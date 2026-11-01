@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v2.7.7（2026-11-01）
+
+**主题：保护伞的 TypeScript 参考实现 —— 可编译、可验证、不随包发布。**
+
+### 新增
+- `types/umbrella/`（7 个 `.ts`）：`types` / `paths` / `cache` / `plugin-scorer` / `action-scorer` /
+  `umbrella` / `index` —— v2.7.6 运行时语义的**可编译镜像**。它不 import 任何 `node:` 内建模块，
+  文件系统（mtime/hash）、时钟、评分服务、审计全部走注入端口，因此任意宿主只需一个 `tsc` 即可编译。
+- `types/tsconfig.json`：`strict` + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` +
+  `noUnusedLocals/Parameters` + `noImplicitReturns` + `noEmit`。
+- `tools/release/typecheck.mjs` + `npm run typecheck`：找到编译器就**真的编译**（失败非零退出）；
+  找不到就打印 `SKIP` 与安装方法并退出 0，**绝不会在未编译的情况下说 PASS**。
+- `types/README.md`：编译方法（`npx tsc -p types/tsconfig.json` 或 `DSH_FANG_TSC=…`）、Node 宿主适配示例、
+  `.mjs ↔ .ts` 映射、8 条与设计稿的差异、边界（无 realpath / 无 UNC / 无强制拦截）。
+
+### 说明
+- 运行时仍是纯 `.mjs`；`types/` **不进 `package.json files`**，tarball 不含它；CI 零第三方依赖策略不变
+  （未新增 workflow job，也没有新增 `devDependencies`）。
+- 本地证据：TypeScript **5.9.2** 严格编译 **0 error**；编译产物跑 35 项行为断言 **35/35**
+  （15 条规则、两张下限表、决策矩阵、指纹缓存 / LRU / mtime 失效、审计记录形状）。
+- `types/` 与运行时出现分歧时，以 `.mjs` + `docs/UMBRELLA.md` 为准，并应同步修正 `types/`。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 7 个补丁位。
+
 ## v2.7.6（2026-11-01）
 
 **主题：保护伞系统（Umbrella）—— 一个证据管道，两个评分出口。**

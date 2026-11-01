@@ -232,3 +232,15 @@ umb.invalidate(pluginId) / umb.clearCache()
 - 插件形态：角色矩阵（母体/分身/consumer）、服务面、配置项（strict 表、buffer 实时 dir）、无 scorer 时仍可回答、未知 `gradeFloorTable` 降级。
 
 门禁：`node tools/release/preflight.mjs --e2e`（含全量测试 + 真实母体/分身 e2e）、`build.mjs`、`allowlist.mjs --with-manifest`、`healthz.mjs`。
+
+## 12. TypeScript 参考实现（v2.7.7）
+
+运行时是纯 `.mjs`；`types/umbrella/` 是同一语义的**可编译镜像**（`types.ts` / `paths.ts` / `cache.ts` /
+`plugin-scorer.ts` / `action-scorer.ts` / `umbrella.ts` / `index.ts`），供类型消费与跨语言移植：
+
+- 不 import `node:` 内建模块——文件系统（mtime / hash）、时钟、评分服务、审计全部是注入端口
+  （`FingerprintPort` / `Clock` / `ScorerPort` / `audit`），因此任意宿主一个 `tsc` 就能编译；
+- 编译开关：`strict` + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` + `noUnused*` + `noImplicitReturns`；
+- `node tools/release/typecheck.mjs`（或 `npm run typecheck`）：有编译器就真编译、没有就打印 `SKIP`，绝不假装 PASS；
+- 不随包发布：`types/` 不在 `package.json files` 内，CI 不加 TypeScript 依赖（保持零依赖）；
+- 语义分歧时以 `.mjs` + 本文件为准，并同步修正 `types/`。差异清单见 `types/README.md`。
