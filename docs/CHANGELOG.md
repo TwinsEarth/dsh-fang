@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## v2.6.1（2026-11-01）
+
+**主题：Adapter v3 协议化 —— 版本协商 / 状态快照 / SSE 事件流 / 幂等命令 / Bearer 认证。**
+
+> 版本策略：`x.y.z`，每一位只能是 0–9（一个次版本含 10 个小版本）。
+> 本次是 v2.6 的第 1 个补丁位（`2.6.0` → `2.6.1`）；v2.6.9 之后才进 `2.7.0`。
+
+### 新增
+- **协议词汇**：`ADAPTER_PROTOCOL_VERSION=3`、v3 五条路由常量、`ADAPTER_EVENT`、`ADAPTER_ERROR_STATUS`
+  （错误码 → HTTP 状态码的唯一来源）。
+- **共享协议库** `src/lib/adapter-protocol.mjs`：cursor 编解码（uint64 十进制字符串）、环形缓冲 `EventLog`、
+  LRU `CommandCache`、版本协商、Bearer 解析、命令信封校验、SSE 帧编解码。
+- **分身侧 Adapter v3**：`GET version/health/state`、`GET events`（SSE：回放/心跳/410 cursor-expired/409 session-changed）、
+  `POST commands`（`commandId` 幂等 + `async:true` → 202 + `trackingId` → `command-done` 事件）；
+  审批 diff 生成 `approval-requested/approval-resolved`；进程级 `sessionId`。
+- **母体侧**：`remote.mjs` 增加 `version/health/state/commands/eventsUrl` 与 Bearer 头；新增
+  `src/lib/adapter-client.mjs`（`connect()` 协商→快照→SSE、断线指数退避、409/410 自动重拉快照、
+  同 `commandId` 网络重试一次）。
+- **Forker token 生命周期**：每次 spawn 生成 48 hex Adapter token，经 `DSH_ADAPTER_TOKEN` 注入分身；
+  `adapterToken(forkId)` 只读母体内存；`stop` 即作废；不写 `forks.json` / `fang-meta.json` / `status()` / URL。
+- **Orchestrator**：握手后调用 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer；
+  协议过新时 fail-closed（不假装 READY）。
+- **文档** `docs/PROTOCOL-V3.md`：接口粒度协议（定位/选型/认证/协商/状态模型/cursor/错误码/时序/测试/遗留决策）。
+
+### 变更
+- 版本 2.6.1；Adapter 路由 5 → 10（v2 五条全部保留，向后兼容）；`hello()`/`status()` 增补
+  `protocol/sessionId/lastCursor` 等字段（旧客户端忽略未知字段）。
+- 旧分身（无 `/version`）按 legacy 协议继续可用；旧母体（不注入 token）下 Adapter 退化为 v2 语义，不加认证层。
+
+### 测试
+- 新增 25 项：协议库 11、Adapter v3 5、AdapterClient 6、Remote v3 2、Forker token 1。
+- 全量 **331 项（330 pass / 1 skip）**；门禁证据见 `docs/AUDIT-v2.6.1.md`。
+
 ## v2.6.0（2026-11-01）
 
 **主题：Forker 完整化 —— 端口池/健康探测/崩溃退避/孤儿恢复/每分身 meta。**

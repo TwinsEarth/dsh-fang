@@ -210,6 +210,7 @@ function errorFromBody(data, status) {
  * @param {object} [options]
  * @param {string} [options.url]      分身 web URL（通常来自 `parseWebUrl()`，可自带 `?token=`）
  * @param {string} [options.token]    token；省略时从 `url` 中提取
+ * @param {string} [options.adapterToken] v3 Bearer token（Forker spawn 时注入；不落 URL）
  * @param {Function} [options.fetchImpl=globalThis.fetch] 可注入的 fetch（测试用）
  * @param {number} [options.timeoutMs=5000] 单次请求超时
  * @param {string} [options.prefix='/fang'] 路由前缀（与 Adapter Config.prefix 一致）
@@ -217,17 +218,22 @@ function errorFromBody(data, status) {
 export function createRemote({
   url,
   token,
+  adapterToken,
   fetchImpl = globalThis.fetch,
   timeoutMs = 5000,
   prefix = '/fang',
 } = {}) {
   const targetUrl = String(url ?? '')
   const effectiveToken = token === undefined || token === null ? extractToken(targetUrl) : String(token)
+  const effectiveAdapterToken = adapterToken === undefined || adapterToken === null ? '' : String(adapterToken)
   const requestTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
     ? Math.floor(Number(timeoutMs))
     : 5000
   const routePrefix = normalizePrefix(prefix)
   const impl = typeof fetchImpl === 'function' ? fetchImpl : null
+
+  /** v3 Bearer 头；没有 token 时不发头（v2 兼容模式）。 */
+  const authHeaders = () => (effectiveAdapterToken ? { authorization: `Bearer ${effectiveAdapterToken}` } : {})
 
   /**
    * 发出一次请求并归一化返回；任何情况下都 resolve，不 reject。
@@ -253,13 +259,16 @@ export function createRemote({
       }
 
       const init = { method, signal: controller.signal }
+      const headers = authHeaders()
       if (body !== undefined) {
-        init.headers = { 'content-type': 'application/json; charset=utf-8' }
+        init.headers = { ...headers, 'content-type': 'application/json; charset=utf-8' }
         try {
           init.body = JSON.stringify(body)
         } catch (e) {
           return failure(0, `serialize-failed: ${msgOf(e)}`, REMOTE_FAILURE_KIND.UNKNOWN)
         }
+      } else if (Object.keys(headers).length > 0) {
+        init.headers = headers
       }
 
       let res
@@ -305,6 +314,8 @@ export function createRemote({
     url: targetUrl,
     token: effectiveToken,
     prefix: routePrefix,
+    /** v3 Bearer token（母体内存持有；为空 = v2 兼容模式）。 */
+    adapterToken: effectiveAdapterToken,
 
     /** 握手：GET /fang/adapter/hello → {ok, status, data:{ok,role,taskId,version,capabilities}} */
     hello() {
@@ -340,6 +351,47 @@ export function createRemote({
     ping() {
       return request('POST', ADAPTER_ROUTE.COMMAND, { body: { op: ADAPTER_OP.PING, payload: {} } })
     },
+
+    // ── v3（PROTOCOL-V3 §4）：协议协商 / 健康 / 快照 / 幂等命令 ──────────────
+
+    /** 协议版本协商：GET /fang/adapter/version */
+    version() {
+      return request('GET', ADAPTER_ROUTE.VERSION)
+    },
+
+    /** 轻量健康检查：GET /fang/adapter/health */
+    health() {
+      return request('GET', ADAPTER_ROUTE.HEALTH)
+    },
+
+    /** 完整状态快照：GET /fang/adapter/state */
+    state() {
+      return request('GET', ADAPTER_ROUTE.STATE)
+    },
+
+    /**
+     * 幂等命令：POST /fang/adapter/commands
+     * @param {{commandId?:string, op?:string, payload?:object, async?:boolean}} envelope
+     */
+    commands(envelope = {}) {
+      const body = envelope && typeof envelope === 'object' ? { ...envelope } : {}
+      return request('POST', ADAPTER_ROUTE.COMMANDS, { body })
+    },
+
+    /**
+     * 拼出 SSE 订阅 URL（含 DSH ?token= 与 since/session 查询参数）。
+     * 实际流读取在 `adapter-client.mjs`；这里只保证 URL 规则与其它请求一致。
+     */
+    eventsUrl({ since = '0', session = '' } = {}) {
+      const base = withToken(joinUrl(targetUrl, ADAPTER_ROUTE.EVENTS, routePrefix), effectiveToken)
+      const query = []
+      if (since !== undefined && since !== null && since !== '') query.push(`since=${encodeURIComponent(String(since))}`)
+      if (session) query.push(`session=${encodeURIComponent(String(session))}`)
+      return query.length > 0 ? `${base}${base.includes('?') ? '&' : '?'}${query.join('&')}` : base
+    },
+
+    /** v3 Bearer 头（adapter-client 建 SSE 连接时复用）。 */
+    authHeaders,
   }
 
   return remote

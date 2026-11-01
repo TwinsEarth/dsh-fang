@@ -48,6 +48,8 @@ function main() {
 
   process.stdout.write(`fake-dsh home=${process.env.DSH_HOME ?? ''}\n`)
   process.stdout.write(`fake-dsh role=${process.env.DSH_FANG_ROLE ?? ''} task=${process.env.DSH_FANG_TASK_ID ?? ''}\n`)
+  // v3: report presence only (never the value) so a test can assert the token reached the child.
+  process.stdout.write(`fake-dsh adapter-token=${process.env.DSH_ADAPTER_TOKEN ? 'set' : 'unset'}\n`)
   process.stdout.write(`fake-dsh argv=${argv.join(' ')}\n`)
 
   if (mode === 'silent') {

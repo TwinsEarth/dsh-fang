@@ -292,3 +292,39 @@ test('classifyRemoteFailure: timeout / json / http / network / unknown', () => {
   assert.equal(nil.kind, 'unknown')
   assert.equal(typeof nil.message, 'string')
 })
+
+test('v3: version/health/state/commands 路径与 Bearer 头', async () => {
+  const fetch = makeFetch(() => fakeResponse({ body: { ok: true } }))
+  const remote = createRemote({ url: BASE, token: 't', adapterToken: 'a-tok', fetchImpl: fetch })
+
+  await remote.version()
+  await remote.health()
+  await remote.state()
+  await remote.commands({ commandId: 'cmd_1', op: 'ping' })
+
+  assert.deepEqual(
+    fetch.calls.map((call) => new URL(call.url).pathname),
+    ['/fang/adapter/version', '/fang/adapter/health', '/fang/adapter/state', '/fang/adapter/commands'],
+    'v3 四个 JSON 端点路径',
+  )
+  for (const call of fetch.calls) {
+    assert.equal(call.init.headers.authorization, 'Bearer a-tok', '每个请求都带 v3 Bearer')
+    assert.equal(new URL(call.url).searchParams.get('token'), 't', 'DSH web token 仍走 ?token=')
+  }
+  assert.deepEqual(JSON.parse(fetch.calls[3].init.body), { commandId: 'cmd_1', op: 'ping' })
+})
+
+test('v3: eventsUrl 带 since/session；无 adapterToken 时不发 Authorization（v2 兼容）', async () => {
+  const fetch = makeFetch(() => fakeResponse({ body: { ok: true } }))
+  const remote = createRemote({ url: BASE, token: 't', fetchImpl: fetch })
+
+  const events = new URL(remote.eventsUrl({ since: '12', session: 's-1' }))
+  assert.equal(events.pathname, '/fang/adapter/events')
+  assert.equal(events.searchParams.get('since'), '12')
+  assert.equal(events.searchParams.get('session'), 's-1')
+  assert.equal(events.searchParams.get('token'), 't')
+  assert.deepEqual(remote.authHeaders(), {})
+
+  await remote.state()
+  assert.equal(fetch.calls[0].init.headers, undefined, 'v2 兼容模式不发 Authorization')
+})

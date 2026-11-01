@@ -19,6 +19,7 @@ import {
   invokeCommercial, commercialConfigSchemaDefaults,
 } from '../kernel/index.mjs'
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
+import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -212,16 +213,26 @@ export function apply(ctx, config) {
   const remoteCache = new Map()
   async function remoteFor(task) {
     if (!task?.url) return null
+    // v3 Bearer token 只从 Forker 内存取（不落盘、不进 task 持久化字段）。
+    const adapterToken = (() => {
+      try {
+        const f = forker()
+        return f && typeof f.adapterToken === 'function' ? String(f.adapterToken(task.taskId) ?? '') : ''
+      } catch {
+        return ''
+      }
+    })()
     const cached = remoteCache.get(task.taskId)
-    if (cached && cached.url === task.url) return cached.client
+    if (cached && cached.url === task.url && cached.adapterToken === adapterToken) return cached.client
     const mod = await remoteModule()
     if (!mod || typeof mod.createRemote !== 'function') return null
     const client = mod.createRemote({
       url: task.url,
       token: task.token || (mod.extractToken ? mod.extractToken(task.url) : ''),
+      adapterToken,
       timeoutMs: 8000,
     })
-    remoteCache.set(task.taskId, { url: task.url, client })
+    remoteCache.set(task.taskId, { url: task.url, adapterToken, client })
     return client
   }
 
@@ -237,14 +248,35 @@ export function apply(ctx, config) {
     while (nowMs() < deadline) {
       const res = await client.hello()
       if (res?.ok && res.data?.ok) {
+        // v3 版本协商（PROTOCOL-V3 §2）：旧分身没有 /adapter/version（404）→ 按 legacy 接受；
+        // 新分身回 protocol 且超出母体支持区间 → fail-closed，绝不假装 READY。
+        let protocol = Number(res.data.protocol) || 0
+        let sessionId = String(res.data.sessionId ?? '')
+        try {
+          const ver = typeof client.version === 'function' ? await client.version() : null
+          if (ver?.ok && ver.data) {
+            const negotiated = negotiateProtocol(ver.data.protocol)
+            if (!negotiated.ok) {
+              task.adapter = { ok: false, error: negotiated.reason, protocol: ver.data.protocol, at: nowMs() }
+              audit(AUDIT.ADAPTER_HANDSHAKE, { taskId: task.taskId, ok: false, error: negotiated.reason, protocol: ver.data.protocol })
+              return task.adapter
+            }
+            protocol = negotiated.protocol
+            sessionId = String(ver.data.sessionId ?? sessionId)
+          }
+        } catch {
+          /* 版本探测失败不改变 hello 的结论；按 hello 自报的 protocol 记录 */
+        }
         task.adapter = {
           ok: true,
           version: res.data.version ?? '',
+          protocol,
+          sessionId,
           role: res.data.role ?? 'fork',
           taskId: res.data.taskId ?? task.taskId,
           at: nowMs(),
         }
-        audit(AUDIT.ADAPTER_HANDSHAKE, { taskId: task.taskId, ok: true, version: task.adapter.version })
+        audit(AUDIT.ADAPTER_HANDSHAKE, { taskId: task.taskId, ok: true, version: task.adapter.version, protocol })
         return task.adapter
       }
       last = res
@@ -273,7 +305,7 @@ export function apply(ctx, config) {
       profile: t.profile,
       createdAt: t.createdAt,
       restarts: t.restarts ?? 0,
-      adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', error: t.adapter?.error ?? '' },
+      adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', protocol: t.adapter?.protocol ?? 0, error: t.adapter?.error ?? '' },
       collaborators: t.collaborators ?? [],
       seed: t.seed ?? null,
       importedSession: t.importedSession ?? null,
