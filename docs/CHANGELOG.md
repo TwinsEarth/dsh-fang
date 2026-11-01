@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## v2.6.3（2026-11-01）
+
+**主题：CommandCache LRU + 幂等语义 —— in-flight 合并、失败契约、只淘汰已完成项。**
+
+### 新增
+- **`src/lib/command-cache.mjs`**：`CommandCache.run(commandId, fn)` 幂等执行。
+  - 两态：`running`（value 是同一个 promise）/ `completed`（value 是结果）；
+  - **并发合并**：同一 `commandId` 并发提交 → 第二次等待同一个 promise，不重复执行副作用；
+  - **失败契约**：业务失败（`fn` 返回 `status:'rejected'`）与 async accepted 都缓存；
+    `fn` 抛错（传输/编程错误，命令可能没执行）不缓存并移除，允许重试重新执行；
+  - **LRU**：Map 插入顺序即使用顺序；`run()` 命中 touch，纯 `get()` 不 touch；
+    超容量时从头部淘汰第一个 completed，跳过 running；全是 running 时允许临时超限，
+    in-flight 完成后自动收敛；
+  - `invalidate()` 只对 completed 生效、`clear()` 保留 running、`stats()` 暴露容量/命中/去重/淘汰/丢弃计数；
+  - 容量必须 ≥1（否则 `RangeError`）；`onEvict` 回调异常被隔离；缓存不实现超时（超时属于命令层）。
+- **Adapter 接线**：`commands()` 改为 `commandCache.run()`；并发同 commandId 只执行一次、
+  第二个请求返回 `deduplicated:true`；只有真正执行的那一次发 `command` / `command-done` 事件；
+  无 commandId 的请求仍不缓存（v2 兼容）。
+- **文档** `docs/COMMAND-CACHE.md`：决策表、API、并发时序、失败契约、LRU 细节、Adapter 接线、
+  测试清单、边界（单进程/不持久化/accepted 缓存）。
+
+### 变更
+- `adapter-protocol.mjs` 不再自带命令缓存实现，改为 re-export `command-cache.mjs`（避免两份幂等语义）；
+- `docs/PROTOCOL-V3.md §6.2/§12` 补充 in-flight 合并与失败契约，并指向 `docs/COMMAND-CACHE.md`。
+
+### 测试
+- 新增 `test/command-cache.test.mjs`（16 项）与 Adapter 并发幂等用例（1 项）；全量门禁见 `docs/AUDIT-v2.6.3.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 3 个补丁位。
+
 ## v2.6.2（2026-11-01）
 
 **主题：控制面板分类折叠 —— 进行中 / 已归档 / 临时 三组，进行中只先显示 7 条会话。**

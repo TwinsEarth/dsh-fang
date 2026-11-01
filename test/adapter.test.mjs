@@ -990,6 +990,38 @@ test('v3: POST commands 幂等（同 commandId 只执行一次）+ 202 异步 + 
   }
 })
 
+test('v3: 同一 commandId 并发提交 → in-flight 合并，只执行一次（CommandCache.run）', async () => {
+  const root = tmpDir('fang-v3-concurrent-')
+  try {
+    const gate = { resolve: null }
+    const buffer = makeBuffer({
+      dir: root,
+      flushImpl: () => new Promise((resolve) => {
+        gate.resolve = () => resolve({ state: 'settled', flushed: ['x.js'], timedOut: false })
+      }),
+    })
+    const { ctx, service } = applyAsFork({ taskId: 'task_conc' }, { [SERVICE.buffer]: buffer })
+
+    const p1 = service.commands({ commandId: 'cmd_conc_1', op: ADAPTER_OP.FLUSH_BUFFER })
+    const p2 = service.commands({ commandId: 'cmd_conc_1', op: ADAPTER_OP.FLUSH_BUFFER })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(buffer.calls.flush.length, 1, '同一 commandId 并发提交只能执行一次')
+    gate.resolve()
+    const [first, second] = await Promise.all([p1, p2])
+    assert.equal(first.ok, true)
+    assert.equal(second.ok, true)
+    assert.equal(first.deduplicated, undefined, '第一个调用是真实执行，不带 deduplicated')
+    assert.equal(second.deduplicated, true, '并发等待者拿到同一次执行的结果')
+
+    const later = await service.commands({ commandId: 'cmd_conc_1', op: ADAPTER_OP.FLUSH_BUFFER })
+    assert.equal(later.deduplicated, true, '完成后再次提交走 completed 重放')
+    assert.equal(buffer.calls.flush.length, 1)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('v3: Bearer 认证（env 注入时强制；未注入时 v2 兼容放行）', async () => {
   const secured = applyWithRole('fork', {}, {}, { env: { DSH_ADAPTER_TOKEN: 'tok-v3-secret-0123456789abcdef' } })
   assert.equal(secured.service.authEnabled, true)
