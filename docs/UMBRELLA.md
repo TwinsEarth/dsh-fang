@@ -78,25 +78,67 @@
 
 **显式传空数组 = 一条规则都不要；只有缺省才用内置默认值**（内置凭据/破坏性/生命周期模式见源码常量，均有 ≥10 条）。
 
-规则表（**先命中先返回**，`matchedRule` 供审计追溯）：
+规则表（v2.7.8 起为**声明式**；数组顺序即优先级，**首个命中胜出**）：
 
-| # | 规则 id | 条件 | 灯色 | 备注 |
-|---|---|---|---|---|
-| 1 | `dsh-lifecycle` | `scope` 为 system/process、工具在 `lifecycleTools`、或命令命中生命周期模式（`dsh … restart/kill`、`taskkill … /im dsh`、`Stop-Process`） | 红 | 决策层**委托** restart-guard，不直接弹窗 |
-| 2 | `destructive-command` | 命令命中破坏性模式（`rm -rf`、`Remove-Item -Recurse -Force`、`git push --force`、`reg delete`、`taskkill`、`DROP TABLE`…） | 红 | 不可逆 |
-| 3 | `credential-access` | 目标/命令命中凭据模式（`.ssh/`、`id_rsa`、`.aws/credentials`、`.git-credentials`、`config/SAM`、`Login Data`…） | 红 | **唯一硬拒绝** |
-| 4 | `network-allowlisted` | 外连且命中 `networkAllowlist`（host / host:port / `*.suffix` / URL 前缀） | 蓝 | 放行 + 标记 |
-| 5 | `network-egress` | 外连且未命中允许列表（URL 解析失败也算未命中） | 黄 | 询问 |
-| 6 | `dynamic-import` | 工具是 `import`/`require` 形态 | 黄 | 加载未评分模块 |
-| 7 | `write-in-buffer` | 写在 `bufferRoot` 内 | 蓝 | 沙箱内副作用 |
-| 8 | `write-in-allowlist` | 写在 `allowPaths` 前缀内 | 蓝 | 受控 |
-| 9 | `write-production` | 写在 `productionRoot` 内 | 黄 | 单列规则，便于审计统计 |
-| 10 | `write-outside-buffer` | 其余写 | 黄 | 越界 |
-| 11 | `exec-read-only` | shell 命令命中只读白名单（`dir/ls/cat/Get-Content/git status/node --version`…）且**不含写重定向** | 蓝 | 判定依据是模式匹配，所以是蓝不是绿 |
-| 12 | `exec-side-effect` | 其余 shell 命令 | 黄 | 有副作用且未能证明只读 |
-| 13 | `read-in-buffer` | 只读且落在 `bufferRoot` 内 | 绿 | 唯一绿灯 |
-| 14 | `read-outside-buffer` | 其余只读 | 蓝 | 读没危险但有信息暴露 |
-| 15 | `unknown-tool` | 未登记的工具 / 没有目标 | 黄 | 兜底，不判绿 |
+```
+ActionRule = { id, category, light, reason, tags[],
+               match(evidence, context) -> boolean,
+               evidence(evidence, context) -> { matchedPattern, ... } }
+```
+
+| # | 规则 id | 类别 | 灯色 | 命中的条件 | 证据（`matchedPattern`） |
+|---|---|---|---|---|---|
+| 1 | `dsh-lifecycle` | lifecycle | 红 | `scope` 为 system/process、工具在 `lifecycleTools`、或命令命中生命周期模式 | `scope:<s>` / `tool:<t>` / `pattern:<正则>` |
+| 2 | `destructive-command` | destructive | 红 | 命令命中破坏性模式（`rm -rf`、`Remove-Item -Recurse -Force`、`git push --force`、`reg delete`、`taskkill`、`DROP TABLE`…） | `pattern:<正则>` + `commandSnippet` |
+| 3 | `credential-access` | credential | 红 | 目标/命令命中凭据模式（`.ssh/`、`id_rsa`、`.aws/credentials`、`.git-credentials`、`config/SAM`、`Login Data`…） | `pattern:<正则>` + `paths[]` |
+| 4 | `network-allowlisted` | network | 蓝 | 外连且命中 `networkAllowlist`（host / host:port / `*.suffix` / URL 前缀） | `allowlisted-host` + `host` |
+| 5 | `network-egress` | network | 黄 | 外连且未命中允许列表（URL 解析失败也算未命中） | `non-allowlisted-host` / `unparsable-url` |
+| 6 | `dynamic-import` | import | 黄 | 工具是 `import`/`require` 形态 | `import-tool` + `specifier` |
+| 7 | `write-in-buffer` | write | 蓝 | 写在 `bufferRoot` 内（write 目标或 shell 重定向目标全部在缓冲区内） | `in-buffer` + `targets[]` |
+| 8 | `write-in-allowlist` | write | 蓝 | 写在 `allowPaths` 前缀内 | `in-allowlist` + `targets[]` |
+| 9 | `write-production` | write | 黄 | 写在 `productionRoot` 内 | `production-root` + `targets[]` |
+| 10 | `write-outside-buffer` | write | 黄 | 其余写（含没有可解析目标） | `outside-buffer-and-allowlist` + `targets[]` + `bufferRoot` |
+| 11 | `exec-read-only` | exec | 蓝 | shell 命令命中只读白名单且**不含写重定向** | `read-only-prefix` + `commandSnippet` |
+| 12 | `exec-side-effect` | exec | 黄 | 其余 shell 命令 | `side-effect` + `writeTargets[]` |
+| 13 | `read-in-buffer` | read | 绿 | 只读且落在 `bufferRoot` 内 | `in-buffer` + `targets[]` |
+| 14 | `read-outside-buffer` | read | 蓝 | 其余只读 | `outside-buffer` + `targets[]` |
+| 15 | `unknown-tool` | fallback | 黄 | 兜底：未登记工具 / 无可识别目标 | `fallback` + `tool` / `mode` |
+
+**每条规则的 `match` 与 `evidence` 都可独立测试**（`test/umbrella.test.mjs` 的「每条规则都能独立命中」用例逐条断言规则 id、类别、灯色与 `matchedPattern`）。
+
+### 2.1 规则注册 / 覆盖（动态扩展）
+
+"追加到表尾" 等于永不命中（前面有兜底规则），所以**位置是规则语义的一部分**——`register` 必须显式给 `before`/`after`：
+
+```js
+const umbrella = ctx.get('fangUmbrella')
+umbrella.registerRule({
+  id: 'no-secret-dir', category: 'write', light: 'red',
+  reason: '禁止触碰 secret 目录', tags: ['custom'],
+  match: (ev, ctx) => String(ctx.targetPath ?? '').includes('secret'),
+  evidence: () => ({ matchedPattern: 'secret-dir' }),
+}, { before: 'unknown-tool' })          // 插在兜底之前
+
+umbrella.overrideRule('unknown-tool', { light: 'blue' })   // 就地改（保留未覆盖字段）
+umbrella.removeRule('exec-read-only')                     // 删除
+umbrella.resetRules()                                     // 恢复默认 15 条
+umbrella.ruleIds()                                        // 当前顺序（= 优先级）
+```
+
+形状校验在注册时立刻抛错（`assertActionRule`）：缺 `match`/`evidence`、未知 `category`、未知灯色、重复 id、`before`/`after` 指向不存在的规则，都不允许静默通过。
+
+### 2.2 命令 / 路径 / URL 的证据提取
+
+`buildActionContext()` 把证据解析一次，供 15 条规则共享：
+
+| 字段 | 来源 | 说明 |
+|---|---|---|
+| `mode` | `evidence.mode` 或工具名映射（`TOOL_MODE`） | `read/write/exec/network/import/unknown` |
+| `commandText` | `target.kind==='command'` 或 `args.command` | shell 规则的操作对象 |
+| `writeTargets` / `readTargets` | `parseShellRedirects()`：`>` `>>`、`tee`、`dd of=`、`Set-Content`/`Out-File`；`cat/less/head/tail/more/Get-Content/type` | 只取**字面量**；`$VAR`/`$(...)`/通配等动态构造一律跳过（交给兜底判黄，不静默放行） |
+| `targetPath` | `target.kind==='path'` 按 `policy.root` 解析 | 相对路径可判 |
+| `url` | `parseUrlParts()`：`{raw, host, hostPort}`，含默认端口（http 80 / https 443） | 不依赖 `URL` 全局对象 |
+| `targetPid` | `target.kind==='pid'` | 数字，NaN → null |
 
 **两处与设计稿不同，都是为了诚实**：
 
@@ -233,13 +275,16 @@ umb.invalidate(pluginId) / umb.clearCache()
 
 门禁：`node tools/release/preflight.mjs --e2e`（含全量测试 + 真实母体/分身 e2e）、`build.mjs`、`allowlist.mjs --with-manifest`、`healthz.mjs`。
 
-## 12. TypeScript 参考实现（v2.7.7）
+## 12. TypeScript 参考实现（v2.7.7 起；v2.7.8 同步声明式规则表）
 
 运行时是纯 `.mjs`；`types/umbrella/` 是同一语义的**可编译镜像**（`types.ts` / `paths.ts` / `cache.ts` /
 `plugin-scorer.ts` / `action-scorer.ts` / `umbrella.ts` / `index.ts`），供类型消费与跨语言移植：
 
 - 不 import `node:` 内建模块——文件系统（mtime / hash）、时钟、评分服务、审计全部是注入端口
   （`FingerprintPort` / `Clock` / `ScorerPort` / `audit`），因此任意宿主一个 `tsc` 就能编译；
+- **动作规则表同步**：TS 侧同样是 `ActionRule` 对象数组（`id/category/light/tags/match/evidence`），
+  `DEFAULT_ACTION_RULES` 15 条与 `.mjs` 一一对应，`createActionRuleSet()` / `registerRule` / `overrideRule` /
+  `removeRule` / `resetRules` 语义一致；编译产物上跑 76 项行为断言（规则命中、证据形状、上下文解析、注册覆盖、审计）；
 - 编译开关：`strict` + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` + `noUnused*` + `noImplicitReturns`；
 - `node tools/release/typecheck.mjs`（或 `npm run typecheck`）：有编译器就真编译、没有就打印 `SKIP`，绝不假装 PASS；
 - 不随包发布：`types/` 不在 `package.json files` 内，CI 不加 TypeScript 依赖（保持零依赖）；
