@@ -30,6 +30,7 @@
 // EINVAL/ENOENT without a shell, so `.cmd`/`.bat` must be launched with
 // `shell: true`; `.mjs`/`.js` entries are launched through node; `.exe` directly.
 import { spawn as spawnProcess, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import net from 'node:net'
 import path from 'node:path'
 import {
@@ -818,6 +819,12 @@ export function apply(ctx, config) {
       crashCount: rec.crashCount ?? 0,
       restartCount: rec.restartCount ?? 0,
       restartScheduledAt: null,
+      /**
+       * v3 Adapter Bearer token：**每次 spawn 重新生成**，只存在于母体内存 + 分身环境变量。
+       * 不写 fang-meta.json、不进 forks.json（publicFork 不含）、不写 URL —— 母体重启后
+       * 旧 token 自然失效，孤儿分身不会被接管（PROTOCOL-V3 §3）。
+       */
+      adapterToken: randomBytes(24).toString('hex'),
       log: collector,
     })
     records.set(forkId, rec)
@@ -896,6 +903,8 @@ export function apply(ctx, config) {
         DSH_FANG_ROLE: 'fork',
         DSH_FANG_TASK_ID: forkId,
         ...(opts.env ?? {}),
+        // v3：Adapter Bearer token（PROTOCOL-V3 §3）。放在 opts.env 之后，母体生成的 token 优先。
+        DSH_ADAPTER_TOKEN: rec.adapterToken,
       }
       let child = null
       try {
@@ -1052,6 +1061,8 @@ export function apply(ctx, config) {
     if (rec.restartTimer) { clearTimeout(rec.restartTimer); rec.restartTimer = null }
     rec.restartScheduledAt = null
     rec.ready = false
+    // token 随进程死亡作废：绝不留给下一次 spawn 复用（restartFork 会重新生成）。
+    rec.adapterToken = null
     const wasRunning = !!rec.running || !!rec.child || !!rec.starting
     const pid = rec.pid ?? rec.child?.pid ?? null
     if (wasRunning) {
@@ -1123,6 +1134,18 @@ export function apply(ctx, config) {
     return rec.log.tail(tailLines)
   }
 
+  /**
+   * v3 Adapter Bearer token（内存 only）。母体用它给 Remote/AdapterClient 加
+   * `Authorization: Bearer`；**不要**把它塞进 status()/publicFork()（那会随
+   * `/fang/api/status` 暴露给浏览器，也会落 forks.json）。
+   * @returns {string} fork 不存在或已停止时为空串
+   */
+  const adapterToken = (forkId) => {
+    ensureRegistry()
+    const rec = records.get(String(forkId ?? '').trim())
+    return typeof rec?.adapterToken === 'string' ? rec.adapterToken : ''
+  }
+
   /** Re-spawn a crashed-but-ready fork after the backoff timer fires. */
   const restartFork = async (rec) => {
     if (disposed || rec.intentionalStop || records.get(rec.forkId) !== rec) return
@@ -1186,6 +1209,7 @@ export function apply(ctx, config) {
     status,
     list,
     logs,
+    adapterToken,
     allocatePort,
     releasePort,
     ensureTemplate,

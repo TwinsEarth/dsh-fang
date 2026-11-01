@@ -11,7 +11,7 @@ import http from 'node:http'
 import zlib from 'node:zlib'
 
 import { makeCtx, makeWebServerStub, makeReq, makeRes } from './helpers.mjs'
-import { SERVICE } from '../src/kernel/index.mjs'
+import { SERVICE, FANG_VERSION } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
@@ -133,7 +133,7 @@ function cleanup(ctx, dataRoot) {
 test('orchestrator: registers service; status exposes tasks, forks compat, commercial flags', async () => {
   const { ctx, svc, dataRoot } = await boot()
   assert.ok(svc)
-  assert.equal(svc.version, '2.6.0')
+  assert.equal(svc.version, FANG_VERSION)
   assert.equal(svc.role, 'mother')
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
@@ -332,7 +332,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
   assert.equal(status.statusCode, 200)
-  assert.equal(status.json().version, '2.6.0')
+  assert.equal(status.json().version, FANG_VERSION)
 
   const wrongMethod = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'POST'), wrongMethod)

@@ -310,7 +310,7 @@ test('apply registers fangForker and an empty registry reports clean failures', 
   try {
     assert.equal(ctx.get(SERVICE.forker), service)
     for (const method of [
-      'provision', 'spawn', 'stop', 'reap', 'status', 'list', 'logs',
+      'provision', 'spawn', 'stop', 'reap', 'status', 'list', 'logs', 'adapterToken',
       'allocatePort', 'releasePort', 'ensureTemplate', 'health', 'recover',
     ]) {
       assert.equal(typeof service[method], 'function', `missing service.${method}`)
@@ -1138,5 +1138,50 @@ test('cross-plugin auditing is tolerant and uses the kernel AUDIT kinds', async 
     assert.equal(result.ok, true)
   } finally {
     brokenCtx.dispose()
+  }
+})
+
+test('v3: adapterToken 每次 spawn 重新生成、只存内存、经 env 注入分身、stop 后作废', async () => {
+  const root = tmp()
+  const template = makeTemplate(root)
+  const homeDir = path.join(root, 'fork-home-token')
+  const dataRoot = path.join(root, 'data-token')
+  const { ctx, service } = newForkContext({ dataRoot })
+  try {
+    assert.equal(service.provision({ forkId: 'f-token', homeDir, profile: 'web', profileTemplate: template }).ok, true)
+    assert.equal(service.adapterToken('f-token'), '', 'spawn 前没有 token')
+    assert.equal(service.adapterToken('missing'), '', '未知 fork 返回空串')
+
+    const first = await service.spawn({
+      forkId: 'f-token', homeDir, profile: 'web', cliPath: FAKE_CLI,
+      env: { FAKE_DSH_MODE: 'ok' }, timeoutMs: 8000,
+    })
+    assert.equal(first.ok, true)
+    const token = service.adapterToken('f-token')
+    assert.match(token, /^[0-9a-f]{48}$/, '24 随机字节 = 48 hex 字符')
+    assert.ok(service.logs('f-token', 40).includes('adapter-token=set'), 'token 必须进子进程环境')
+
+    // 不落盘、不外泄：forks.json / status / list / fang-meta.json 都不含 token
+    const registry = readJson(path.join(dataRoot, 'forks.json'), null)
+    assert.ok(registry, 'spawn 后 registry 已写盘')
+    assert.equal(JSON.stringify(registry).includes(token), false, 'token 绝不进 forks.json')
+    assert.equal(JSON.stringify(service.status('f-token')).includes(token), false, 'status() 不得泄露 token')
+    assert.equal(JSON.stringify(service.list()).includes(token), false, 'list() 不得泄露 token')
+    assert.equal(readFile(path.join(homeDir, 'fang-meta.json')).includes(token), false, 'fang-meta.json 不含 token')
+
+    service.stop('f-token')
+    assert.equal(service.adapterToken('f-token'), '', 'stop 后旧 token 立即作废')
+
+    const second = await service.spawn({
+      forkId: 'f-token', homeDir, profile: 'web', cliPath: FAKE_CLI,
+      env: { FAKE_DSH_MODE: 'ok' }, timeoutMs: 8000,
+    })
+    assert.equal(second.ok, true)
+    const token2 = service.adapterToken('f-token')
+    assert.match(token2, /^[0-9a-f]{48}$/)
+    assert.notEqual(token2, token, '每次 spawn 都换新 token')
+    service.stop('f-token')
+  } finally {
+    ctx.dispose()
   }
 })
