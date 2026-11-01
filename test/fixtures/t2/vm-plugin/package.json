@@ -1,0 +1,6 @@
+{
+  "name": "@local/t2-vm-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T6 fixture: single `node:vm` import scores S=22, which sits between the mother A bound (20) and the fork A bound (25) — the same source grades B in mother and A in fork."
+}

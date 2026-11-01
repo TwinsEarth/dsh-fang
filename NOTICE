@@ -1,0 +1,95 @@
+# dsh-Fang — NOTICE（许可边界地图）
+
+> 本文件说明仓库中每个目录/文件适用哪一份许可证。**发生冲突时，以本文件与对应目录内
+> SPDX 头为准；没有列出的目录默认随其最近祖先目录的许可证。**
+>
+> 仓库版本：v2.1.0（2026-11-01）。许可证分层方案见 [docs/LICENSING.md](docs/LICENSING.md)。
+
+---
+
+## 1. 分层总表
+
+| 层 | 路径 | 许可证 | SPDX |
+|---|---|---|---|
+| **核心层**（AGPL-3.0） | `src/kernel/` · `src/plugins/` · `src/lib/` · `probes/` · `client.js` · `cordis.patch.yml` · `cordis.patch.single-row.yml` · `test/` · `tools/e2e.mjs` · `src/index.mjs` · `src/compose.mjs` | GNU Affero GPL v3.0 或更高版本 | `AGPL-3.0-or-later` |
+| **生态层**（MIT） | `sdk/` · `tools/fangctl.mjs` · 本仓库中标注 MIT 的示例/模板 | MIT | `MIT` |
+| **商业层**（闭源） | `relay-server/` · `enterprise/` | 商业许可（见 `LICENSE-COMMERCIAL`） | `LicenseRef-dsh-Fang-Commercial` |
+| **第三方**（保留原协议） | `src/kernel/vendor/schemastery.mjs` · `src/kernel/vendor/cosmokit.mjs` | MIT（上游 cordis 项目） | `MIT` |
+
+### 1.1 核心层文件清单（AGPL-3.0-or-later）
+
+```
+src/index.mjs
+src/compose.mjs
+src/kernel/*.mjs              （含 ledger/paths/fsx/rounds/role/core/types/schema/index/…）
+src/kernel/vendor/*           ← 例外：第三方 MIT，见 §3
+src/plugins/*.mjs             （orchestrator/forker/restart-guard/adapter/scorer/router/
+                               healer/approver/hot-reloader/buffer-keeper/auditor/session-catalog）
+src/lib/remote.mjs
+src/lib/container/index.mjs
+src/lib/session-format.mjs
+probes/*
+client.js
+cordis.patch.yml
+cordis.patch.single-row.yml
+test/**                       （除非文件头另有声明）
+tools/e2e.mjs
+```
+
+### 1.2 生态层文件清单（MIT）
+
+```
+sdk/**
+tools/fangctl.mjs
+```
+
+### 1.3 商业层
+
+```
+relay-server/**               商业闭源（Relay 服务器：联合开发/云备份/Token API/团队协作/SLA）
+enterprise/**                 商业闭源（企业功能：SSO、团队权限、审计导出等）
+```
+
+这些目录**不随开源分发包一起发布**；其中代码（若存在）不是开源软件，不得复制进 MIT/AGPL 目录。
+
+---
+
+## 2. 为什么这样分
+
+- **核心层 AGPL-3.0**：防止云厂商把瓮城编排器/派生器/红线守卫/Adapter 直接包装成托管服务而不回馈源码。
+  AGPL 的网络传染性覆盖"只提供服务、不分发副本"的规避路径。
+- **生态层 MIT**：插件 SDK、CLI、模板、示例可以零摩擦被任何项目使用、修改、二次分发，
+  鼓励第三方写插件、做发行版、集成进自己的工具链。
+- **商业层闭源**：Relay 服务器与团队/企业功能是**从第一天就设计为商业功能**的服务，不是把免费功能上墙。
+
+> 纪律：**永远不要把已经以 AGPL/MIT 发布的功能挪到付费层。** 违反这条，社区信任无法修复。
+
+---
+
+## 3. 第三方组件
+
+本仓库不打包任何 DSH 运行时依赖；以下文件是从上游复制并改写的 vendored 代码，保留上游 MIT 许可：
+
+| 文件 | 上游 | 许可 | 说明 |
+|---|---|---|---|
+| `src/kernel/vendor/schemastery.mjs` | cordis（Shigma） | MIT | 运行时配置 schema 校验库；仅把 import 路径改写为同目录文件名 |
+| `src/kernel/vendor/cosmokit.mjs` | cordis（Shigma） | MIT | schemastery 的依赖工具库 |
+
+上游版权声明保留在各文件头部；MIT 全文见 upstream 项目
+<https://github.com/shigma/cordis>（`LICENSE`）。如上游许可发生变化，以 `LICENSES/cordis-MIT.txt` 为准。
+
+`probes/AppContainerHost.cs`、`probes/*.ps1` 为本项目自有代码（AGPL 核心层）。
+
+---
+
+## 4. 贡献
+
+所有贡献按 [CLA.md](CLA.md) 授权给项目维护者：维护者获得**永久、全球、非独占、免版税、不可撤销**的
+再许可权利（含以商业闭源协议再许可的权利），这是双许可证（AGPL + 商业授权）路径成立的前提。
+
+---
+
+## 5. 商业授权
+
+需要在不遵守 AGPL-3.0 的条件下使用核心层（例如闭源托管服务、OEM 集成）时，
+请联系维护者获取商业许可：`licensing@example.com` **（占位，发布前替换为真实联系方式）**。

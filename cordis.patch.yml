@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
+# dsh-Fang v1.0.0 — bundle layer.
+# One installable bundle; ten plugin rows. The row order is a dependency order:
+# auditor/forker/buffer feed the middle tier, orchestrator comes last.
+- insert:
+    - id: fang-auditor
+      name: '@local/dsh-fang/auditor'
+      config:
+        dataRoot: ''
+        bootSelfCheck: true
+
+    - id: fang-forker
+      name: '@local/dsh-fang/forker'
+      config:
+        cliPath: ''
+        profileTemplate: ''
+        startTimeoutMs: 60000
+        maxForks: 8
+
+    - id: fang-buffer-keeper
+      name: '@local/dsh-fang/buffer-keeper'
+      config:
+        root: ''
+        settleMs: 750
+        pollMs: 250
+
+    - id: fang-scorer
+      name: '@local/dsh-fang/scorer'
+      config:
+        allowlist: []
+
+    - id: fang-healer
+      name: '@local/dsh-fang/healer'
+      config:
+        blockingOnUnknown: true
+        reservedIds: []
+
+    - id: fang-router
+      name: '@local/dsh-fang/router'
+      config:
+        containerAvailable: false
+        trustedPlugins: []
+
+    - id: fang-approver
+      name: '@local/dsh-fang/approver'
+      config:
+        defaultTtlMs: 300000
+        remindAt: 0.5
+        authMode: manual
+        strictRedLine: true
+        backupRoot: ''
+
+    - id: fang-hot-reloader
+      name: '@local/dsh-fang/hot-reloader'
+      config:
+        healthWindowMs: 300
+        healthMaxNewHandles: 2
+        requireApprovalForSwap: true
+
+    - id: fang-restart-guard
+      name: '@local/dsh-fang/restart-guard'
+      config:
+        mode: observe
+        authMode: manual
+        strictRedLine: true
+        allowProcessRestart: false
+        autoPromoteAfterHours: 24
+
+    - id: fang-adapter
+      name: '@local/dsh-fang/adapter'
+      config:
+        prefix: /fang
+        taskId: ''
+        auditLimit: 500
+        commandTimeoutMs: 10000
+
+    - id: fang-session-catalog
+      name: '@local/dsh-fang/session-catalog'
+      config:
+        limit: 50
+        allowArchived: false
+        previewMaxChars: 2000
+
+    - id: fang-orchestrator
+      name: '@local/dsh-fang'
+      config:
+        role: mother
+        maxForks: 8
+        motherProfile: web
+        autoReapIdleMinutes: 0
+        routes:
+          enabled: true
+          prefix: /fang

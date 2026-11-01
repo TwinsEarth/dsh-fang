@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT
+# Example plugin row: host half marks the plugin present; the client half talks to /fang/api/status.
+- insert:
+    - id: fang-example-status-badge
+      name: '@fang-example/status-badge'
+      config:
+        intervalMs: 10000

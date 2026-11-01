@@ -1,0 +1,63 @@
+{
+  "name": "@local/dsh-fang",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "description": "dsh-Fang (瓮城) v1.0.0 — mother/fork plugin development environment: one readonly mother, a disposable child dsh-Web per task, 1 orchestrator + 9 sub-plugins.",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./compose": "./src/compose.mjs",
+    "./orchestrator": "./src/plugins/orchestrator.mjs",
+    "./forker": "./src/plugins/forker.mjs",
+    "./scorer": "./src/plugins/scorer.mjs",
+    "./healer": "./src/plugins/healer.mjs",
+    "./approver": "./src/plugins/approver.mjs",
+    "./hot-reloader": "./src/plugins/hot-reloader.mjs",
+    "./restart-guard": "./src/plugins/restart-guard.mjs",
+    "./buffer-keeper": "./src/plugins/buffer-keeper.mjs",
+    "./auditor": "./src/plugins/auditor.mjs",
+    "./router": "./src/plugins/router.mjs",
+    "./adapter": "./src/plugins/adapter.mjs",
+    "./session-catalog": "./src/plugins/session-catalog.mjs",
+    "./client": {
+      "browser": "./client.js",
+      "default": "./client.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "src/**/*.mjs",
+    "src/**/*.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "LICENSE-CORE",
+    "LICENSE-SDK",
+    "LICENSE-COMMERCIAL",
+    "NOTICE",
+    "CLA.md",
+    "LICENSES/**",
+    "sdk/**"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "check": "node tools/fangctl.mjs verify",
+    "doctor": "node tools/fangctl.mjs doctor"
+  },
+  "license": "AGPL-3.0-or-later"
+}

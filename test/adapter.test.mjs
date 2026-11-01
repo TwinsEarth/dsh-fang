@@ -1,0 +1,805 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
+// T5 — Adapter（分身侧跨进程桥）单测（契约：docs/CONTRACTS-V2.md §1/§5.1、PROTOCOL-V2.md §3）。
+//
+// 覆盖：角色门禁（mother 不注册服务/路由，fork 才注册）、模块形状、5 条 exact 路由与
+// Config.prefix、HTTP 方法校验 405 / 400 / 409、GET status/approvals/audit、POST command、
+// 9 条命令的全部降级分支、read-plugin 的路径逃逸/二进制/单文件与总量上限、
+// route-confirm 自动补 assessment、archive flush+审计+事件、命令超时。
+// 不 spawn 真实进程、不开真实 socket：HTTP 处理器直接调用 `webServer.find(...).handler`。
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { EventEmitter } from 'node:events'
+
+import { makeCtx, makeWebServerStub, makeReq, makeRes, tmpDir } from './helpers.mjs'
+import {
+  SERVICE, ADAPTER_OP, ADAPTER_ROUTE, AUDIT, FANG_VERSION,
+} from '../src/kernel/index.mjs'
+import * as adapterModule from '../src/plugins/adapter.mjs'
+
+const ADAPTER_SERVICE = SERVICE.adapter // 'fangAdapter'
+const PREFIX = '/fang'
+const routePath = (suffix) => `${PREFIX}${suffix}`
+
+const ENV_KEYS = ['DSH_FANG_ROLE', 'DSH_FANG_TASK_ID', 'DSH_FANG_FORK_ID', 'DSH_FANG_FORK', 'FANG_TASK_ID']
+
+/** 临时改 env 执行 fn（同步段内），结束后恢复，避免污染同进程其它测试。 */
+function withEnv(patch, fn) {
+  const saved = {}
+  for (const key of Object.keys(patch)) {
+    saved[key] = process.env[key]
+    if (patch[key] === undefined) delete process.env[key]
+    else process.env[key] = patch[key]
+  }
+  try {
+    return fn()
+  } finally {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
+    }
+  }
+}
+
+/** 按角色 apply（env 优先于任何配置），返回 {ctx, ws, service}。 */
+function applyWithRole(role, config = {}, services = {}, { webServer = true, env = {} } = {}) {
+  const childServices = { ...services }
+  const ws = webServer ? makeWebServerStub() : null
+  if (ws) childServices.webServer = ws
+  const ctx = makeCtx({ services: childServices })
+  const patch = { DSH_FANG_ROLE: role, ...env }
+  const service = withEnv(patch, () => adapterModule.apply(ctx, config))
+  return { ctx, ws, service }
+}
+
+const applyAsFork = (config = {}, services = {}, opts = {}) => applyWithRole('fork', config, services, opts)
+
+// ── 服务桩（形状对齐 kernel SERVICE 的真实实现）──────────────────────────────
+
+function makeBuffer({ dir = '', flushResult = { state: 'settled', flushed: ['a.js'], timedOut: false }, flushImpl = null, stateResult = null } = {}) {
+  const calls = { flush: [] }
+  return {
+    calls,
+    get dir() { return dir },
+    state() {
+      if (stateResult) return stateResult
+      return { state: 'settled', dir, pending: [], mode: 'watch' }
+    },
+    async flush(opts = {}) {
+      calls.flush.push(opts)
+      if (flushImpl) return flushImpl(opts)
+      return typeof flushResult === 'function' ? flushResult(opts) : flushResult
+    },
+  }
+}
+
+function makeApprover({ items = [], decide = null } = {}) {
+  const calls = { decide: [], pending: 0 }
+  return {
+    calls,
+    pending() {
+      calls.pending += 1
+      return items.map((item) => ({ ...item }))
+    },
+    decide(id, outcome, options) {
+      calls.decide.push({ id, outcome, options })
+      if (decide) return decide(id, outcome, options)
+      return { ok: true, id, outcome, by: options?.by ?? 'api', at: 'T0' }
+    },
+  }
+}
+
+function makeAuditor(records = []) {
+  const calls = { append: [], read: [] }
+  return {
+    calls,
+    append(kind, data) {
+      calls.append.push({ kind, data })
+      return { kind, seq: calls.append.length }
+    },
+    read(opts = {}) {
+      calls.read.push(opts)
+      const limit = opts.limit === undefined ? 100 : Number(opts.limit)
+      if (limit <= 0) return []
+      return records.slice(-limit)
+    },
+  }
+}
+
+function makeScorer(factory = (dir) => ({ grade: 'B', S: 30, color: 'blue', veto: false, reasons: [], signals: [] })) {
+  const calls = { scoreDir: [] }
+  return {
+    calls,
+    scoreDir(dir, manifest, opts) {
+      calls.scoreDir.push({ dir, manifest, opts })
+      return { ...factory(dir), dir }
+    },
+  }
+}
+
+function makeRouter(confirm = (input) => ({ route: input?.decision?.route ?? 'sandbox', escalated: true })) {
+  const calls = { confirm: [] }
+  return {
+    calls,
+    confirm(input) {
+      calls.confirm.push(input)
+      return confirm(input)
+    },
+  }
+}
+
+function makeAllServices({ dir = '', auditorRecords = [] } = {}) {
+  return {
+    [SERVICE.buffer]: makeBuffer({ dir }),
+    [SERVICE.approver]: makeApprover({ items: [{ id: 'a1' }, { id: 'a2' }] }),
+    [SERVICE.auditor]: makeAuditor(auditorRecords),
+    [SERVICE.scorer]: makeScorer(),
+    [SERVICE.router]: makeRouter(),
+    [SERVICE.healer]: { gates: () => ({ pass: true, gates: [] }) },
+    [SERVICE.hotReloader]: { swap: async () => ({ ok: true }) },
+  }
+}
+
+function writePlugin(root, pluginId, files) {
+  const dir = path.join(root, pluginId)
+  for (const [rel, content] of Object.entries(files)) {
+    const file = path.join(dir, rel)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, content)
+  }
+  return dir
+}
+
+function findHandler(ws, method, suffix) {
+  const route = ws.find(method, routePath(suffix))
+  assert.ok(route, `route ${method} ${routePath(suffix)} must be registered`)
+  return route.handler
+}
+
+/** 发一个"原始 body"的请求（用于非法 JSON/超大 body 分支）。 */
+function makeRawReq(rawBody, method = 'POST', url = undefined) {
+  const req = new EventEmitter()
+  req.method = method
+  req.url = url
+  req.destroy = () => {}
+  process.nextTick(() => {
+    req.emit('data', Buffer.from(rawBody))
+    req.emit('end')
+  })
+  return req
+}
+
+function getReq(url = undefined) {
+  const req = makeReq(undefined, 'GET')
+  req.url = url
+  return req
+}
+
+// ── 角色门禁与形状 ───────────────────────────────────────────────────────────
+
+test('roleGate: mother 角色下不注册服务、不注册路由（apply 直接 return）', () => {
+  const ws = makeWebServerStub()
+  const ctx = makeCtx({ services: { webServer: ws } })
+  withEnv({ DSH_FANG_ROLE: undefined, DSH_FANG_TASK_ID: undefined }, () => {
+    const returned = adapterModule.apply(ctx, {})
+    assert.equal(returned, undefined, 'mother 下 apply 必须直接返回')
+  })
+  assert.equal(ctx.get(ADAPTER_SERVICE), undefined, 'mother 下不得提供 fangAdapter 服务')
+  assert.equal(ws.routes.length, 0, 'mother 下不得注册任何路由')
+  ctx.dispose()
+})
+
+test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_shape' })
+  assert.ok(service, 'fork 下必须注册 fangAdapter')
+  assert.equal(ctx.get(ADAPTER_SERVICE), service)
+  assert.equal(service.role, 'fork')
+  assert.equal(service.taskId, 'task_shape')
+  for (const method of ['hello', 'status', 'approvals', 'audit', 'command']) {
+    assert.equal(typeof service[method], 'function', `service.${method} 必须是函数`)
+  }
+
+  assert.deepEqual(ws.paths(), [
+    routePath(ADAPTER_ROUTE.HELLO),
+    routePath(ADAPTER_ROUTE.STATUS),
+    routePath(ADAPTER_ROUTE.APPROVALS),
+    routePath(ADAPTER_ROUTE.AUDIT),
+    routePath(ADAPTER_ROUTE.COMMAND),
+  ], '5 条路由与 ADAPTER_ROUTE 常量一致')
+  assert.deepEqual(service.routes, ws.paths(), 'service.routes 暴露已注册路径（测试用）')
+  for (const route of ws.routes) assert.equal(route.kind, 'exact')
+
+  assert.equal(adapterModule.name, 'fang-adapter')
+  assert.ok(Array.isArray(adapterModule.inject))
+  assert.equal(typeof adapterModule.Config, 'function')
+  const defaults = adapterModule.Config({})
+  assert.equal(defaults.prefix, '/fang')
+  assert.equal(defaults.taskId, '')
+  assert.equal(defaults.auditLimit, 500)
+  assert.equal(defaults.commandTimeoutMs, 10000)
+  assert.equal(adapterModule._internals.MAX_FILE_BYTES, 1024 * 1024)
+  assert.equal(adapterModule._internals.MAX_TOTAL_BYTES, 2 * 1024 * 1024)
+  ctx.dispose()
+})
+
+test('hello(): role/taskId/version/capabilities；taskId 取 environ / 配置优先', async () => {
+  const fromConfig = applyAsFork({ taskId: 'task_cfg' })
+  const hello = fromConfig.service.hello()
+  assert.equal(hello.ok, true)
+  assert.equal(hello.role, 'fork')
+  assert.equal(hello.taskId, 'task_cfg')
+  assert.equal(hello.version, FANG_VERSION)
+  assert.ok(Array.isArray(hello.capabilities))
+  for (const op of Object.values(ADAPTER_OP)) assert.ok(hello.capabilities.includes(op), `capabilities 应含 ${op}`)
+  fromConfig.ctx.dispose()
+
+  const fromEnv = applyAsFork({}, {}, { env: { DSH_FANG_TASK_ID: 'task_env' } })
+  assert.equal(fromEnv.service.taskId, 'task_env', '缺省取 env DSH_FANG_TASK_ID')
+  assert.equal(fromEnv.service.hello().taskId, 'task_env')
+  fromEnv.ctx.dispose()
+
+  const configWins = applyAsFork({ taskId: 'task_cfg2' }, {}, { env: { DSH_FANG_TASK_ID: 'task_env2' } })
+  assert.equal(configWins.service.taskId, 'task_cfg2', '显式配置优先于环境变量')
+  configWins.ctx.dispose()
+})
+
+test('Config.prefix 生效（与母体 Remote.prefix 对齐）', () => {
+  const { ctx, ws } = applyAsFork({ prefix: '/x/' })
+  assert.deepEqual(ws.paths(), [
+    '/x/adapter/hello', '/x/adapter/status', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
+  ])
+  ctx.dispose()
+})
+
+test('webServer 缺失时 service 仍可用，routes 为空（不抛）', () => {
+  const { ctx, service } = applyAsFork({}, {}, { webServer: false })
+  assert.ok(service)
+  assert.deepEqual(service.routes, [])
+  assert.equal(service.hello().ok, true)
+  ctx.dispose()
+})
+
+test('dispose 后服务被释放', () => {
+  const { ctx } = applyAsFork({})
+  assert.ok(ctx.get(ADAPTER_SERVICE))
+  ctx.dispose()
+  assert.equal(ctx.get(ADAPTER_SERVICE), undefined)
+})
+
+// ── HTTP 层：方法校验 / GET / POST ───────────────────────────────────────────
+
+test('HTTP 方法错误 → 405（GET 路由收到 POST、POST 路由收到 GET）', async () => {
+  const { ctx, ws } = applyAsFork({})
+  const helloHandler = findHandler(ws, 'GET', ADAPTER_ROUTE.HELLO)
+  const res = makeRes()
+  await helloHandler(makeReq(undefined, 'POST'), res)
+  assert.equal(res.statusCode, 405)
+  assert.equal(res.json().ok, false)
+  assert.equal(res.json().code, 'method-not-allowed')
+  assert.equal(res.headers['content-type'], 'application/json; charset=utf-8')
+
+  const commandHandler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMAND)
+  const res2 = makeRes()
+  await commandHandler(makeReq(undefined, 'GET'), res2)
+  assert.equal(res2.statusCode, 405)
+  assert.equal(res2.json().code, 'method-not-allowed')
+  ctx.dispose()
+})
+
+test('HTTP GET status: 200 + 服务表/缓冲三态/待批数/审计头', async () => {
+  const root = tmpDir('fang-t5-status-')
+  try {
+    const services = makeAllServices({ dir: root, auditorRecords: [{ kind: 'boot', seq: 1, hash: 'h1' }, { kind: 'route', seq: 2, hash: 'h2' }] })
+    const { ctx, ws, service } = applyAsFork({ taskId: 'task_http' }, services)
+    await service.command({ op: ADAPTER_OP.PING }) // 让 uptime 有一点跨度
+
+    const handler = findHandler(ws, 'GET', ADAPTER_ROUTE.STATUS)
+    const res = makeRes()
+    await handler(getReq(routePath(ADAPTER_ROUTE.STATUS)), res)
+
+    assert.equal(res.statusCode, 200)
+    const body = res.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.role, 'fork')
+    assert.equal(body.taskId, 'task_http')
+    for (const key of ['scorer', 'router', 'healer', 'approver', 'hotReloader', 'buffer', 'auditor', 'adapter']) {
+      assert.equal(body.services[key], true, `services.${key} 应为 true`)
+    }
+    assert.equal(body.services.adapter, true)
+    assert.equal(body.buffer.state, 'settled')
+    assert.deepEqual(body.buffer.pending, [])
+    assert.equal(body.buffer.dir, root)
+    assert.equal(body.approvals.pending, 2)
+    assert.equal(body.audit.records, 2)
+    assert.equal(body.audit.head, 'h2')
+    assert.equal(typeof body.startedAt, 'number')
+    assert.ok(body.startedAt > 0)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('HTTP GET status: 依赖全缺时显式降级（不 pretend）', async () => {
+  const { ctx, ws } = applyAsFork({})
+  const handler = findHandler(ws, 'GET', ADAPTER_ROUTE.STATUS)
+  const res = makeRes()
+  await handler(getReq(), res)
+  assert.equal(res.statusCode, 200)
+  const body = res.json()
+  assert.equal(body.ok, true)
+  assert.equal(body.services.scorer, false)
+  assert.equal(body.services.buffer, false)
+  assert.equal(body.buffer.state, 'unavailable')
+  assert.equal(body.approvals.pending, 0)
+  assert.equal(body.audit.records, 0)
+  assert.equal(body.audit.head, null)
+  ctx.dispose()
+})
+
+test('HTTP GET audit: ?limit 生效且被 Config.auditLimit 夹紧；缺 auditor → 409', async () => {
+  const records = Array.from({ length: 10 }, (_, i) => ({ kind: 'r', seq: i + 1, hash: `h${i + 1}` }))
+  const auditor = makeAuditor(records)
+  const { ctx, ws } = applyAsFork({ auditLimit: 3 }, { [SERVICE.auditor]: auditor })
+
+  const handler = findHandler(ws, 'GET', ADAPTER_ROUTE.AUDIT)
+  const res = makeRes()
+  await handler(getReq(`${routePath(ADAPTER_ROUTE.AUDIT)}?limit=9&token=t`), res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().ok, true)
+  assert.equal(res.json().records.length, 3, 'auditLimit=3 夹紧 ?limit=9')
+  assert.deepEqual(auditor.calls.read.at(-1), { limit: 3 })
+
+  const resDefault = makeRes()
+  await handler(getReq(), resDefault)
+  assert.equal(resDefault.json().records.length, 3, '没有 ?limit 时默认 100 也被夹紧到 3')
+  assert.deepEqual(auditor.calls.read.at(-1), { limit: 3 })
+  ctx.dispose()
+
+  const missing = applyAsFork({})
+  const resMissing = makeRes()
+  await findHandler(missing.ws, 'GET', ADAPTER_ROUTE.AUDIT)(getReq(), resMissing)
+  assert.equal(resMissing.statusCode, 409)
+  assert.equal(resMissing.json().code, 'service-unavailable')
+  assert.deepEqual(resMissing.json().records, [])
+  missing.ctx.dispose()
+})
+
+test('HTTP GET approvals: 200 items；缺 approver → 409 降级', async () => {
+  const { ctx, ws } = applyAsFork({}, { [SERVICE.approver]: makeApprover({ items: [{ id: 'a1' }, { id: 'a2' }] }) })
+  const res = makeRes()
+  await findHandler(ws, 'GET', ADAPTER_ROUTE.APPROVALS)(getReq(), res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().ok, true)
+  assert.equal(res.json().items.length, 2)
+  ctx.dispose()
+
+  const missing = applyAsFork({})
+  const resMissing = makeRes()
+  await findHandler(missing.ws, 'GET', ADAPTER_ROUTE.APPROVALS)(getReq(), resMissing)
+  assert.equal(resMissing.statusCode, 409)
+  assert.equal(resMissing.json().code, 'service-unavailable')
+  assert.deepEqual(resMissing.json().items, [])
+  missing.ctx.dispose()
+})
+
+test('HTTP POST command: 200 成功 / 400 非法 JSON / 400 unknown-op / 400 missing-op', async () => {
+  const { ctx, ws } = applyAsFork({ taskId: 'task_http_cmd' })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMAND)
+
+  const okRes = makeRes()
+  await handler(makeReq({ op: 'ping' }, 'POST'), okRes)
+  assert.equal(okRes.statusCode, 200)
+  assert.equal(okRes.json().ok, true)
+  assert.equal(okRes.json().op, 'ping')
+  assert.equal(okRes.json().result.pong, true)
+  assert.equal(okRes.json().result.taskId, 'task_http_cmd')
+
+  const badJson = makeRes()
+  await handler(makeRawReq('{not json'), badJson)
+  assert.equal(badJson.statusCode, 400)
+  assert.equal(badJson.json().code, 'bad-request')
+
+  const unknown = makeRes()
+  await handler(makeReq({ op: 'launch-missiles' }, 'POST'), unknown)
+  assert.equal(unknown.statusCode, 400)
+  assert.equal(unknown.json().code, 'unknown-op')
+  assert.equal(unknown.json().ok, false)
+
+  const missingOp = makeRes()
+  await handler(makeReq({}, 'POST'), missingOp)
+  assert.equal(missingOp.statusCode, 400)
+  assert.equal(missingOp.json().code, 'bad-request')
+  ctx.dispose()
+})
+
+test('HTTP POST command: 命令失败映射 409 / 500', async () => {
+  const { ctx, ws } = applyAsFork({})
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMAND)
+
+  const notAvailable = makeRes()
+  await handler(makeReq({ op: ADAPTER_OP.FLUSH_BUFFER }, 'POST'), notAvailable)
+  assert.equal(notAvailable.statusCode, 409)
+  assert.equal(notAvailable.json().code, 'service-unavailable')
+
+  const throwing = makeRes()
+  await handler(makeReq({ op: ADAPTER_OP.SCORE_PLUGIN, payload: { pluginId: 'plug' } }, 'POST'), throwing)
+  assert.equal(throwing.statusCode, 409, '缺 scorer 时 score-plugin 降级 409')
+  assert.equal(throwing.json().code, 'service-unavailable')
+  ctx.dispose()
+})
+
+// ── command 层：各 op 分支与降级 ────────────────────────────────────────────
+
+test('command ping/status/flush-buffer', async () => {
+  const root = tmpDir('fang-t5-flush-')
+  try {
+    const buffer = makeBuffer({ dir: root, flushResult: { state: 'settled', flushed: ['index.js'], timedOut: false } })
+    const { ctx, service } = applyAsFork({}, { [SERVICE.buffer]: buffer })
+
+    const ping = await service.command({ op: ADAPTER_OP.PING })
+    assert.equal(ping.ok, true)
+    assert.equal(ping.op, 'ping')
+    assert.equal(ping.result.pong, true)
+    assert.equal(typeof ping.result.at, 'string')
+    assert.equal(ping.result.taskId, service.taskId)
+
+    const status = await service.command({ op: ADAPTER_OP.STATUS })
+    assert.equal(status.ok, true)
+    assert.equal(status.result.ok, true)
+    assert.equal(status.result.role, 'fork')
+
+    const flush = await service.command({ op: ADAPTER_OP.FLUSH_BUFFER })
+    assert.equal(flush.ok, true)
+    assert.deepEqual(flush.result.flushed, ['index.js'])
+    assert.equal(buffer.calls.flush.length, 1)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('command flush-buffer: 缺 buffer → service-unavailable；flush 抛错 → handler-threw', async () => {
+  const missing = applyAsFork({})
+  const out = await missing.service.command({ op: ADAPTER_OP.FLUSH_BUFFER })
+  assert.equal(out.ok, false)
+  assert.equal(out.code, 'service-unavailable')
+  assert.equal(out.op, 'flush-buffer')
+  missing.ctx.dispose()
+
+  const throwing = applyAsFork({}, {
+    [SERVICE.buffer]: makeBuffer({ flushImpl: () => { throw new Error('flush explode') } }),
+  })
+  const out2 = await throwing.service.command({ op: ADAPTER_OP.FLUSH_BUFFER })
+  assert.equal(out2.ok, false)
+  assert.equal(out2.code, 'handler-threw')
+  assert.match(out2.error, /flush explode/)
+  throwing.ctx.dispose()
+})
+
+test('command timeout: 悬挂的 flush 返回 code=timeout，不阻塞后续 ping', async () => {
+  const hanging = makeBuffer({ flushImpl: () => new Promise(() => {}) })
+  const { ctx, service } = applyAsFork({ commandTimeoutMs: 20 }, { [SERVICE.buffer]: hanging })
+  const startedAt = Date.now()
+  const out = await service.command({ op: ADAPTER_OP.FLUSH_BUFFER })
+  assert.equal(out.ok, false)
+  assert.equal(out.code, 'timeout')
+  assert.ok(Date.now() - startedAt < 2000)
+
+  const ping = await service.command({ op: ADAPTER_OP.PING })
+  assert.equal(ping.ok, true, '一条命令超时不影响后续命令')
+  ctx.dispose()
+})
+
+test('command score-plugin: 成功 / 缺服务 / 缺 pluginId / 逃逸 / 不存在', async () => {
+  const root = tmpDir('fang-t5-score-')
+  try {
+    writePlugin(root, 'plug', {
+      'package.json': '{"name":"plug","version":"1.0.0","type":"module"}',
+      'index.js': 'export const name = "plug"\n',
+    })
+    const scorer = makeScorer(() => ({ grade: 'B', S: 30, color: 'blue', veto: false, reasons: [], signals: [] }))
+    const { ctx, service } = applyAsFork({}, { [SERVICE.buffer]: makeBuffer({ dir: root }), [SERVICE.scorer]: scorer })
+
+    const ok = await service.command({ op: ADAPTER_OP.SCORE_PLUGIN, payload: { pluginId: 'plug' } })
+    assert.equal(ok.ok, true)
+    assert.equal(ok.result.grade, 'B')
+    assert.equal(ok.result.pluginId, 'plug')
+    assert.equal(scorer.calls.scoreDir.length, 1)
+    assert.equal(scorer.calls.scoreDir[0].dir, path.join(root, 'plug'))
+
+    const noId = await service.command({ op: ADAPTER_OP.SCORE_PLUGIN, payload: {} })
+    assert.equal(noId.ok, false)
+    assert.equal(noId.code, 'bad-request')
+
+    const escape = await service.command({ op: ADAPTER_OP.SCORE_PLUGIN, payload: { pluginId: '../plug' } })
+    assert.equal(escape.ok, false)
+    assert.equal(escape.code, 'path-escape')
+
+    const missingPlugin = await service.command({ op: ADAPTER_OP.SCORE_PLUGIN, payload: { pluginId: 'nope' } })
+    assert.equal(missingPlugin.ok, false)
+    assert.equal(missingPlugin.code, 'plugin-not-found')
+    ctx.dispose()
+
+    const noScorer = applyAsFork({}, { [SERVICE.buffer]: makeBuffer({ dir: root }) })
+    const degraded = await noScorer.service.command({ op: ADAPTER_OP.SCORE_PLUGIN, payload: { pluginId: 'plug' } })
+    assert.equal(degraded.ok, false)
+    assert.equal(degraded.code, 'service-unavailable')
+    noScorer.ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('command read-plugin: 成功返回 {files:{relPath:text}}，嵌套路径用 /', async () => {
+  const root = tmpDir('fang-t5-read-')
+  try {
+    writePlugin(root, 'plug', {
+      'package.json': '{"name":"plug"}',
+      'index.js': 'export default 1\n',
+      'lib/util.js': 'export const x = 2\n',
+    })
+    const { ctx, service } = applyAsFork({}, { [SERVICE.buffer]: makeBuffer({ dir: root }) })
+    const out = await service.command({ op: ADAPTER_OP.READ_PLUGIN, payload: { pluginId: 'plug' } })
+
+    assert.equal(out.ok, true)
+    assert.equal(out.op, 'read-plugin')
+    assert.equal(out.result.pluginId, 'plug')
+    assert.deepEqual(Object.keys(out.result.files).sort(), ['index.js', 'lib/util.js', 'package.json'])
+    assert.equal(out.result.files['lib/util.js'], 'export const x = 2\n')
+    assert.equal(out.result.count, 3)
+    assert.ok(out.result.bytes > 0)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('command read-plugin: 拒绝路径逃逸/盘符/UNC/..（含真实越界目录）', async () => {
+  const root = tmpDir('fang-t5-escape-')
+  try {
+    const bufferRoot = path.join(root, 'buffer')
+    writePlugin(bufferRoot, 'plug', { 'index.js': 'x' })
+    fs.writeFileSync(path.join(root, 'secret.txt'), 'mother-secret')
+    const { ctx, service } = applyAsFork({}, { [SERVICE.buffer]: makeBuffer({ dir: bufferRoot }) })
+
+    const escapes = ['../secret.txt', '..\\secret.txt', 'a/../../secret.txt', '.', 'C:\\Windows\\win.ini', '\\\\server\\share\\x', '/etc/passwd']
+    for (const pluginId of escapes) {
+      const out = await service.command({ op: ADAPTER_OP.READ_PLUGIN, payload: { pluginId } })
+      assert.equal(out.ok, false, `pluginId=${pluginId} 必须被拒绝`)
+      assert.equal(out.code, 'path-escape', `pluginId=${pluginId} 应报 path-escape，实际 ${out.code}`)
+      assert.equal(out.result.files, undefined, '逃逸不得返回任何文件内容')
+    }
+
+    const empty = await service.command({ op: ADAPTER_OP.READ_PLUGIN, payload: {} })
+    assert.equal(empty.ok, false)
+    assert.equal(empty.code, 'bad-request')
+
+    const noBufferService = applyAsFork({})
+    const unknownRoot = await noBufferService.service.command({ op: ADAPTER_OP.READ_PLUGIN, payload: { pluginId: 'plug' } })
+    assert.equal(unknownRoot.ok, false)
+    assert.ok(['plugin-not-found', 'not-configured'].includes(unknownRoot.code), `未知 root 应显式降级，实际 ${unknownRoot.code}`)
+    noBufferService.ctx.dispose()
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('command read-plugin: 二进制 / 单文件 >1MB / 总量 >2MB 全部拒绝', async () => {
+  const root = tmpDir('fang-t5-limits-')
+  try {
+    writePlugin(root, 'binary', { 'index.js': 'x' })
+    fs.writeFileSync(path.join(root, 'binary', 'blob.bin'), Buffer.from([0, 1, 2, 3, 0, 255]))
+    writePlugin(root, 'big-file', { 'index.js': 'x' })
+    fs.writeFileSync(path.join(root, 'big-file', 'huge.txt'), Buffer.alloc(1024 * 1024 + 1, 97))
+    writePlugin(root, 'big-total', { 'index.js': 'x' })
+    for (let i = 0; i < 3; i++) {
+      fs.writeFileSync(path.join(root, 'big-total', `part${i}.txt`), Buffer.alloc(800 * 1024, 98))
+    }
+    const { ctx, service } = applyAsFork({}, { [SERVICE.buffer]: makeBuffer({ dir: root }) })
+
+    const binary = await service.command({ op: ADAPTER_OP.READ_PLUGIN, payload: { pluginId: 'binary' } })
+    assert.equal(binary.ok, false)
+    assert.equal(binary.code, 'binary-file')
+    assert.match(binary.error, /blob\.bin/)
+
+    const bigFile = await service.command({ op: ADAPTER_OP.READ_PLUGIN, payload: { pluginId: 'big-file' } })
+    assert.equal(bigFile.ok, false)
+    assert.equal(bigFile.code, 'file-too-large')
+
+    const bigTotal = await service.command({ op: ADAPTER_OP.READ_PLUGIN, payload: { pluginId: 'big-total' } })
+    assert.equal(bigTotal.ok, false)
+    assert.equal(bigTotal.code, 'total-too-large')
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('command route-confirm: 转发 Router.confirm（可只给 pluginId，自动补 assessment）', async () => {
+  const root = tmpDir('fang-t5-route-')
+  try {
+    writePlugin(root, 'plug', {
+      'package.json': '{"name":"plug","type":"module"}',
+      'index.js': 'export default 1\n',
+    })
+    const router = makeRouter((input) => ({
+      route: input?.decision?.route ?? 'sandbox',
+      escalated: Boolean(input?.assessment),
+      basis: { forkAssessment: input?.assessment?.grade ?? null },
+    }))
+    const scorer = makeScorer(() => ({ grade: 'C', S: 50, color: 'yellow', veto: false, reasons: [], signals: [] }))
+    const { ctx, service } = applyAsFork({}, {
+      [SERVICE.buffer]: makeBuffer({ dir: root }),
+      [SERVICE.router]: router,
+      [SERVICE.scorer]: scorer,
+    })
+
+    const out = await service.command({
+      op: ADAPTER_OP.ROUTE_CONFIRM,
+      payload: { decision: { route: 'sandbox', reason: 'trusted' }, pluginId: 'plug' },
+    })
+    assert.equal(out.ok, true)
+    assert.equal(out.result.route, 'sandbox')
+    assert.equal(out.result.escalated, true)
+    assert.equal(router.calls.confirm.length, 1)
+    assert.equal(router.calls.confirm[0].decision.route, 'sandbox')
+    assert.equal(router.calls.confirm[0].assessment.grade, 'C', 'payload 没给 assessment 时用分身 Scorer 现算')
+    ctx.dispose()
+
+    const noRouter = applyAsFork({}, { [SERVICE.buffer]: makeBuffer({ dir: root }) })
+    const degraded = await noRouter.service.command({ op: ADAPTER_OP.ROUTE_CONFIRM, payload: { decision: {} } })
+    assert.equal(degraded.ok, false)
+    assert.equal(degraded.code, 'service-unavailable')
+    noRouter.ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('command approvals/approval-decide: 决策归一化 / 参数校验 / 缺服务', async () => {
+  const approver = makeApprover({
+    items: [{ id: 'a1' }, { id: 'a2' }],
+    decide: (id, outcome, options) => ({ ok: true, id, outcome, by: options?.by, at: 'T1' }),
+  })
+  const { ctx, service } = applyAsFork({}, { [SERVICE.approver]: approver })
+
+  const list = await service.command({ op: ADAPTER_OP.APPROVALS })
+  assert.equal(list.ok, true)
+  assert.equal(list.result.items.length, 2)
+
+  const approved = await service.command({ op: ADAPTER_OP.APPROVAL_DECIDE, payload: { id: 'a1', decision: 'approve', by: 'mother' } })
+  assert.equal(approved.ok, true)
+  assert.equal(approved.result.outcome, 'approved')
+  assert.equal(approver.calls.decide[0].outcome, 'approved')
+  assert.equal(approver.calls.decide[0].options.by, 'mother')
+
+  const denied = await service.command({ op: ADAPTER_OP.APPROVAL_DECIDE, payload: { id: 'a2', outcome: 'denied', note: 'nope' } })
+  assert.equal(denied.ok, true)
+  assert.equal(approver.calls.decide[1].outcome, 'denied')
+  assert.equal(approver.calls.decide[1].options.note, 'nope')
+
+  const badOutcome = await service.command({ op: ADAPTER_OP.APPROVAL_DECIDE, payload: { id: 'a1', decision: 'maybe' } })
+  assert.equal(badOutcome.ok, false)
+  assert.equal(badOutcome.code, 'bad-request')
+
+  const missingId = await service.command({ op: ADAPTER_OP.APPROVAL_DECIDE, payload: { decision: 'approve' } })
+  assert.equal(missingId.ok, false)
+  assert.equal(missingId.code, 'bad-request')
+
+  const noApprover = applyAsFork({})
+  const degraded = await noApprover.service.command({ op: ADAPTER_OP.APPROVAL_DECIDE, payload: { id: 'x', decision: 'approve' } })
+  assert.equal(degraded.ok, false)
+  assert.equal(degraded.code, 'service-unavailable')
+  noApprover.ctx.dispose()
+  ctx.dispose()
+
+  const notFoundApprover = makeApprover({ decide: () => ({ ok: false, reason: 'not-found' }) })
+  const notFound = applyAsFork({}, { [SERVICE.approver]: notFoundApprover })
+  const refused = await notFound.service.command({ op: ADAPTER_OP.APPROVAL_DECIDE, payload: { id: 'ghost', decision: 'approve' } })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'not-found')
+  notFound.ctx.dispose()
+})
+
+test('command archive: flush + 审计 + 事件 + 幂等；缺 buffer → service-unavailable', async () => {
+  const root = tmpDir('fang-t5-archive-')
+  try {
+    const buffer = makeBuffer({ dir: root, flushResult: { state: 'settled', flushed: ['index.js'], timedOut: false } })
+    const auditor = makeAuditor([])
+    const { ctx, service } = applyAsFork({ taskId: 'task_arch' }, { [SERVICE.buffer]: buffer, [SERVICE.auditor]: auditor })
+    const events = []
+    ctx.on('fang/task-archived', (payload) => events.push(payload))
+
+    const first = await service.command({ op: ADAPTER_OP.ARCHIVE })
+    assert.equal(first.ok, true)
+    assert.equal(first.result.archived, true)
+    assert.deepEqual(first.result.flushed, ['index.js'])
+    assert.equal(buffer.calls.flush.length, 1)
+    assert.equal(auditor.calls.append.length, 1)
+    assert.equal(auditor.calls.append[0].kind, AUDIT.TASK_ARCHIVED)
+    assert.equal(auditor.calls.append[0].data.taskId, 'task_arch')
+    assert.equal(events.length, 1)
+    assert.equal(events[0].taskId, 'task_arch')
+    assert.equal(service.status().archived, true)
+
+    const second = await service.command({ op: ADAPTER_OP.ARCHIVE })
+    assert.equal(second.ok, true, 'archive 必须可重复调用（幂等）')
+    assert.equal(buffer.calls.flush.length, 2)
+    ctx.dispose()
+
+    const noBuffer = applyAsFork({})
+    const degraded = await noBuffer.service.command({ op: ADAPTER_OP.ARCHIVE })
+    assert.equal(degraded.ok, false)
+    assert.equal(degraded.code, 'service-unavailable')
+    noBuffer.ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('service.audit(): limit 夹紧 / 缺 auditor 降级；approvals() 缺服务降级', async () => {
+  const records = Array.from({ length: 12 }, (_, i) => ({ kind: 'r', seq: i + 1 }))
+  const auditor = makeAuditor(records)
+  const { ctx, service } = applyAsFork({ auditLimit: 5 }, { [SERVICE.auditor]: auditor })
+
+  const tail = service.audit({ limit: 3 })
+  assert.equal(tail.ok, true)
+  assert.equal(tail.records.length, 3)
+  assert.deepEqual(auditor.calls.read.at(-1), { limit: 3 })
+
+  const clamped = service.audit({ limit: 100 })
+  assert.equal(clamped.records.length, 5, 'auditLimit 夹紧上限')
+
+  const zero = service.audit({ limit: 0 })
+  assert.deepEqual(zero.records, [])
+  ctx.dispose()
+
+  const degraded = applyAsFork({})
+  const auditOut = degraded.service.audit({})
+  assert.equal(auditOut.ok, false)
+  assert.equal(auditOut.code, 'service-unavailable')
+  assert.deepEqual(auditOut.records, [])
+  const approvalsOut = degraded.service.approvals()
+  assert.equal(approvalsOut.ok, false)
+  assert.equal(approvalsOut.code, 'service-unavailable')
+  assert.deepEqual(approvalsOut.items, [])
+  degraded.ctx.dispose()
+})
+
+test('未知命令返回 unknown-op 且带 op；ping 结果含 taskId/uptime', async () => {
+  const { ctx, service } = applyAsFork({ taskId: 'task_unknown' })
+  const out = await service.command({ op: 'nope', payload: {} })
+  assert.equal(out.ok, false)
+  assert.equal(out.op, 'nope')
+  assert.equal(out.code, 'unknown-op')
+  assert.match(out.error, /unknown-op/)
+
+  const ping = await service.command({ op: 'ping' })
+  assert.equal(ping.result.taskId, 'task_unknown')
+  assert.equal(typeof ping.result.uptimeMs, 'number')
+  assert.ok(ping.result.uptimeMs >= 0)
+  ctx.dispose()
+})
+
+test('纯函数：normalizePrefix / resolveInside 的边界', () => {
+  const { normalizePrefix, resolveInside } = adapterModule._internals
+  assert.equal(normalizePrefix(''), '/fang')
+  assert.equal(normalizePrefix('fang'), '/fang')
+  assert.equal(normalizePrefix('/fang/'), '/fang')
+  assert.equal(normalizePrefix('/a/b//'), '/a/b')
+  assert.equal(normalizePrefix('\\x'), '/x')
+
+  const root = path.resolve('root-buffer')
+  assert.equal(resolveInside(root, 'plug').dir, path.join(root, 'plug'))
+  assert.equal(resolveInside(root, 'plug/sub').dir, path.join(root, 'plug', 'sub'))
+  assert.equal(resolveInside(root, '..').ok, false)
+  assert.equal(resolveInside(root, '../x').ok, false)
+  assert.equal(resolveInside(root, '').ok, false)
+  assert.equal(resolveInside(root, '.').ok, false)
+  assert.equal(resolveInside(root, '\\server\\x').ok, false)
+  assert.equal(resolveInside(root, 'C:\\x').ok, false)
+})

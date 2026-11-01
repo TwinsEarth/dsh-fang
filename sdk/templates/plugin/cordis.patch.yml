@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Bundle patch for the plugin template: one loader row inserted at install time.
+# Rename the id / package name when you copy this template.
+- insert:
+    - id: my-plugin
+      name: '@your-scope/dsh-plugin-template'
+      config:
+        greeting: 'hello from my plugin'

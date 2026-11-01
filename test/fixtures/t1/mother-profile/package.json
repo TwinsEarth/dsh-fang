@@ -1,0 +1,10 @@
+{
+  "name": "mother-profile-fixture",
+  "version": "9.9.9",
+  "private": true,
+  "type": "module",
+  "description": "T1 fixture: the profileTemplate a fork clones package.json + cordis*.yml from.",
+  "dependencies": {
+    "fixture-only": "1.0.0"
+  }
+}

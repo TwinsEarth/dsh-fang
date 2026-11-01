@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-Fang (mother/fork plugin development)",
+    "description": "One readonly mother plus a disposable child dsh-Web per task: crash containment without restarting the mother, with scoring, approval, audit and promotion gates."
+  }
+}

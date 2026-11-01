@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "my-plugin (template)",
+    "description": "Minimal MIT plugin template for DSH / dsh-Fang: host half plus an optional composer-dock badge."
+  }
+}

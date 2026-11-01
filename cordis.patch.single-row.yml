@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
+# dsh-Fang v1.0.0 — 单行回退装载
+# 仅当 loader 无法解析 `@local/dsh-fang/xxx` 子路径入口时使用：
+#   * 用本文件替换 profile 里的 bundle patch（或 --patch 覆盖）
+#   * 同一包只挂一行，src/compose.mjs 会把十个子插件挂成嵌套 fiber
+- insert:
+    - id: fang
+      name: '@local/dsh-fang/compose'
+      config:
+        orchestrator:
+          role: mother
+          maxForks: 8
+          motherProfile: web
+        restartGuard:
+          mode: observe
+          authMode: manual
+          strictRedLine: true
+          allowProcessRestart: false

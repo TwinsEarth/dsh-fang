@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="dsh-Fang">
+  <rect x="4" y="4" width="56" height="56" rx="12" fill="#0f172a"/>
+  <rect x="12" y="12" width="16" height="16" rx="3" fill="#38bdf8"/>
+  <rect x="36" y="12" width="16" height="16" rx="3" fill="#1e40af" opacity="0.9"/>
+  <rect x="12" y="36" width="16" height="16" rx="3" fill="#1e40af" opacity="0.7"/>
+  <rect x="36" y="36" width="16" height="16" rx="3" fill="#64748b" opacity="0.8"/>
+  <path d="M28 20h8M20 28v8M44 28v8M28 44h8" stroke="#94a3b8" stroke-width="2" stroke-linecap="round"/>
+</svg>

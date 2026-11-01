@@ -1,0 +1,36 @@
+{
+  "name": "@your-scope/dsh-plugin-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal dsh-Fang / DSH plugin template (MIT): host half + optional client half.",
+  "exports": {
+    ".": "./index.js",
+    "./client": {
+      "browser": "./client.js",
+      "default": "./client.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection"
+      ]
+    }
+  }
+}

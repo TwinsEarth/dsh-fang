@@ -1,0 +1,24 @@
+{
+  "name": "@fang-example/status-badge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Example MIT plugin: shows dsh-Fang status next to the composer (third-party plugin calling Fang's public HTTP surface).",
+  "exports": {
+    ".": "./index.js",
+    "./client": {
+      "browser": "./client.js",
+      "default": "./client.js"
+    }
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-connection"]
+    }
+  }
+}

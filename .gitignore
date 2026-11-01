@@ -1,0 +1,20 @@
+# Local-only artefacts — never publish these
+dist/
+node_modules/
+.data/
+sandbox-data/
+queue/
+buffer/
+*.log
+*.tmp
+*.local
+.env
+.env.*
+.DS_Store
+Thumbs.db
+*.url
+dsh-host.pid
+ports.json
+forks.json
+tasks.json
+audit.jsonl

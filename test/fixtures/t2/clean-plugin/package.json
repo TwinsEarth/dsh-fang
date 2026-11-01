@@ -1,0 +1,9 @@
+{
+  "name": "@local/fang-fixture-clean",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "T2 healer fixture: a well-formed middle-tier plugin (no dangerous imports, no undeclared deps).",
+  "dependencies": {
+    "@deepseek-ai/dsh-client-ui-conversation": "^1.0.0"
+  }
+}

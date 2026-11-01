@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# CI: 零第三方依赖 —— 直接跑 node:test，外加许可分层回归。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: full unit + integration suite
+        run: node --test --test-concurrency=1 "test/*.test.mjs"
+      - name: license layering guard
+        run: node test/licensing.test.mjs
+      - name: offline doctor (self-check, no DSH required)
+        run: node tools/fangctl.mjs doctor
+
+  e2e:
+    name: real dsh e2e (optional, self-hosted)
+    runs-on: self-hosted
+    if: ${{ vars.RUN_E2E == '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: boot a disposable mother and run a real fork
+        run: node tools/e2e.mjs
