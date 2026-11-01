@@ -353,6 +353,138 @@ export function readBoundedHead(options = {}) {
   }
 }
 
+export const TITLE_DEFAULTS = Object.freeze({
+  maxFrames: 64,
+  maxCompressedBytes: 2 * 1024 * 1024,
+  maxEvents: 4000,
+})
+
+/**
+ * 有界多帧事件读：一次只读文件前 maxCompressedBytes 字节，逐帧解压直到 maxFrames 帧。
+ * 会话标题（session/title 事件）与首条用户消息通常在前几十帧内；**绝不整文件解压**。
+ * @returns {{events:object[], lines:string[], degraded:string[], framesDecoded:number, bytesRead:number}}
+ */
+export function readBoundedEvents(options = {}) {
+  const {
+    file,
+    maxFrames = TITLE_DEFAULTS.maxFrames,
+    maxCompressedBytes = TITLE_DEFAULTS.maxCompressedBytes,
+    maxEvents = TITLE_DEFAULTS.maxEvents,
+    fsApi,
+    zstdDecompressSync,
+  } = options ?? {}
+  const degraded = []
+  const out = { events: [], lines: [], degraded, framesDecoded: 0, bytesRead: 0 }
+  const note = (tag) => { if (!degraded.includes(tag)) degraded.push(tag) }
+  if (typeof file !== 'string' || !file) { note('no-file'); return out }
+  if (!fsApi || typeof fsApi.openSync !== 'function') { note('no-fs-api'); return out }
+  if (typeof zstdDecompressSync !== 'function') { note('no-zstd'); return out }
+  const frameBudget = clampInt(maxFrames, 1, 4096, TITLE_DEFAULTS.maxFrames)
+  const byteBudget = clampInt(maxCompressedBytes, 4096, 64 * 1024 * 1024, TITLE_DEFAULTS.maxCompressedBytes)
+  const eventBudget = clampInt(maxEvents, 1, 200000, TITLE_DEFAULTS.maxEvents)
+  let fd = null
+  try {
+    let fileSize = null
+    try {
+      const st = fsApi.statSync(file)
+      if (st && Number.isFinite(st.size)) fileSize = st.size
+    } catch { /* open 阶段会再次暴露 */ }
+    if (fileSize === 0) { note('empty'); return out }
+    fd = fsApi.openSync(file, 'r')
+    const toRead = fileSize === null ? byteBudget : Math.min(fileSize, byteBudget)
+    if (!(toRead > 0)) { note('empty'); return out }
+    const buffer = new Uint8Array(toRead)
+    const got = fsApi.readSync(fd, buffer, 0, toRead, 0)
+    out.bytesRead = Number.isFinite(got) ? got : 0
+    if (out.bytesRead <= 0) { note('empty'); return out }
+    if (fileSize !== null && out.bytesRead < fileSize) note('compressed-limit')
+    const view = buffer.subarray(0, out.bytesRead)
+    const looksZstd = view.length >= 4
+      && view[0] === ZSTD_MAGIC[0] && view[1] === ZSTD_MAGIC[1]
+      && view[2] === ZSTD_MAGIC[2] && view[3] === ZSTD_MAGIC[3]
+    let text = ''
+    if (!looksZstd) {
+      note('not-zstd')
+      text = decodeUtf8(view)
+    } else {
+      const offsets = findMagicOffsets(view)
+      const bounds = [...new Set((offsets.length > 0 && offsets[0] === 0) ? offsets : [0, ...offsets])].sort((a, b) => a - b)
+      for (let i = 0; i < bounds.length && out.framesDecoded < frameBudget; i++) {
+        const frame = view.subarray(bounds[i], i + 1 < bounds.length ? bounds[i + 1] : view.length)
+        if (frame.length < 4) continue
+        try {
+          const decoded = zstdDecompressSync(frame)
+          const bytes = decoded instanceof Uint8Array ? decoded : new Uint8Array(decoded)
+          if (bytes.length === 0) { note('frame-empty'); continue }
+          text += decodeUtf8(bytes)
+          out.framesDecoded += 1
+        } catch {
+          note('frame-decode-failed')
+          break
+        }
+      }
+      if (out.framesDecoded < bounds.length) note('frame-limit')
+    }
+    const lines = text.split('\n')
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+    for (const line of lines) {
+      if (!line.trim()) continue
+      let parsed = null
+      try { parsed = JSON.parse(line) } catch { note('line-unparsable'); continue }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      out.events.push(parsed)
+      out.lines.push(line)
+      if (out.events.length >= eventBudget) { note('event-limit'); break }
+    }
+    return out
+  } catch {
+    note('read-failed')
+    return out
+  } finally {
+    if (fd !== null) { try { fsApi.closeSync(fd) } catch { /* ignore */ } }
+  }
+}
+
+/**
+ * 从事件里提取会话标题：最新 session/title > 首条用户消息（截断）> null。
+ * titleSource 让调用方如实标注标题来源（不假装有原生标题）。
+ */
+export function extractSessionTitle(events = []) {
+  let title = null
+  let titleSource = null
+  let messageSeq = null
+  let preview = null
+  for (const event of (Array.isArray(events) ? events : [])) {
+    if (!event || typeof event !== 'object') continue
+    if (event.type === 'session/title') {
+      const data = event.data && typeof event.data === 'object' ? event.data : {}
+      const raw = typeof data.title === 'string' ? data.title.trim().replace(/\s+/g, ' ') : ''
+      if (raw) {
+        title = raw
+        titleSource = 'session/title'
+        const seqs = Array.isArray(data.messageSeqs) ? data.messageSeqs : []
+        messageSeq = Number.isFinite(seqs[0]) ? seqs[0] : null
+      }
+    }
+    if (!preview && event.type === 'user/message') {
+      const data = event.data && typeof event.data === 'object' ? event.data : event
+      const content = Array.isArray(data.content) ? data.content : []
+      const text = content
+        .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join(' ')
+        .trim()
+        .replace(/\s+/g, ' ')
+      if (text) preview = text.slice(0, 160)
+    }
+  }
+  if (!title && preview) {
+    title = preview.slice(0, 80)
+    titleSource = 'first-user'
+  }
+  return { title, titleSource, preview, messageSeq }
+}
+
 // ── 脱敏 ────────────────────────────────────────────────────────────────────
 // 顺序有意义：先凭证类，再联系方式，最后绝对路径；每类替换后计数。
 const REDACTION_RULES = [
@@ -472,6 +604,9 @@ export function scanSessionDirs(options = {}) {
 }
 
 export const _internals = {
+  readBoundedEvents,
+  extractSessionTitle,
+  TITLE_DEFAULTS,
   findMagicOffsets,
   firstFrameSlice,
   joinRel,

@@ -87,7 +87,6 @@
       config:
         role: mother
         maxForks: 8
-        motherProfile: web
         autoReapIdleMinutes: 0
         routes:
           enabled: true

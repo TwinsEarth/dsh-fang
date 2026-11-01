@@ -648,3 +648,42 @@ test('workspace.json 缺失时：仍列出目录（unknown workspace），degrad
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('listSessions exposes native session titles from session/title events (with source + preview)', () => {
+  const home = makeHome()
+  try {
+    writeIndex(home, { workspaces: [WS_GPT], archived: [], pinned: [] })
+    addSession(home, WS_GPT.path, SESSION_B, [
+      `${headerLine(SESSION_B)}\n`,
+      `${JSON.stringify({ type: 'session/title', seq: 5, data: { title: '瓮城 UI 入口设计' } })}\n`,
+      `${JSON.stringify({ type: 'user/message', data: { content: [{ type: 'text', text: '设计左侧导航' }] } })}\n`,
+    ], 2000)
+    const { ctx, service } = applyCatalog({ home })
+    const list = service.listSessions()
+    assert.equal(list.ok, true)
+    assert.equal(list.sessions.length, 1)
+    assert.equal(list.sessions[0].title, '瓮城 UI 入口设计')
+    assert.equal(list.sessions[0].titleSource, 'session/title')
+    assert.match(list.sessions[0].preview, /设计左侧导航/)
+    // 再次读取走 mtime 缓存，标题保持一致
+    assert.equal(service.listSessions().sessions[0].title, '瓮城 UI 入口设计')
+    ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('listSessions falls back to the workspace title when the log has no title or user message', () => {
+  const home = makeHome()
+  try {
+    writeIndex(home, { workspaces: [WS_GPT], archived: [], pinned: [] })
+    addSession(home, WS_GPT.path, SESSION_A, [`${headerLine(SESSION_A)}\n`], 3000)
+    const { ctx, service } = applyCatalog({ home })
+    const item = service.listSessions().sessions[0]
+    assert.equal(item.titleSource, 'workspace')
+    assert.equal(item.title, 'GPT')
+    ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

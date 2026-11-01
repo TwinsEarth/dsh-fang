@@ -31,6 +31,22 @@ window.__ModuleLoader__.load({
     const MONO = 'var(--ds-font-family-code, ui-monospace, Consolas, monospace)'
 
     const short = (s, n = 8) => String(s ?? '').slice(-n)
+    // 会话标题：优先原生 session/title；其次首条用户消息预览；最后才用工作区名（并如实标注来源）
+    const sessionLabel = (s) => {
+      const title = String(s.title ?? '').trim()
+      const source = s.titleSource ?? ''
+      if (title && source === 'session/title') return title
+      if (s.preview) return String(s.preview)
+      if (title) return title
+      return s.workspaceTitle || '未命名会话'
+    }
+    const sessionSourceHint = (s) => {
+      const source = s.titleSource ?? ''
+      if (source === 'session/title') return ''
+      if (source === 'first-user') return ' · 首条消息'
+      if (source === 'workspace') return ' · 工作区名'
+      return ''
+    }
     const fmtTime = (ms) => {
       if (!ms) return '—'
       try { return new Date(ms).toISOString().replace('T', ' ').slice(0, 16) } catch { return '—' }
@@ -261,9 +277,9 @@ window.__ModuleLoader__.load({
               onClick: () => setSelected({ kind: 'session', item: s }),
             },
             h('div', { style: { flex: 1, minWidth: 0 } },
-              h('div', { style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.title || s.workspaceTitle || '未命名会话'),
+              h('div', { title: s.title || s.preview || undefined, style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, sessionLabel(s)),
               h('div', { style: { fontSize: 12, color: TEXT2, fontFamily: MONO } },
-                `${short(s.sessionId, 12)} · ${fmtTime(s.updatedAt)}${s.workspaceTitle ? ' · ' + s.workspaceTitle : ''}${s.archived ? ' · 已归档' : ''}`)),
+                `${short(s.sessionId, 12)} · ${fmtTime(s.updatedAt)}${s.workspaceTitle ? ' · ' + s.workspaceTitle : ''}${sessionSourceHint(s)}${s.archived ? ' · 已归档' : ''}`)),
             h('span', { style: { fontSize: 12, color: TEXT2 } }, '选择'))),
 
         // 继续开发：任务

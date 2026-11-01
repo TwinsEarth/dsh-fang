@@ -6,6 +6,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import path from 'node:path'
 import zlib from 'node:zlib'
 
 import { tmpDir } from './helpers.mjs'
@@ -20,6 +21,9 @@ import {
   parseWorkspaceIndex,
   encodeWorkspaceKey,
   readBoundedHead,
+  readBoundedEvents,
+  extractSessionTitle,
+  TITLE_DEFAULTS,
   redact,
   scanSessionDirs,
 } from '../src/lib/session-format.mjs'
@@ -334,4 +338,52 @@ test('redact: 多类混合计数 / 干净文本零改动 / 原始秘密不残留
   assert.equal(cleanOut.redactions, 0)
   assert.deepEqual(redact(''), { text: '', redactions: 0 })
   assert.deepEqual(redact(null), { text: '', redactions: 0 })
+})
+
+test('readBoundedEvents + extractSessionTitle: native session/title from a later frame', () => {
+  const dir = tmpDir('fang-sf-title-')
+  try {
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    const frames = [
+      JSON.stringify({ type: 'session', version: 4, id: 'session-x' }) + '\n',
+      JSON.stringify({ type: 'session/title', seq: 7, data: { title: '  修复  dock 徽标 ', messageSeqs: [5] } }) + '\n',
+      JSON.stringify({ type: 'user/message', data: { content: [{ type: 'text', text: '帮我修一下徽标' }] } }) + '\n',
+    ]
+    fs.writeFileSync(file, Buffer.concat(frames.map((fr) => zlib.zstdCompressSync(Buffer.from(fr, 'utf8')))))
+    const decoded = readBoundedEvents({ file, fsApi: FSA, zstdDecompressSync: zlib.zstdDecompressSync })
+    assert.equal(decoded.events.length, 3)
+    const meta = extractSessionTitle(decoded.events)
+    assert.equal(meta.title, '修复 dock 徽标', 'title is trimmed and whitespace-collapsed')
+    assert.equal(meta.titleSource, 'session/title')
+    assert.equal(meta.messageSeq, 5)
+    assert.match(meta.preview, /帮我修一下徽标/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('extractSessionTitle: falls back to the first user message; empty input returns null', () => {
+  const meta = extractSessionTitle([{ type: 'user/message', data: { content: [{ type: 'text', text: '  只读设计评审  ' }] } }])
+  assert.equal(meta.title, '只读设计评审')
+  assert.equal(meta.titleSource, 'first-user')
+  assert.equal(extractSessionTitle([]).title, null)
+  assert.equal(extractSessionTitle([]).titleSource, null)
+})
+
+test('readBoundedEvents: frame budget degrades honestly instead of pretending to have read everything', () => {
+  const dir = tmpDir('fang-sf-title-cap-')
+  try {
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    const frames = [
+      JSON.stringify({ type: 'session', version: 4 }) + '\n',
+      JSON.stringify({ type: 'session/title', data: { title: 'later title' } }) + '\n',
+    ]
+    fs.writeFileSync(file, Buffer.concat(frames.map((fr) => zlib.zstdCompressSync(Buffer.from(fr, 'utf8')))))
+    const decoded = readBoundedEvents({ file, maxFrames: 1, fsApi: FSA, zstdDecompressSync: zlib.zstdDecompressSync })
+    assert.equal(decoded.framesDecoded, 1)
+    assert.ok(decoded.degraded.includes('frame-limit'))
+    assert.equal(extractSessionTitle(decoded.events).title, null)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

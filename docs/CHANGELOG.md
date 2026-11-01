@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## v2.1.1（2026-11-01）
+
+**主题：会话可辨认 + 分身不再"派生出僵尸"。**
+
+### 新增
+- 会话标题：从会话日志的有界多帧读（`session/title` 事件）提取原生标题；
+  无原生标题时退化为"首条用户消息预览"，再退化才用工作区名。API 返回 `title/titleSource/preview`
+  （来源如实标注：`session/title` / `first-user` / `workspace`）。
+- 控制面板会话行显示真实会话名（长标题截断 + 完整 title 提示），下方标注来源与工作区。
+
+### 修复
+- **分身僵尸**：orchestrator 的模板解析改为"只选一个真的装了本 bundle 的 profile"，
+  并在 provision 后校验 `<forkHome>/profiles/<p>/node_modules/@local/dsh-fang`；
+  解析不到 bundle 时直接回收（`fork-bundle-unavailable`）而不是派生出一个
+  `/fang` 全部 404、adapter 永远 `http-404` 的僵尸分身。
+- `cordis.patch.yml` 移除了遗留的 `motherProfile: web`（它把分身模板指向了没有 Fang 的 web profile，
+  正是上面僵尸分身的根因）。
+- 标题提取有界：最多 64 帧 / 2MiB 压缩预算，超出如实 `frame-limit` 降级，绝不整文件解压；
+  标题按 `mtime+size` 缓存，列表刷新不重复解帧。
+
 ## 协议分层（2026-11-01，不改变运行时行为）
 
 **主题：AGPL 核心 + MIT 生态 + 商业闭源的许可分层，以及"不赌解释"的边界文档。**

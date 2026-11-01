@@ -44,6 +44,9 @@ import {
   encodeWorkspaceKey,
   scanSessionDirs,
   readBoundedHead,
+  readBoundedEvents,
+  extractSessionTitle,
+  TITLE_DEFAULTS,
   redact,
 } from '../lib/session-format.mjs'
 
@@ -55,6 +58,8 @@ const DEFAULTS = Object.freeze({
   limit: 50,
   maxFileBytes: 262144,
   previewMaxChars: 2048,
+  titleMaxFrames: 64,
+  titleMaxCompressedBytes: 2 * 1024 * 1024,
   allowArchived: true,
 })
 
@@ -71,6 +76,10 @@ export const Config = z.object({
     .description('列表默认返回条数（请求 ?limit= 会被夹在 1..500）'),
   maxFileBytes: z.number().min(1024).max(67108864).default(262144)
     .description('单次头读的压缩字节预算；多帧日志只解第一帧'),
+  titleMaxFrames: z.number().min(1).max(4096).default(64)
+    .description('标题提取最多解码的 zstd 帧数（会话标题通常在前几十帧）'),
+  titleMaxCompressedBytes: z.number().min(4096).max(67108864).default(2097152)
+    .description('标题提取的压缩字节预算（有界读，绝不整文件解压）'),
   previewMaxChars: z.number().min(0).max(65536).default(2048)
     .description('digest 预览的最大字符数（超过 digest 32KiB 上限会 halt 而不是截断）'),
   allowArchived: z.boolean().default(true)
@@ -122,6 +131,8 @@ export function apply(ctx, config) {
   const maxFileBytes = clampInt(cfg.maxFileBytes, 1024, 64 * 1024 * 1024, DEFAULTS.maxFileBytes)
   const previewMaxChars = clampInt(cfg.previewMaxChars, 0, 65536, DEFAULTS.previewMaxChars)
   const allowArchived = cfg.allowArchived !== false
+  const titleMaxFrames = clampInt(cfg.titleMaxFrames, 1, 4096, DEFAULTS.titleMaxFrames)
+  const titleMaxCompressedBytes = clampInt(cfg.titleMaxCompressedBytes, 4096, 64 * 1024 * 1024, DEFAULTS.titleMaxCompressedBytes)
 
   /** 注入给纯函数库的 fs 视图（只读方法；库本身零 node 依赖）。 */
   const fsApi = {
@@ -220,6 +231,44 @@ export function apply(ctx, config) {
     return isInside(sessionsRoot, file) ? file : null
   }
 
+  // ── 会话标题（有界多帧读 + mtime 缓存）──────────────────────────────
+  /** sessionId → { mtimeMs, size, value }；日志没变就不重复解帧。 */
+  const titleCache = new Map()
+
+  const titleOf = (session) => {
+    const file = logFileFor(session)
+    if (!file) return { title: null, titleSource: null, preview: null, degraded: ['no-log-file'] }
+    let stat = null
+    try { stat = fs.statSync(file) } catch { /* 读不到就走解帧降级 */ }
+    const cached = titleCache.get(session.sessionId)
+    if (cached && stat && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.value
+    const decoded = readBoundedEvents({
+      file,
+      maxFrames: titleMaxFrames,
+      maxCompressedBytes: titleMaxCompressedBytes,
+      fsApi,
+      zstdDecompressSync,
+    })
+    const extracted = extractSessionTitle(decoded.events)
+    const value = {
+      title: extracted.title,
+      titleSource: extracted.titleSource,
+      preview: extracted.preview,
+      messageSeq: extracted.messageSeq,
+      framesDecoded: decoded.framesDecoded,
+      degraded: decoded.degraded,
+    }
+    if (stat) titleCache.set(session.sessionId, { mtimeMs: stat.mtimeMs, size: stat.size, value })
+    return value
+  }
+
+  const titleFields = (info, fallbackTitle = null) => ({
+    title: info.title ?? fallbackTitle ?? null,
+    titleSource: info.title ? (info.titleSource ?? 'unknown') : 'workspace',
+    preview: info.preview ?? null,
+    titleDegraded: info.degraded ?? [],
+  })
+
   /** 按 sessionId 定位（前端只传 id；路径永远由扫描结果推出）。 */
   const findSession = (sessionId) => {
     const raw = typeof sessionId === 'string' ? sessionId : String(sessionId ?? '')
@@ -263,6 +312,7 @@ export function apply(ctx, config) {
       limit: defaultLimit,
       maxFileBytes,
       previewMaxChars,
+      titleBudget: { maxFrames: titleMaxFrames, maxCompressedBytes: titleMaxCompressedBytes },
       allowArchived,
       counts,
       degraded: scanned.degraded,
@@ -311,7 +361,7 @@ export function apply(ctx, config) {
     })
     return {
       ok: true,
-      sessions: page.map(sessionView),
+      sessions: page.map((session) => ({ ...sessionView(session), ...titleFields(titleOf(session), session.workspaceTitle) })),
       total,
       returned: page.length,
       limit: requestedLimit,
@@ -359,6 +409,7 @@ export function apply(ctx, config) {
       header,
       logFile: SESSION_LOG_FILE,
       head: { lines: head.lines.length, bytesRead: head.bytesRead, degraded: head.degraded },
+      ...titleFields(titleOf(session), session.workspaceTitle),
     }
     audit('session-read', { ok: true, sessionId: session.sessionId, op: 'get', bytesRead: head.bytesRead })
     return { ok: true, session: view, degraded }

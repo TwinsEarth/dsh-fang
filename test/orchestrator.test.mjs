@@ -25,6 +25,9 @@ function makeFakeForker(overrides = {}) {
     async provision(args) {
       calls.provision.push(args)
       fs.mkdirSync(path.join(args.homeDir, 'profiles', args.profile), { recursive: true })
+      // The orchestrator now refuses forks whose profile cannot resolve this bundle,
+      // so the fake forker must materialize the marker (real forker junctions it).
+      fs.mkdirSync(path.join(args.homeDir, 'profiles', args.profile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
       return { ok: true, homeDir: args.homeDir, profileDir: path.join(args.homeDir, 'profiles', args.profile) }
     },
     async spawn(args) {
@@ -128,7 +131,7 @@ function cleanup(ctx, dataRoot) {
 test('orchestrator: registers service; status exposes tasks, forks compat, commercial flags', async () => {
   const { ctx, svc, dataRoot } = await boot()
   assert.ok(svc)
-  assert.equal(svc.version, '2.1.0')
+  assert.equal(svc.version, '2.1.1')
   assert.equal(svc.role, 'mother')
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
@@ -327,7 +330,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
   assert.equal(status.statusCode, 200)
-  assert.equal(status.json().version, '2.1.0')
+  assert.equal(status.json().version, '2.1.1')
 
   const wrongMethod = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'POST'), wrongMethod)
@@ -402,4 +405,42 @@ test('orchestrator: normalizeSeed bounds seed size and falls back to lineage mar
   const seeded = orchestrator.normalizeSeed({ sessionId: 's', markdown: '# hi' })
   assert.equal(seeded.markdown, '# hi')
   assert.throws(() => orchestrator.normalizeSeed({ markdown: 'x'.repeat(70 * 1024) }), /seed-too-large/)
+})
+
+test('orchestrator: template resolver prefers a profile that actually resolves the bundle', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-tpl-'))
+  const good = path.join(dir, 'good-profile')
+  const bad = path.join(dir, 'bad-profile')
+  fs.mkdirSync(path.join(good, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.mkdirSync(bad, { recursive: true })
+  const prev = process.env.DSH_PROFILE_DIR
+  process.env.DSH_PROFILE_DIR = good
+  try {
+    const { ctx, svc, forker, dataRoot } = await boot({ config: { profileTemplate: bad } })
+    const out = await svc.createTask({ title: 'tpl' })
+    assert.equal(out.ok, true, JSON.stringify(out))
+    assert.equal(forker.calls.provision[0].profileTemplate, good, 'must skip the template without the bundle')
+    cleanup(ctx, dataRoot)
+  } finally {
+    if (prev === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = prev
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator: a fork that cannot resolve the bundle is reaped instead of becoming a zombie', async () => {
+  const forker = makeFakeForker()
+  const realProvision = forker.provision.bind(forker)
+  forker.provision = async (args) => {
+    const out = await realProvision(args)
+    fs.rmSync(path.join(args.homeDir, 'profiles', args.profile, 'node_modules'), { recursive: true, force: true })
+    return out
+  }
+  const { ctx, svc, forker: f, dataRoot } = await boot({ forker })
+  const out = await svc.createTask({ title: 'zombie' })
+  assert.equal(out.ok, false)
+  assert.equal(out.error, 'fork-bundle-unavailable')
+  assert.equal(f.calls.reap.length, 1, 'the broken fork must be reaped')
+  assert.deepEqual(svc.listTasks(), [], 'the failed task must not stay registered')
+  cleanup(ctx, dataRoot)
 })

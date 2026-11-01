@@ -18,6 +18,9 @@ import os from 'node:os'
 import path from 'node:path'
 import net from 'node:net'
 import { spawn, execFileSync } from 'node:child_process'
+import zlib from 'node:zlib'
+
+import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const KEEP = process.argv.includes('--keep')
@@ -67,6 +70,25 @@ async function waitFor(fn, { timeoutMs = 60000, intervalMs = 500, label = 'condi
   return { ok: false, error: `timeout waiting for ${label}`, last }
 }
 
+/** Create a real multi-frame session log + workspace index so /api/sessions can be asserted. */
+function seedSession(homeRoot, { sessionId, workspacePath, title }) {
+  const sessionsDir = path.join(homeRoot, 'sessions', encodeWorkspaceKey(workspacePath), sessionId)
+  fs.mkdirSync(sessionsDir, { recursive: true })
+  const frames = [
+    JSON.stringify({ type: 'session', version: 4, id: sessionId, createdAt: 1793500000000, cwd: workspacePath }) + '\n',
+    JSON.stringify({ type: 'session/title', seq: 2, data: { title, messageSeqs: [1], source: { kind: 'fallback' } } }) + '\n',
+    JSON.stringify({ type: 'user/message', data: { content: [{ type: 'text', text: 'e2e 首条用户消息' }] } }) + '\n',
+  ]
+  fs.writeFileSync(path.join(sessionsDir, 'session.v4.jsonl.zstd'), Buffer.concat(frames.map((fr) => zlib.zstdCompressSync(Buffer.from(fr, 'utf8')))))
+  const storages = path.join(homeRoot, 'storages')
+  fs.mkdirSync(storages, { recursive: true })
+  fs.writeFileSync(path.join(storages, 'workspace.json'), JSON.stringify({
+    unit: { name: 'workspace', version: 2 },
+    global: { initialized: true, defaultWorkspaceId: 'ws-e2e', workspaceIds: ['ws-e2e'], archivedSessionIds: [], pinnedSessionIds: [] },
+    tables: { workspaces: { 'ws-e2e': { path: workspacePath, title: 'E2E', sessionIds: [sessionId], createdAt: '2026-10-16T05:35:00.313Z', updatedAt: '2026-11-01T02:44:03.199Z' } } },
+  }, null, 2))
+}
+
 function makeProfile(homeRoot) {
   const profileDir = path.join(homeRoot, 'profiles', 'e2e')
   fs.mkdirSync(path.join(profileDir, 'node_modules'), { recursive: true })
@@ -93,6 +115,10 @@ async function main() {
   const startedAt = Date.now()
   const homeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-e2e-'))
   const port = await freePort()
+  const E2E_NATIVE_TITLE = 'e2e 原生会话标题'
+  const E2E_SESSION_ID = 'session-11111111-2222-4333-8444-555555555555'
+  const E2E_WS_PATH = 'E:\\e2e-ws'
+  seedSession(homeRoot, { sessionId: E2E_SESSION_ID, workspacePath: E2E_WS_PATH, title: E2E_NATIVE_TITLE })
   const profileDir = makeProfile(homeRoot)
   console.log(`e2e: home=${homeRoot}`)
   console.log(`e2e: profile=${profileDir}`)
@@ -146,14 +172,21 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 2.1.0', status.body?.version === '2.1.0')
+    check('status reports version 2.1.1', status.body?.version === '2.1.1')
     check('status reports role=mother', status.body?.role === 'mother')
     check('mother has forker service', status.body?.services?.forker === true)
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
     check('mother exposes 8 mother-side services', Object.values(status.body?.services ?? {}).filter(Boolean).length >= 5)
 
     const sessions = await api('/fang/api/sessions')
-    check('GET /fang/api/sessions 200', sessions.status === 200, `status=${sessions.status} sessions=${(sessions.body?.sessions ?? sessions.body?.items ?? []).length} body=${JSON.stringify(sessions.body).slice(0, 220)}`)
+    const sessionItems = sessions.body?.sessions ?? sessions.body?.items ?? []
+    check('GET /fang/api/sessions 200', sessions.status === 200, `status=${sessions.status} sessions=${sessionItems.length}`)
+    check('session catalog is readable (served from a real log)', sessions.body?.readable !== false, JSON.stringify(sessions.body?.degraded ?? []))
+    const titled = sessionItems.find((s) => s.sessionId === E2E_SESSION_ID)
+    check('session list contains the seeded session', Boolean(titled))
+    check('session title is the native session/title', titled?.title === E2E_NATIVE_TITLE, JSON.stringify(titled?.title ?? null))
+    check('session titleSource is session/title', titled?.titleSource === 'session/title', String(titled?.titleSource))
+    check('session preview carries the first user message', String(titled?.preview ?? '').includes('e2e 首条用户消息'), JSON.stringify(titled?.preview ?? null))
 
     const panel = await fetch(`${booted.url.replace(/\?.*$/, '')}?token=${encodeURIComponent(token)}`).catch(() => null)
     const panelRes = await api('/fang/panel')

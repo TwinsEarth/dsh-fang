@@ -142,11 +142,15 @@ export function apply(ctx, config) {
   const cliPath = () => (cfg.cliPath ? cfg.cliPath : resolveCliPath('', process.env))
   // The booted profile's own directory is authoritative (launcher sets DSH_PROFILE_DIR);
   // resolving "$DSH_HOME/profiles/<tag>" from argv can point at a template that never existed.
-  const templateDir = () => (
-    cfg.profileTemplate
-      ? cfg.profileTemplate
-      : (process.env.DSH_PROFILE_DIR || resolveProfileDir(motherProfile))
-  )
+  // 分身模板必须来自一个**真的装了本 bundle** 的 profile；否则分身的 node_modules junction
+  // 指到一个没有 @local/dsh-fang 的 profile，fork 里所有 /fang 路由都会 404（实测事故）。
+  const templateDir = () => {
+    const candidates = [cfg.profileTemplate, process.env.DSH_PROFILE_DIR, resolveProfileDir(motherProfile), resolveProfileDir(layout.profileTag)]
+    const usable = candidates.filter((dir) => typeof dir === "string" && dir.trim()
+      && exists(path.join(dir, "node_modules", "@local", "dsh-fang")))
+    if (usable.length > 0) return usable[0]
+    return candidates.find((dir) => typeof dir === "string" && dir.trim()) ?? resolveProfileDir(layout.profileTag)
+  }
   const commercialHooks = commercialConfigSchemaDefaults()
   for (const key of Object.keys(commercialHooks)) {
     if (cfg.commercial && cfg.commercial[key] === true) commercialHooks[key] = true
@@ -323,6 +327,20 @@ export function apply(ctx, config) {
           return { ok: false, error: 'provision-failed', detail: provisioned.error }
         }
         audit(AUDIT.FORK_CREATED, { taskId, forkId: taskId, title, homeDir, profile })
+
+        // 防御：分身的 profile 必须能解析本 bundle；否则派生出来的是一个"没有 /fang 路由"的
+        // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
+        const forkProfileDir = path.join(homeDir, 'profiles', profile)
+        const forkBundle = path.join(forkProfileDir, 'node_modules', '@local', 'dsh-fang')
+        if (!exists(forkBundle)) {
+          task.status = TASK_STATUS.FAILED
+          tasks.delete(taskId)
+          persist()
+          try { await f.reap(taskId) } catch { /* 回收失败不改变结论 */ }
+          audit(AUDIT.FORK_CRASHED, { taskId, error: 'fork-bundle-unavailable', forkProfileDir })
+          return { ok: false, error: 'fork-bundle-unavailable', detail: forkProfileDir }
+        }
+
 
         // v2.1 lineage seed: a bounded handoff digest copied into the fork's own home.
         // The fork reads it; the mother stays immutable (no session mount/copy).
