@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## v2.6.7（2026-11-01）
+
+**主题：TaskHandle —— 把 fork 启动、Adapter 连接、命令代理、崩溃重建连接收进一个生命周期对象。**
+
+### 新增
+- **`src/lib/task-handle.mjs`**：`TaskHandle` 组合 Forker（进程层）+ ForkClient（传输/命令层）。
+  - 状态机：`idle / starting / running / reconnecting / stopping / stopped / failed`；
+  - `start()`：fork 未运行则 `forker.spawn()`（可选 spawnOptions），用 `forker.adapterToken()`
+    建 ForkClient 并 connect；重复调用幂等；
+  - **崩溃重建连接**：监听 `fang/fork-crashed` → `reconnecting` → 等 `fang/fork-started`
+    （事件优先 + `forker.status()` 轮询兜底）→ 用**新 url + 新 token** 重建 client；
+    token 由 Forker 在每次 spawn 时重新生成（内存 only），重启后不会 401；
+  - **命令代理**：`command(op, payload)` + dsh-Fang 9 个便捷方法；重连窗口内最多等
+    `commandWaitMs`（默认 5s），超时 reject `task-unavailable`；idle/stopped/failed fail-closed；
+  - 生命周期：`stop()`（断开 client + forker.stop，保留 home）、`recycle()`（stop + reap）、
+    `dispose()`（只释放本地资源，不杀 fork）；stop/recycle 幂等；
+  - 事件聚合：`onEvent()` 转发 SSE 事件；`onTaskEvent()` 输出
+    `status-changed / crashed / restarting / reconnected / failed`。
+- **文档** `docs/TASK-HANDLE.md`：状态机、崩溃恢复流程、与 Forker 的接口约定、
+  TS 形状映射、测试清单、边界（supervise 默认关闭、命令不缓冲、未接线 Orchestrator）。
+
+### 变更
+- `docs/PROTOCOL-V3.md §9/§11/§12` 增加 TaskHandle 的职责与测试列。
+
+### 测试
+- 新增 `test/task-handle.test.mjs`（17 项）；全量门禁见 `docs/AUDIT-v2.6.7.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 7 个补丁位。
+
 ## v2.6.6（2026-11-01）
 
 **主题：分身 Web UI 模式 —— 不再把「母体 API 在分身里不存在」渲染成插件故障。**
