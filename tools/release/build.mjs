@@ -3,7 +3,7 @@
 // 用法：node tools/release/build.mjs [--skip-preflight]
 import fs from 'node:fs'
 import path from 'node:path'
-import { ROOT, readJson, versionOf, run, sha256File, selectFilesFromManifest } from './lib.mjs'
+import { ROOT, readJson, versionOf, run, sha256File, selectFilesFromManifest, PUBLISH_NAME, PUBLISH_BASENAME } from './lib.mjs'
 
 const args = process.argv.slice(2)
 const skipPreflight = args.includes('--skip-preflight')
@@ -32,7 +32,7 @@ for (const rel of files) {
   if (/\.(mjs|js|json|yml|yaml|md|txt)$/.test(rel)) {
     let text = fs.readFileSync(src, 'utf8')
     // The published package is `dsh-fang`, so bundle row names and client ids must match it.
-    text = text.split('@local/dsh-fang').join('dsh-fang')
+    text = text.split('@local/dsh-fang').join(PUBLISH_NAME)
     fs.writeFileSync(dest, text, 'utf8')
   } else {
     fs.copyFileSync(src, dest)
@@ -41,7 +41,7 @@ for (const rel of files) {
 
 const stagedPkg = {
   ...pkg,
-  name: 'dsh-fang',
+  name: PUBLISH_NAME,
   version,
   private: false,
   license: 'AGPL-3.0-or-later',
@@ -56,7 +56,7 @@ const stagedPkg = {
 }
 fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(stagedPkg, null, 2) + '\n', 'utf8')
 
-const tarball = path.join(ROOT, 'dist', `dsh-fang-${version}.tgz`)
+const tarball = path.join(ROOT, 'dist', `${PUBLISH_BASENAME}-${version}.tgz`)
 fs.rmSync(tarball, { force: true })
 const tgz = run('tar', ['-czf', tarball, '-C', stage, 'package'])
 if (tgz.status !== 0) { console.error('FAIL tar: ' + (tgz.stderr || tgz.stdout)); process.exit(1) }
@@ -70,7 +70,7 @@ if (entries.some((e) => e.startsWith('package/dist/') || e.startsWith('package/n
 }
 
 const manifest = {
-  name: 'dsh-fang',
+  name: PUBLISH_NAME,
   version,
   at: new Date().toISOString(),
   node: process.versions.node,
@@ -84,7 +84,7 @@ const manifest = {
 }
 fs.writeFileSync(path.join(ROOT, 'dist', 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
 
-console.log(`PASS  build dsh-fang@${version}`)
+console.log(`PASS  build ${PUBLISH_NAME}@${version}`)
 console.log(`      tarball : dist/${path.basename(tarball)} (${manifest.size} bytes, ${manifest.entries} entries)`)
 console.log(`      sha256  : ${manifest.sha256}`)
 console.log('      manifest: dist/manifest.json')

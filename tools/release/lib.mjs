@@ -3,12 +3,17 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
+import dns from 'node:dns'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
+// Registry/CDN endpoints are dual-stack; prefer IPv4 to avoid 10s IPv6 connect timeouts.
+try { dns.setDefaultResultOrder('ipv4first') } catch { /* older node */ }
+
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-export const PUBLISH_NAME = 'dsh-fang' // npm package name (unscoped, public)
+export const PUBLISH_NAME = '@twinsearth/dsh-fang' // npm package name (scoped, public)
+export const PUBLISH_BASENAME = 'dsh-fang' // tarball file basename
 
 export const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(ROOT, rel), 'utf8'))
 export const readText = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')

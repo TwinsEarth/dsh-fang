@@ -133,7 +133,7 @@ function cleanup(ctx, dataRoot) {
 test('orchestrator: registers service; status exposes tasks, forks compat, commercial flags', async () => {
   const { ctx, svc, dataRoot } = await boot()
   assert.ok(svc)
-  assert.equal(svc.version, '2.3.0')
+  assert.equal(svc.version, '2.3.1')
   assert.equal(svc.role, 'mother')
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
@@ -332,7 +332,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
   assert.equal(status.statusCode, 200)
-  assert.equal(status.json().version, '2.3.0')
+  assert.equal(status.json().version, '2.3.1')
 
   const wrongMethod = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'POST'), wrongMethod)

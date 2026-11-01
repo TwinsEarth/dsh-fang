@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## v2.3.1（2026-11-01）
+
+**主题：npm 包名改为 `@twinsearth/dsh-fang` + 修复 CI 上的 watchdog 取消。**
+
+### 变更
+- npm 发布包名：`@twinsearth/dsh-fang`（scoped、公开、AGPL-3.0-or-later）；构建时
+  `@local/dsh-fang` 统一改写为 `@twinsearth/dsh-fang`，tarball 仍为 `dsh-fang-<ver>.tgz`。
+- 注册表 PUT 路径/tarball URL 按 scoped 规则编码（`@twinsearth%2Fdsh-fang`）；healthz 远端检查同步。
+
+### 修复
+- restart-guard 的审批 watchdog 定时器不再 `unref()`：挂起审批时事件循环必须保持存活，
+  否则 Node 测试调度器会在 1s 定时器触发前判定事件循环已结束并 `cancelledByParent`
+  （CI Windows node 22 实测 8 个用例被取消，本地 node 24 偶发不复现）。
+- release workflow 修复：`secrets` 不能用于 job 级 `if`，改为 step 级检查 + `workflow_dispatch`。
+
 ## v2.3.0（2026-11-01）
 
 **主题：8 步发布流水线落地 —— 以 npm 与 GitHub Release 为主，验收门禁可执行。**

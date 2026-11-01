@@ -162,7 +162,6 @@ export function apply(ctx, config) {
   const withDeadline = (promise, ms) => new Promise((resolve, reject) => {
     let settled = false
     const timer = setTimeout(() => finish(resolve, { outcome: 'timeout', by: 'guard-timeout', at: Date.now() }), Math.max(1, Number(ms) || 1))
-    if (typeof timer.unref === 'function') timer.unref()
     timers.add(timer)
     function finish(fn, value) {
       if (settled) return

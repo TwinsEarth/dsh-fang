@@ -13,10 +13,10 @@
 | 7 | 兼容性 | `node tools/release/compat.mjs` | Node 22/24 均可 import 全部模块 |
 | 8 | CI | GitHub Actions | `ci`（windows 22/24 + license ubuntu）与 `compat` 全绿 |
 
-发布动作（tag 之后由 `release.yml` 自动执行）：npm publish（`dsh-fang`）→ GitHub Release（附 tarball+manifest）→
+发布动作（tag 之后由 `release.yml` 自动执行）：npm publish（`@twinsearth/dsh-fang`）→ GitHub Release（附 tarball+manifest）→
 Docker healthz 镜像（可选 secrets）→ `healthz --remote` 复核 npm/GitHub 远端版本。
 
 已知边界：
 - 容器探针（`FANG_CONTAINER_LIVE=1`）依赖 Windows AppContainer，Linux CI 只做模块导入兼容；
 - Docker 镜像只提供 `/healthz` 发布健康服务，不是完整 DSH/Electron 运行环境；
-- npm 包名是 `dsh-fang`（仓库内本地 bundle 名 `@local/dsh-fang` 在构建时统一改写）。
+- npm 包名是 `@twinsearth/dsh-fang`（仓库内本地 bundle 名 `@local/dsh-fang` 在构建时统一改写）。

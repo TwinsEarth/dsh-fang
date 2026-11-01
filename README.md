@@ -1,30 +1,30 @@
 [![CI](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml/badge.svg)](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE-CORE)
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
-[![npm](https://img.shields.io/badge/npm-dsh--fang-red.svg)](https://www.npmjs.com/package/dsh-fang)
+[![npm](https://img.shields.io/badge/npm-dsh--fang-red.svg)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
 
-# dsh-Fang v2.3.0
+# dsh-Fang v2.3.1
 
 **母体大脑 + 分身器官 + 容器兜底**：一个只读母体，每个任务派生一个用完即弃的子 dsh-Web；
 开发都在分身里，母体只在「提升」时被显式更新。崩溃不扩散、污染不残留、插件不串味。
 
-> v2.3.0 把「瓮城」做进 Web UI（左侧导航 + 3:7 分屏控制面板 + 双击派生 + 母体/分身会话继续开发）；
+> v2.3.1 把「瓮城」做进 Web UI（左侧导航 + 3:7 分屏控制面板 + 双击派生 + 母体/分身会话继续开发）；
 > v2.0.0 按三层拓扑重新部署，
 > 新增 **Adapter** 跨进程桥、任务语义、端口池、干净模板、Router 双阶段、评分环境阈值、
 > 审计汇总、容器执行与申报写代理、商用钩子。
 
-## 当前状态（2026-11-01，v2.3.0）
+## 当前状态（2026-11-01，v2.3.1）
 
 - UI：左侧导航「瓮城」（红色城门图标）· 中列控制面板 **3:7 分屏**（左=母体项目&会话，右=分身项目&会话，两栏独立滚动）· dock 徽标双击快速派生；
 - 测试：**292 tests / 291 pass / 0 fail / 1 skip**（skip = `FANG_CONTAINER_LIVE=1` 手动容器探针，已单独跑 **9/9**）；
 - 实机端到端：`node tools/e2e.mjs` → **41/41 checks passed**（临时 `$DSH_HOME` + 真实 dsh 母体 + 真分身：
   派生 → Adapter 握手 → 角色矩阵 → 任务/分身会话标题 → 归档 → 审计链 → 回收）；
-- desktop profile 已挂 `@local/dsh-fang` bundle 层（通过 `link:` 指到本仓库，包版本 2.3.0）；
+- desktop profile 已挂 `@local/dsh-fang` bundle 层（通过 `link:` 指到本仓库，包版本 2.3.1）；
 - ✅ v2.1.0 的「瓮城」UI 已在运行中的宿主生效（活体实测）：`sidebar.panellist` 有 `id=fang`（order 90, active）、
   `main` 的 key `fang` 已注册、dock 的 `fang-badge` active；宿主行 `include:fang-session-catalog` 已加载。
-- 🔧 v2.3.0（3:7 分屏面板 + 分身会话 API + 会话原生标题 + 僵尸防护）代码与测试已就绪；
+- 🔧 v2.3.1（3:7 分屏面板 + 分身会话 API + 会话原生标题 + 僵尸防护）代码与测试已就绪；
   宿主侧需**重启**加载、页面刷新即可看到新布局与新标题。
-  交付与证据见 [docs/v2.3.0-交付报告.md](docs/v2.3.0-交付报告.md) 与 [docs/UI-瓮城入口.md](docs/UI-瓮城入口.md)。
+  交付与证据见 [docs/v2.3.1-交付报告.md](docs/v2.3.1-交付报告.md) 与 [docs/UI-瓮城入口.md](docs/UI-瓮城入口.md)。
 
 ---
 
@@ -35,7 +35,7 @@
 - 输入框 dock 徽标：单击开面板，双击快速派生（可发现性提示在 tooltip 里）。
 
 规格与平台约束见 [docs/UI-瓮城入口.md](docs/UI-瓮城入口.md)；交付记录见
-[docs/v2.3.0-交付报告.md](docs/v2.3.0-交付报告.md)。
+[docs/v2.3.1-交付报告.md](docs/v2.3.1-交付报告.md)。
 
 ## 快速开始
 

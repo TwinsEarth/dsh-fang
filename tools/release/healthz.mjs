@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { ROOT, readJson, run, serveHealthz } from './lib.mjs'
+import { ROOT, readJson, run, serveHealthz, PUBLISH_NAME } from './lib.mjs'
 
 const args = process.argv.slice(2)
 const remote = args.includes('--remote')
@@ -24,7 +24,7 @@ try {
   add('artifact: extract', x.status === 0, (x.stderr || '').slice(0, 200))
   const pkgDir = path.join(tmp, 'package')
   const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
-  add('package: name is dsh-fang', pkg.name === 'dsh-fang', pkg.name)
+  add('package: name is the published scope', pkg.name === PUBLISH_NAME, pkg.name)
   add('package: version matches manifest', pkg.version === manifest.version, `${pkg.version} vs ${manifest.version}`)
   add('package: AGPL license', pkg.license === 'AGPL-3.0-or-later', String(pkg.license))
   add('package: LICENSE-CORE shipped', fs.existsSync(path.join(pkgDir, 'LICENSE-CORE')))
@@ -50,7 +50,8 @@ try {
 
 if (remote) {
   const { httpJson } = await import('./lib.mjs')
-  const npm = await httpJson('https://registry.npmjs.org/dsh-fang/latest')
+  const npmNamePath = manifest.name.replace('/', '%2F')
+  const npm = await httpJson(`https://registry.npmjs.org/${npmNamePath}/latest`)
   add('remote: npm package published', npm.status === 200 && npm.data?.version === manifest.version, `status=${npm.status} version=${npm.data?.version ?? '(none)'}`)
   const gh = await httpJson('https://api.github.com/repos/TwinsEarth/dsh-fang/releases/tags/v' + manifest.version)
   add('remote: GitHub release exists', gh.status === 200, `status=${gh.status}`)
