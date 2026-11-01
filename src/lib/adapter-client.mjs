@@ -67,6 +67,9 @@ export function createAdapterClient(options = {}) {
   let sessionId = ''
   let lastCursor = '0'
   let lastState = null
+  let lastVersionInfo = null
+  let sessionMismatch = null
+  let protocolRange = { min: undefined, max: undefined }
   let lastError = ''
   let stopped = true
   let controller = null
@@ -246,6 +249,8 @@ export function createAdapterClient(options = {}) {
       return { ok: false, code: negotiated.reason, protocol: versionRes.data?.protocol }
     }
     protocol = negotiated.protocol
+    protocolRange = { min: negotiated.min, max: negotiated.max }
+    lastVersionInfo = versionRes.data && typeof versionRes.data === 'object' ? versionRes.data : { protocol: versionRes.data ?? null }
     sessionId = String(versionRes.data?.sessionId ?? '')
 
     const snapshot = await remote.state()
@@ -259,6 +264,13 @@ export function createAdapterClient(options = {}) {
     lastState = snapshot.data ?? null
     if (lastState?.sessionId) sessionId = String(lastState.sessionId)
     if (lastState?.lastCursor !== undefined) lastCursor = String(lastState.lastCursor)
+    // 一致性诊断：version 与 state 之间 Adapter 若重启，sessionId 会变化。
+    // 此时 state 是最新真相，继续用 state.sessionId 连接；只记录差异供排障（不重试三步）。
+    const versionSession = String(lastVersionInfo?.sessionId ?? '')
+    const stateSession = String(lastState?.sessionId ?? '')
+    sessionMismatch = versionSession && stateSession && versionSession !== stateSession
+      ? { versionSession, stateSession, at: Date.now() }
+      : null
     emit('state', lastState)
 
     const opened = await openOnce()
@@ -283,7 +295,7 @@ export function createAdapterClient(options = {}) {
       if (autoReconnect) void reconnectLoop()
       return result
     })
-    return { ok: true, protocol, sessionId, state: lastState, lastCursor }
+    return { ok: true, protocol, sessionId, state: lastState, lastCursor, version: lastVersionInfo, sessionMismatch }
   }
 
   /** 停止事件流（幂等）。未到期的退避计时器会被立即唤醒，让重连循环看到 stopped 退出。 */
@@ -342,6 +354,18 @@ export function createAdapterClient(options = {}) {
     },
     get lastState() {
       return lastState
+    },
+    /** 最近一次 /adapter/version 的原始响应（protocol / version / sessionId…），供诊断。 */
+    get lastVersionInfo() {
+      return lastVersionInfo
+    },
+    /** version 与 state 的 sessionId 不一致时记录（Adapter 在两次请求之间重启过）。 */
+    get sessionMismatch() {
+      return sessionMismatch
+    },
+    /** 本客户端实际用于协商的协议区间（min/max），供诊断与上层审计。 */
+    get protocolRange() {
+      return { ...protocolRange }
     },
     get lastError() {
       return lastError
