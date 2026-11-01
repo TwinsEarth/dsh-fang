@@ -34,6 +34,12 @@
 //     顶栏「隐藏/显示临时内容」可整组隐藏，偏好存 localStorage（fang.panel.showTemporary）；
 //   * 判定只用宿主已返回的事实（archived / empty / 任务标题），不改协议、不新增接口。
 //
+// v2.6.6 分身 Web UI 模式：
+//   * 分身的 profile 也包含本 bundle 的 client 半，但母体 API（/fang/api/*）在分身里不存在
+//     （orchestrator 是 mother-only）。以前面板会把这些 404 渲染成「不可读」故障；
+//   * 现在先探测宿主角色：/fang/api/status 200 = 母体；否则 /fang/adapter/hello 200/401 = 分身；
+//   * 分身里只渲染一段说明（不请求母体 API），dock 徽标隐藏；母体里行为不变。
+//
 // 颜色只走宿主 token（--dsw-alias-*）+ 插件艺术色 --fang-gate-accent，不写死主题底色。
 
 window.__ModuleLoader__.load({
@@ -373,6 +379,45 @@ window.__ModuleLoader__.load({
       return { status: res.status, body, diagnostic: { url, status: res.status, contentType } }
     }
 
+    // ── 宿主角色探测（v2.6.6）：母体 host 有 /fang/api/status；分身 host 只有 /fang/adapter/* ──
+    // 分身的 profile bundle 也包含本插件的 client 半，所以分身 Web UI 会渲染「瓮城」入口；
+    // 但母体 API 在分身里不存在（orchestrator 是 mother-only），不能把 404 当故障刷满面板。
+    const HOST_ROLE = { UNKNOWN: 'unknown', MOTHER: 'mother', FORK: 'fork' }
+    const hostRoleStore = { state: { role: HOST_ROLE.UNKNOWN, error: '', at: 0 }, listeners: new Set(), inflight: null }
+    function setHostRole(role, error = '') {
+      hostRoleStore.state = { role, error, at: Date.now() }
+      for (const fn of [...hostRoleStore.listeners]) { try { fn(hostRoleStore.state) } catch { /* ignore */ } }
+    }
+    async function detectHostRole(force = false) {
+      if (!force && hostRoleStore.state.at > 0) return hostRoleStore.state
+      if (hostRoleStore.inflight) return hostRoleStore.inflight
+      hostRoleStore.inflight = (async () => {
+        const status = await api('/fang/api/status')
+        if (status.status === 200 && status.body && status.body.ok !== false) {
+          setHostRole(HOST_ROLE.MOTHER)
+          return hostRoleStore.state
+        }
+        const hello = await api('/fang/adapter/hello')
+        // 401 也是证据：路由存在但要求 Bearer（v2.6.1+ 的 Forker 会给分身注入 token）。
+        if (hello.status === 200 || hello.status === 401) {
+          setHostRole(HOST_ROLE.FORK)
+          return hostRoleStore.state
+        }
+        setHostRole(HOST_ROLE.UNKNOWN, `status ${status.status} · adapter ${hello.status}`)
+        return hostRoleStore.state
+      })().finally(() => { hostRoleStore.inflight = null })
+      return hostRoleStore.inflight
+    }
+    function useHostRole() {
+      const [role, setRole] = useState(hostRoleStore.state)
+      useEffect(() => {
+        hostRoleStore.listeners.add(setRole)
+        if (!hostRoleStore.state.at) void detectHostRole()
+        return () => { hostRoleStore.listeners.delete(setRole) }
+      }, [])
+      return role
+    }
+
     /** 快速派生：双击图标/徽标触发；单飞 + 2s 冷却，结果进共享 store。 */
     function quickDerive(title) {
       const now = Date.now()
@@ -482,6 +527,30 @@ window.__ModuleLoader__.load({
       },
       dot ? h('span', { 'aria-hidden': 'true', style: { width: 6, height: 6, borderRadius: 999, background: palette.dot, flexShrink: 0 } }) : null,
       children)
+    }
+
+    /** 分身 Web UI 的「瓮城」说明页（v2.6.6）：母体 API 不在分身里，别把 404 当故障。 */
+    function ForkHostNotice({ role }) {
+      return h('div', {
+        role: 'region',
+        'aria-label': '瓮城 · 分身 Web UI',
+        style: {
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          gap: 10, minHeight: 340, margin: 12, padding: '36px 22px', textAlign: 'center',
+          border: `1px dashed ${BORDER}`, borderRadius: 12, background: 'rgba(127,127,127,.02)',
+        },
+      },
+      h('span', {
+        style: {
+          display: 'inline-flex', width: 44, height: 44, borderRadius: 12,
+          alignItems: 'center', justifyContent: 'center',
+          background: ACCENT_WASH, border: `1px solid ${ACCENT_LINE}`,
+        },
+      }, h(GateGlyph, { size: 26, active: true })),
+      h('span', { style: { fontSize: 15, fontWeight: 600, lineHeight: '22px', color: TEXT } }, '当前页面是分身的 Web UI'),
+      h('span', { style: { maxWidth: 560, fontSize: 12, lineHeight: '20px', color: TEXT2 } }, '瓮城母体面板只在母体宿主中可用；这个页面是 dsh-Fang 派生的分身（role=fork）。母体接口 /fang/api/* 在分身里不存在，所以这里不显示任务与会话——这是预期行为，不是插件故障。'),
+      h('span', { style: { maxWidth: 560, fontSize: 12, lineHeight: '20px', color: TEXT2 } }, '要派生、归档或管理分身，请回到母体窗口的「瓮城」面板；当前标签页继续使用分身自己的会话与工具即可。'),
+      role?.error ? h('code', { style: { fontFamily: MONO, fontSize: 10.5, color: TEXT3 } }, 'probe: ' + role.error) : null)
     }
 
     function Tag({ children, tone = 'neutral', mono = false, title }) {
@@ -1165,6 +1234,8 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState(null)
       const [derive, setDerive] = useState(state.derive)
       const [scrolled, setScrolled] = useState({ left: false, right: false })
+      // v2.6.6：分身 Web UI 里没有母体 API，先探测角色再决定是否刷新/渲染母体面板。
+      const hostRole = useHostRole()
 
       const refreshLock = useRef(false)
       const seqRef = useRef({})
@@ -1281,6 +1352,8 @@ window.__ModuleLoader__.load({
       }, [loadForkSessions])
 
       useEffect(() => {
+        // 只有确认是母体宿主才拉 /fang/api/*；分身 Web UI 里这些接口不存在（404 是预期）。
+        if (hostRole.role !== HOST_ROLE.MOTHER) return undefined
         refresh()
         const timer = setInterval(() => {
           if (typeof document !== 'undefined' && document.hidden) return
@@ -1294,7 +1367,7 @@ window.__ModuleLoader__.load({
           if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
           off()
         }
-      }, [refresh])
+      }, [refresh, hostRole.role])
 
       useEffect(() => {
         if (!selected) return undefined
@@ -2034,6 +2107,9 @@ window.__ModuleLoader__.load({
         ? { display: 'grid', gridTemplateColumns: 'minmax(0,1fr)', gridAutoRows: 'auto', gap: 12 }
         : { flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0,3fr) minmax(0,7fr)', gap: 12 }
 
+      // 分身 Web UI：母体 API 不存在，渲染专用说明页，并且不发起 /fang/api/* 请求（v2.6.6）。
+      if (hostRole.role === HOST_ROLE.FORK) return h(ForkHostNotice, { role: hostRole })
+
       return h('div', { role: 'region', 'aria-label': '瓮城控制台', style: rootStyle },
         header,
         statusBanner,
@@ -2064,8 +2140,11 @@ window.__ModuleLoader__.load({
       const [hover, setHover] = useState(false)
       const [focus, setFocus] = useState(false)
       const handle = useMemo(() => makeDoubleTap(() => quickDerive('徽标快速派生')), [])
+      const hostRole = useHostRole()
 
       useEffect(() => {
+        // 分身 Web UI 没有母体状态接口：不 polling、不显示「瓮城离线」假故障。
+        if (hostRole.role !== HOST_ROLE.MOTHER) return undefined
         let alive = true
         const poll = async () => {
           try {
@@ -2096,7 +2175,7 @@ window.__ModuleLoader__.load({
         const timer = setInterval(poll, 10000)
         const off = subscribe(setDerive)
         return () => { alive = false; clearInterval(timer); off() }
-      }, [])
+      }, [hostRole.role])
 
       const openPanel = () => {
         try {
@@ -2121,6 +2200,8 @@ window.__ModuleLoader__.load({
         : view.anomalies > 0
           ? `瓮城：${view.anomalies} 个运行中分身的适配器未握手；单击打开面板，双击快速派生`
           : '瓮城：单击打开面板，双击快速派生分身'
+
+      if (hostRole.role === HOST_ROLE.FORK) return null // 分身 Web UI 不显示母体状态徽标
 
       return h('div', {
         title,
