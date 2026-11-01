@@ -1054,6 +1054,114 @@ test('v3: Bearer 认证（env 注入时强制；未注入时 v2 兼容放行）'
   legacy.ctx.dispose()
 })
 
+// ── v2.6.8：外部注册命令（registerCommand）与 413 body 上限 ──────────────────
+
+test('v4: registerCommand 同步命令（200 + commandId 幂等 + disposer 后 unknown-op）', async () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_reg' })
+  const calls = []
+  const dispose = service.registerCommand('demo-echo', async (payload, execCtx) => {
+    calls.push({ payload, commandId: execCtx.commandId, trackingId: execCtx.trackingId })
+    return { status: 'completed', result: { echo: payload.value ?? null } }
+  })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+
+  const first = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_1', op: 'demo-echo', payload: { value: 42 } }, 'POST'), first)
+  assert.equal(first.statusCode, 200)
+  assert.equal(first.json().status, 'completed')
+  assert.deepEqual(first.json().result, { echo: 42 })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].commandId, 'cmd_reg_1')
+  assert.equal(calls[0].trackingId, 'track_cmd_reg_1')
+
+  const second = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_1', op: 'demo-echo', payload: { value: 42 } }, 'POST'), second)
+  assert.equal(second.statusCode, 200)
+  assert.equal(second.json().deduplicated, true)
+  assert.equal(calls.length, 1, '同 commandId 不得重复执行')
+
+  dispose()
+  const gone = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_2', op: 'demo-echo', payload: {} }, 'POST'), gone)
+  assert.equal(gone.statusCode, 400)
+  assert.equal(gone.json().code, 'unknown-op')
+  ctx.dispose()
+})
+
+test('v4: registerCommand 异步命令（202 + command-done SSE + 重试同一 trackingId）', async () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_reg_async' })
+  const dispose = service.registerCommand('demo-load', async (payload, execCtx) => {
+    setTimeout(() => {
+      execCtx.emit({
+        kind: 'command-done',
+        trackingId: execCtx.trackingId,
+        op: 'demo-load',
+        result: { ok: true, op: 'demo-load', result: { loaded: payload.pluginId } },
+      })
+    }, 15)
+    return { status: 'accepted', trackingId: execCtx.trackingId }
+  })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+
+  const accepted = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_async', op: 'demo-load', payload: { pluginId: 'p1' } }, 'POST'), accepted)
+  assert.equal(accepted.statusCode, 202)
+  assert.equal(accepted.json().status, 'accepted')
+  assert.equal(accepted.json().trackingId, 'track_cmd_reg_async')
+
+  await new Promise((resolve) => setTimeout(resolve, 35))
+  const events = service.eventsSince('0')
+  const done = events.events.find((entry) => entry.event.kind === 'command-done')
+  assert.ok(done, '异步命令必须通过 EventLog 推 command-done')
+  assert.equal(done.event.trackingId, 'track_cmd_reg_async')
+  assert.deepEqual(done.event.result.result, { loaded: 'p1' })
+
+  const retry = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_async', op: 'demo-load', payload: { pluginId: 'p1' } }, 'POST'), retry)
+  assert.equal(retry.statusCode, 202)
+  assert.equal(retry.json().deduplicated, true)
+  assert.equal(retry.json().trackingId, 'track_cmd_reg_async', '重试必须拿到同一个 trackingId')
+
+  dispose()
+  ctx.dispose()
+})
+
+test('v4: registerCommand 不允许覆盖内置 op；rejected 结果映射为失败信封', async () => {
+  const { ctx, service } = applyAsFork({})
+  assert.throws(
+    () => service.registerCommand(ADAPTER_OP.PING, () => ({})),
+    /cannot override built-in op/,
+  )
+  const dispose = service.registerCommand('demo-reject', async () => ({
+    status: 'rejected',
+    code: 'bad-request',
+    message: 'not allowed',
+  }))
+  const out = await service.commands({ commandId: 'cmd_rej', op: 'demo-reject' })
+  assert.equal(out.ok, false)
+  assert.equal(out.code, 'bad-request')
+  assert.equal(out.error, 'not allowed')
+  dispose()
+  ctx.dispose()
+})
+
+test('v4: 请求体超过 1MB → 413 body-too-large（executor 不被调用）', async () => {
+  const { ctx, ws, service } = applyAsFork({})
+  let called = 0
+  service.registerCommand('demo-big', async () => {
+    called += 1
+    return { status: 'completed', result: {} }
+  })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+  const big = `{"commandId":"cmd_big","op":"demo-big","payload":"${'a'.repeat(1_000_100)}"}`
+  const res = makeRes()
+  await handler(makeRawReq(big), res)
+  assert.equal(res.statusCode, 413)
+  assert.equal(res.json().code, 'body-too-large')
+  assert.equal(called, 0)
+  ctx.dispose()
+})
+
 test('纯函数：normalizePrefix / resolveInside 的边界', () => {
   const { normalizePrefix, resolveInside } = adapterModule._internals
   assert.equal(normalizePrefix(''), '/fang')

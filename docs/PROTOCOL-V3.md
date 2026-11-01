@@ -277,6 +277,9 @@ interface CommandEnvelope {
 - **同步**：返回 `200 {ok, op, result, commandId}`；
 - **异步**：返回 `202 {ok:true, status:'accepted', trackingId, commandId, async:true}`，
   完成后推 `command-done {trackingId, op, result}`。`trackingId`（追踪）与 `commandId`（去重）是两个字段；
+- **扩展命令**（v2.6.8）：插件可通过 `registerCommand(op, executor)` 注册新 op；executor 返回普通对象 =
+  同步 200，返回 `{status:'accepted',trackingId}` = 202 + 自行 `emit command-done`；内置 op 不可覆盖。
+  请求体上限 1 MB，超限 **413 `body-too-large`**（契约见 `docs/ADAPTER-COMMANDS.md`）；
 - 同一次重试窗口内（分身未重启）幂等成立；跨进程重启不保证（见 §12 遗留决策）。
 
 ### 6.3 待审批 diff
@@ -322,7 +325,8 @@ interface CommandEnvelope {
 |---|---|---|---|
 | 200 | — | 成功 | 直接使用 |
 | 202 | — | 异步命令已接受 | 用 `trackingId` 等 `command-done` |
-| 400 | `bad-request` / `invalid-json` / `invalid-payload` / `missing-op` / `unknown-op` / `path-escape` / `file-too-large` / `total-too-large` / `binary-file` / `body-too-large` / `cursor-invalid` / `command-id-invalid` | 参数/协议错误 | 记录，不重试 |
+| 400 | `bad-request` / `invalid-json` / `invalid-payload` / `missing-op` / `unknown-op` / `path-escape` / `file-too-large` / `total-too-large` / `binary-file` / `cursor-invalid` / `command-id-invalid` | 参数/协议错误 | 记录，不重试 |
+| 413 | `body-too-large` | 请求体超过 1 MB | 记录，不重试 |
 | 401 | `unauthorized` | token 错误 | 标记 fork 不可信；**不重试** |
 | 404 | `not-found` / `plugin-not-found` | 资源不存在 | 记录，不重试 |
 | 409 | `session-changed` / `state-conflict` / `not-pending` / `service-unavailable` / `not-configured` / `conflict` / `timeout` | 状态冲突/依赖缺失 | `session-changed` 重置 cursor；其余记录 |
@@ -465,13 +469,14 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 | `test/adapter.test.mjs`（+6，共 32） | v3 路由注册顺序、version/health/state 形状、审批 diff 事件、SSE 回放/session-changed/cursor-invalid/410/close 清理、命令幂等+202+参数校验、并发同 commandId 只执行一次、Bearer 401/放行 |
 | `test/adapter-client.test.mjs`（6） | connect 三步、协议过新拒绝、401 致命、409 重拉快照+续流、同 commandId 网络重试、400 不重试 |
 | `test/fork-client.test.mjs`（13，v2.6.4） | 同步直通/缓存、异步 accepted→command-done 终态、异步超时、传输失败不缓存、SSE 断开保留 inflight、session 变化清空、disconnect 清空、stale command-done、重复 trackingId、事件隔离、connect 失败、参数边界、9 个 op 便捷方法 |
-| `test/task-handle.test.mjs`（17，v2.6.7） | 启动链/token/spawn、崩溃后新端口新 token 重连、命令短等待、重启超时、stop/recycle/dispose、SSE 断开不改变状态、事件聚合、幂等、fail-closed |
+- `test/task-handle.test.mjs`（17，v2.6.7） | 启动链/token/spawn、崩溃后新端口新 token 重连、命令短等待、重启超时、stop/recycle/dispose、SSE 断开不改变状态、事件聚合、幂等、fail-closed |
+| `test/adapter.test.mjs`（36，v2.6.8 新增 4） | 既有：命令/审批/归档/SSE/认证；新增：registerCommand 同步+异步+disposer、accepted 重试同 trackingId、拒绝覆盖内置 op、1MB body → 413 |
 | `test/sse-parser-fuzz.test.mjs`（7，v2.6.5） | 帧边界/多行 data/CRLF/flush/超长行/UTF-8 字节切分、固定种子分块等价、随机 seed smoke、RNG 可复现、参考实现一致、roundtrip、flush 后可用 |
 | `test/remote.test.mjs`（+2，共 14） | v3 路径 + Bearer 头、eventsUrl 的 since/session/token |
 | `test/forker.test.mjs`（+1，共 25） | token 每次 spawn 重新生成、进 env、stop 作废、不落 forks.json/fang-meta.json/status |
 | `test/orchestrator.test.mjs`（18） | 版本号改从 `FANG_VERSION` 读取；握手/任务生命周期回归 |
 
-全量：**385 项（384 pass / 1 skip）**。
+全量：**389 项（388 pass / 1 skip）**。
 
 ---
 
@@ -484,6 +489,8 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
   传输错误不缓存、LRU 只淘汰已完成项，契约见 `docs/COMMAND-CACHE.md`；
 - `ForkClient`（v2.6.4）：命令外观 + inflight/trackingId/超时兜底，契约见 `docs/FORK-CLIENT.md`；
 - `TaskHandle`（v2.6.7）：fork 进程 + ForkClient 的统一生命周期，崩溃后重建连接，契约见 `docs/TASK-HANDLE.md`；
+- `Adapter.registerCommand`（v2.6.8）：外部插件注册命令（同步/异步由 executor 返回值决定），
+  accepted 走 command-done；1 MB body 超限 → 413；契约见 `docs/ADAPTER-COMMANDS.md`；
 - 共享协议库 + ForkClient（SSE 解析、cursor 续传、409/410 处理、指数退避、幂等重试）；
 - Forker 每次 spawn 生成 token 并经 env 注入；`adapterToken(forkId)` 只读内存；
 - Orchestrator 在握手后做 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer。

@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## v2.6.8（2026-11-01）
+
+**主题：Adapter 命令入口的扩展面 —— 外部插件注册命令 + 413 body 上限。**
+
+### 新增
+- **`adapter.registerCommand(op, executor)`**（`src/plugins/adapter.mjs`）：
+  - executor 签名 `(payload, { commandId, trackingId, emit, logger })`；
+  - **同步/异步由 executor 的返回值决定**：普通对象 = 200；`{status:'completed',result}` = 200；
+    `{status:'rejected',code,message}` = 失败信封；`{status:'accepted',trackingId}` = **202**，
+    由 executor 异步执行并通过 `emit({kind:'command-done',…})` 推送结果；
+  - `trackingId` 未显式给出时默认 `track_<commandId>`，同一 commandId 重试稳定；
+  - 内置 op 不可覆盖（抛错），避免协议语义被第三方替换；disposer 后该 op 回到 `unknown-op`；
+  - 仍由 `CommandCache.run(commandId, …)` 包裹：accepted 也缓存，重试不会启动第二个异步任务。
+
+### 修复
+- **body 超限 → 413**：`POST /adapter/commands`（以及 `/adapter/command`）请求体超过 1 MB 时，
+  之前返回 400 `bad-request`；现在按 `ADAPTER_ERROR_STATUS` 返回 **413 `body-too-large`**，
+  且 executor 不会被调用。
+
+### 文档 / 测试
+- `docs/ADAPTER-COMMANDS.md`：设计稿（CommandHttpHandler / EventLog / CommandHandler /
+  AdapterServer）与本仓库已有实现的映射；为什么复用 DSH webServer 而不是独立端口；
+  HTTP 状态表、SSE cursor/session 语义、命令注册示例、边界。
+- `docs/PROTOCOL-V3.md §6.2/§6.4/§11/§12`：扩展命令约定与 413。
+- `test/adapter.test.mjs` 新增 4 项：registerCommand 同步幂等 + disposer、异步 202 + command-done +
+  重试同 trackingId、拒绝覆盖内置 op / rejected 映射、1 MB body → 413。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 8 个补丁位。
+
 ## v2.6.7（2026-11-01）
 
 **主题：TaskHandle —— 把 fork 启动、Adapter 连接、命令代理、崩溃重建连接收进一个生命周期对象。**

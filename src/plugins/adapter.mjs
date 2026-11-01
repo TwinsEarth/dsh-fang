@@ -818,6 +818,33 @@ export function apply(ctx, config) {
     }],
   ])
 
+  /**
+   * 外部插件注册的命令（v2.6.8）。与内置 HANDLERS 走同一条分派链：
+   *   registerCommand(op, (payload, ctx) => result | {status:'accepted', trackingId})
+   * - 返回普通对象 → 同步成功（HTTP 200）；
+   * - 返回 {status:'accepted', trackingId} → HTTP 202，executor 自行异步执行，
+   *   完成后必须通过 ctx.emit({kind:'command-done', trackingId, result}) 推送；
+   * - 返回 {status:'completed'|'rejected'} → 按对应形状返回；
+   * - 抛错 → handler-threw（fail-closed）。
+   * 内置 op 不允许被覆盖（避免协议语义被第三方悄悄替换）。
+   */
+  const REGISTERED = new Map()
+
+  const registerCommand = (op, executor) => {
+    const kind = String(op ?? '').trim()
+    if (!kind) throw new TypeError('registerCommand requires a non-empty op')
+    if (typeof executor !== 'function') throw new TypeError('registerCommand requires a function')
+    if (HANDLERS.has(kind)) throw new Error(`cannot override built-in op: ${kind}`)
+    REGISTERED.set(kind, executor)
+    emit('fang/adapter-command-registered', { op: kind })
+    return () => {
+      if (REGISTERED.get(kind) === executor) {
+        REGISTERED.delete(kind)
+        emit('fang/adapter-command-unregistered', { op: kind })
+      }
+    }
+  }
+
   /** 给命令套一个硬超时：handler 悬挂时也返回 timeout，而不是让 HTTP 挂着。 */
   const withTimeout = (promise, timeoutMs) => {
     if (!(timeoutMs > 0)) return Promise.resolve(promise)
@@ -854,8 +881,9 @@ export function apply(ctx, config) {
       emit('fang/adapter-command', { op: '', ok: false, code: envelope.code })
       return envelope
     }
-    const handler = HANDLERS.get(op)
-    if (!handler) {
+    const builtin = HANDLERS.get(op)
+    const registered = builtin ? null : REGISTERED.get(op)
+    if (!builtin && !registered) {
       const envelope = { ok: false, op, error: `unknown-op:${op}`, code: 'unknown-op' }
       emit('fang/adapter-command', { op, ok: false, code: envelope.code })
       return envelope
@@ -863,13 +891,44 @@ export function apply(ctx, config) {
 
     let raw
     try {
-      raw = await withTimeout(handler(payload), commandTimeoutMs)
+      if (registered) {
+        // 外部注册命令：executor 自己决定同步/异步，拿到 commandId/trackingId/emit 上下文。
+        const execCtx = {
+          commandId: String(request.commandId ?? '') || null,
+          trackingId: String(request.trackingId ?? '') || (request.commandId ? `track_${String(request.commandId)}` : newId('cmd')),
+          emit: (event) => publish(event),
+          logger: {
+            debug: (...args) => { try { ctx.logger?.debug?.(...args) } catch { /* ignore */ } },
+            warn: (...args) => { try { ctx.logger?.warn?.(...args) } catch { /* ignore */ } },
+          },
+        }
+        raw = await withTimeout(registered(payload, execCtx), commandTimeoutMs)
+        if (raw && typeof raw === 'object' && raw.status === 'accepted') {
+          const trackingId = String(raw.trackingId ?? execCtx.trackingId)
+          const envelope = { ok: true, op, status: 'accepted', trackingId, commandId: execCtx.commandId, async: true }
+          emit('fang/adapter-command', { op, ok: true, async: true, trackingId })
+          return envelope
+        }
+        if (raw && typeof raw === 'object' && raw.status === 'completed') {
+          raw = { ok: true, status: 'completed', result: raw.result === undefined ? null : raw.result }
+        } else if (raw && typeof raw === 'object' && raw.status === 'rejected') {
+          raw = { ok: false, code: String(raw.code ?? 'rejected'), error: String(raw.message ?? 'rejected') }
+        }
+      } else {
+        raw = await withTimeout(builtin(payload), commandTimeoutMs)
+      }
     } catch (e) {
       raw = { ok: false, code: 'handler-threw', error: msgOf(e) }
     }
     if (raw && typeof raw === 'object' && raw.__timeout === true) {
       const envelope = { ok: false, op, error: 'command-timeout', code: 'timeout' }
       emit('fang/adapter-command', { op, ok: false, code: envelope.code })
+      return envelope
+    }
+    if (registered && raw && typeof raw === 'object' && raw.status === 'completed') {
+      // 外部注册命令的 CommandResult 形状：保序返回 status/result，而不是塞进 result 字段。
+      const envelope = { ok: true, op, status: 'completed', result: raw.result === undefined ? null : raw.result, commandId: String(request.commandId ?? '') || null }
+      emit('fang/adapter-command', { op, ok: true })
       return envelope
     }
     if (raw && typeof raw === 'object' && raw.ok === false) {
@@ -902,10 +961,12 @@ export function apply(ctx, config) {
       return { ok: false, code: normalized.code, error: normalized.error, commandId: normalized.commandId ?? '' }
     }
     const { commandId, op, payload, async: isAsync } = normalized
+    // 外部注册命令由 executor 自己决定同步/异步；通用 async 标志只作用于内置 op。
+    const isRegistered = REGISTERED.has(op)
 
     // 无 commandId = 不幂等（兼容 v2 用法），直接执行。
     if (!commandId) {
-      if (isAsync) {
+      if (isAsync && !isRegistered) {
         const trackingId = newId('cmd')
         void Promise.resolve()
           .then(() => command({ op, payload }))
@@ -914,6 +975,7 @@ export function apply(ctx, config) {
         return { ok: true, status: 'accepted', trackingId, op, commandId: null, async: true }
       }
       const result = await command({ op, payload })
+      if (result && result.status === 'accepted') return { ...result, commandId: null }
       publish({ kind: ADAPTER_EVENT.COMMAND, op, ok: result.ok !== false, code: result.code ?? null, commandId: null })
       return { ...result, commandId: null }
     }
@@ -921,16 +983,21 @@ export function apply(ctx, config) {
     let executed = false
     const envelope = await commandCache.run(commandId, async () => {
       executed = true
-      if (isAsync) {
+      if (isAsync && !isRegistered) {
         return { ok: true, status: 'accepted', trackingId: commandId, op, commandId, async: true }
       }
-      const result = await command({ op, payload })
+      const result = await command({ op, payload, commandId })
       return { ...result, commandId }
     })
 
     if (executed) {
-      if (isAsync) {
-        // 异步命令：结果通过事件返回；缓存里保留 accepted（重放仍是同一个 trackingId）。
+      if (envelope && envelope.status === 'accepted') {
+        // 外部注册命令的 accepted：executor 负责异步执行并通过 ctx.emit 推 command-done，
+        // 这里不再二次调度（否则会执行两遍）。
+        return envelope
+      }
+      if (isAsync && !isRegistered) {
+        // 内置异步命令：结果通过事件返回；缓存里保留 accepted（重放仍是同一个 trackingId）。
         void Promise.resolve()
           .then(() => command({ op, payload }))
           .then((result) => publish({ kind: ADAPTER_EVENT.COMMAND_DONE, trackingId: commandId, op, result }))
@@ -960,6 +1027,8 @@ export function apply(ctx, config) {
     audit,
     command,
     commands,
+    registerCommand,
+    registeredCommands: () => [...REGISTERED.keys()],
     versionInfo,
     health,
     state,
@@ -1118,7 +1187,8 @@ export function apply(ctx, config) {
     route('POST', `${prefix}${ADAPTER_ROUTE.COMMAND}`, async (req, res) => {
       const parsed = await readJsonBody(req)
       if (parsed.error) {
-        return json(res, 400, { ok: false, code: 'bad-request', error: parsed.error })
+        const code = parsed.error === 'body-too-large' ? 'body-too-large' : 'bad-request'
+        return json(res, statusForCode(code), { ok: false, code, error: parsed.error })
       }
       const out = await command(parsed.body ?? {})
       return sendResult(res, out)
@@ -1134,7 +1204,8 @@ export function apply(ctx, config) {
     route('POST', `${prefix}${ADAPTER_ROUTE.COMMANDS}`, async (req, res) => {
       const parsed = await readJsonBody(req)
       if (parsed.error) {
-        return json(res, 400, { ok: false, code: 'bad-request', error: parsed.error })
+        const code = parsed.error === 'body-too-large' ? 'body-too-large' : 'bad-request'
+        return json(res, statusForCode(code), { ok: false, code, error: parsed.error })
       }
       const out = await commands(parsed.body ?? {})
       if (out && out.ok === false) return json(res, statusForCode(out.code), out)
