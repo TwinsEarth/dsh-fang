@@ -103,7 +103,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.6.7'
+export const FANG_VERSION = '2.6.8'
 
 /**
  * @typedef {object} ForkInfo
@@ -211,7 +211,7 @@ export const ADAPTER_ERROR_STATUS = {
   'file-too-large': 400,
   'total-too-large': 400,
   'binary-file': 400,
-  'body-too-large': 400,
+  'body-too-large': 413,
   'cursor-invalid': 400,
   'command-id-invalid': 400,
   unauthorized: 401,
