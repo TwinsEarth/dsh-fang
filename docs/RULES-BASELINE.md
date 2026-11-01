@@ -88,3 +88,48 @@ effective 恢复到不含它的上一次有效规则，并返回 `applied: false
   仍停留在 v2.7.9 语义（声明式规则表 + AST-lite 解析）。已在 `docs/AUDIT-v2.8.0.md §6` 与
   `docs/AUDIT-v2.8.1.md` 登记，计划后续补丁补齐。
 - 热加载依赖 `fs.watch`：Windows 正常；网络盘/容器挂载可能不触发，用 `reloadRules()` 兜底。
+
+## 8. 严格模式：`inherit: false`（v2.8.2）
+
+语义不是「替换整个规则表」，而是**丢弃此层之前所有可调规则，只保留硬规则 + fallback**，
+再从该层开始叠加。安全边界不能被严格模式绕过。
+
+| 场景 | `inherit: true`（默认） | `inherit: false` |
+|---|---|---|
+| 未列出的可调规则（`network-egress` 等） | 保持上一层/内置默认 | **从表中删除** |
+| 未列出的硬规则（`credential-access` 等） | 保持 | **强制保留**（锁标签来自规则自身） |
+| 兜底 `unknown-tool` | 保持 | **强制保留**（rebuild 后无 fallback 视为 bug，拒绝应用） |
+| 关闭/降级硬规则 | 拒绝 | 拒绝 |
+| 追加 pattern 到硬规则 | 允许 | 允许 |
+| 后续 `inherit: true` 层 | 叠加 | 叠加到严格结果上；**不会**恢复被丢弃的内置规则（除非该层按 id 显式引用，此时用内置定义"复活"它） |
+| 多个 `inherit: false` | — | 最后一个生效，它之前的层全部丢弃 |
+
+- **优先级**：严格模式下优先级表重置为「仅保留硬规则 + fallback」；用户新增规则未写 `priority` 时用默认 500——
+  严格模式建议显式写 priority，否则同档规则只能靠声明顺序。
+- **合法边界**：`inherit: false` 且没有任何规则 = 只剩 `dsh-lifecycle`/`destructive-command`/`credential-access`
+  + `unknown-tool` 的「极简安全模式」，不报错。
+- **审计**：严格模式激活时写一条 `AUDIT.UMBRELLA_STRICT_MODE`（`umbrella-strict-mode`），
+  含 `layerIndex` / `preservedHardRules` / `preservedFallback` / `discardedRuleCount`；
+  `ruleConfigStatus().strictMode` 同步可见。这是重大配置行为，必须能事后追溯「哪个项目从何时起丢掉了哪些规则」。
+
+示例（项目层完全替换）：
+
+```yaml
+version: 1
+inherit: false
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: credential-access          # 硬规则：只能扩面，不能关闭
+    pathPatterns: [{ re: "\\.company-secrets" }]
+  - id: write-outside-buffer       # 可调规则必须重新定义，否则从表中消失
+    light: red
+    priority: 40
+  - id: network-egress
+    priority: 50
+  - id: project-build-guard        # 新增声明式规则
+    category: destructive
+    light: red
+    priority: 25
+    match: { kind: command-pattern, patterns: [{ re: "\\brm\\s+-rf\\s+(?:dist|build)\\b" }] }
+    evidence: { kind: pattern-match }
+```

@@ -653,3 +653,153 @@ rules:
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── inherit:false 严格模式（v2.8.2）─────────────────────────────────────────
+
+function strictConfig(yamlBody) {
+  const body = String(yamlBody ?? '').trim()
+  const rulesSection = body === '' || body === '[]' ? 'rules: []' : `rules:\n${yamlBody}`
+  const parsed = parseYamlSubset(`version: 1
+inherit: false
+settings: { failOnInvalidPattern: true }
+${rulesSection}`)
+  assert.deepEqual(parsed.errors, [])
+  const validated = validateRuleConfig(parsed.value)
+  assert.deepEqual(validated.errors, [])
+  return validated.config
+}
+
+const FALLBACK_ID = 'unknown-tool'
+
+test('严格模式：无规则定义 = 只剩硬规则 + 兜底（合法的极简安全模式）', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const applied = registry.applyLayer(strictConfig('  []'))
+  assert.equal(applied.applied, true)
+  assert.equal(applied.source, 'strict-replaced')
+  assert.deepEqual(registry.ids().sort(), ['credential-access', 'destructive-command', 'dsh-lifecycle', FALLBACK_ID].sort())
+  assert.ok(applied.strictMode)
+  assert.deepEqual(applied.strictMode.preservedHardRules.sort(), ['credential-access', 'destructive-command', 'dsh-lifecycle'].sort())
+  assert.deepEqual(applied.strictMode.preservedFallback, [FALLBACK_ID])
+  assert.equal(applied.strictMode.discardedRuleCount, DEFAULT_ACTION_RULES.length - 4)
+  // 可调规则消失：写越界不再命中 write-outside-buffer，落到兜底
+  const write = baseLight({ tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/a') } }, policy, registry)
+  assert.equal(write.matchedRule, FALLBACK_ID)
+  assert.equal(write.light, 'yellow')
+})
+
+test('严格模式：只保留用户重新定义的可调规则', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const config = strictConfig(`  - id: write-outside-buffer
+    light: red
+    reason: strict write
+  - id: read-in-buffer
+    light: green
+    priority: 80
+`)
+  const applied = registry.applyLayer(config)
+  assert.equal(applied.applied, true)
+  const ids = registry.ids()
+  assert.ok(ids.includes('write-outside-buffer'))
+  assert.ok(ids.includes('read-in-buffer'))
+  assert.ok(!ids.includes('network-egress'), '未定义的可调规则必须消失')
+  assert.ok(!ids.includes('dynamic-import'))
+})
+
+test('严格模式：硬规则不可关闭/不可降级（整层拒绝，保留旧规则）', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const before = registry.ids()
+  const disable = strictConfig(`  - id: credential-access
+    enabled: false
+`)
+  const rejected = registry.applyLayer(disable)
+  assert.equal(rejected.applied, false)
+  assert.ok(rejected.errors.some((e) => e.includes('cannot be disabled')))
+  assert.deepEqual(registry.ids(), before, '拒绝后保留旧规则（层被弹出）')
+
+  const downgrade = strictConfig(`  - id: destructive-command
+    light: yellow
+`)
+  const rejected2 = registry.applyLayer(downgrade)
+  assert.equal(rejected2.applied, false)
+  assert.ok(rejected2.errors.some((e) => e.includes('cannot be lowered')))
+})
+
+test('严格模式之后的 inherit:true 层叠加，不回退内置全集', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  assert.equal(registry.applyLayer(strictConfig('  []')).applied, true)
+  const stacked = parseYamlSubset(`version: 1
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: read-in-buffer
+    light: green
+    priority: 80
+`)
+  const validated = validateRuleConfig(stacked.value)
+  assert.deepEqual(validated.errors, [])
+  const applied = registry.applyLayer(validated.config)
+  assert.equal(applied.applied, true)
+  const ids = registry.ids()
+  assert.ok(ids.includes('read-in-buffer'))
+  assert.ok(!ids.includes('network-egress'), '后续 inherit:true 层不得恢复内置可调规则')
+  assert.equal(registry.status().source, 'strict-replaced')
+  assert.ok(registry.status().strictMode)
+})
+
+test('较晚的 inherit:false 覆盖较早层（丢弃其覆盖值）', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const first = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: write-outside-buffer
+    light: red
+    reason: first layer
+`).value)
+  assert.equal(registry.applyLayer(first.config).applied, true)
+  assert.equal(registry.ids().includes('write-outside-buffer'), true)
+
+  assert.equal(registry.applyLayer(strictConfig('  []')).applied, true)
+  assert.equal(registry.ids().includes('write-outside-buffer'), false, '严格模式丢弃了第一层的可调规则')
+  assert.equal(registry.layerCount(), 2)
+  assert.equal(registry.status().strictMode.layerIndex, 1)
+})
+
+test('schema：inherit 缺省 true、显式 false、非布尔报错', () => {
+  assert.equal(validateRuleConfig({ version: 1 }).config.inherit, true)
+  assert.equal(validateRuleConfig({ version: 1, inherit: false }).config.inherit, false)
+  assert.ok(validateRuleConfig({ version: 1, inherit: 'no' }).errors.some((e) => e.includes('inherit')))
+})
+
+test('插件：严格模式出现在 ruleConfigStatus 并落审计事件', () => {
+  const dir = tmpDir('fang-rules-strict-')
+  const previousRole = process.env.DSH_FANG_ROLE
+  process.env.DSH_FANG_ROLE = 'mother'
+  const file = path.join(dir, 'strict.yaml')
+  fs.writeFileSync(file, `version: 1
+inherit: false
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: write-outside-buffer
+    light: red
+`, 'utf8')
+  const audit = []
+  try {
+    const ctx = makeCtx({ services: { [SERVICE.auditor]: { append: (kind, data) => audit.push({ kind, data }) } } })
+    try {
+      umbrellaPlugin.apply(ctx, { rulesFile: file, rulesWatch: false, baselineFile: ':none:' })
+      const svc = ctx.get(SERVICE.umbrella)
+      const status = svc.ruleConfigStatus()
+      assert.equal(status.source, 'strict-replaced')
+      assert.ok(status.strictMode)
+      assert.equal(status.strictMode.preservedHardRules.length, 3)
+      assert.ok(audit.some((record) => record.kind === 'umbrella-strict-mode'))
+      const strictRecord = audit.find((record) => record.kind === 'umbrella-strict-mode')
+      assert.equal(strictRecord.data.discardedRuleCount, DEFAULT_ACTION_RULES.length - 4)
+      assert.ok(Array.isArray(strictRecord.data.preservedHardRules))
+    } finally {
+      ctx.dispose()
+    }
+  } finally {
+    if (previousRole === undefined) delete process.env.DSH_FANG_ROLE
+    else process.env.DSH_FANG_ROLE = previousRole
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -142,7 +142,9 @@ export function apply(ctx, config) {
     warnings: [],
     errors: [],
     appliedAt: null,
+    strictMode: null,
   }
+  let lastStrictStamp = null
 
   const layerCandidates = [
     { name: 'baseline', file: baselinePath },
@@ -183,14 +185,38 @@ export function apply(ctx, config) {
         try { ctx.logger?.warn?.(`[umbrella] ${layer.name} rule config rejected, keeping previous rules: ${applied.errors.join('; ')}`) } catch { /* ignore */ }
       }
     }
+    const registryStatus = ruleRegistry.status()
     ruleConfigStatus = {
-      source: ruleRegistry.status().source,
+      source: registryStatus.source,
       layers: layerStatus,
       ruleCount: ruleRegistry.ids().length,
       applied: layerStatus.some((layer) => layer.applied === true),
       warnings,
       errors,
       appliedAt: Date.now(),
+      strictMode: registryStatus.strictMode ?? null,
+    }
+    // 严格模式是重大配置行为：首次激活（或层/丢弃数变化）时落一条审计
+    const strict = ruleConfigStatus.strictMode
+    const stamp = strict === null ? null : `${strict.layerIndex}:${strict.discardedRuleCount}:${strict.preservedHardRules.join(',')}`
+    if (stamp !== null && stamp !== lastStrictStamp) {
+      lastStrictStamp = stamp
+      try {
+        safeGet(ctx, SERVICE.auditor)?.append?.(AUDIT.UMBRELLA_STRICT_MODE, {
+          component: name,
+          at: strict.activatedAt,
+          layerIndex: strict.layerIndex,
+          preservedHardRules: strict.preservedHardRules,
+          preservedFallback: strict.preservedFallback ?? [],
+          discardedRuleCount: strict.discardedRuleCount,
+          layers: ruleConfigStatus.layers.map((layer) => ({ name: layer.name, applied: layer.applied })),
+        })
+      } catch { /* 审计缺失不影响决策 */ }
+      try {
+        ctx.logger?.info?.(`[umbrella] strict mode (inherit:false) active at layer ${strict.layerIndex}: preserved ${strict.preservedHardRules.length} hard rules, discarded ${strict.discardedRuleCount} adjustable rules`)
+      } catch { /* logger 可选 */ }
+    } else if (stamp === null) {
+      lastStrictStamp = null
     }
     return ruleConfigStatus
   }
