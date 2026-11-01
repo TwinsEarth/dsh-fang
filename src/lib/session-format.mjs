@@ -485,6 +485,46 @@ export function extractSessionTitle(events = []) {
   return { title, titleSource, preview, messageSeq }
 }
 
+export const SEED_DEFAULTS = Object.freeze({
+  maxFrames: 512,
+  maxCompressedBytes: 16 * 1024 * 1024,
+  maxChars: 48 * 1024,
+})
+
+function messageTextOf(data) {
+  const content = Array.isArray(data?.content) ? data.content : []
+  return content
+    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+/**
+ * 有界对话摘录：只取 user/assistant 的文本内容，按字符预算截断。
+ * 用于派生分身时的会话交接种子（不是完整日志转储）。
+ */
+export function extractConversation(events = [], options = {}) {
+  const maxChars = clampInt(options.maxChars ?? SEED_DEFAULTS.maxChars, 1024, 256 * 1024, SEED_DEFAULTS.maxChars)
+  const parts = []
+  let used = 0
+  let messages = 0
+  let truncated = false
+  for (const event of (Array.isArray(events) ? events : [])) {
+    if (!event || typeof event !== 'object') continue
+    const role = event.type === 'user/message' ? '用户' : event.type === 'assistant/message' ? '助手' : null
+    if (!role) continue
+    const text = messageTextOf(event.data ?? event)
+    if (!text) continue
+    const block = `**${role}**：${text}\n\n`
+    if (used + block.length > maxChars) { truncated = true; break }
+    parts.push(block)
+    used += block.length
+    messages += 1
+  }
+  return { markdown: parts.join(''), messages, truncated, chars: used }
+}
+
 // ── 脱敏 ────────────────────────────────────────────────────────────────────
 // 顺序有意义：先凭证类，再联系方式，最后绝对路径；每类替换后计数。
 const REDACTION_RULES = [
@@ -604,6 +644,8 @@ export function scanSessionDirs(options = {}) {
 }
 
 export const _internals = {
+  extractConversation,
+  SEED_DEFAULTS,
   readBoundedEvents,
   extractSessionTitle,
   TITLE_DEFAULTS,

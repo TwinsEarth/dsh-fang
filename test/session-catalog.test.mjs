@@ -687,3 +687,51 @@ test('listSessions falls back to the workspace title when the log has no title o
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('listSessions exposes the real createdAt from the session header, not the file mtime', () => {
+  const home = makeHome()
+  try {
+    writeIndex(home, { workspaces: [WS_GPT], archived: [], pinned: [] })
+    const file = addSession(home, WS_GPT.path, SESSION_B, [`${headerLine(SESSION_B)}\n`,
+      `${JSON.stringify({ type: 'session/title', seq: 2, data: { title: '真实标题' } })}\n`,
+      `${JSON.stringify({ type: 'user/message', data: { content: [{ type: 'text', text: '真实问题' }] } })}\n`,
+    ], 999999999)
+    const { ctx, service } = applyCatalog({ home })
+    const item = service.listSessions().sessions[0]
+    assert.equal(item.title, '真实标题')
+    assert.equal(item.createdAt, HEADER_TIME, 'createdAt comes from the session header')
+    assert.notEqual(item.createdAt, fs.statSync(file).mtimeMs, 'not the file mtime')
+    assert.equal(item.empty, false)
+    assert.equal(item.userMessages, 1)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('seed() extracts the bounded transcript and refuses empty sessions', () => {
+  const home = makeHome()
+  try {
+    writeIndex(home, { workspaces: [WS_GPT], archived: [], pinned: [] })
+    addSession(home, WS_GPT.path, SESSION_A, [
+      `${headerLine(SESSION_A)}\n`,
+      `${JSON.stringify({ type: 'session/title', seq: 1, data: { title: '交接标题' } })}\n`,
+      `${JSON.stringify({ type: 'user/message', data: { content: [{ type: 'text', text: '用户第一问' }] } })}\n`,
+      `${JSON.stringify({ type: 'assistant/message', data: { content: [{ type: 'text', text: '助手第一答' }] } })}\n`,
+    ], 5000)
+    addSession(home, WS_GPT.path, SESSION_B, [`${headerLine(SESSION_B)}\n`], 6000)
+    const { ctx, service } = applyCatalog({ home })
+    const seeded = service.seed(SESSION_A)
+    assert.equal(seeded.ok, true, JSON.stringify(seeded))
+    assert.match(seeded.markdown, /# 会话交接：交接标题/)
+    assert.match(seeded.markdown, /用户第一问/)
+    assert.match(seeded.markdown, /助手第一答/)
+    assert.equal(seeded.sourceFile, service.seed(SESSION_A).sourceFile, 'source file is stable')
+    const empty = service.seed(SESSION_B)
+    assert.equal(empty.ok, false)
+    assert.equal(empty.code, 'session-empty')
+    ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

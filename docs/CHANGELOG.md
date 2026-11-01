@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## v2.4.0（2026-11-01）
+
+**主题：母体会话数据修正 + 派生时真正继承历史 + 「瓮城」控制面板重设计。**
+
+### 修复（母体 · 项目 & 会话）
+- **创建时间**：列表此前只回传文件 mtime（并当成时间展示），现在从会话日志 header 读取真实 `createdAt`，
+  API 同时返回 `createdAt/createdAtIso/updatedAt`；UI 分别显示「创建」与「更新」。
+- **空会话**：没有 `user/message` 的会话标记 `empty:true`，UI 显示「空会话」标签并禁止「继续开发」，
+  派生时返回 `session-empty`，不再生成只有 header 的假交接。
+- **历史会话继承**：派生前构建真正的交接种子（有界多帧读取 + 对话摘录，默认 48KiB），
+  并把母体会话日志**复制进分身自己的 `$DSH_HOME`**（`sessions/<workspaceKey>/<sessionId>`），
+  同步写入分身的 `storages/workspace.json`，让分身原生 UI 能看到这段历史；
+  日志超过 `importMaxBytes`（默认 32 MiB）时如实标记「仅交接摘要」。
+- 之前 `fang-seeds/*.md` 只写不读（注释称"fork reads it"，实际无消费方），现改为种子+历史导入双轨，
+  派生响应返回 `importedSession` 供 UI 如实展示。
+
+### UI（控制面板重设计）
+- 3:7 分屏保留；新增品牌/状态/主操作分层、会话搜索、分组折叠、两栏回顶、选中条两段式。
+- 会话标题来源感知：`session/title` → 原生标题；`preview` → 首条消息；缺失 → 「未命名会话 + 短 ID」，
+  绝不拿工作区名冒充标题。
+- 任务健康拆成生命周期/适配器两枚徽章；`running + adapter 失败` 标记异常（僵尸分身），
+  错误带 code/中文原因/诊断/就地重试；分身会话读取失败只影响该卡。
+- 响应式 ≤980px 单列堆叠、键盘可达、对比度 ≥ WCAG AA（详见 `docs/UI-瓮城入口.md`）。
+
+### 测试
+- 新增：真实 `createdAt`（非 mtime）、空会话拒绝、`seed()` 对话摘录、派生导入会话日志与 workspace 索引。
+- 全量 294 项（293 pass / 0 fail / 1 skip；skip 为手动容器探针）。
+
 ## v2.3.1（2026-11-01）
 
 **主题：npm 包名改为 `@twinsearth/dsh-fang` + 修复 CI 上的 watchdog 取消。**
