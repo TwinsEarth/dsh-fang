@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "2.7.6",
+  "version": "2.7.7",
   "private": true,
   "type": "module",
   "description": "dsh-Fang (瓮城) — mother/fork plugin development environment for DeepSeek Harness: one readonly mother, a disposable child dsh-Web per task, 1 orchestrator + 12 sub-plugins.",
@@ -67,7 +67,8 @@
     "build": "node tools/release/build.mjs",
     "healthz": "node tools/release/healthz.mjs",
     "compat": "node tools/release/compat.mjs",
-    "publish:npm": "node tools/release/publish-npm.mjs"
+    "publish:npm": "node tools/release/publish-npm.mjs",
+    "typecheck": "node tools/release/typecheck.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {
