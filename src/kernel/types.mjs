@@ -103,7 +103,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.6.1'
+export const FANG_VERSION = '2.6.2'
 
 /**
  * @typedef {object} ForkInfo

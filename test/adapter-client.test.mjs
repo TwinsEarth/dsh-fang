@@ -43,7 +43,7 @@ test('connect: 版本协商 → 快照 → SSE，cursor 推进、事件/状态�
     const target = String(url)
     calls.push({ url: target, headers: init.headers ?? {} })
     if (target.includes('/adapter/version')) {
-      return jsonRes({ ok: true, protocol: 3, sessionId: 's-1', version: '2.6.1' })
+      return jsonRes({ ok: true, protocol: 3, sessionId: 's-1', version: '2.6.2' })
     }
     if (target.includes('/adapter/state')) {
       return jsonRes({ ok: true, sessionId: 's-1', lastCursor: '5', plugins: [] })
