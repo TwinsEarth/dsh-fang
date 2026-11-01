@@ -18,6 +18,9 @@ export const SERVICE = {
   adapter: 'fangAdapter',
   commercial: 'fangCommercial',
   sessionCatalog: 'fangSessionCatalog',
+  sessionBridge: 'fangSessionBridge',
+  sessionSync: 'fangSessionSync',
+  sessionRouter: 'fangSessionRouter',
 }
 
 /** Loader row ids used by cordis.patch.yml. */
@@ -33,6 +36,9 @@ export const ROW = {
   auditor: 'fang-auditor',
   router: 'fang-router',
   sessionCatalog: 'fang-session-catalog',
+  sessionBridge: 'fang-session-bridge',
+  sessionSync: 'fang-session-sync',
+  sessionRouter: 'fang-session-router',
 }
 
 export const FORK_STATUS = {
@@ -97,7 +103,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.4.0'
+export const FANG_VERSION = '2.5.0'
 
 /**
  * @typedef {object} ForkInfo

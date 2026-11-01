@@ -21,6 +21,7 @@ test('role: environment wins over config, config over default', () => {
   assert.equal(resolveRole({ cfgRole: 'fork', env: {} }), 'fork')
   assert.equal(resolveRole({ cfgRole: '', env: {} }), 'mother')
   assert.equal(resolveRole({ cfgRole: 'bogus', env: { DSH_FANG_ROLE: 'bogus' } }), 'mother', 'invalid values fall back')
+  assert.equal(resolveRole({ cfgRole: '', env: { DSH_FANG_ROLE: 'consumer' } }), 'consumer', 'consumer is a first-class role')
 })
 
 test('role: the v2 matrix covers all eleven plugins and the 3-layer split', () => {
@@ -37,11 +38,14 @@ test('role: the v2 matrix covers all eleven plugins and the 3-layer split', () =
     bufferKeeper: ['fork'],
     auditor: ['mother', 'fork'],
     sessionCatalog: ['mother'],
+    sessionBridge: ['mother'],
+    sessionSync: ['mother', 'consumer'],
+    sessionRouter: ['mother'],
   }
   for (const [key, roles] of Object.entries(expected)) {
     assert.deepEqual(rolesOf(key), roles, `matrix for ${key}`)
   }
-  assert.equal(Object.keys(MATRIX).length, 12)
+  assert.equal(Object.keys(MATRIX).length, 15)
   assert.equal(roleAllows('orchestrator', 'fork'), false)
   assert.equal(roleAllows('adapter', 'mother'), false)
   assert.equal(roleAllows('auditor', 'fork'), true)
@@ -96,7 +100,7 @@ test('commercial: hooks are off by default and no-op without a provider', async 
 })
 
 test('vocabulary: v2 version, task lifecycle, adapter protocol and container states', () => {
-  assert.equal(FANG_VERSION, '2.4.0')
+  assert.equal(FANG_VERSION, '2.5.0')
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.version, FANG_VERSION, 'package.json version must match kernel FANG_VERSION')
   assert.deepEqual(Object.values(TASK_STATUS), ['provisioning', 'ready', 'running', 'archived', 'failed'])

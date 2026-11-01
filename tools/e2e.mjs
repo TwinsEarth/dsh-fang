@@ -172,9 +172,17 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 2.4.0', status.body?.version === '2.4.0')
+    check('status reports version 2.5.0', status.body?.version === '2.5.0')
     check('status reports role=mother', status.body?.role === 'mother')
     check('mother has forker service', status.body?.services?.forker === true)
+
+    const route = await api('/fang/api/route?realtime=1')
+    check('GET /fang/api/route 200', route.status === 200, `mode=${route.body?.mode}`)
+    check('router chooses sync without a bridge descriptor', route.body?.mode === 'sync' && route.body?.bridge?.available === false, JSON.stringify(route.body?.bridge ?? null))
+    const syncStatus = await api('/fang/api/sync/status')
+    check('GET /fang/api/sync/status 200', syncStatus.status === 200 && syncStatus.body?.ok === true, JSON.stringify(syncStatus.body ?? null).slice(0, 160))
+    const bridgeStatus = await api('/fang/api/bridge/status')
+    check('GET /fang/api/bridge/status fail-closed', bridgeStatus.status === 200 && bridgeStatus.body?.ok === false && bridgeStatus.body?.code === 'bridge-unavailable', JSON.stringify(bridgeStatus.body ?? null).slice(0, 160))
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
     check('mother exposes 8 mother-side services', Object.values(status.body?.services ?? {}).filter(Boolean).length >= 5)
 

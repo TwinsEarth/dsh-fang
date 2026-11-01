@@ -82,6 +82,27 @@
         allowArchived: false
         previewMaxChars: 2000
 
+    - id: fang-session-bridge
+      name: '@local/dsh-fang/session-bridge'
+      config:
+        dshHome: ""
+        prefix: /fang
+        timeoutMs: 15000
+
+    - id: fang-session-sync
+      name: '@local/dsh-fang/session-sync'
+      config:
+        sessionsRoot: ""
+        bundleRoot: ""
+        maxBundleBytes: 536870912
+
+    - id: fang-session-router
+      name: '@local/dsh-fang/session-router'
+      config:
+        sameMachine: true
+        bridgeEnabled: true
+        needsRealtime: false
+
     - id: fang-orchestrator
       name: '@local/dsh-fang'
       config:
