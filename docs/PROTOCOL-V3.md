@@ -381,6 +381,14 @@ idle ──connect()──▶ negotiating ──ok──▶ streaming
 - SSE 断开保留 inflight（cursor 补发），`resetCursor=true` / `disconnect()` 清空并 reject；
 - 契约与 13 项测试见 `docs/FORK-CLIENT.md`。
 
+**TaskHandle（v2.6.7 实现）**：`src/lib/task-handle.mjs` 组合 Forker + ForkClient：
+
+- `start()` 负责 spawn（可选）+ 用 forker 的内存 token 建 client + connect；
+- 监听 `fang/fork-crashed` → `reconnecting`；等 `fang/fork-started`（或轮询 status）→ 用
+  **新 url / 新 token** 重建 client（ForkClient 只处理同进程 SSE 断线，进程重启由 TaskHandle 处理）；
+- 重连窗口内命令最多等 `commandWaitMs`，超时 fail-closed；`stop/recycle/dispose` 幂等；
+- 状态机与 17 项测试见 `docs/TASK-HANDLE.md`。
+
 ---
 
 ## 10. 时序
@@ -457,12 +465,13 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 | `test/adapter.test.mjs`（+6，共 32） | v3 路由注册顺序、version/health/state 形状、审批 diff 事件、SSE 回放/session-changed/cursor-invalid/410/close 清理、命令幂等+202+参数校验、并发同 commandId 只执行一次、Bearer 401/放行 |
 | `test/adapter-client.test.mjs`（6） | connect 三步、协议过新拒绝、401 致命、409 重拉快照+续流、同 commandId 网络重试、400 不重试 |
 | `test/fork-client.test.mjs`（13，v2.6.4） | 同步直通/缓存、异步 accepted→command-done 终态、异步超时、传输失败不缓存、SSE 断开保留 inflight、session 变化清空、disconnect 清空、stale command-done、重复 trackingId、事件隔离、connect 失败、参数边界、9 个 op 便捷方法 |
+| `test/task-handle.test.mjs`（17，v2.6.7） | 启动链/token/spawn、崩溃后新端口新 token 重连、命令短等待、重启超时、stop/recycle/dispose、SSE 断开不改变状态、事件聚合、幂等、fail-closed |
 | `test/sse-parser-fuzz.test.mjs`（7，v2.6.5） | 帧边界/多行 data/CRLF/flush/超长行/UTF-8 字节切分、固定种子分块等价、随机 seed smoke、RNG 可复现、参考实现一致、roundtrip、flush 后可用 |
 | `test/remote.test.mjs`（+2，共 14） | v3 路径 + Bearer 头、eventsUrl 的 since/session/token |
 | `test/forker.test.mjs`（+1，共 25） | token 每次 spawn 重新生成、进 env、stop 作废、不落 forks.json/fang-meta.json/status |
 | `test/orchestrator.test.mjs`（18） | 版本号改从 `FANG_VERSION` 读取；握手/任务生命周期回归 |
 
-全量：**368 项（367 pass / 1 skip）**。
+全量：**385 项（384 pass / 1 skip）**。
 
 ---
 
@@ -474,6 +483,7 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 - `CommandCache.run()` 幂等执行（v2.6.3）：in-flight 合并、completed 重放、业务失败缓存 /
   传输错误不缓存、LRU 只淘汰已完成项，契约见 `docs/COMMAND-CACHE.md`；
 - `ForkClient`（v2.6.4）：命令外观 + inflight/trackingId/超时兜底，契约见 `docs/FORK-CLIENT.md`；
+- `TaskHandle`（v2.6.7）：fork 进程 + ForkClient 的统一生命周期，崩溃后重建连接，契约见 `docs/TASK-HANDLE.md`；
 - 共享协议库 + ForkClient（SSE 解析、cursor 续传、409/410 处理、指数退避、幂等重试）；
 - Forker 每次 spawn 生成 token 并经 env 注入；`adapterToken(forkId)` 只读内存；
 - Orchestrator 在握手后做 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer。
