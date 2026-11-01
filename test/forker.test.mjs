@@ -311,7 +311,7 @@ test('apply registers fangForker and an empty registry reports clean failures', 
     assert.equal(ctx.get(SERVICE.forker), service)
     for (const method of [
       'provision', 'spawn', 'stop', 'reap', 'status', 'list', 'logs',
-      'allocatePort', 'releasePort', 'ensureTemplate',
+      'allocatePort', 'releasePort', 'ensureTemplate', 'health', 'recover',
     ]) {
       assert.equal(typeof service[method], 'function', `missing service.${method}`)
     }
