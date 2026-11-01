@@ -508,6 +508,8 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
   非终态继续等待；成功信号仍为 `fang/fork-started` + 轮询兜底；
 - 连接三步可观测（v2.7.4）：`lastVersionInfo` / `protocolRange` / `sessionMismatch` 诊断，
   连接顺序仍为 version → state → SSE；契约见 `docs/CONNECT-PREFLIGHT.md`；
+- 端口生命周期（v2.7.5）：Adapter 复用 DSH 单端口（无 `adapterPort`/`DSH_ADAPTER_PORT`），
+  Forker 唯一分配者 + 六条归还路径；契约见 `docs/PORT-LIFECYCLE.md`；
 - 共享协议库 + ForkClient（SSE 解析、cursor 续传、409/410 处理、指数退避、幂等重试）；
 - Forker 每次 spawn 生成 token 并经 env 注入；`adapterToken(forkId)` 只读内存；
 - Orchestrator 在握手后做 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer。

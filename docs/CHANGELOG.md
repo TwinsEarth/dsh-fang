@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## v2.7.5（2026-11-01）
+
+**主题：端口生命周期文档化 —— Adapter 复用 DSH 端口，不存在第二个 Adapter 端口。**
+
+### 说明（设计评审结论，非代码变更）
+- 设计稿提出「Forker 分配 DSH + Adapter 两个端口、写 `adapterPort`、注入 `DSH_ADAPTER_PORT`、
+  AdapterServer 独立 listen、双端口 waitReady / 归还」。本仓库在 v2.6.8 已明确采用
+  **单端口**方案：Adapter 的路由挂在分身自己的 DSH `webServer` 上
+  （`docs/ADAPTER-COMMANDS.md §1`），没有第二个监听者，因此没有第二份端口生命周期。
+- Forker 仍是唯一端口分配者：每分身 1 个池端口（18000–18100，101 个；`maxForks` 默认 8），
+  失败/超时/退出/stop/reap/死孤儿六条归还路径均已有代码与测试覆盖；
+  Adapter 就绪由 Orchestrator 在同端口做 `/fang/adapter/hello` 握手判定，而不是第二个端口探活。
+
+### 文档
+- 新增 `docs/PORT-LIFECYCLE.md`：端口所有权、env 契约、就绪判定、六条归还路径、
+  「为什么不需要双端口」、以及未来若真要独立端口的完整改动清单与风险。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 5 个补丁位。
+
 ## v2.7.4（2026-11-01）
 
 **主题：连接三步流程可观测化 —— version 信息 / 协议区间 / session 一致性诊断。**
