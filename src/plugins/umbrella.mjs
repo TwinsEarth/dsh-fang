@@ -178,6 +178,7 @@ export function apply(ctx, config) {
         ruleCount: applied.ruleCount,
         warnings: applied.warnings,
         errors: applied.errors,
+        revertedToLayerIndex: applied.revertedToLayerIndex ?? null,
       })
       warnings.push(...applied.warnings)
       errors.push(...applied.errors)

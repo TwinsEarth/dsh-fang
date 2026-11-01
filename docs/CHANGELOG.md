@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v2.8.3（2026-11-02）
+
+**主题：严格模式 + 语法错误的回退语义（组 4 扩展）——事务化 rebuild，失败层对后续层不可见。**
+
+### 变更
+- `rule-registry.rebuild` 重构为**纯计算** `computeRebuild(layerList)`：不再就地修改 `effective`/`status`，
+  返回 `{ applied, effective, status }`；`applyLayer`/`applyConfig`/`clearLayers` 只在 `applied` 时提交。
+  失败时 `layers`/`effective`/`status`/`strictMode` **全部保持上一次成功值**，失败层对后续层完全不可见。
+- 失败结果新增 `revertedToLayerIndex`（`-1` = 内置全集），审计与 `ruleConfigStatus()` 可直接回答
+  「哪一层被拒绝、回退到了哪一层」。
+- **YAML 解析修正**：支持 flow 映射 `{ k: v, k2: v2 }` 与嵌套 flow 列表 `[{ re: "..." }]`
+  （深度感知、尊重引号）。此前 `settings: { failOnInvalidPattern: true }` 会被当成标量字符串，
+  导致 `settings` 静默回落到默认值——写了严格设置却不生效。这是组 4 测试暴露的真 bug。
+
+### 测试
+- 扩展组 4（`test/rule-config.test.mjs` 30 → **35 项**）：严格层编译失败回退到上一个成功层、
+  第二个严格层失败回退到第一个严格层（不是内置全集）、失败后 `inherit:true` 层叠加到上一个成功层、
+  失败层状态隔离（layers/effective/strictMode 均不被污染）、插件层状态报告。
+- 全量测试 **494 → 499 项**（498 pass / 1 skip）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 3 个补丁位。
+
 ## v2.8.2（2026-11-02）
 
 **主题：`inherit: false` 严格模式 —— 项目可完全替换可调规则集，但拆不掉安全边界。**
