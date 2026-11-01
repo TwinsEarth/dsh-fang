@@ -27,6 +27,13 @@
 //   * 可用性：会话搜索、分组折叠、两栏回到顶部、键盘 Enter/Space 选择、Esc 取消选中、
 //     focus-visible 等效焦点环、小屏（≤980px）上下堆叠且两栏仍各自滚动。
 //
+// v2.6.2 分类折叠（左=母体 项目/对话，右=分身 任务/项目）：
+//   * 三个分区：进行中（默认展开）/ 已归档（默认折叠）/ 临时（默认折叠）；
+//   * 进行中会话最多先显示 7 条，其余折叠成「展开剩余 N 个」；归档与临时分区默认折叠；
+//   * 临时 = 空会话（没有用户消息，无法继续开发）+ 快速派生任务（空白、未继承会话）；
+//     顶栏「隐藏/显示临时内容」可整组隐藏，偏好存 localStorage（fang.panel.showTemporary）；
+//   * 判定只用宿主已返回的事实（archived / empty / 任务标题），不改协议、不新增接口。
+//
 // 颜色只走宿主 token（--dsw-alias-*）+ 插件艺术色 --fang-gate-accent，不写死主题底色。
 
 window.__ModuleLoader__.load({
@@ -176,6 +183,66 @@ window.__ModuleLoader__.load({
       const out = [...groups.values()]
       for (const group of out) group.sessions.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
       return out.sort((a, b) => b.latestAt - a.latestAt || String(a.title).localeCompare(String(b.title)))
+    }
+
+    // ── 面板分类（v2.6.2）：进行中 / 已归档 / 临时 ─────────────────────────────
+    //
+    // 事实约束：服务端没有「临时」字段，也不该为了 UI 改动协议。这里用两条可解释的
+    // 事实定义「临时」，并在分区标题的 tooltip 里写明，用户可整体隐藏临时内容：
+    //   * 空会话（没有 user 消息，无法继续开发）：会话 side 的 empty=true；
+    //   * 快速派生任务（双击图标/「派生新分身」产生的空白分身，未继承任何会话）：
+    //     标题是 快速派生 / 双击快速派生 / 徽标快速派生 / 重试快速派生。
+    // 归档优先级最高：同一项既是 archived 又是 empty 时只进「已归档」，不重复计数。
+    const PANEL_TEMP_PREF_KEY = 'fang.panel.showTemporary'
+    const PANEL_ACTIVE_LIMIT = 7
+    const QUICK_DERIVE_TITLE_RE = /^(?:(?:双击|徽标|重试)快速派生|快速派生)$/
+
+    const isArchivedSession = (session) => !!session?.archived
+    const isEmptySession = (session) => !!session?.empty
+    const isTempTask = (task) => QUICK_DERIVE_TITLE_RE.test(String(task?.title ?? '').trim())
+
+    /** 母体会话三分：归档 > 临时（空会话）> 进行中。返回原对象引用，不改写字段。 */
+    function classifyMotherSessions(items) {
+      const active = []
+      const archived = []
+      const temporary = []
+      for (const item of Array.isArray(items) ? items : []) {
+        if (isArchivedSession(item)) archived.push(item)
+        else if (isEmptySession(item)) temporary.push(item)
+        else active.push(item)
+      }
+      return { active, archived, temporary }
+    }
+
+    /** 分身任务三分：归档 > 临时（快速派生空白分身）> 进行中。 */
+    function classifyTasks(items) {
+      const active = []
+      const archived = []
+      const temporary = []
+      for (const item of Array.isArray(items) ? items : []) {
+        if (String(item?.status ?? '') === 'archived') archived.push(item)
+        else if (isTempTask(item)) temporary.push(item)
+        else active.push(item)
+      }
+      return { active, archived, temporary }
+    }
+
+    function readPanelBoolPref(key, fallback) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return fallback
+        const raw = window.localStorage.getItem(key)
+        return raw === null ? fallback : raw === '1'
+      } catch {
+        return fallback
+      }
+    }
+    function writePanelBoolPref(key, value) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return
+        window.localStorage.setItem(key, value ? '1' : '0')
+      } catch {
+        /* 隐私模式/禁用 storage：偏好只在本次会话内生效 */
+      }
     }
 
     // ── 状态语义 ──────────────────────────────────────────────────────────
@@ -670,6 +737,32 @@ window.__ModuleLoader__.load({
       }, h(IconChevron, { open: !!expanded, size: 12 }), label)
     }
 
+    /**
+     * 面板分类分区：一个可折叠标题 + 内容。左侧母体（项目/对话）与右侧分身（任务/项目）
+     * 共用；tone 只用于标题前的小圆点，不改变内容颜色。
+     */
+    function FoldSection({ label, count, collapsed, onToggle, title, tone = 'neutral', extra = null, children }) {
+      const palette = TONE[tone] || TONE.neutral
+      return h('div', { style: { borderTop: `1px solid ${BORDER_SOFT}` } },
+        h('div', {
+          style: {
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            padding: '4px 10px', background: 'rgba(127,127,127,.025)',
+          },
+        },
+        h(CollapseToggle, {
+          expanded: !collapsed,
+          onToggle,
+          label: `${label} · ${count}`,
+          title: title || (collapsed ? `展开${label}` : `收起${label}`),
+        }),
+        tone !== 'neutral'
+          ? h('span', { 'aria-hidden': 'true', style: { width: 6, height: 6, borderRadius: 999, background: palette.dot, flexShrink: 0 } })
+          : null,
+        extra),
+        collapsed ? null : h('div', null, children))
+    }
+
     // ── 响应式 & 计时 hooks ────────────────────────────────────────────────
     function useMediaQuery(query) {
       const getMatch = () => {
@@ -1051,6 +1144,22 @@ window.__ModuleLoader__.load({
       const [collapsedGroups, setCollapsedGroups] = useState(() => new Set())
       const [collapsedTasks, setCollapsedTasks] = useState(() => new Set())
       const [archivedCollapsed, setArchivedCollapsed] = useState(true)
+      // v2.6.2 分类折叠：左栏（母体 项目/对话）与右栏（分身 任务/项目）各自记住折叠态。
+      const [leftActiveCollapsed, setLeftActiveCollapsed] = useState(false)
+      const [leftArchivedCollapsed, setLeftArchivedCollapsed] = useState(true)
+      const [leftTempCollapsed, setLeftTempCollapsed] = useState(true)
+      const [rightActiveCollapsed, setRightActiveCollapsed] = useState(false)
+      const [rightTempCollapsed, setRightTempCollapsed] = useState(true)
+      const [activeSessionsExpanded, setActiveSessionsExpanded] = useState(false)
+      // 「临时内容」整组显示/隐藏，跨会话记住（storage 不可用时只影响本次面板会话）。
+      const [showTemporary, setShowTemporary] = useState(() => readPanelBoolPref(PANEL_TEMP_PREF_KEY, true))
+      const toggleTemporary = () => {
+        setShowTemporary((value) => {
+          const next = !value
+          writePanelBoolPref(PANEL_TEMP_PREF_KEY, next)
+          return next
+        })
+      }
       const [busy, setBusy] = useState('')
       const [refreshing, setRefreshing] = useState(false)
       const [notice, setNotice] = useState(null)
@@ -1381,12 +1490,18 @@ window.__ModuleLoader__.load({
       const ready = Number(data?.tasks?.ready ?? 0) || 0
       const running = Number(data?.tasks?.running ?? 0) || 0
       const max = data?.tasks?.max ?? '—'
-      const activeTasks = useMemo(() => (Array.isArray(tasks.items) ? tasks.items : [])
-        .filter((task) => String(task.status) !== 'archived')
-        .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)), [tasks.items])
-      const archivedTasks = useMemo(() => (Array.isArray(tasks.items) ? tasks.items : [])
-        .filter((task) => String(task.status) === 'archived')
-        .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)), [tasks.items])
+      const taskSplit = useMemo(() => {
+        const split = classifyTasks(Array.isArray(tasks.items) ? tasks.items : [])
+        const byCreatedDesc = (a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)
+        return {
+          active: split.active.sort(byCreatedDesc),
+          archived: split.archived.sort(byCreatedDesc),
+          temporary: split.temporary.sort(byCreatedDesc),
+        }
+      }, [tasks.items])
+      const activeTasks = taskSplit.active
+      const archivedTasks = taskSplit.archived
+      const tempTasks = showTemporary ? taskSplit.temporary : []
       const anomalies = activeTasks.length
         ? activeTasks.filter((task) => String(task.status) === 'running' && !task.adapter?.ok).length
         : (status.state === 'ready' ? running : 0)
@@ -1396,7 +1511,13 @@ window.__ModuleLoader__.load({
         return sessions.items.filter((session) => [sessionTitleInfo(session).text, session.preview, session.sessionId, session.workspaceTitle, session.workspacePath]
           .some((value) => String(value ?? '').toLowerCase().includes(normalQuery)))
       }, [sessions.items, normalQuery])
-      const motherGroups = useMemo(() => groupSessionsByWorkspace(filteredSessions), [filteredSessions])
+      const motherSplit = useMemo(() => classifyMotherSessions(filteredSessions), [filteredSessions])
+      const motherActiveGroups = useMemo(() => groupSessionsByWorkspace(motherSplit.active), [motherSplit])
+      const motherArchivedGroups = useMemo(() => groupSessionsByWorkspace(motherSplit.archived), [motherSplit])
+      const motherTempGroups = useMemo(() => groupSessionsByWorkspace(motherSplit.temporary), [motherSplit])
+      const motherVisibleCount = showTemporary
+        ? motherSplit.active.length + motherSplit.archived.length + motherSplit.temporary.length
+        : motherSplit.active.length + motherSplit.archived.length
       const titleStats = useMemo(() => {
         let named = 0
         let unnamed = 0
@@ -1475,6 +1596,14 @@ window.__ModuleLoader__.load({
         statusStrip,
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginLeft: isNarrow ? 0 : 'auto', width: isNarrow ? '100%' : 'auto' } },
           h(Btn, {
+            variant: 'quiet',
+            size: 'sm',
+            onClick: toggleTemporary,
+            title: showTemporary
+              ? '隐藏临时内容：空会话（没有用户消息）与快速派生任务（空白分身）；偏好会记住'
+              : '显示临时内容：空会话（没有用户消息）与快速派生任务（空白分身）；偏好会记住',
+          }, showTemporary ? '隐藏临时内容' : '显示临时内容'),
+          h(Btn, {
             variant: 'ghost',
             onClick: () => refresh({ manual: true }),
             disabled: refreshing,
@@ -1529,28 +1658,108 @@ window.__ModuleLoader__.load({
 
       const leftParts = []
       if (sessionsBanner) leftParts.push(h('div', { key: 'err', style: { padding: '10px 10px 0' } }, sessionsBanner))
+
+      /** 一个分类分区内的 workspace 组；limit>0 时只渲染前 limit 条会话（进行中分区用）。 */
+      const renderSessionGroups = (groups, { limit = 0, sectionKey = '' } = {}) => {
+        const nodes = []
+        let shown = 0
+        const cap = limit > 0 && !activeSessionsExpanded ? limit : Infinity
+        for (const group of groups) {
+          if (shown >= cap) break
+          const room = cap === Infinity ? group.sessions.length : Math.max(0, cap - shown)
+          if (room === 0) break
+          const sessions = group.sessions.slice(0, room)
+          shown += sessions.length
+          // 同一个工作区可能同时出现在「进行中/已归档/临时」三个分区；折叠状态按分区独立。
+          const collapseKey = `${sectionKey}:${group.key}`
+          nodes.push(h('div', { key: sectionKey + ':g:' + group.key },
+            h(GroupHeader, {
+              group,
+              collapsed: collapsedGroups.has(collapseKey),
+              onToggle: () => toggleGroup(collapseKey),
+            }),
+            collapsedGroups.has(collapseKey)
+              ? null
+              : h('div', null, sessions.map((session) => h(SessionRow, {
+                key: 's:' + session.sessionId,
+                session,
+                selected: selected?.item?.sessionId === session.sessionId,
+                onSelect: () => setSelected({ item: session }),
+              })))))
+        }
+        return { nodes, shown }
+      }
+
       if (sessions.state === 'loading' && sessions.items.length === 0) {
         leftParts.push(h(StateBlock, { key: 'load', tone: 'info', title: '正在读取母体会话…', message: '只读扫描会话目录；不打开会话正文。' }))
-      } else if (motherGroups.length === 0) {
+      } else if (motherVisibleCount === 0) {
         if (!(sessions.state === 'error' && sessions.items.length === 0)) {
-          leftParts.push(h('div', { key: 'empty' }, normalQuery ? noMatch : emptyMother))
+          if (!normalQuery && motherSplit.temporary.length > 0 && !showTemporary) {
+            leftParts.push(h(StateBlock, {
+              key: 'temp-hidden',
+              dashed: true,
+              tone: 'neutral',
+              title: `当前只有 ${motherSplit.temporary.length} 条临时内容（已隐藏）`,
+              message: '临时 = 空会话（没有用户消息，无法继续开发）。可以在顶栏「显示临时内容」中重新打开。',
+              actions: [h(Btn, { key: 'show', size: 'sm', variant: 'ghost', onClick: toggleTemporary }, '显示临时内容')],
+            }))
+          } else {
+            leftParts.push(h('div', { key: 'empty' }, normalQuery ? noMatch : emptyMother))
+          }
         }
       } else {
         if (titleNote) leftParts.push(h('div', { key: 'note' }, titleNote))
-        leftParts.push(h('div', { key: 'groups' }, motherGroups.map((group) => h('div', { key: 'g:' + group.key },
-          h(GroupHeader, {
-            group,
-            collapsed: collapsedGroups.has(group.key),
-            onToggle: () => toggleGroup(group.key),
-          }),
-          collapsedGroups.has(group.key)
-            ? null
-            : h('div', null, group.sessions.map((session) => h(SessionRow, {
-              key: 's:' + session.sessionId,
-              session,
-              selected: selected?.item?.sessionId === session.sessionId,
-              onSelect: () => setSelected({ item: session }),
-            })))))))
+        const activeCollapsed = leftActiveCollapsed
+        const activeLimit = PANEL_ACTIVE_LIMIT
+        const activeGroupsRender = renderSessionGroups(motherActiveGroups, { limit: activeLimit, sectionKey: 'active' })
+        const activeHidden = motherSplit.active.length - activeGroupsRender.shown
+        leftParts.push(h('div', { key: 'sections' },
+          motherSplit.active.length > 0
+            ? h(FoldSection, {
+              key: 'active',
+              label: '进行中',
+              count: motherSplit.active.length,
+              collapsed: activeCollapsed,
+              onToggle: () => setLeftActiveCollapsed((value) => !value),
+              title: activeCollapsed ? '展开进行中的项目 & 对话' : '收起进行中的项目 & 对话',
+              tone: 'success',
+              extra: activeHidden > 0 || (activeSessionsExpanded && motherSplit.active.length > activeLimit)
+                ? h(Btn, {
+                  size: 'sm',
+                  variant: 'quiet',
+                  onClick: () => setActiveSessionsExpanded((value) => !value),
+                  title: activeSessionsExpanded ? `只显示前 ${activeLimit} 个会话` : `展开其余 ${activeHidden} 个会话`,
+                }, activeSessionsExpanded ? '收起多余会话' : `展开剩余 ${activeHidden} 个`)
+                : null,
+            }, h('div', null,
+              activeGroupsRender.nodes,
+              activeHidden > 0
+                ? h('div', {
+                  style: { padding: '6px 14px 8px', fontSize: 10.5, lineHeight: '16px', color: TEXT2 },
+                }, `进行中会话只显示前 ${activeLimit} 个，其余 ${activeHidden} 个已折叠。`)
+                : null))
+            : null,
+          motherSplit.archived.length > 0
+            ? h(FoldSection, {
+              key: 'archived',
+              label: '已归档',
+              count: motherSplit.archived.length,
+              collapsed: leftArchivedCollapsed,
+              onToggle: () => setLeftArchivedCollapsed((value) => !value),
+              title: leftArchivedCollapsed ? '展开已归档的项目 & 对话（默认折叠）' : '收起已归档的项目 & 对话',
+            }, h('div', null, renderSessionGroups(motherArchivedGroups, { sectionKey: 'archived' }).nodes))
+            : null,
+          showTemporary && motherSplit.temporary.length > 0
+            ? h(FoldSection, {
+              key: 'temp',
+              label: '临时',
+              count: motherSplit.temporary.length,
+              collapsed: leftTempCollapsed,
+              onToggle: () => setLeftTempCollapsed((value) => !value),
+              title: '临时 = 空会话（没有用户消息，无法继续开发）；默认折叠，可在顶栏隐藏整组',
+              tone: 'warning',
+            }, h('div', null, renderSessionGroups(motherTempGroups, { sectionKey: 'temp' }).nodes))
+            : null))
         if (sessions.total > sessions.items.length) {
           leftParts.push(h('div', {
             key: 'trunc',
@@ -1572,7 +1781,12 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
           h('h2', { style: { margin: 0, fontSize: 13, fontWeight: 600, lineHeight: '18px', whiteSpace: 'nowrap' } }, '母体')),
         h('span', { style: { fontSize: 11, lineHeight: '15px', color: TEXT2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '项目 & 会话 · 选中会话后继续开发')),
-      h(Pill, { tone: 'neutral', title: `已加载 ${sessions.items.length} 个会话${sessions.total > sessions.items.length ? `，母体共 ${sessions.total} 个` : ''}` }, `${sessionCountLabel} 会话`))
+      h(Pill, {
+        tone: 'neutral',
+        title: `进行中 ${motherSplit.active.length} · 已归档 ${motherSplit.archived.length}`
+          + (showTemporary ? ` · 临时 ${motherSplit.temporary.length}` : ' · 临时已隐藏')
+          + `；已加载 ${sessions.items.length} 个会话${sessions.total > sessions.items.length ? `，母体共 ${sessions.total} 个` : ''}`,
+      }, `${sessionCountLabel} 会话`))
 
       const leftSection = h('section', {
         role: 'region',
@@ -1659,41 +1873,70 @@ window.__ModuleLoader__.load({
       if (tasksBanner) rightParts.push(h('div', { key: 'taskserr', style: { padding: '10px 12px 0' } }, tasksBanner))
       if (tasks.state === 'loading' && tasks.items.length === 0) {
         rightParts.push(h(StateBlock, { key: 'loading', tone: 'info', title: '正在读取分身列表…' }))
-      } else if (activeTasks.length === 0 && archivedTasks.length === 0) {
-        if (tasks.state !== 'error') rightParts.push(h('div', { key: 'empty', style: { padding: '16px 14px' } }, emptyRight))
+      } else if (activeTasks.length === 0 && archivedTasks.length === 0 && tempTasks.length === 0) {
+        if (tasks.state !== 'error') {
+          const hasHiddenTemp = !showTemporary && taskSplit.temporary.length > 0
+          rightParts.push(h('div', { key: 'empty', style: { padding: '16px 14px' } },
+            hasHiddenTemp
+              ? h(StateBlock, {
+                dashed: true,
+                tone: 'neutral',
+                title: `当前只有 ${taskSplit.temporary.length} 个临时任务（已隐藏）`,
+                message: '临时 = 快速派生（空白、未继承会话）的分身任务；可在顶栏「显示临时内容」重新打开。',
+                actions: [h(Btn, { key: 'show', size: 'sm', variant: 'ghost', onClick: toggleTemporary }, '显示临时内容')],
+              })
+              : emptyRight))
+        }
       } else {
-        if (activeTasks.length === 0) {
-          rightParts.push(h('div', { key: 'noactive', style: { padding: '10px 14px 0', fontSize: 12, color: TEXT2 } }, '当前没有活跃分身。'))
+        const taskCards = (items) => h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, padding: '12px' } },
+          items.map((task) => h(TaskCard, {
+            key: task.taskId,
+            task,
+            fork: forkSessions[task.taskId],
+            collapsed: collapsedTasks.has(task.taskId),
+            onToggleSessions: () => toggleTask(task.taskId),
+            onOpen: openTask,
+            onArchive: archiveTask,
+            onRetrySessions: () => loadForkSessions(task.taskId),
+            archiving: busy === 'archive:' + task.taskId,
+            onOpenSession: openForkSession,
+            routeMissing,
+            isNarrow,
+          })))
+        if (activeTasks.length > 0) {
+          rightParts.push(h(FoldSection, {
+            key: 'active',
+            label: '进行中',
+            count: activeTasks.length,
+            collapsed: rightActiveCollapsed,
+            onToggle: () => setRightActiveCollapsed((value) => !value),
+            title: rightActiveCollapsed ? '展开进行中的任务 & 项目' : '收起进行中的任务 & 项目',
+            tone: 'success',
+          }, taskCards(activeTasks)))
         } else {
-          rightParts.push(h('div', { key: 'cards', style: { display: 'flex', flexDirection: 'column', gap: 10, padding: '12px' } },
-            activeTasks.map((task) => h(TaskCard, {
-              key: task.taskId,
-              task,
-              fork: forkSessions[task.taskId],
-              collapsed: collapsedTasks.has(task.taskId),
-              onToggleSessions: () => toggleTask(task.taskId),
-              onOpen: openTask,
-              onArchive: archiveTask,
-              onRetrySessions: () => loadForkSessions(task.taskId),
-              archiving: busy === 'archive:' + task.taskId,
-              onOpenSession: openForkSession,
-              routeMissing,
-              isNarrow,
-            }))))
+          rightParts.push(h('div', { key: 'noactive', style: { padding: '10px 14px 0', fontSize: 12, color: TEXT2 } }, '当前没有进行中的分身。'))
         }
         if (archivedTasks.length > 0) {
-          rightParts.push(h('div', {
-            key: 'arch',
-            style: { margin: '0 12px 12px', border: `1px solid ${BORDER_SOFT}`, borderRadius: 8, overflow: 'hidden' },
-          },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', background: 'rgba(127,127,127,.03)' } },
-            h(CollapseToggle, {
-              expanded: !archivedCollapsed,
-              onToggle: () => setArchivedCollapsed((value) => !value),
-              label: `已归档 · ${archivedTasks.length}`,
-              title: archivedCollapsed ? '展开已归档分身' : '收起已归档分身',
-            })),
-          archivedCollapsed ? null : archivedTasks.map((task) => h(ArchivedRow, { key: task.taskId, task, onOpen: openTask }))))
+          rightParts.push(h(FoldSection, {
+            key: 'archived',
+            label: '已归档',
+            count: archivedTasks.length,
+            collapsed: archivedCollapsed,
+            onToggle: () => setArchivedCollapsed((value) => !value),
+            title: archivedCollapsed ? '展开已归档分身（默认折叠）' : '收起已归档分身',
+          }, h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 12px 12px' } },
+            archivedTasks.map((task) => h(ArchivedRow, { key: task.taskId, task, onOpen: openTask })))))
+        }
+        if (showTemporary && tempTasks.length > 0) {
+          rightParts.push(h(FoldSection, {
+            key: 'temp',
+            label: '临时',
+            count: tempTasks.length,
+            collapsed: rightTempCollapsed,
+            onToggle: () => setRightTempCollapsed((value) => !value),
+            title: '临时 = 快速派生（空白、未继承会话）的分身任务；默认折叠，可在顶栏隐藏整组',
+            tone: 'warning',
+          }, taskCards(tempTasks)))
         }
       }
 
@@ -1713,7 +1956,7 @@ window.__ModuleLoader__.load({
         dot: anomalies > 0,
         title: anomalies > 0
           ? `${anomalies} 个运行中分身的适配器未握手，需要处理`
-          : `活跃 ${activeTasks.length} 个${archivedTasks.length ? `，已归档 ${archivedTasks.length} 个` : ''}`,
+          : `进行中 ${activeTasks.length} 个${archivedTasks.length ? `，已归档 ${archivedTasks.length} 个` : ''}${showTemporary && tempTasks.length ? `，临时 ${tempTasks.length} 个` : ''}`,
       }, anomalies > 0 ? `${activeTasks.length} 项目 · ${anomalies} 异常` : `${activeTasks.length} 项目`))
 
       const rightSection = h('section', {
@@ -1808,7 +2051,7 @@ window.__ModuleLoader__.load({
             fontSize: 11, lineHeight: '16px', color: TEXT2,
           },
         },
-        h('span', null, '双击左侧「瓮城」图标或输入框徽标 = 快速派生；单击 = 打开本面板；两栏各自滚动。'),
+        h('span', null, '双击左侧「瓮城」图标或输入框徽标 = 快速派生；单击 = 打开本面板；两栏各自滚动；进行中只先显示 7 条会话，归档/临时默认折叠。'),
         h('span', { style: { flex: 1 } }),
         data?.version ? h('span', { style: { fontFamily: MONO, fontSize: 10.5, color: TEXT2 }, title: '宿主侧 dsh-Fang 版本' }, 'v' + data.version) : null,
         h(LinkBtn, { href: '/fang/panel', tone: 'muted', size: 'sm' }, '独立门户', h(IconExternal, { size: 10 }))))

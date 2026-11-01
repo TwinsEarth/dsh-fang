@@ -23,6 +23,10 @@ add('license: package.json AGPL', pkg.license === 'AGPL-3.0-or-later', String(pk
 add('license: SDK MIT text', readText('LICENSE-SDK').includes('MIT License'))
 add('license: commercial + CLA + NOTICE', ['LICENSE-COMMERCIAL', 'CLA.md', 'NOTICE'].every((f) => fs.existsSync(path.join(ROOT, f))))
 
+// UI 半是浏览器模块，没有单元测试；至少保证它是一份可解析的 JS（v2.6.2 起纳入门禁）。
+const clientParse = nodeRun(['--check', 'client.js'])
+add('client half: node --check client.js', clientParse.status === 0, clientParse.status === 0 ? 'green' : (clientParse.stderr || clientParse.stdout).slice(-300))
+
 const lic = nodeRun(['test/licensing.test.mjs'])
 add('license layering guard', lic.status === 0, lic.status === 0 ? 'green' : (lic.stderr || lic.stdout).slice(-300))
 
