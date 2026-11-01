@@ -1243,12 +1243,15 @@ export function createUmbrella(options = {}) {
     audit = null,
     onPluginScored = null,
     rules: initialRules = null,
+    registry = null,
   } = options
 
   // 规则集：可传数组（自动建集）或 createActionRuleSet() 的实例（可注册/覆盖）。
   const ruleSet = initialRules && typeof initialRules.find === 'function' && Array.isArray(initialRules.rules)
     ? initialRules
     : createActionRuleSet(initialRules ?? DEFAULT_ACTION_RULES)
+  // v2.8.0：可选的规则注册表（内置 + YAML 叠加）。提供时优先于 ruleSet。
+  const activeRules = registry ?? ruleSet
 
   // policy 允许是函数：插件在每次评分时都能拿到最新的 buffer root（buffer-keeper 的
   // root 是 start({dir}) 之后才知道的），而缓存仍按插件指纹失效，不因 root 变化清空。
@@ -1402,7 +1405,7 @@ export function createUmbrella(options = {}) {
   /** 动作评分：基础灯色 + 等级下限，只升不降。每次调用都重算，不缓存。 */
   function assessAction(evidence = {}, opts = {}) {
     const started = now()
-    const base = baseLight(evidence, policyNow(), ruleSet)
+    const base = baseLight(evidence, policyNow(), activeRules)
     const { grade, basis } = gradeFor(evidence, opts)
     const eff = effectiveLight(base.light, grade, { table: floors.table })
     return {
@@ -1489,7 +1492,7 @@ export function createUmbrella(options = {}) {
     assessPlugin,
     assessAction,
     decideAction,
-    baseLight: (evidence) => baseLight(evidence, policyNow(), ruleSet),
+    baseLight: (evidence) => baseLight(evidence, policyNow(), activeRules),
     gradeFloor: (grade) => gradeFloor(grade, { table: floors.table }),
     effectiveLight: (base, grade) => effectiveLight(base, grade, { table: floors.table }),
     cachedGrade: (pluginId) => grades.get(String(pluginId)) ?? null,
@@ -1498,13 +1501,16 @@ export function createUmbrella(options = {}) {
     clearCache,
     // 规则表：只读视图 + 唯一的三种变更入口（都做形状校验并以 id 定位）
     get rules() {
-      return ruleSet.rules.slice()
+      return activeRules.rules.slice()
     },
-    ruleIds: () => ruleSet.ids(),
-    registerRule: (rule, opts) => ruleSet.register(rule, opts),
-    overrideRule: (id, patch) => ruleSet.override(id, patch),
-    removeRule: (id) => ruleSet.remove(id),
-    resetRules: () => ruleSet.reset(),
+    get ruleRegistry() {
+      return registry
+    },
+    ruleIds: () => activeRules.ids(),
+    registerRule: (rule, opts) => activeRules.register(rule, opts),
+    overrideRule: (id, patch) => activeRules.override(id, patch),
+    removeRule: (id) => activeRules.remove(id),
+    resetRules: () => activeRules.reset(),
   }
 }
 

@@ -176,6 +176,59 @@ parseShellRedirects(commandText, policy) -> { writeTargets, readTargets,
 PowerShell 走同一套词法器（`>` 在 PS 里就是 Out-File），但 PS 专有语义（`-RedirectStandardOutput`、
 `2>&1` 的流合并细节）不解析——遇到可疑语法由兜底规则判黄，文档如实声明。
 
+### 2.4 YAML 规则配置（v2.8.0）
+
+内置规则**永远存在**；YAML 是**叠加层**——可以开关内置规则、覆盖属性、追加正则、或用内置声明式
+matcher 新增简单规则，而不改代码。完整示例见 `docs/UMBRELLA-RULES.example.yaml`。
+
+```yaml
+version: 1
+settings: { failOnUnknownRule: false, failOnInvalidPattern: false, rejectUnsafeRegex: true }
+rules:
+  - { id: credential-access, enabled: true }              # 开关
+  - id: write-outside-buffer
+    light: red                                            # 覆盖灯色（默认 yellow）
+    priority: 35                                          # 覆盖优先级
+    reason: "CI 环境：越界写需审批"
+    tags: ["ci-strict"]
+  - id: credential-access
+    pathPatterns:                                         # 给内置规则追加正则
+      - { re: "\\.dsh[\\\\/]secrets", label: "DSH secrets" }
+  - id: project-build-guard                               # 声明式新规则
+    category: destructive
+    light: red
+    reason: "禁止删除构建目录"
+    match: { kind: command-pattern, patterns: [{ re: "\\brm\\s+-rf\\s+(?:dist|build)\\b" }] }
+    evidence: { kind: pattern-match }
+```
+
+| 能力 | YAML | 说明 |
+|---|---|---|
+| 启用/禁用内置规则 | ✅ `enabled: false` | 最常用；未提及 = 保持原样 |
+| 覆盖 `light` / `priority` / `reason` / `tags` / `category` | ✅ | 优先级基线 `DEFAULT_RULE_PRIORITIES`（10…9999），同优先级按内置顺序稳定排序 |
+| 给内置规则追加 `commandPatterns` / `pathPatterns` | ✅ | 包装原谓词（`原 match || 新正则命中`） |
+| 新增规则 | ✅ 9 种 matcher：`command-pattern` `path-pattern` `path-outside` `url-host-in` `url-host-not-in` `tool-in` `pid-equal` `always` `never`；evidence：`pattern-match` `list-match` `static` | 只允许声明式，不能写任意 JS |
+| 任意 JS 谓词 / 动态计算路径 / 改 `parseFailed` 语义 | ❌ | 必须写进代码（YAML 是配置不是脚本，否则规则表不可审计） |
+
+**fail-safe 矩阵**：
+
+| 失效 | 行为 |
+|---|---|
+| 文件不存在 | 纯内置规则，不报错（`found:false`） |
+| YAML 语法错误 / schema 校验失败 | **整份拒绝**，保留上一次有效规则（启动时 = 纯内置），`ruleConfigStatus()` 报错 |
+| 未知 id | 默认警告并跳过；`failOnUnknownRule: true` 时整份拒绝 |
+| 正则编译失败 | `failOnInvalidPattern: false` 跳过该条；`true` 整份拒绝 |
+| 明显灾难回溯正则 | `rejectUnsafeRegex: true`（默认）拒绝该模式；关闭需显式声明 |
+| 热加载失败 | 保留旧 `effective`，不破坏当前运行（先构造新数组、校验通过才替换） |
+
+**接线**：插件配置 `rulesFile` / `rulesWatch` / `rulesDebounceMs`；服务面 `ruleConfigStatus()`（来源/文件/是否应用/
+警告与错误）、`reloadRules()`、`applyRuleConfig(config)`、`ruleRegistry`。门面层 `createUmbrella({ registry })`
+使用注册表规则；不传则沿用原规则集（向后兼容）。
+
+**边界（如实声明）**：YAML 子集**不支持**锚点/别名/多文档/块标量（`|`、`>`）——遇到会明确报错，
+不做"猜一个近似值"；正则安全是**启发式**而非完整 ReDoS 分析；`types/` 的 TS 参考实现**尚未镜像**
+v2.8.0 的规则配置层（计划在后续补丁补齐，审计报告已登记）。
+
 **两处与设计稿不同，都是为了诚实**：
 
 - 顺序把 `dsh-lifecycle` 提到 `destructive-command` 之前。设计稿把破坏性放第一；但 `taskkill /im dsh` 这类命令同时命中两条，若先判破坏性，决策会变成「询问用户」而不是「交给 restart-guard」。先判生命周期让宿主动作走专用路径，其余破坏性命令仍走 `ask`。

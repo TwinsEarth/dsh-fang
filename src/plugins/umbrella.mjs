@@ -7,8 +7,10 @@
 //
 // 这个插件自己**不扫源码**：静态证据的唯一来源是 `SERVICE.scorer`，缺它就失败往坏里判
 // （E + degraded），绝不假装安全。纯逻辑在 `src/lib/umbrella.mjs`，契约见 docs/UMBRELLA.md。
+import path from 'node:path'
 import { AUDIT, SERVICE, roleGate, z } from '../kernel/index.mjs'
 import {
+  DEFAULT_ACTION_RULES,
   DEFAULT_FLOOR_TABLE,
   DECISION,
   GRADE_FLOOR,
@@ -19,6 +21,11 @@ import {
   normalizeGrade,
   normalizeLight,
 } from '../lib/umbrella.mjs'
+import {
+  createRuleRegistry,
+  loadRuleConfigFile,
+  watchRuleConfigFile,
+} from '../lib/rule-registry.mjs'
 
 export const name = 'fang-umbrella'
 export const inject = []
@@ -46,6 +53,12 @@ export const Config = z.object({
     .description('插件评分缓存容量（LRU，按入口文件 mtime 失效）'),
   auditDecisions: z.boolean().default(true)
     .description('每次 decideAction 落一条 umbrella-decision 审计'),
+  rulesFile: z.string().default('')
+    .description('YAML 规则配置文件路径（空 = 只用内置规则；相对路径按本实例 cwd 解析）'),
+  rulesWatch: z.boolean().default(true)
+    .description('监听 rulesFile 变化并热加载（失败保留上一次有效规则）'),
+  rulesDebounceMs: z.natural().default(200)
+    .description('热加载防抖窗口（毫秒）'),
 })
 
 function safeGet(ctx, key) {
@@ -97,11 +110,91 @@ export function apply(ctx, config) {
     }
   }
 
+  // ── 规则配置层：内置规则 + YAML 叠加（fail-safe：坏配置保留旧规则/纯内置） ──
+  const ruleRegistry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const rulesFile = String(cfg.rulesFile ?? '').trim()
+  const rulesFilePath = rulesFile.length > 0 ? path.resolve(rulesFile) : ''
+  let ruleConfigStatus = {
+    source: 'builtin',
+    file: rulesFilePath || null,
+    found: false,
+    applied: false,
+    ruleCount: ruleRegistry.ids().length,
+    warnings: [],
+    errors: [],
+    appliedAt: null,
+  }
+
+  if (rulesFilePath.length > 0) {
+    const loaded = loadRuleConfigFile(rulesFilePath)
+    if (loaded.errors.length > 0) {
+      ruleConfigStatus = { ...ruleConfigStatus, found: loaded.found, errors: loaded.errors, applied: false }
+      try { ctx.logger?.warn?.(`[umbrella] rule config rejected, using builtin rules: ${loaded.errors.join('; ')}`) } catch { /* ignore */ }
+    } else if (loaded.config !== null) {
+      const applied = ruleRegistry.applyConfig(loaded.config)
+      ruleConfigStatus = {
+        ...ruleConfigStatus,
+        found: true,
+        applied: applied.applied,
+        source: applied.applied ? 'yaml' : 'builtin',
+        ruleCount: applied.ruleCount,
+        warnings: applied.warnings,
+        errors: applied.errors,
+        appliedAt: Date.now(),
+      }
+    } else {
+      ruleConfigStatus = { ...ruleConfigStatus, found: false }
+    }
+  }
+
+  let ruleWatcher = null
+  const reloadRules = () => {
+    if (rulesFilePath.length === 0) return ruleConfigStatus
+    const loaded = loadRuleConfigFile(rulesFilePath)
+    if (loaded.errors.length > 0) {
+      ruleConfigStatus = { ...ruleConfigStatus, errors: loaded.errors, applied: false }
+      return ruleConfigStatus
+    }
+    if (loaded.config === null) {
+      ruleRegistry.resetToBuiltin()
+      ruleConfigStatus = { ...ruleConfigStatus, source: 'builtin', applied: false, ruleCount: ruleRegistry.ids().length, errors: [], warnings: [], appliedAt: Date.now() }
+      return ruleConfigStatus
+    }
+    const applied = ruleRegistry.applyConfig(loaded.config)
+    ruleConfigStatus = {
+      ...ruleConfigStatus,
+      found: true,
+      applied: applied.applied,
+      source: applied.applied ? 'yaml' : ruleConfigStatus.source,
+      ruleCount: applied.ruleCount,
+      warnings: applied.warnings,
+      errors: applied.errors,
+      appliedAt: Date.now(),
+    }
+    return ruleConfigStatus
+  }
+
+  if (rulesFilePath.length > 0 && cfg.rulesWatch) {
+    ruleWatcher = watchRuleConfigFile(rulesFilePath, ruleRegistry, (result) => {
+      ruleConfigStatus = {
+        ...ruleConfigStatus,
+        applied: result.applied === true,
+        source: result.applied === true ? 'yaml' : ruleConfigStatus.source,
+        ruleCount: ruleRegistry.ids().length,
+        warnings: result.warnings ?? ruleConfigStatus.warnings,
+        errors: result.errors ?? [],
+        appliedAt: Date.now(),
+      }
+    }, { debounceMs: cfg.rulesDebounceMs, logger: ctx.logger })
+    ctx.effect(() => () => { try { ruleWatcher?.stop?.() } catch { /* ignore */ } })
+  }
+
   const umbrella = createUmbrella({
     scorer: scorerAdapter(),
     policy: policyNow,
     floorTable: cfg.gradeFloorTable,
     cacheSize: cfg.cacheSize,
+    registry: ruleRegistry,
     audit(record) {
       if (!cfg.auditDecisions) return
       try { safeGet(ctx, SERVICE.auditor)?.append?.(AUDIT.UMBRELLA_DECISION, record) } catch { /* 审计缺失不影响决策 */ }
@@ -125,6 +218,36 @@ export function apply(ctx, config) {
     floorTable: umbrella.floorTable,
     floorDegraded: umbrella.floorDegraded,
     floors: umbrella.grades,
+
+    /** YAML 规则配置状态（来源 / 文件 / 是否应用 / 警告与错误）。 */
+    ruleConfigStatus() {
+      return { ...ruleConfigStatus, rules: ruleRegistry.ids() }
+    },
+
+    /** 立即重读 rulesFile（热加载的手动入口）。 */
+    reloadRules() {
+      return reloadRules()
+    },
+
+    /** 直接应用一份已解析的配置对象（测试/嵌入用）；失败保留旧规则。 */
+    applyRuleConfig(config) {
+      const applied = ruleRegistry.applyConfig(config)
+      ruleConfigStatus = {
+        ...ruleConfigStatus,
+        applied: applied.applied,
+        source: applied.applied ? 'yaml' : ruleConfigStatus.source,
+        ruleCount: applied.ruleCount,
+        warnings: applied.warnings,
+        errors: applied.errors,
+        appliedAt: Date.now(),
+      }
+      return applied
+    },
+
+    /** 规则注册表（只读视图 + 运行时注册/覆盖）。 */
+    get ruleRegistry() {
+      return ruleRegistry
+    },
 
     /**
      * 插件评分（静态）。input: { pluginId?, dir?, manifest?, source?, pkg?, version?, environment?, refresh? }
