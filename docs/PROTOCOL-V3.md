@@ -471,12 +471,13 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 | `test/fork-client.test.mjs`（13，v2.6.4） | 同步直通/缓存、异步 accepted→command-done 终态、异步超时、传输失败不缓存、SSE 断开保留 inflight、session 变化清空、disconnect 清空、stale command-done、重复 trackingId、事件隔离、connect 失败、参数边界、9 个 op 便捷方法 |
 - `test/task-handle.test.mjs`（17，v2.6.7） | 启动链/token/spawn、崩溃后新端口新 token 重连、命令短等待、重启超时、stop/recycle/dispose、SSE 断开不改变状态、事件聚合、幂等、fail-closed |
 | `test/adapter.test.mjs`（36，v2.6.8 新增 4） | 既有：命令/审批/归档/SSE/认证；新增：registerCommand 同步+异步+disposer、accepted 重试同 trackingId、拒绝覆盖内置 op、1MB body → 413 |
+| `test/sse-directed.test.mjs`（8，v2.6.9） | 9 分支 61 条定向用例完整性、smoke（一次性+分块）、expectedFrames 覆盖、mutation 检出（裁掉所有尾部 CR）、混合策略确定性、均匀抽样、fuzz 全定向 900 次分支全覆盖、全随机/可复现 |
 | `test/sse-parser-fuzz.test.mjs`（7，v2.6.5） | 帧边界/多行 data/CRLF/flush/超长行/UTF-8 字节切分、固定种子分块等价、随机 seed smoke、RNG 可复现、参考实现一致、roundtrip、flush 后可用 |
 | `test/remote.test.mjs`（+2，共 14） | v3 路径 + Bearer 头、eventsUrl 的 since/session/token |
 | `test/forker.test.mjs`（+1，共 25） | token 每次 spawn 重新生成、进 env、stop 作废、不落 forks.json/fang-meta.json/status |
 | `test/orchestrator.test.mjs`（18） | 版本号改从 `FANG_VERSION` 读取；握手/任务生命周期回归 |
 
-全量：**389 项（388 pass / 1 skip）**。
+全量：**397 项（396 pass / 1 skip）**。
 
 ---
 
@@ -491,6 +492,8 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 - `TaskHandle`（v2.6.7）：fork 进程 + ForkClient 的统一生命周期，崩溃后重建连接，契约见 `docs/TASK-HANDLE.md`；
 - `Adapter.registerCommand`（v2.6.8）：外部插件注册命令（同步/异步由 executor 返回值决定），
   accepted 走 command-done；1 MB body 超限 → 413；契约见 `docs/ADAPTER-COMMANDS.md`；
+- SSE 定向生成器（v2.6.9）：9 分支 61 条最小输入 + expectedFrames + mutation 检出，
+  随机模糊按 `directedProb` 混入；契约见 `docs/FUZZ-SSE-DIRECTED.md`；
 - 共享协议库 + ForkClient（SSE 解析、cursor 续传、409/410 处理、指数退避、幂等重试）；
 - Forker 每次 spawn 生成 token 并经 env 注入；`adapterToken(forkId)` 只读内存；
 - Orchestrator 在握手后做 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer。

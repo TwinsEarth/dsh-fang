@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url'
 import { SseParser } from '../../src/lib/sse-parser.mjs'
 import { XorShift128 } from './sse-rng.mjs'
 import { generateInput } from './sse-generators.mjs'
+import { ALL_BRANCHES, generateMixed, runDirectedSmokeTest } from './sse-directed.mjs'
 import {
   buildChunkStrategies,
   framesEqual,
@@ -45,25 +46,47 @@ const msgOf = (e) => String(e && e.message !== undefined ? e.message : e)
  * 主模糊循环：输入 → 基准解析（一次性）→ 参考实现 oracle → 6 种字符串分块 →
  * 字节级分块 → roundtrip → flush 不变量。
  *
- * @param {{iterations?:number, seed?:number, stopOnFirstFailure?:boolean}} [options]
- * @returns {{seed:number, totalIterations:number, failures:FuzzFailure[]}}
+ * @param {{iterations?:number, seed?:number, stopOnFirstFailure?:boolean,
+ *          directedProb?:number, directed?:boolean}} [options]
+ * @returns {{seed:number, totalIterations:number, failures:FuzzFailure[],
+ *           branchCounts:Record<string,number>, directedHits:number, randomHits:number}}
  */
-export function runSseParserFuzz({ iterations = 5000, seed, stopOnFirstFailure = false } = {}) {
+export function runSseParserFuzz({
+  iterations = 5000,
+  seed,
+  stopOnFirstFailure = false,
+  directedProb = 0.3,
+  directed = true,
+} = {}) {
   const requested = Math.floor(Number(iterations))
   const total = Number.isFinite(requested) && requested > 0 ? requested : 0
   const baseSeed = Number.isFinite(Number(seed)) ? Number(seed) >>> 0 : (Date.now() & 0x7fffffff)
   const failures = []
+  const branchCounts = Object.fromEntries(ALL_BRANCHES.map((branch) => [branch, 0]))
+  let directedHits = 0
+  let randomHits = 0
   let completed = 0
+  const summary = () => ({ seed: baseSeed, totalIterations: completed, failures, branchCounts, directedHits, randomHits })
 
   for (let i = 0; i < total; i += 1) {
     const iterationSeed = (baseSeed + Math.imul(i, 0x9e3779b1)) >>> 0
     const rng = new XorShift128(iterationSeed)
-    const { input, description } = generateInput(rng)
+    const generated = directed
+      ? generateMixed(rng, { directedProb })
+      : { ...generateInput(rng) }
+    const { input, description, branch } = generated
+    if (branch) {
+      branchCounts[branch] += 1
+      directedHits += 1
+    } else {
+      randomHits += 1
+    }
     const record = (kind, reason, chunks, expected, actual) => {
       failures.push({
         seed: iterationSeed,
         iteration: i,
         description,
+        branch: branch ?? null,
         kind,
         reason,
         input,
@@ -80,7 +103,7 @@ export function runSseParserFuzz({ iterations = 5000, seed, stopOnFirstFailure =
     } catch (e) {
       record('baseline-threw', `baseline threw: ${msgOf(e)}`, [], [], [])
       completed += 1
-      if (stopOnFirstFailure) return { seed: baseSeed, totalIterations: completed, failures }
+      if (stopOnFirstFailure) return summary()
       continue
     }
 
@@ -146,11 +169,11 @@ export function runSseParserFuzz({ iterations = 5000, seed, stopOnFirstFailure =
 
     completed += 1
     if (stopOnFirstFailure && failures.length > 0) {
-      return { seed: baseSeed, totalIterations: completed, failures }
+      return summary()
     }
   }
 
-  return { seed: baseSeed, totalIterations: completed, failures }
+  return summary()
 }
 
 function check(condition, label) {
@@ -226,6 +249,7 @@ function formatFailure(failure) {
     `iterationSeed: ${failure.seed}`,
     `iteration: ${failure.iteration}`,
     `description: ${failure.description}`,
+    `branch: ${failure.branch ?? 'random'}`,
     `kind: ${failure.kind}`,
     `reason: ${failure.reason}`,
     `input: ${JSON.stringify(failure.input)}`,
@@ -249,6 +273,9 @@ export function main(argv = process.argv.slice(2)) {
   const iterations = Number(getArg('--iterations', '5000'))
   const seedArg = getArg('--seed', '')
   const stopOnFirstFailure = argv.includes('--stop-on-first')
+  const directed = !argv.includes('--no-directed')
+  const directedProbRaw = Number(getArg('--directed-prob', '0.3'))
+  const directedProb = Number.isFinite(directedProbRaw) ? Math.min(1, Math.max(0, directedProbRaw)) : 0.3
 
   try {
     runPropertyTests()
@@ -258,8 +285,43 @@ export function main(argv = process.argv.slice(2)) {
     return 2
   }
 
-  const result = runSseParserFuzz({ iterations, seed: seedArg === '' ? undefined : Number(seedArg), stopOnFirstFailure })
-  console.log(`[fuzz] seed=${result.seed} iterations=${result.totalIterations} failures=${result.failures.length}`)
+  // 定向 smoke：每个已知分支的最小输入 + expectedFrames + 6 种分块等价性。
+  const smoke = runDirectedSmokeTest()
+  if (smoke.failures.length > 0) {
+    console.error(`[directed] ${smoke.failures.length} failure(s) / ${smoke.totalCases} cases`)
+    for (const failure of smoke.failures.slice(0, 5)) {
+      console.error(`  ${failure.branch} | ${failure.description}`)
+      console.error(`    input:  ${JSON.stringify(failure.input)}`)
+      console.error(`    reason: ${failure.reason}`)
+    }
+    return 3
+  }
+  console.log(`[directed] ${smoke.passed}/${smoke.totalCases} cases passed`)
+  console.log(`[directed] branches: ${ALL_BRANCHES.length} (${Object.entries(smoke.branchCounts).map(([b, n]) => `${b}=${n}`).join(', ')})`)
+
+  const result = runSseParserFuzz({
+    iterations,
+    seed: seedArg === '' ? undefined : Number(seedArg),
+    stopOnFirstFailure,
+    directedProb,
+    directed,
+  })
+  console.log(
+    `[fuzz] seed=${result.seed} iterations=${result.totalIterations} failures=${result.failures.length} ` +
+      `directed=${result.directedHits} random=${result.randomHits}`,
+  )
+  if (directed) {
+    console.log('[fuzz] branch coverage:')
+    for (const branch of ALL_BRANCHES) {
+      const n = result.branchCounts[branch]
+      const pct = result.directedHits > 0 ? ((n / result.directedHits) * 100).toFixed(1) : '0.0'
+      console.log(`  ${branch}: ${n} (${pct}%)`)
+    }
+    if (result.directedHits > 100) {
+      const zeroHits = ALL_BRANCHES.filter((branch) => result.branchCounts[branch] === 0)
+      if (zeroHits.length > 0) console.warn(`[fuzz] WARN: zero-hit branches: ${zeroHits.join(', ')}`)
+    }
+  }
   if (result.failures.length === 0) return 0
 
   for (const failure of result.failures.slice(0, 5)) console.error(`\n${formatFailure(failure)}`)
