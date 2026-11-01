@@ -1222,6 +1222,8 @@ window.__ModuleLoader__.load({
       const [activeSessionsExpanded, setActiveSessionsExpanded] = useState(false)
       // 「临时内容」整组显示/隐藏，跨会话记住（storage 不可用时只影响本次面板会话）。
       const [showTemporary, setShowTemporary] = useState(() => readPanelBoolPref(PANEL_TEMP_PREF_KEY, true))
+      // v2.7.1 读档：顶栏切换存档 UI；存档 = 进程已停止、home 保留的已归档任务。
+      const [showArchive, setShowArchive] = useState(false)
       const toggleTemporary = () => {
         setShowTemporary((value) => {
           const next = !value
@@ -1423,7 +1425,7 @@ window.__ModuleLoader__.load({
           return
         }
         const ok = typeof window !== 'undefined' && window.confirm
-          ? window.confirm(`归档分身「${task.title || task.taskId}」？\n\n会先 flush 分身缓冲并落审计，然后回收该分身的 $DSH_HOME。此操作不可撤销。`)
+          ? window.confirm(`归档分身「${task.title || task.taskId}」？\n\n会先 flush 分身缓冲并落审计，然后停止分身进程；存档保留在本地，之后可在「读档」里还原或永久删除。`)
           : false
         if (!ok) return
         const label = 'archive:' + task.taskId
@@ -1434,14 +1436,88 @@ window.__ModuleLoader__.load({
           const body = result.body
           if (result.status === 200 && body?.ok) {
             const remoteWarn = body.remote && body.remote.ok === false ? `（远端未确认：${body.remote.error || 'unknown'}）` : ''
-            setNotice({ tone: 'success', title: '已归档', message: `${task.title || task.taskId}${remoteWarn}` })
+            setNotice({
+              tone: 'success',
+              title: body.already ? '已在存档中' : '已归档',
+              message: `${task.title || task.taskId} · 进程已停止，存档保留${remoteWarn}；点顶栏「读档」可还原或删除。`,
+            })
           } else {
             const code = body?.error || (result.status ? 'http-' + result.status : 'network')
-            setNotice({ tone: 'danger', title: '归档失败', code, message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+            setNotice({
+              tone: 'danger',
+              title: body?.error === 'stop-failed' ? '归档失败：分身进程未停止' : '归档失败',
+              code,
+              message: body?.error === 'stop-failed'
+                ? '宿主已尝试停止进程，但确认它仍在运行；归档没有生效，任务仍保留。请重试或检查 Forker 日志。'
+                : failureHint(code),
+              detail: body?.detail || diagnosticText(result.diagnostic),
+            })
           }
           await refresh()
         } catch (e) {
           setNotice({ tone: 'danger', title: '归档失败', code: 'network', message: String(e?.message ?? e) })
+        } finally {
+          if (aliveRef.current) setBusy('')
+        }
+      }
+
+      const restoreTask = async (task) => {
+        if (busy) {
+          setNotice({ tone: 'warning', title: '操作进行中', message: '请等待当前操作完成后再还原。' })
+          return
+        }
+        const ok = typeof window !== 'undefined' && window.confirm
+          ? window.confirm(`还原存档「${task.title || task.taskId}」？\n\n会用原存档重新启动分身（新端口、新 token），存档内容不会丢失。`)
+          : false
+        if (!ok) return
+        setBusy('restore:' + task.taskId)
+        setNotice(null)
+        try {
+          const result = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
+          const body = result.body
+          if (result.status === 200 && body?.ok) {
+            setShowArchive(false)
+            setNotice({
+              tone: 'success',
+              title: '已还原存档',
+              message: `${task.title || task.taskId} 已重新启动（端口 ${body.port ?? '—'}${body.adapter?.ok ? ' · 适配器已就绪' : ' · 适配器尚未就绪'}）`,
+              actions: body.url ? [{ label: '打开分身', href: body.url }] : [],
+            })
+          } else {
+            const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+            setNotice({ tone: 'danger', title: '还原失败', code, message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+          }
+          await refresh()
+        } catch (e) {
+          setNotice({ tone: 'danger', title: '还原失败', code: 'network', message: String(e?.message ?? e) })
+        } finally {
+          if (aliveRef.current) setBusy('')
+        }
+      }
+
+      const deleteArchiveTask = async (task) => {
+        if (busy) {
+          setNotice({ tone: 'warning', title: '操作进行中', message: '请等待当前操作完成后再删除存档。' })
+          return
+        }
+        const ok = typeof window !== 'undefined' && window.confirm
+          ? window.confirm(`永久删除存档「${task.title || task.taskId}」？\n\n会删除该分身的 $DSH_HOME 与存档记录，不可撤销。`)
+          : false
+        if (!ok) return
+        setBusy('delete-archive:' + task.taskId)
+        setNotice(null)
+        try {
+          const result = await api('/fang/api/tasks/archive/delete', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
+          const body = result.body
+          if (result.status === 200 && body?.ok) {
+            setNotice({ tone: 'success', title: '存档已删除', message: `${task.title || task.taskId} 的存档与 home 已删除。` })
+          } else {
+            const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+            setNotice({ tone: 'danger', title: '删除存档失败', code, message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+          }
+          await refresh()
+        } catch (e) {
+          setNotice({ tone: 'danger', title: '删除存档失败', code: 'network', message: String(e?.message ?? e) })
         } finally {
           if (aliveRef.current) setBusy('')
         }
@@ -1668,6 +1744,12 @@ window.__ModuleLoader__.load({
             h('span', { style: { fontSize: 11, lineHeight: '15px', color: TEXT2, letterSpacing: '.04em' } }, '母体 × 分身 · 双生控制台'))),
         statusStrip,
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginLeft: isNarrow ? 0 : 'auto', width: isNarrow ? '100%' : 'auto' } },
+          h(Btn, {
+            variant: showArchive ? 'primary' : 'quiet',
+            size: 'sm',
+            onClick: () => setShowArchive((value) => !value),
+            title: '读档：查看已归档分身；可还原（重新启动）或永久删除',
+          }, showArchive ? '返回面板' : `读档${archivedTasks.length ? ` (${archivedTasks.length})` : ''}`),
           h(Btn, {
             variant: 'quiet',
             size: 'sm',
@@ -1990,15 +2072,12 @@ window.__ModuleLoader__.load({
           rightParts.push(h('div', { key: 'noactive', style: { padding: '10px 14px 0', fontSize: 12, color: TEXT2 } }, '当前没有进行中的分身。'))
         }
         if (archivedTasks.length > 0) {
-          rightParts.push(h(FoldSection, {
-            key: 'archived',
-            label: '已归档',
-            count: archivedTasks.length,
-            collapsed: archivedCollapsed,
-            onToggle: () => setArchivedCollapsed((value) => !value),
-            title: archivedCollapsed ? '展开已归档分身（默认折叠）' : '收起已归档分身',
-          }, h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 12px 12px' } },
-            archivedTasks.map((task) => h(ArchivedRow, { key: task.taskId, task, onOpen: openTask })))))
+          rightParts.push(h('div', {
+            key: 'archivehint',
+            style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '10px 14px 0', fontSize: 11.5, lineHeight: '18px', color: TEXT2 },
+          },
+          h('span', null, `有 ${archivedTasks.length} 个存档（进程已停止，home 保留）。`),
+          h(Btn, { size: 'sm', variant: 'ghost', onClick: () => setShowArchive(true) }, '打开读档')))
         }
         if (showTemporary && tempTasks.length > 0) {
           rightParts.push(h(FoldSection, {
@@ -2106,6 +2185,77 @@ window.__ModuleLoader__.load({
       const splitStyle = isMobile
         ? { display: 'grid', gridTemplateColumns: 'minmax(0,1fr)', gridAutoRows: 'auto', gap: 12 }
         : { flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0,3fr) minmax(0,7fr)', gap: 12 }
+
+      // ── 读档（v2.7.1）：存档 = 进程已停止、home 保留的已归档任务 ─────────
+      const archiveView = h('section', {
+        role: 'region',
+        'aria-label': '瓮城读档',
+        style: {
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          border: `1px solid ${BORDER}`, borderRadius: 12, overflow: 'hidden',
+          background: SURFACE, boxShadow: '0 1px 2px rgba(0,0,0,.03)',
+        },
+      },
+      h('div', {
+        style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '10px 14px', borderBottom: `1px solid ${BORDER}` },
+      },
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 } },
+        h('h2', { style: { margin: 0, fontSize: 13, fontWeight: 600, lineHeight: '18px' } }, '读档 · 存档管理'),
+        h('span', { style: { fontSize: 11, lineHeight: '16px', color: TEXT2 } }, '归档会停止分身进程并保留 home；还原会用存档重新启动，删除会永久移除 home。')),
+      h(Tag, { title: '已归档分身数量' }, `${archivedTasks.length} 个存档`)),
+      tasks.state === 'error' ? h('div', { style: { padding: '10px 14px 0' } }, tasksBanner) : null,
+      h('div', {
+        style: { flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 },
+      },
+      archivedTasks.length === 0
+        ? h(StateBlock, {
+          dashed: true,
+          title: '还没有存档',
+          message: '在分身卡片上点「归档」会停止进程并保留存档；之后在这里还原或永久删除。',
+        })
+        : archivedTasks.map((task) => h('div', {
+          key: task.taskId,
+          style: {
+            border: `1px solid ${BORDER}`, borderRadius: 10, padding: 12, background: RAISED,
+            display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0,
+          },
+        },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 } },
+          h('span', { style: { fontSize: 13, fontWeight: 600, color: TEXT, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.title || '未命名分身'),
+          h(Tag, null, '已归档')),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 11, lineHeight: '17px', color: TEXT2 } },
+          h('code', { style: { fontFamily: MONO, fontSize: 10.5 } }, short(task.taskId, 10)),
+          h('span', null, `归档于 ${fmtTime(task.archivedAt)}`),
+          task.archiveRemote && task.archiveRemote.ok === false
+            ? h('span', { style: { color: WARNING } }, `远端未确认：${task.archiveRemote.error || 'unknown'}`)
+            : null),
+        h('span', { style: { fontSize: 11, lineHeight: '17px', color: TEXT3 } },
+          task.homeDir
+            ? '存档保留在本地；还原会重新启动分身（新端口、新 token），会话与文件仍在。'
+            : '存档 home 已不存在；只能删除记录。'),
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          h(Btn, {
+            size: 'sm',
+            variant: 'primary',
+            disabled: !!busy || !task.homeDir,
+            onClick: () => restoreTask(task),
+            title: task.homeDir ? '用该存档重新启动分身' : '存档 home 缺失，无法还原',
+          }, busy === 'restore:' + task.taskId ? '还原中…' : '还原'),
+          h(Btn, {
+            size: 'sm',
+            variant: 'ghost',
+            disabled: !!busy,
+            onClick: () => deleteArchiveTask(task),
+            title: '永久删除该存档与 $DSH_HOME（不可撤销）',
+            style: { color: DANGER },
+          }, busy === 'delete-archive:' + task.taskId ? '删除中…' : '删除存档'))))))
+
+      if (showArchive) {
+        return h('div', { role: 'region', 'aria-label': '瓮城读档', style: rootStyle },
+          header,
+          noticeView,
+          h('div', { style: { flex: 1, minHeight: 0, display: 'flex' } }, archiveView))
+      }
 
       // 分身 Web UI：母体 API 不存在，渲染专用说明页，并且不发起 /fang/api/* 请求（v2.6.6）。
       if (hostRole.role === HOST_ROLE.FORK) return h(ForkHostNotice, { role: hostRole })

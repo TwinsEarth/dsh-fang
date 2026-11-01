@@ -98,12 +98,13 @@ export const AUDIT = {
   BUFFER_FLUSH: 'buffer-flush',
   TASK_READY: 'task-ready',
   TASK_ARCHIVED: 'task-archived',
+  TASK_RESTORED: 'task-restored',
   ADAPTER_HANDSHAKE: 'adapter-handshake',
   ROUTE_CONFIRMED: 'route-confirmed',
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.7.0'
+export const FANG_VERSION = '2.7.1'
 
 /**
  * @typedef {object} ForkInfo

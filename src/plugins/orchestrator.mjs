@@ -49,7 +49,9 @@ export const Config = z.object({
   allowProcessRestart: z.boolean().default(false)
     .description('是否允许编排器主动重启母体（默认禁止；重启一律交给 restart-guard）'),
   autoReapIdleMinutes: z.number().min(0).max(1440).default(0)
-    .description('空闲多少分钟后自动归档任务（0 = 不自动）'),
+    .description('空闲多少分钟后自动回收任务（0 = 不自终）'),
+  archiveStopTimeoutMs: z.number().min(100).max(30000).default(3000)
+    .description('归档时等待分身进程真正退出的上限（毫秒）'),
   commercial: z.object({
     collaboration: z.boolean().default(false).description('联合开发（需 fangCommercial provider）'),
     git: z.boolean().default(false).description('本地 Git 快照（需 provider）'),
@@ -309,6 +311,8 @@ export function apply(ctx, config) {
       collaborators: t.collaborators ?? [],
       seed: t.seed ?? null,
       importedSession: t.importedSession ?? null,
+      archivedAt: t.archivedAt ?? null,
+      archiveRemote: t.archiveRemote ?? null,
     }
   }
 
@@ -842,11 +846,14 @@ export function apply(ctx, config) {
       })
       return { ok: true, taskId: task.taskId, sessions, degraded: index.degraded ?? [] }
     },
-    /** v2 归档：先让分身 flush + 落审计，再回收进程与 home。 */
+    /** v2 归档：先让分身 flush + 落审计，再**停止进程但保留 home**（读档/还原/删除见 restoreTask/deleteArchived）。 */
     async archiveTask(taskId) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status === TASK_STATUS.ARCHIVED) {
+        return { ok: true, archived: true, already: true, taskId: id, title: task.title, homeKept: true }
+      }
       const summary = taskView(task)
       let remote = { ok: false, error: 'adapter-unavailable' }
       if (task.adapter?.ok) {
@@ -856,12 +863,130 @@ export function apply(ctx, config) {
           remote = { ok: !!(res.ok && res.data?.ok !== false), error: res.data?.error ?? res.error }
         }
       }
+
+      // 归档 = 停止进程 + 保留 home；必须确认进程真的退了，否则把失败如实返回，
+      // 不能把「列表里没了、进程还在」当成归档成功。
+      const f = forker()
+      if (!f || typeof f.stop !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id, remote }
+      try {
+        const stopped = await f.stop(id)
+        if (stopped && stopped.ok === false && stopped.error !== 'not-found') {
+          return { ok: false, error: 'stop-failed', detail: stopped.error ?? 'stop-failed', taskId: id, remote }
+        }
+      } catch (e) {
+        return { ok: false, error: 'stop-failed', detail: String(e?.message ?? e), taskId: id, remote }
+      }
+      const deadline = nowMs() + cfg.archiveStopTimeoutMs
+      let alive = true
+      while (nowMs() < deadline) {
+        alive = typeof f.alive === 'function' ? !!f.alive(id) : !!(f.status?.(id)?.running)
+        if (!alive) break
+        await sleep(100)
+      }
+      if (alive) {
+        audit(AUDIT.TASK_ARCHIVED, { taskId: id, title: task.title, ok: false, error: 'stop-failed', remote })
+        return { ok: false, error: 'stop-failed', detail: 'fork process is still alive after stop', taskId: id, remote, alive: true }
+      }
+
       task.status = TASK_STATUS.ARCHIVED
+      task.archivedAt = nowMs()
+      task.archiveRemote = remote
+      task.pid = null
+      task.port = null
+      task.url = null
+      task.token = ''
+      task.adapter = { ok: false, error: 'archived', at: nowMs() }
       persist()
-      const reaped = await service.reap(id)
-      audit(AUDIT.TASK_ARCHIVED, { taskId: id, title: task.title, remote })
+      remoteCache.delete(id)
+      audit(AUDIT.TASK_ARCHIVED, { taskId: id, title: task.title, remote, stopped: true, homeKept: true })
       bus.emit('fang/task-archived', { taskId: id, title: task.title })
-      return { ok: true, archived: true, taskId: id, title: task.title, summary, remote, reaped: reaped.ok === true }
+      return {
+        ok: true,
+        archived: true,
+        taskId: id,
+        title: task.title,
+        summary,
+        remote,
+        stopped: true,
+        homeKept: true,
+      }
+    },
+
+    /** 还原存档：用原 home/profile 重新 spawn（新端口 + 新 token），再握手。 */
+    async restoreTask(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived', taskId: id }
+      if (!task.homeDir || !exists(task.homeDir)) {
+        return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
+      }
+      const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
+      const forkBundle = path.join(forkProfileDir, 'node_modules', '@local', 'dsh-fang')
+      if (!exists(forkBundle)) {
+        return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
+      }
+      const f = forker()
+      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      const started = await f.spawn({
+        forkId: id,
+        homeDir: task.homeDir,
+        profile: task.profile,
+        cliPath: cliPath(),
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+      })
+      if (!started || started.ok === false) {
+        audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
+        return { ok: false, error: 'spawn-failed', detail: started?.error ?? 'unknown', taskId: id }
+      }
+      task.status = TASK_STATUS.RUNNING
+      task.archivedAt = null
+      task.archiveRemote = null
+      task.pid = started.pid ?? null
+      task.port = started.port ?? null
+      task.url = started.url ?? null
+      task.token = started.token ?? extractTokenSafe(task.url)
+      task.adapter = { ok: false, error: 'handshaking' }
+      persist()
+      audit(AUDIT.FORK_STARTED, { taskId: id, pid: task.pid, port: task.port, profile: task.profile, restored: true })
+      const adapter = await handshake(task)
+      task.status = adapter.ok ? TASK_STATUS.READY : TASK_STATUS.RUNNING
+      persist()
+      audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
+      bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
+      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter }
+    },
+
+    /** 永久删除存档：reap（杀进程 + 删 home + 删记录）；forker 记录已丢时按 home 兜底清理。 */
+    async deleteArchivedTask(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived', taskId: id }
+      const f = forker()
+      let reaped = { ok: true }
+      try {
+        if (f && typeof f.reap === 'function') reaped = await f.reap(id)
+      } catch (e) {
+        reaped = { ok: false, error: String(e?.message ?? e) }
+      }
+      if (reaped && reaped.ok === false && reaped.error !== 'not-found') {
+        return { ok: false, error: 'reap-failed', detail: reaped.error, taskId: id }
+      }
+      // forker 记录不存在（宿主重启/旧归档）时，仍清理 task.homeDir（限定在 forks 根内）。
+      if (reaped?.error === 'not-found' && task.homeDir) {
+        const root = path.resolve(layout.forkHomesDir) + path.sep
+        const target = path.resolve(task.homeDir)
+        if (target.startsWith(root) && exists(target)) {
+          try { removeTree(target) } catch (e) { return { ok: false, error: 'remove-failed', detail: String(e?.message ?? e), taskId: id } }
+        }
+      }
+      tasks.delete(id)
+      remoteCache.delete(id)
+      persist()
+      audit(AUDIT.FORK_REAPED, { taskId: id, title: task.title, archivedDelete: true })
+      bus.emit('fang/fork-reaped', { forkId: id })
+      return { ok: true, deleted: true, taskId: id, title: task.title }
     },
 
     async reap(taskId) {
@@ -974,7 +1099,7 @@ export function apply(ctx, config) {
       const idleMs = cfg.autoReapIdleMinutes * 60_000
       for (const task of [...tasks.values()]) {
         if (nowMs() - (task.lastActiveAt ?? task.createdAt) > idleMs) {
-          service.archiveTask(task.taskId).catch(() => { /* best effort */ })
+          service.reap(task.taskId).catch(() => { /* best effort */ })
         }
       }
     }, 60_000)
@@ -1030,6 +1155,16 @@ export function apply(ctx, config) {
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
         const body = await readBody(req)
         const out = await service.archiveTask(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('POST', `${prefix}/api/tasks/restore`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.restoreTask(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('POST', `${prefix}/api/tasks/archive/delete`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.deleteArchivedTask(String(body?.taskId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
       })
       route('POST', `${prefix}/api/tasks/promote`, async (req, res) => {

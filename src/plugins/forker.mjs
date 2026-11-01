@@ -1198,12 +1198,22 @@ export function apply(ctx, config) {
     return { ok: true, actions, forks: actions.filter((a) => a.action === 'mark-crashed').length }
   }
 
+  /** 真实进程存活判断（用于归档确认 stop 真的生效，而不是只看 rec.running 状态）。 */
+  const alive = (forkId) => {
+    ensureRegistry()
+    const rec = records.get(String(forkId ?? '').trim())
+    if (!rec) return false
+    const pid = rec.pid ?? rec.child?.pid ?? null
+    return isPidAlive(pid)
+  }
+
   const service = {
     role: gate.role,
     provision,
     spawn,
     stop,
     reap,
+    alive,
     health,
     recover,
     status,
