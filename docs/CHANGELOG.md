@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## v2.6.9（2026-11-01）
+
+**主题：SseParser 定向生成器 —— 为 9 个分支各构造“边界恰好命中”的最小输入。**
+
+### 新增
+- **`tools/fuzz/sse-directed.mjs`**：
+  - 9 个分支、**61 条**定向用例：`cr-trimming`（8）/ `multi-line-data`（7）/
+    `empty-data-dropped`（9）/ `comment-ignored`（9）/ `space-trimming`（7）/
+    `field-override`（6）/ `retry-and-unknown`（6）/ `data-field-edge`（4）/ `buffer-boundary`（5）；
+  - 40+ 条用例带 `expectedFrames`，锁定“只裁一个 CR / 只裁一个空格 / 空 data 帧丢弃 /
+    无冒号 data 仍产帧”等精确语义；
+  - `pickDirected(rng)` 均匀选分支与用例；`generateMixed(rng, { directedProb })` 按概率混合定向/随机；
+  - `runDirectedSmokeTest()`：一次性解析 + expectedFrames + 6 种分块策略 × 3 种子等价性；
+    支持注入 parse 函数用于 mutation 测试。
+- **`tools/fuzz/sse-parser-fuzz.mjs`**：
+  - `runSseParserFuzz({ directedProb, directed })` 支持混合策略，返回 `branchCounts` /
+    `directedHits` / `randomHits`；失败记录带 `branch`；
+  - CLI 先跑定向 smoke（61/61），再跑随机模糊，并打印分支覆盖率；
+    `--directed-prob` / `--no-directed` 可调；`directedHits > 100` 时零命中分支告警。
+- **`test/sse-directed.test.mjs`（8 项）**：用例完整性、smoke、expectedFrames 覆盖、
+  mutation 检出（裁掉所有尾部 CR 会被抓到）、混合确定性、均匀抽样、fuzz 全定向/全随机/可复现。
+
+### 文档
+- `docs/FUZZ-SSE-DIRECTED.md`：分支表、用例设计、smoke 流程、混合策略、CLI、取舍与边界。
+- `docs/PROTOCOL-V3.md §11/§12`：定向生成器测试与实现记录。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 9 个补丁位。
+
 ## v2.6.8（2026-11-01）
 
 **主题：Adapter 命令入口的扩展面 —— 外部插件注册命令 + 413 body 上限。**
