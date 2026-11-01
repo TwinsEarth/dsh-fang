@@ -11,7 +11,7 @@ import http from 'node:http'
 import zlib from 'node:zlib'
 
 import { makeCtx, makeWebServerStub, makeReq, makeRes } from './helpers.mjs'
-import { SERVICE } from '../src/kernel/index.mjs'
+import { SERVICE, FANG_VERSION } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
@@ -133,7 +133,7 @@ function cleanup(ctx, dataRoot) {
 test('orchestrator: registers service; status exposes tasks, forks compat, commercial flags', async () => {
   const { ctx, svc, dataRoot } = await boot()
   assert.ok(svc)
-  assert.equal(svc.version, '2.3.1')
+  assert.equal(svc.version, FANG_VERSION)
   assert.equal(svc.role, 'mother')
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
@@ -332,7 +332,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
   assert.equal(status.statusCode, 200)
-  assert.equal(status.json().version, '2.3.1')
+  assert.equal(status.json().version, FANG_VERSION)
 
   const wrongMethod = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'POST'), wrongMethod)
@@ -354,11 +354,23 @@ test('orchestrator: resolveInside rejects traversal and absolute plugin paths', 
 test('orchestrator: derive() asks the session catalog for a bounded seed and writes it into the fork home', skipNoRemote, async () => {
   const adapter = await makeAdapterServer()
   try {
-    const digestCalls = []
+    const seedCalls = []
+    const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-seed-src-'))
+    const srcFile = path.join(srcDir, 'session.v4.jsonl.zstd')
+    fs.writeFileSync(srcFile, 'fake-zstd-bytes')
     const catalog = {
-      async digest(sessionId) {
-        digestCalls.push(sessionId)
-        return { ok: true, markdown: '# lineage\n\n- session: ' + sessionId, sha256: 'x' }
+      async seed(sessionId) {
+        seedCalls.push(sessionId)
+        return {
+          ok: true,
+          markdown: '# lineage\n\n- session: ' + sessionId,
+          sourceFile: srcFile,
+          workspacePath: 'E:\\ws',
+          workspaceTitle: 'WS',
+          workspaceId: 'ws-1',
+          createdAt: 1793500000000,
+          sourceBytes: 16,
+        }
       },
     }
     const { ctx, svc, forker, dataRoot } = await boot({
@@ -367,7 +379,7 @@ test('orchestrator: derive() asks the session catalog for a bounded seed and wri
     })
     const out = await svc.derive({ sessionId: 'session-01234567-89ab-cdef-0123-456789abcdef', title: '从会话继续' })
     assert.equal(out.ok, true, JSON.stringify(out))
-    assert.equal(digestCalls.length, 1, 'catalog.digest called exactly once')
+    assert.equal(seedCalls.length, 1, 'catalog.seed called exactly once')
     assert.equal(out.derivedFrom.sessionId, 'session-01234567-89ab-cdef-0123-456789abcdef')
     const list = svc.listTasks()
     assert.equal(list.length, 1)
@@ -376,6 +388,13 @@ test('orchestrator: derive() asks the session catalog for a bounded seed and wri
     const seedDir = path.join(list[0].homeDir, 'fang-seeds')
     const seedFiles = fs.existsSync(seedDir) ? fs.readdirSync(seedDir) : []
     assert.equal(seedFiles.length, 1, 'exactly one seed file written')
+    const imported = list[0].importedSession
+    assert.equal(imported?.ok, true, JSON.stringify(imported))
+    const destLog = path.join(list[0].homeDir, 'sessions', encodeWorkspaceKey('E:\\ws'), 'session-01234567-89ab-cdef-0123-456789abcdef', 'session.v4.jsonl.zstd')
+    assert.equal(fs.existsSync(destLog), true, 'mother session log imported into the fork')
+    const forkIndex = JSON.parse(fs.readFileSync(path.join(list[0].homeDir, 'storages', 'workspace.json'), 'utf8'))
+    const entry = Object.values(forkIndex.tables.workspaces).find((w) => w.path === 'E:\\ws')
+    assert.deepEqual(entry.sessionIds, ['session-01234567-89ab-cdef-0123-456789abcdef'])
     const seedText = fs.readFileSync(path.join(seedDir, seedFiles[0]), 'utf8')
     assert.match(seedText, /# lineage/)
     // mother data untouched beyond its own dataDir: no sessions dir is created

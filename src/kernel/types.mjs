@@ -18,6 +18,9 @@ export const SERVICE = {
   adapter: 'fangAdapter',
   commercial: 'fangCommercial',
   sessionCatalog: 'fangSessionCatalog',
+  sessionBridge: 'fangSessionBridge',
+  sessionSync: 'fangSessionSync',
+  sessionRouter: 'fangSessionRouter',
 }
 
 /** Loader row ids used by cordis.patch.yml. */
@@ -33,6 +36,9 @@ export const ROW = {
   auditor: 'fang-auditor',
   router: 'fang-router',
   sessionCatalog: 'fang-session-catalog',
+  sessionBridge: 'fang-session-bridge',
+  sessionSync: 'fang-session-sync',
+  sessionRouter: 'fang-session-router',
 }
 
 export const FORK_STATUS = {
@@ -97,7 +103,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.3.1'
+export const FANG_VERSION = '2.6.1'
 
 /**
  * @typedef {object} ForkInfo
@@ -162,6 +168,66 @@ export const ADAPTER_ROUTE = {
   APPROVALS: '/adapter/approvals',
   AUDIT: '/adapter/audit',
   COMMAND: '/adapter/command',
+  // ── v3（docs/PROTOCOL-V3.md §4）：与 v2 五条并存，向后兼容 ──
+  VERSION: '/adapter/version',
+  HEALTH: '/adapter/health',
+  STATE: '/adapter/state',
+  EVENTS: '/adapter/events',
+  COMMANDS: '/adapter/commands',
+}
+
+/**
+ * Adapter 协议版本（v2.6.1 起）。两侧编译期常量：母体用它做版本协商，分身
+ * 在 /adapter/version 与 /adapter/state 里回报。
+ */
+export const ADAPTER_PROTOCOL_VERSION = 3
+/** 母体可接受的最低协议版本（v1 = 无版本号的 v2.0 握手，按 legacy 处理）。 */
+export const ADAPTER_PROTOCOL_MIN = 1
+
+/** Adapter 事件种类（SSE 下行，docs/PROTOCOL-V3.md §6）。 */
+export const ADAPTER_EVENT = {
+  STATE_CHANGED: 'state-changed',
+  PLUGIN_STATE: 'plugin-state',
+  APPROVAL_REQUESTED: 'approval-requested',
+  APPROVAL_RESOLVED: 'approval-resolved',
+  AUDIT: 'audit',
+  COMMAND: 'command',
+  COMMAND_PROGRESS: 'command-progress',
+  COMMAND_DONE: 'command-done',
+  ERROR: 'error',
+}
+
+/**
+ * Adapter 错误码 → HTTP 状态码（docs/PROTOCOL-V3.md §8）。
+ * 未登记的 code 一律 500：宁可让母体看到一个明确的失败，也不要假装成功。
+ */
+export const ADAPTER_ERROR_STATUS = {
+  'bad-request': 400,
+  'invalid-json': 400,
+  'invalid-payload': 400,
+  'missing-op': 400,
+  'unknown-op': 400,
+  'path-escape': 400,
+  'file-too-large': 400,
+  'total-too-large': 400,
+  'binary-file': 400,
+  'body-too-large': 400,
+  'cursor-invalid': 400,
+  'command-id-invalid': 400,
+  unauthorized: 401,
+  'not-found': 404,
+  'plugin-not-found': 404,
+  'session-changed': 409,
+  'state-conflict': 409,
+  'not-pending': 409,
+  'service-unavailable': 409,
+  'not-configured': 409,
+  conflict: 409,
+  timeout: 409,
+  'cursor-expired': 410,
+  'handler-threw': 500,
+  'internal-error': 500,
+  'not-ready': 503,
 }
 
 /** Container (AppContainer) executor states. */

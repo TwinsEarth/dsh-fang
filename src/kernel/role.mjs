@@ -9,7 +9,7 @@
 // Matrix is the product contract (docs/CONTRACTS-V2.md §2). Adding a plugin to a role
 // here is the only place that decision lives.
 
-export const ROLE = { MOTHER: 'mother', FORK: 'fork' }
+export const ROLE = { MOTHER: 'mother', FORK: 'fork', CONSUMER: 'consumer' }
 
 /** plugin key → roles in which the plugin activates. */
 export const MATRIX = {
@@ -25,14 +25,17 @@ export const MATRIX = {
   bufferKeeper: ['fork'],
   auditor: ['mother', 'fork'],
   sessionCatalog: ['mother'],
+  sessionBridge: ['mother'],
+  sessionSync: ['mother', 'consumer'],
+  sessionRouter: ['mother'],
 }
 
-const VALID_ROLES = new Set([ROLE.MOTHER, ROLE.FORK])
+const VALID_ROLES = new Set([ROLE.MOTHER, ROLE.FORK, ROLE.CONSUMER])
 
 /**
  * The environment wins over config: a fork is started by the forker with
  * DSH_FANG_ROLE=fork and must never be able to promote itself to a mother by config.
- * @returns {'mother'|'fork'}
+ * @returns {'mother'|'fork'|'consumer'}
  */
 export function resolveRole({ cfgRole = '', env = process.env } = {}) {
   const fromEnv = env?.DSH_FANG_ROLE

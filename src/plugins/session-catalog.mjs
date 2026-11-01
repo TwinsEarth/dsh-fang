@@ -46,7 +46,9 @@ import {
   readBoundedHead,
   readBoundedEvents,
   extractSessionTitle,
+  extractConversation,
   TITLE_DEFAULTS,
+  SEED_DEFAULTS,
   redact,
 } from '../lib/session-format.mjs'
 
@@ -250,11 +252,16 @@ export function apply(ctx, config) {
       zstdDecompressSync,
     })
     const extracted = extractSessionTitle(decoded.events)
+    const header = decoded.events.find((event) => event?.type === 'session')
+    const userMessages = decoded.events.filter((event) => event?.type === 'user/message').length
     const value = {
       title: extracted.title,
       titleSource: extracted.titleSource,
       preview: extracted.preview,
       messageSeq: extracted.messageSeq,
+      createdAt: Number.isFinite(header?.createdAt) ? header.createdAt : null,
+      userMessages,
+      empty: userMessages === 0,
       framesDecoded: decoded.framesDecoded,
       degraded: decoded.degraded,
     }
@@ -267,6 +274,10 @@ export function apply(ctx, config) {
     titleSource: info.title ? (info.titleSource ?? 'unknown') : 'workspace',
     preview: info.preview ?? null,
     titleDegraded: info.degraded ?? [],
+    createdAt: info.createdAt ?? null,
+    createdAtIso: isIsoFromMs(info.createdAt),
+    userMessages: info.userMessages ?? 0,
+    empty: info.empty === true,
   })
 
   /** 按 sessionId 定位（前端只传 id；路径永远由扫描结果推出）。 */
@@ -521,6 +532,73 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 会话交接种子：有界多帧读取 + 对话摘录，供派生分身时写入 fang-seeds 并导入历史会话。
+   * 空会话（没有任何 user/message）显式返回 session-empty，不伪造交接内容。
+   */
+  const seed = (sessionId, options = {}) => {
+    const found = findSession(sessionId)
+    if (!found.ok) return found
+    const opts = options && typeof options === 'object' ? options : {}
+    const maxFrames = clampInt(opts.maxFrames ?? SEED_DEFAULTS.maxFrames, 8, 4096, SEED_DEFAULTS.maxFrames)
+    const maxCompressedBytes = clampInt(opts.maxCompressedBytes ?? SEED_DEFAULTS.maxCompressedBytes, 4096, 256 * 1024 * 1024, SEED_DEFAULTS.maxCompressedBytes)
+    const maxChars = clampInt(opts.maxChars ?? SEED_DEFAULTS.maxChars, 1024, 256 * 1024, SEED_DEFAULTS.maxChars)
+    const decoded = readBoundedEvents({ file: found.file, maxFrames, maxCompressedBytes, fsApi, zstdDecompressSync })
+    const meta = extractSessionTitle(decoded.events)
+    const conv = extractConversation(decoded.events, { maxChars })
+    if (conv.messages === 0) {
+      return {
+        ok: false,
+        code: 'session-empty',
+        sessionId: found.session.sessionId,
+        degraded: decoded.degraded,
+        framesDecoded: decoded.framesDecoded,
+      }
+    }
+    const header = decoded.events.find((event) => event.type === 'session')
+    const session = found.session
+    const title = meta.title ?? '未命名会话'
+    const lines = []
+    lines.push(`# 会话交接：${title}`)
+    lines.push('')
+    lines.push(`- sessionId: \`${session.sessionId}\``)
+    lines.push(`- 工作区: ${session.workspaceTitle}${session.workspacePath ? ` (${session.workspacePath})` : '（未在 workspace.json 登记）'}`)
+    if (Number.isFinite(header?.createdAt)) lines.push(`- 创建: ${new Date(header.createdAt).toISOString()}`)
+    if (Number.isFinite(session.updatedAt)) lines.push(`- 最近更新: ${new Date(session.updatedAt).toISOString()}`)
+    if (typeof header?.cwd === 'string') lines.push(`- cwd: ${header.cwd}`)
+    if (typeof header?.agentPreset === 'string') lines.push(`- agentPreset: ${header.agentPreset}`)
+    lines.push(`- 摘录: ${conv.messages} 条消息 / 最多 ${maxChars} 字符${conv.truncated ? '（已截断）' : ''}`)
+    lines.push('')
+    lines.push('## 对话摘录')
+    lines.push('')
+    lines.push(conv.markdown || '_（无对话内容）_')
+    if (decoded.degraded.length > 0) {
+      lines.push('')
+      lines.push(`> degraded: ${decoded.degraded.join(', ')}`)
+    }
+    const markdown = lines.join('\n')
+    return {
+      ok: true,
+      sessionId: session.sessionId,
+      title,
+      markdown,
+      bytes: Buffer.byteLength(markdown, 'utf8'),
+      messages: conv.messages,
+      truncated: conv.truncated,
+      framesDecoded: decoded.framesDecoded,
+      degraded: decoded.degraded,
+      sourceFile: found.file,
+      sourceBytes: session.bytes,
+      workspaceId: session.workspaceId,
+      workspacePath: session.workspacePath,
+      workspaceTitle: session.workspaceTitle,
+      createdAt: Number.isFinite(header?.createdAt) ? header.createdAt : null,
+      updatedAt: session.updatedAt,
+      cwd: typeof header?.cwd === 'string' ? header.cwd : null,
+      agentPreset: typeof header?.agentPreset === 'string' ? header.agentPreset : null,
+    }
+  }
+
   const service = {
     role: gate.role,
     version: FANG_VERSION,
@@ -535,6 +613,7 @@ export function apply(ctx, config) {
     getSession,
     readHead,
     digest,
+    seed,
   }
 
   ctx.effect(() => ctx.provide(SERVICE.sessionCatalog, service))

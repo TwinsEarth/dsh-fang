@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "2.3.1",
+  "version": "2.6.1",
   "private": true,
   "type": "module",
   "description": "dsh-Fang (瓮城) — mother/fork plugin development environment for DeepSeek Harness: one readonly mother, a disposable child dsh-Web per task, 1 orchestrator + 12 sub-plugins.",
@@ -24,7 +24,10 @@
       "default": "./client.js"
     },
     "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.svg",
+    "./session-bridge": "./src/plugins/session-bridge.mjs",
+    "./session-sync": "./src/plugins/session-sync.mjs",
+    "./session-router": "./src/plugins/session-router.mjs"
   },
   "files": [
     "src/**/*.mjs",

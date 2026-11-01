@@ -13,6 +13,18 @@
 //   GET  /fang/adapter/audit       审计尾部（?limit=n）
 //   POST /fang/adapter/command     控制命令 {op, payload}
 //
+// v2.6.1 起叠加 v3 接口（契约：docs/PROTOCOL-V3.md §4，向后兼容，旧端点全部保留）：
+//
+//   GET  /fang/adapter/version     协议版本协商（protocol / sessionId / capabilities）
+//   GET  /fang/adapter/health      轻量健康检查（Forker.waitReady / 存活探测）
+//   GET  /fang/adapter/state       完整状态快照（带 lastCursor，幂等）
+//   GET  /fang/adapter/events      SSE 事件流（?since=<cursor>&session=<sid>）
+//   POST /fang/adapter/commands    幂等命令信封 {commandId, op, payload, async}
+//
+// 认证（v3）：Forker spawn 时生成随机 token 经 env `DSH_ADAPTER_TOKEN` 注入，母体每次
+// 请求带 `Authorization: Bearer <token>`；token 不落盘、不写 URL。未注入时退化为
+// v2 语义（交由 DSH web 的 ?token= 守卫），以便旧分身/旧母体平滑共存。
+//
 // 硬约束：
 //   * 只部署在分身：apply 首行 roleGate('adapter')，mother 角色下不注册服务/路由；
 //   * 处理器与 service 方法**共用同一实现**，HTTP 只做方法校验与状态码映射；
@@ -23,6 +35,7 @@
 //   * archive = flush buffer + 归档标记（进程 kill 由母体 Forker 执行，绝不自杀）。
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 
 import {
   z,
@@ -31,13 +44,31 @@ import {
   SERVICE,
   ADAPTER_OP,
   ADAPTER_ROUTE,
+  ADAPTER_EVENT,
+  ADAPTER_PROTOCOL_MIN,
+  ADAPTER_PROTOCOL_VERSION,
   AUDIT,
   FANG_VERSION,
   bus,
   exists,
   iso,
+  newId,
   nowMs,
+  sampleResources,
+  totalResources,
 } from '../kernel/index.mjs'
+import {
+  CommandCache,
+  EventLog,
+  SSE_HEARTBEAT_MS,
+  SSE_RETRY_FRAME,
+  normalizeCommandEnvelope,
+  parseBearer,
+  parseCursor,
+  sseComment,
+  sseFrame,
+  statusForAdapterError,
+} from '../lib/adapter-protocol.mjs'
 
 export const name = 'fang-adapter'
 export const inject = []
@@ -54,6 +85,10 @@ const DEFAULTS = Object.freeze({
   taskId: '',
   auditLimit: 500,
   commandTimeoutMs: 10000,
+  token: '',
+  eventCapacity: 1000,
+  commandCacheSize: 500,
+  heartbeatMs: 5000,
 })
 
 export const Config = z.object({
@@ -65,6 +100,14 @@ export const Config = z.object({
     .description('单次审计拉取上限（HTTP ?limit= 会被夹在此值内）'),
   commandTimeoutMs: z.number().min(1).max(600000).default(10000)
     .description('单条控制命令的硬超时（毫秒）；超时返回 code=timeout，不阻塞 HTTP'),
+  token: z.string().default('')
+    .description('v3 Bearer token；留空 = 环境变量 DSH_ADAPTER_TOKEN（Forker spawn 时注入）'),
+  eventCapacity: z.number().min(1).max(100000).default(1000)
+    .description('SSE 事件环形缓冲容量（母体断线后可续传的事件数）'),
+  commandCacheSize: z.number().min(1).max(10000).default(500)
+    .description('命令幂等缓存容量（LRU，按 commandId）'),
+  heartbeatMs: z.number().min(1000).max(60000).default(5000)
+    .description('SSE 心跳 + 待审批 diff 周期（毫秒）'),
 })
 
 const msgOf = (e) => String(e && e.message !== undefined ? e.message : e)
@@ -206,8 +249,104 @@ export function apply(ctx, config) {
   const taskId = resolveTaskId(cfg)
   const auditLimit = clampInt(cfg.auditLimit, 1, 100000, DEFAULTS.auditLimit)
   const commandTimeoutMs = clampInt(cfg.commandTimeoutMs, 1, 600000, DEFAULTS.commandTimeoutMs)
+  const eventCapacity = clampInt(cfg.eventCapacity, 1, 100000, DEFAULTS.eventCapacity)
+  const commandCacheSize = clampInt(cfg.commandCacheSize, 1, 10000, DEFAULTS.commandCacheSize)
+  const heartbeatMs = clampInt(cfg.heartbeatMs, 1000, 60000, DEFAULTS.heartbeatMs)
   const role = gate.role
   const startedAt = nowMs()
+
+  /**
+   * v3 进程实例 id：只要进程重启就换一个。母体据此判断「对端是不是同一个分身」，
+   * 避免把旧 cursor 用在新进程上（PROTOCOL-V3 §7.3）。
+   */
+  const sessionId = `s-${randomBytes(8).toString('hex')}`
+
+  /**
+   * Bearer token：显式配置 > env `DSH_ADAPTER_TOKEN`（Forker spawn 时注入，不落盘）。
+   * 两者都没有 = v2 兼容模式：仍由 DSH web 自身的 ?token= 守卫，Adapter 不再加一层。
+   */
+  const adapterToken = (() => {
+    const explicit = String(cfg.token ?? '').trim()
+    if (explicit) return explicit
+    const fromEnv = typeof process.env?.DSH_ADAPTER_TOKEN === 'string' ? process.env.DSH_ADAPTER_TOKEN.trim() : ''
+    return fromEnv
+  })()
+  const expectedTokenBuf = adapterToken ? Buffer.from(adapterToken, 'utf8') : null
+
+  /** 恒定时间比较；长度不同直接 false（不泄露长度信息之外的任何东西）。 */
+  const authorized = (req) => {
+    if (!expectedTokenBuf) return true
+    const got = parseBearer(req?.headers?.authorization ?? req?.headers?.Authorization)
+    if (!got) return false
+    const actual = Buffer.from(got, 'utf8')
+    if (actual.length !== expectedTokenBuf.length) return false
+    try {
+      return timingSafeEqual(actual, expectedTokenBuf)
+    } catch {
+      return false
+    }
+  }
+
+  // ── v3 状态同步基础设施：事件环形缓冲 + 订阅扇出 + 命令幂等缓存 ─────────────
+  const eventLog = new EventLog({ capacity: eventCapacity, sessionId })
+  const commandCache = new CommandCache({ capacity: commandCacheSize })
+  const subscribers = new Set()
+  const activeStreams = new Set()
+
+  const publish = (event) => {
+    let envelope = null
+    try {
+      envelope = eventLog.append(event)
+    } catch {
+      return null
+    }
+    for (const sink of subscribers) {
+      try {
+        sink(envelope)
+      } catch {
+        /* 单个 SSE 连接写失败不得影响其它连接与命令处理 */
+      }
+    }
+    return envelope
+  }
+
+  const subscribe = (sink) => {
+    if (typeof sink !== 'function') return () => {}
+    subscribers.add(sink)
+    return () => subscribers.delete(sink)
+  }
+
+  // 待审批 diff：审批项没有「requested」事件，靠 pending() 快照比对；决议有 bus 事件。
+  const knownApprovals = new Map()
+  const decidedOutcomes = new Map()
+
+  const offApprovalDecided = (() => {
+    try {
+      if (typeof bus?.on !== 'function') return null
+      return bus.on('fang/approval-decided', (payload) => {
+        const id = String(payload?.id ?? payload?.approvalId ?? '').trim()
+        if (!id) return
+        const outcome = String(payload?.outcome ?? 'resolved')
+        const verdict = outcome === 'approved' ? 'approve' : outcome === 'denied' ? 'reject' : outcome
+        decidedOutcomes.set(id, verdict)
+        if (knownApprovals.has(id)) {
+          knownApprovals.delete(id)
+          publish({ kind: ADAPTER_EVENT.APPROVAL_RESOLVED, approvalId: id, verdict })
+        }
+      })
+    } catch {
+      return null
+    }
+  })()
+  if (typeof offApprovalDecided === 'function') {
+    ctx.effect(() => () => {
+      try {
+        offApprovalDecided()
+      } catch {
+        /* ignore */
+      }
+    })
+  }
 
   let layout = null
   try {
@@ -327,6 +466,162 @@ export function apply(ctx, config) {
     adapter: true,
   })
 
+  // ── v3 快照 / 健康 / 版本 / 审批 diff（docs/PROTOCOL-V3.md §5）─────────────
+  const activeSessions = () => {
+    const catalog = safeGet(SERVICE.sessionCatalog)
+    if (!catalog || typeof catalog.list !== 'function') return null
+    try {
+      const list = catalog.list()
+      return Array.isArray(list) ? list.length : null
+    } catch {
+      return null
+    }
+  }
+
+  const metricsView = () => {
+    let memory = null
+    try {
+      memory = process.memoryUsage()
+    } catch {
+      memory = null
+    }
+    let cpu = null
+    try {
+      const usage = process.cpuUsage()
+      cpu = { userMs: Math.round(usage.user / 1000), systemMs: Math.round(usage.system / 1000) }
+    } catch {
+      cpu = null
+    }
+    return {
+      rssBytes: memory?.rss ?? null,
+      heapUsedBytes: memory?.heapUsed ?? null,
+      handleCount: totalResources(sampleResources()),
+      cpu,
+      activeSessions: activeSessions(),
+      pid: process.pid ?? null,
+    }
+  }
+
+  /** 审批项归一化：不假设 approver.pending() 的字段全在（缺失就 null，不假装有值）。 */
+  const approvalSummary = (item) => ({
+    approvalId: String(item?.id ?? item?.approvalId ?? ''),
+    action: String(item?.action ?? item?.summary ?? item?.reason ?? item?.title ?? ''),
+    light: item?.light ?? item?.tone ?? item?.risk ?? null,
+    createdAt: item?.createdAt ?? item?.at ?? null,
+  })
+
+  /** 待审批 diff → approval-requested / approval-resolved 事件（环形缓冲，SSE 顺序一致）。 */
+  const syncApprovals = () => {
+    const rawItems = approvalItems()
+    const items = Array.isArray(rawItems) ? rawItems : []
+    const seen = new Set()
+    for (const item of items) {
+      const summary = approvalSummary(item)
+      if (!summary.approvalId) continue
+      seen.add(summary.approvalId)
+      if (knownApprovals.has(summary.approvalId)) continue
+      knownApprovals.set(summary.approvalId, summary)
+      publish({ kind: ADAPTER_EVENT.APPROVAL_REQUESTED, approval: summary })
+    }
+    for (const id of [...knownApprovals.keys()]) {
+      if (seen.has(id)) continue
+      knownApprovals.delete(id)
+      const verdict = decidedOutcomes.get(id) ?? 'resolved'
+      decidedOutcomes.delete(id)
+      publish({ kind: ADAPTER_EVENT.APPROVAL_RESOLVED, approvalId: id, verdict })
+    }
+  }
+
+  /** 完整状态快照：幂等、无 cursor 参数，母体 UI / 首帧同步用。 */
+  const stateSnapshot = () => {
+    const rawItems = approvalItems()
+    const items = Array.isArray(rawItems) ? rawItems : []
+    const buffer = bufferView()
+    const audit = auditHead()
+    const services = servicesView()
+    return {
+      ok: true,
+      sessionId,
+      protocolVersion: ADAPTER_PROTOCOL_VERSION,
+      minProtocol: ADAPTER_PROTOCOL_MIN,
+      version: FANG_VERSION,
+      role,
+      taskId,
+      status: archivedAt !== null ? 'stopping' : 'running',
+      uptimeMs: nowMs() - startedAt,
+      at: nowMs(),
+      metrics: metricsView(),
+      services,
+      plugins: Object.entries(services).map(([pluginId, present]) => ({
+        pluginId,
+        state: present ? 'active' : 'unavailable',
+      })),
+      approvals: items.map((item) => approvalSummary(item)),
+      buffer: {
+        state: buffer.state,
+        pending: buffer.pending.length,
+        dirtyFiles: buffer.pending.length,
+        dir: buffer.dir,
+      },
+      audit: { records: audit.records, head: audit.head, degraded: audit.degraded ?? null },
+      archived: archivedAt !== null,
+      lastCursor: eventLog.lastCursor,
+      nextCursor: eventLog.nextCursor,
+    }
+  }
+
+  const versionInfo = () => ({
+    ok: true,
+    protocol: ADAPTER_PROTOCOL_VERSION,
+    minProtocol: ADAPTER_PROTOCOL_MIN,
+    version: FANG_VERSION,
+    sessionId,
+    taskId,
+    role,
+    capabilities: Object.values(ADAPTER_OP),
+    at: iso(),
+  })
+
+  const health = () => ({
+    ok: true,
+    status: archivedAt !== null ? 'archived' : 'running',
+    pid: process.pid ?? null,
+    taskId,
+    sessionId,
+    protocol: ADAPTER_PROTOCOL_VERSION,
+    uptimeMs: nowMs() - startedAt,
+    archived: archivedAt !== null,
+    at: iso(),
+  })
+
+  const state = () => {
+    syncApprovals()
+    return stateSnapshot()
+  }
+
+  /**
+   * 事件续传：session 不匹配 → session-changed（母体重置 cursor）；
+   * cursor 过期 → gap=true（HTTP 层回 410，母体回退到 state 快照）。
+   */
+  const eventsSince = (cursor, session) => {
+    const sid = String(session ?? '').trim()
+    if (sid && sid !== sessionId) {
+      return { ok: false, code: 'session-changed', sessionId, events: [], gap: false }
+    }
+    const normalizedCursor = cursor === undefined || cursor === null || cursor === '' ? '0' : cursor
+    const result = eventLog.since(normalizedCursor)
+    if (!result.ok) return { ok: false, code: result.code, events: [], gap: false, sessionId }
+    return {
+      ok: true,
+      events: result.events,
+      gap: result.gap,
+      reason: result.reason,
+      lastCursor: result.lastCursor,
+      nextCursor: result.nextCursor,
+      sessionId,
+    }
+  }
+
   // ── service 方法（HTTP 处理器与母体 Remote 共用同一实现）────────────────────
 
   const hello = () => ({
@@ -334,6 +629,8 @@ export function apply(ctx, config) {
     role,
     taskId,
     version: FANG_VERSION,
+    protocol: ADAPTER_PROTOCOL_VERSION,
+    sessionId,
     capabilities: Object.values(ADAPTER_OP),
   })
 
@@ -343,6 +640,9 @@ export function apply(ctx, config) {
       ok: true,
       taskId,
       role,
+      protocol: ADAPTER_PROTOCOL_VERSION,
+      sessionId,
+      lastCursor: eventLog.lastCursor,
       services: servicesView(),
       buffer: bufferView(),
       approvals: { pending: items ? items.length : 0 },
@@ -587,10 +887,55 @@ export function apply(ctx, config) {
     return { ok: true, op, result: raw === undefined ? null : raw }
   }
 
+  /**
+   * v3 命令入口：commandId 幂等 + async 202。
+   * 幂等语义：同一个 commandId 重试时直接重放第一次的响应，**不重复执行副作用**。
+   * async 语义：立刻返回 {status:'accepted', trackingId}，进度/结果走 SSE
+   * 的 command-done 事件；trackingId 与 commandId 是两个东西（追踪 vs 去重）。
+   */
+  async function commands(input = {}) {
+    const normalized = normalizeCommandEnvelope(input)
+    if (!normalized.ok) {
+      return { ok: false, code: normalized.code, error: normalized.error, commandId: normalized.commandId ?? '' }
+    }
+    const { commandId, op, payload, async: isAsync } = normalized
+
+    if (commandId) {
+      const cached = commandCache.get(commandId)
+      if (cached) return { ...cached, deduplicated: true }
+    }
+
+    if (isAsync) {
+      const trackingId = commandId || newId('cmd')
+      const accepted = { ok: true, status: 'accepted', trackingId, op, commandId: commandId || null, async: true }
+      if (commandId) commandCache.set(commandId, accepted)
+      void Promise.resolve()
+        .then(() => command({ op, payload }))
+        .then((result) => {
+          publish({ kind: ADAPTER_EVENT.COMMAND_DONE, trackingId, op, result })
+          if (commandId) commandCache.set(commandId, { ...accepted, done: true, result })
+        })
+        .catch((e) => {
+          publish({ kind: ADAPTER_EVENT.ERROR, code: 'handler-threw', message: msgOf(e), trackingId, op })
+        })
+      return accepted
+    }
+
+    const result = await command({ op, payload })
+    const envelope = { ...result, commandId: commandId || null }
+    if (commandId) commandCache.set(commandId, envelope)
+    publish({ kind: ADAPTER_EVENT.COMMAND, op, ok: result.ok !== false, code: result.code ?? null, commandId: commandId || null })
+    return envelope
+  }
+
   const service = {
     role,
     taskId,
     version: FANG_VERSION,
+    protocol: ADAPTER_PROTOCOL_VERSION,
+    sessionId,
+    /** 是否启用了 v3 Bearer 认证（false = v2 兼容模式）。 */
+    authEnabled: expectedTokenBuf !== null,
     /** 已注册的 HTTP 路径（测试用；无 webServer 时为空数组）。 */
     routes: [],
 
@@ -599,51 +944,47 @@ export function apply(ctx, config) {
     approvals,
     audit,
     command,
+    commands,
+    versionInfo,
+    health,
+    state,
+    eventsSince,
+    lastCursor: () => eventLog.lastCursor,
   }
 
   ctx.effect(() => ctx.provide(SERVICE.adapter, service))
 
+  // 插件卸载：关掉所有 SSE 长连接，清空订阅与幂等缓存（不留悬挂定时器/引用）。
+  ctx.effect(() => () => {
+    for (const close of [...activeStreams]) {
+      try {
+        close()
+      } catch {
+        /* ignore */
+      }
+    }
+    subscribers.clear()
+    commandCache.clear()
+  })
+
   // ── HTTP 路由（处理器与 service 共用上面的实现）────────────────────────────
   const json = (res, code, obj) => {
     try {
-      res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      if (!res.headersSent) {
+        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      }
     } catch {
       /* 假 res / 已写头的 res 都不能把处理器打挂 */
     }
     try {
-      res.end(JSON.stringify(obj))
+      if (!res.writableEnded) res.end(JSON.stringify(obj))
     } catch {
       /* 同上 */
     }
   }
 
-  /** HTTP 状态码映射（契约 §5.1：405/400/409/500）。 */
-  const statusForCode = (code) => {
-    switch (String(code ?? '')) {
-      case 'bad-request':
-      case 'unknown-op':
-      case 'missing-op':
-      case 'invalid-json':
-      case 'path-escape':
-      case 'file-too-large':
-      case 'total-too-large':
-      case 'binary-file':
-      case 'body-too-large':
-        return 400
-      case 'service-unavailable':
-      case 'not-found':
-      case 'plugin-not-found':
-      case 'not-configured':
-      case 'conflict':
-      case 'timeout':
-      case 'not-pending':
-        return 409
-      case 'handler-threw':
-        return 500
-      default:
-        return 500
-    }
-  }
+  /** 错误码 → HTTP 状态码：唯一来源是 kernel 的 ADAPTER_ERROR_STATUS（PROTOCOL-V3 §8）。 */
+  const statusForCode = (code) => statusForAdapterError(code)
 
   /** 读取 JSON 请求体；不抛，返回 {body} 或 {error}。 */
   const readJsonBody = (req) => new Promise((resolve) => {
@@ -698,6 +1039,22 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 极简 query 解析（不依赖 URL 解析器，req.url 在测试里可能是 undefined）。 */
+  const parseQuery = (rawUrl) => {
+    const out = {}
+    const text = String(rawUrl ?? '')
+    const at = text.indexOf('?')
+    if (at < 0) return out
+    for (const pair of text.slice(at + 1).split('&')) {
+      if (!pair) continue
+      const eq = pair.indexOf('=')
+      const key = decodeURIComponentSafe(eq < 0 ? pair : pair.slice(0, eq))
+      const value = eq < 0 ? '' : decodeURIComponentSafe(pair.slice(eq + 1))
+      if (!(key in out)) out[key] = value
+    }
+    return out
+  }
+
   const registerRoutes = (webServer) => {
     const route = (method, routePath, handler) => {
       webServer.register({
@@ -708,9 +1065,20 @@ export function apply(ctx, config) {
           if (actual !== method) {
             return json(res, 405, { ok: false, code: 'method-not-allowed', error: 'method-not-allowed', path: routePath })
           }
+          if (!authorized(req)) {
+            return json(res, 401, { ok: false, code: 'unauthorized', error: 'unauthorized', path: routePath })
+          }
           try {
             return await handler(req, res)
           } catch (e) {
+            if (res?.headersSent) {
+              try {
+                res.end()
+              } catch {
+                /* ignore */
+              }
+              return undefined
+            }
             return json(res, 500, { ok: false, code: 'handler-threw', error: msgOf(e) })
           }
         },
@@ -720,6 +1088,7 @@ export function apply(ctx, config) {
 
     const sendResult = (res, out) => json(res, out && out.ok !== false ? 200 : statusForCode(out?.code), out)
 
+    // ── v2 五条（PROTOCOL-V2 §3，保留）─────────────────────────────────────
     route('GET', `${prefix}${ADAPTER_ROUTE.HELLO}`, (req, res) => json(res, 200, hello()))
 
     route('GET', `${prefix}${ADAPTER_ROUTE.STATUS}`, (req, res) => json(res, 200, status()))
@@ -738,6 +1107,104 @@ export function apply(ctx, config) {
       }
       const out = await command(parsed.body ?? {})
       return sendResult(res, out)
+    })
+
+    // ── v3 五条（PROTOCOL-V3 §4）──────────────────────────────────────────
+    route('GET', `${prefix}${ADAPTER_ROUTE.VERSION}`, (req, res) => json(res, 200, versionInfo()))
+
+    route('GET', `${prefix}${ADAPTER_ROUTE.HEALTH}`, (req, res) => json(res, 200, health()))
+
+    route('GET', `${prefix}${ADAPTER_ROUTE.STATE}`, (req, res) => json(res, 200, state()))
+
+    route('POST', `${prefix}${ADAPTER_ROUTE.COMMANDS}`, async (req, res) => {
+      const parsed = await readJsonBody(req)
+      if (parsed.error) {
+        return json(res, 400, { ok: false, code: 'bad-request', error: parsed.error })
+      }
+      const out = await commands(parsed.body ?? {})
+      if (out && out.ok === false) return json(res, statusForCode(out.code), out)
+      if (out && out.status === 'accepted') return json(res, 202, out)
+      return json(res, 200, out)
+    })
+
+    /**
+     * SSE 长连接：鉴权由 route 包装器统一处理；session 不匹配 = 409，cursor 过期 = 410。
+     * 先回放环形缓冲，再挂订阅；心跳注释帧每 heartbeatMs 一次（同时驱动审批 diff）。
+     */
+    route('GET', `${prefix}${ADAPTER_ROUTE.EVENTS}`, async (req, res) => {
+      const query = parseQuery(req?.url)
+      const since = query.since
+      const session = query.session
+      if (session && session !== sessionId) {
+        return json(res, 409, { ok: false, code: 'session-changed', error: 'session-changed', sessionId })
+      }
+      syncApprovals()
+      const replay = eventsSince(since, session)
+      if (replay.ok === false) return json(res, statusForCode(replay.code), replay)
+      if (replay.gap) {
+        return json(res, 410, {
+          ok: false,
+          code: 'cursor-expired',
+          error: 'cursor-expired',
+          sessionId,
+          lastCursor: replay.lastCursor,
+          nextCursor: replay.nextCursor,
+        })
+      }
+
+      try {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-store, no-transform',
+          connection: 'keep-alive',
+          'x-accel-buffering': 'no',
+        })
+      } catch {
+        /* 假 res 的 writeHead 也能工作；真实 res 这里不应抛 */
+      }
+
+      const write = (chunk) => {
+        try {
+          if (!res.writableEnded) res.write(chunk)
+        } catch {
+          /* 连接已断，等 close 回调清理 */
+        }
+      }
+
+      write(SSE_RETRY_FRAME)
+      write(sseComment('connected'))
+      for (const envelope of replay.events) write(sseFrame(envelope))
+
+      const off = subscribe((envelope) => write(sseFrame(envelope)))
+      const heartbeat = setInterval(() => {
+        syncApprovals()
+        write(sseComment('heartbeat'))
+      }, heartbeatMs)
+      if (typeof heartbeat.unref === 'function') heartbeat.unref()
+
+      let closed = false
+      const close = () => {
+        if (closed) return
+        closed = true
+        clearInterval(heartbeat)
+        off()
+        activeStreams.delete(close)
+        try {
+          if (!res.writableEnded) res.end()
+        } catch {
+          /* ignore */
+        }
+      }
+      activeStreams.add(close)
+      try {
+        req?.on?.('close', close)
+        req?.on?.('aborted', close)
+        res?.on?.('close', close)
+        res?.on?.('error', close)
+      } catch {
+        /* ignore */
+      }
+      return undefined
     })
   }
 
@@ -766,6 +1233,8 @@ export const _internals = {
   TASK_ID_ENVS,
   MAX_FILE_BYTES,
   MAX_TOTAL_BYTES,
+  ADAPTER_PROTOCOL_VERSION,
+  ADAPTER_PROTOCOL_MIN,
   resolveTaskId,
   readPluginTree,
   normalizePrefix,

@@ -15,7 +15,7 @@ import { EventEmitter } from 'node:events'
 
 import { makeCtx, makeWebServerStub, makeReq, makeRes, tmpDir } from './helpers.mjs'
 import {
-  SERVICE, ADAPTER_OP, ADAPTER_ROUTE, AUDIT, FANG_VERSION,
+  SERVICE, ADAPTER_OP, ADAPTER_ROUTE, AUDIT, FANG_VERSION, ADAPTER_PROTOCOL_VERSION,
 } from '../src/kernel/index.mjs'
 import * as adapterModule from '../src/plugins/adapter.mjs'
 
@@ -177,6 +177,38 @@ function getReq(url = undefined) {
   return req
 }
 
+/** SSE 用的假响应：记录 writeHead/write/end，close 事件由测试手动 emit 或 ctx.dispose 触发。 */
+function makeSseRes() {
+  const res = new EventEmitter()
+  res.statusCode = 0
+  res.headers = {}
+  res.chunks = []
+  res.writableEnded = false
+  res.headersSent = false
+  res.writeHead = (code, headers) => {
+    res.statusCode = code
+    res.headersSent = true
+    Object.assign(res.headers, headers ?? {})
+  }
+  res.write = (chunk) => {
+    res.chunks.push(String(chunk))
+    return true
+  }
+  res.end = (chunk) => {
+    if (chunk !== undefined && chunk !== null) res.chunks.push(String(chunk))
+    res.writableEnded = true
+  }
+  res.body = () => res.chunks.join('')
+  res.json = () => {
+    try {
+      return JSON.parse(res.body())
+    } catch {
+      return null
+    }
+  }
+  return res
+}
+
 // ── 角色门禁与形状 ───────────────────────────────────────────────────────────
 
 test('roleGate: mother 角色下不注册服务、不注册路由（apply 直接 return）', () => {
@@ -197,9 +229,14 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
   assert.equal(ctx.get(ADAPTER_SERVICE), service)
   assert.equal(service.role, 'fork')
   assert.equal(service.taskId, 'task_shape')
-  for (const method of ['hello', 'status', 'approvals', 'audit', 'command']) {
+  for (const method of [
+    'hello', 'status', 'approvals', 'audit', 'command',
+    'commands', 'versionInfo', 'health', 'state', 'eventsSince', 'lastCursor',
+  ]) {
     assert.equal(typeof service[method], 'function', `service.${method} 必须是函数`)
   }
+  assert.equal(service.protocol, ADAPTER_PROTOCOL_VERSION)
+  assert.match(service.sessionId, /^s-[0-9a-f]{16}$/, '每次进程启动一个 sessionId')
 
   assert.deepEqual(ws.paths(), [
     routePath(ADAPTER_ROUTE.HELLO),
@@ -207,7 +244,12 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
     routePath(ADAPTER_ROUTE.APPROVALS),
     routePath(ADAPTER_ROUTE.AUDIT),
     routePath(ADAPTER_ROUTE.COMMAND),
-  ], '5 条路由与 ADAPTER_ROUTE 常量一致')
+    routePath(ADAPTER_ROUTE.VERSION),
+    routePath(ADAPTER_ROUTE.HEALTH),
+    routePath(ADAPTER_ROUTE.STATE),
+    routePath(ADAPTER_ROUTE.COMMANDS),
+    routePath(ADAPTER_ROUTE.EVENTS),
+  ], '10 条路由 = v2 五条 + v3 五条，顺序与 ADAPTER_ROUTE 常量一致')
   assert.deepEqual(service.routes, ws.paths(), 'service.routes 暴露已注册路径（测试用）')
   for (const route of ws.routes) assert.equal(route.kind, 'exact')
 
@@ -219,8 +261,13 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
   assert.equal(defaults.taskId, '')
   assert.equal(defaults.auditLimit, 500)
   assert.equal(defaults.commandTimeoutMs, 10000)
+  assert.equal(defaults.token, '')
+  assert.equal(defaults.eventCapacity, 1000)
+  assert.equal(defaults.commandCacheSize, 500)
+  assert.equal(defaults.heartbeatMs, 5000)
   assert.equal(adapterModule._internals.MAX_FILE_BYTES, 1024 * 1024)
   assert.equal(adapterModule._internals.MAX_TOTAL_BYTES, 2 * 1024 * 1024)
+  assert.equal(adapterModule._internals.ADAPTER_PROTOCOL_VERSION, ADAPTER_PROTOCOL_VERSION)
   ctx.dispose()
 })
 
@@ -249,6 +296,7 @@ test('Config.prefix 生效（与母体 Remote.prefix 对齐）', () => {
   const { ctx, ws } = applyAsFork({ prefix: '/x/' })
   assert.deepEqual(ws.paths(), [
     '/x/adapter/hello', '/x/adapter/status', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
+    '/x/adapter/version', '/x/adapter/health', '/x/adapter/state', '/x/adapter/commands', '/x/adapter/events',
   ])
   ctx.dispose()
 })
@@ -783,6 +831,195 @@ test('未知命令返回 unknown-op 且带 op；ping 结果含 taskId/uptime', a
   assert.equal(typeof ping.result.uptimeMs, 'number')
   assert.ok(ping.result.uptimeMs >= 0)
   ctx.dispose()
+})
+
+// ── v3：协议版本 / 快照 / 认证 / SSE / 幂等命令（docs/PROTOCOL-V3.md）──────────
+
+test('v3: GET version/health/state 快照（协议号/sessionId/lastCursor/指标）', async () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_v3_snapshot' })
+
+  const versionRes = makeRes()
+  await findHandler(ws, 'GET', ADAPTER_ROUTE.VERSION)(getReq(), versionRes)
+  assert.equal(versionRes.statusCode, 200)
+  const versionBody = versionRes.json()
+  assert.equal(versionBody.ok, true)
+  assert.equal(versionBody.protocol, ADAPTER_PROTOCOL_VERSION)
+  assert.equal(versionBody.minProtocol, 1)
+  assert.equal(versionBody.sessionId, service.sessionId)
+  assert.equal(versionBody.taskId, 'task_v3_snapshot')
+  assert.equal(versionBody.capabilities.length, Object.values(ADAPTER_OP).length)
+
+  const healthRes = makeRes()
+  await findHandler(ws, 'GET', ADAPTER_ROUTE.HEALTH)(getReq(), healthRes)
+  assert.equal(healthRes.statusCode, 200)
+  const healthBody = healthRes.json()
+  assert.equal(healthBody.ok, true)
+  assert.equal(healthBody.status, 'running')
+  assert.equal(healthBody.protocol, ADAPTER_PROTOCOL_VERSION)
+  assert.equal(healthBody.pid, process.pid)
+
+  const stateRes = makeRes()
+  await findHandler(ws, 'GET', ADAPTER_ROUTE.STATE)(getReq(), stateRes)
+  assert.equal(stateRes.statusCode, 200)
+  const snapshot = stateRes.json()
+  assert.equal(snapshot.ok, true)
+  assert.equal(snapshot.sessionId, service.sessionId)
+  assert.equal(snapshot.protocolVersion, ADAPTER_PROTOCOL_VERSION)
+  assert.equal(snapshot.status, 'running')
+  assert.equal(snapshot.lastCursor, '0')
+  assert.ok(Array.isArray(snapshot.plugins))
+  assert.ok(snapshot.plugins.some((p) => p.pluginId === 'adapter' && p.state === 'active'))
+  assert.equal(typeof snapshot.metrics.rssBytes, 'number')
+  assert.equal(typeof snapshot.metrics.handleCount, 'number')
+  assert.equal(snapshot.buffer.state, 'unavailable')
+  assert.deepEqual(snapshot.approvals, [])
+
+  // hello 也补了 protocol/sessionId（v2 客户端忽略未知字段，前向兼容）
+  const helloBody = service.hello()
+  assert.equal(helloBody.protocol, ADAPTER_PROTOCOL_VERSION)
+  assert.equal(helloBody.sessionId, service.sessionId)
+  ctx.dispose()
+})
+
+test('v3: 审批 diff → approval-requested / approval-resolved 事件（不重复）', () => {
+  const approver = makeApprover({ items: [{ id: 'a1', action: 'install dep', light: 'yellow' }] })
+  const { ctx, service } = applyAsFork({}, { [SERVICE.approver]: approver })
+
+  const snapshot = service.state()
+  assert.equal(snapshot.approvals.length, 1)
+  assert.equal(snapshot.approvals[0].approvalId, 'a1')
+  assert.equal(snapshot.approvals[0].action, 'install dep')
+  assert.equal(snapshot.approvals[0].light, 'yellow')
+
+  const first = service.eventsSince('0')
+  assert.equal(first.ok, true)
+  assert.equal(first.events.length, 1)
+  assert.equal(first.events[0].event.kind, 'approval-requested')
+  assert.equal(first.events[0].cursor, '1')
+  assert.equal(first.events[0].sessionId, service.sessionId)
+  assert.equal(first.lastCursor, '1')
+
+  service.state() // 同一批待办再次拉快照，不得重复发 requested
+  assert.equal(service.eventsSince('1').events.length, 0)
+
+  ctx.emit('fang/approval-decided', { id: 'a1', outcome: 'denied' })
+  const second = service.eventsSince('1')
+  assert.equal(second.events.length, 1)
+  assert.deepEqual(second.events[0].event, { kind: 'approval-resolved', approvalId: 'a1', verdict: 'reject' })
+  ctx.dispose()
+})
+
+test('v3: SSE events 路由（回放/session-changed/cursor-invalid/cursor-expired/关闭清理）', async () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_sse', eventCapacity: 2 })
+  const eventsHandler = findHandler(ws, 'GET', ADAPTER_ROUTE.EVENTS)
+
+  // 3 条事件 + capacity=2 → 环形缓冲只剩 cursor 2、3
+  for (const n of [1, 2, 3]) await service.commands({ commandId: `cmd_ping_${n}`, op: ADAPTER_OP.PING })
+  assert.equal(service.lastCursor(), '3')
+
+  const res = makeSseRes()
+  await eventsHandler(getReq(`${routePath(ADAPTER_ROUTE.EVENTS)}?since=2&session=${service.sessionId}`), res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.headers['content-type'], 'text/event-stream; charset=utf-8')
+  assert.equal(res.headers['cache-control'], 'no-store, no-transform')
+  const body = res.body()
+  assert.ok(body.includes('retry: 2000'))
+  assert.ok(body.includes(': connected'))
+  assert.ok(body.includes('id: 3'), 'since=2 只回放 cursor=3')
+  assert.ok(!body.includes('id: 2'), 'cursor 之前的旧事件不回放')
+  res.emit('close')
+  assert.equal(res.writableEnded, true, 'close 时清理长连接')
+
+  const expired = makeSseRes()
+  await eventsHandler(getReq(`${routePath(ADAPTER_ROUTE.EVENTS)}?since=0`), expired)
+  assert.equal(expired.statusCode, 410)
+  assert.equal(expired.json().code, 'cursor-expired')
+  assert.equal(expired.json().lastCursor, '3')
+
+  const wrongSession = makeSseRes()
+  await eventsHandler(getReq(`${routePath(ADAPTER_ROUTE.EVENTS)}?since=0&session=s-dead`), wrongSession)
+  assert.equal(wrongSession.statusCode, 409)
+  assert.equal(wrongSession.json().code, 'session-changed')
+
+  const badCursor = makeSseRes()
+  await eventsHandler(getReq(`${routePath(ADAPTER_ROUTE.EVENTS)}?since=abc`), badCursor)
+  assert.equal(badCursor.statusCode, 400)
+  assert.equal(badCursor.json().code, 'cursor-invalid')
+  ctx.dispose()
+})
+
+test('v3: POST commands 幂等（同 commandId 只执行一次）+ 202 异步 + 参数校验', async () => {
+  const root = tmpDir('fang-v3-cmd-')
+  try {
+    const buffer = makeBuffer({ dir: root, flushResult: { state: 'settled', flushed: ['index.js'], timedOut: false } })
+    const { ctx, ws } = applyAsFork({ taskId: 'task_v3_cmd' }, { [SERVICE.buffer]: buffer })
+    const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+
+    const first = makeRes()
+    await handler(makeReq({ commandId: 'cmd_flush_1', op: ADAPTER_OP.FLUSH_BUFFER }, 'POST'), first)
+    assert.equal(first.statusCode, 200)
+    assert.equal(first.json().ok, true)
+    assert.equal(first.json().commandId, 'cmd_flush_1')
+    assert.equal(buffer.calls.flush.length, 1)
+
+    const replay = makeRes()
+    await handler(makeReq({ commandId: 'cmd_flush_1', op: ADAPTER_OP.FLUSH_BUFFER }, 'POST'), replay)
+    assert.equal(replay.statusCode, 200)
+    assert.equal(replay.json().deduplicated, true)
+    assert.equal(buffer.calls.flush.length, 1, '同 commandId 必须重放，不得重复执行')
+
+    const accepted = makeRes()
+    await handler(makeReq({ commandId: 'cmd_async_1', op: ADAPTER_OP.PING, async: true }, 'POST'), accepted)
+    assert.equal(accepted.statusCode, 202)
+    assert.equal(accepted.json().status, 'accepted')
+    assert.equal(accepted.json().trackingId, 'cmd_async_1')
+    await new Promise((resolve) => setTimeout(resolve, 25))
+
+    const missing = makeRes()
+    await handler(makeReq({ op: '' }, 'POST'), missing)
+    assert.equal(missing.statusCode, 400)
+    assert.equal(missing.json().code, 'missing-op')
+
+    const badId = makeRes()
+    await handler(makeReq({ commandId: 'bad id', op: ADAPTER_OP.PING }, 'POST'), badId)
+    assert.equal(badId.statusCode, 400)
+    assert.equal(badId.json().code, 'command-id-invalid')
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('v3: Bearer 认证（env 注入时强制；未注入时 v2 兼容放行）', async () => {
+  const secured = applyWithRole('fork', {}, {}, { env: { DSH_ADAPTER_TOKEN: 'tok-v3-secret-0123456789abcdef' } })
+  assert.equal(secured.service.authEnabled, true)
+  const stateHandler = findHandler(secured.ws, 'GET', ADAPTER_ROUTE.STATE)
+
+  const noAuth = makeRes()
+  await stateHandler(getReq(), noAuth)
+  assert.equal(noAuth.statusCode, 401)
+  assert.equal(noAuth.json().code, 'unauthorized')
+
+  const wrong = makeRes()
+  const reqWrong = getReq()
+  reqWrong.headers = { authorization: 'Bearer wrong-token-0123456789abcdef00' }
+  await stateHandler(reqWrong, wrong)
+  assert.equal(wrong.statusCode, 401, '长度相同也必须是恒定时间比较后拒绝')
+
+  const okRes = makeRes()
+  const reqOk = getReq()
+  reqOk.headers = { authorization: 'Bearer tok-v3-secret-0123456789abcdef' }
+  await stateHandler(reqOk, okRes)
+  assert.equal(okRes.statusCode, 200)
+  assert.equal(okRes.json().ok, true)
+  secured.ctx.dispose()
+
+  const legacy = applyAsFork({})
+  assert.equal(legacy.service.authEnabled, false, '无 env token = v2 兼容模式')
+  const legacyRes = makeRes()
+  await findHandler(legacy.ws, 'GET', ADAPTER_ROUTE.STATE)(getReq(), legacyRes)
+  assert.equal(legacyRes.statusCode, 200)
+  legacy.ctx.dispose()
 })
 
 test('纯函数：normalizePrefix / resolveInside 的边界', () => {

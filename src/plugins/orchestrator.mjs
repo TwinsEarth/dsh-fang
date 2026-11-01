@@ -19,6 +19,7 @@ import {
   invokeCommercial, commercialConfigSchemaDefaults,
 } from '../kernel/index.mjs'
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
+import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -43,6 +44,8 @@ export const Config = z.object({
     .description('派生后等待分身 Adapter 就绪的上限（毫秒）；超时任务记为 running（adapter 未就绪）'),
   adapterPollMs: z.number().min(50).max(5000).default(400)
     .description('Adapter 握手轮询间隔（毫秒）'),
+  importMaxBytes: z.number().min(0).max(268435456).default(33554432)
+    .description('派生时导入母体历史会话日志的大小上限（字节）；超过则只保留交接摘要，不复制历史'),
   allowProcessRestart: z.boolean().default(false)
     .description('是否允许编排器主动重启母体（默认禁止；重启一律交给 restart-guard）'),
   autoReapIdleMinutes: z.number().min(0).max(1440).default(0)
@@ -210,16 +213,26 @@ export function apply(ctx, config) {
   const remoteCache = new Map()
   async function remoteFor(task) {
     if (!task?.url) return null
+    // v3 Bearer token 只从 Forker 内存取（不落盘、不进 task 持久化字段）。
+    const adapterToken = (() => {
+      try {
+        const f = forker()
+        return f && typeof f.adapterToken === 'function' ? String(f.adapterToken(task.taskId) ?? '') : ''
+      } catch {
+        return ''
+      }
+    })()
     const cached = remoteCache.get(task.taskId)
-    if (cached && cached.url === task.url) return cached.client
+    if (cached && cached.url === task.url && cached.adapterToken === adapterToken) return cached.client
     const mod = await remoteModule()
     if (!mod || typeof mod.createRemote !== 'function') return null
     const client = mod.createRemote({
       url: task.url,
       token: task.token || (mod.extractToken ? mod.extractToken(task.url) : ''),
+      adapterToken,
       timeoutMs: 8000,
     })
-    remoteCache.set(task.taskId, { url: task.url, client })
+    remoteCache.set(task.taskId, { url: task.url, adapterToken, client })
     return client
   }
 
@@ -235,14 +248,35 @@ export function apply(ctx, config) {
     while (nowMs() < deadline) {
       const res = await client.hello()
       if (res?.ok && res.data?.ok) {
+        // v3 版本协商（PROTOCOL-V3 §2）：旧分身没有 /adapter/version（404）→ 按 legacy 接受；
+        // 新分身回 protocol 且超出母体支持区间 → fail-closed，绝不假装 READY。
+        let protocol = Number(res.data.protocol) || 0
+        let sessionId = String(res.data.sessionId ?? '')
+        try {
+          const ver = typeof client.version === 'function' ? await client.version() : null
+          if (ver?.ok && ver.data) {
+            const negotiated = negotiateProtocol(ver.data.protocol)
+            if (!negotiated.ok) {
+              task.adapter = { ok: false, error: negotiated.reason, protocol: ver.data.protocol, at: nowMs() }
+              audit(AUDIT.ADAPTER_HANDSHAKE, { taskId: task.taskId, ok: false, error: negotiated.reason, protocol: ver.data.protocol })
+              return task.adapter
+            }
+            protocol = negotiated.protocol
+            sessionId = String(ver.data.sessionId ?? sessionId)
+          }
+        } catch {
+          /* 版本探测失败不改变 hello 的结论；按 hello 自报的 protocol 记录 */
+        }
         task.adapter = {
           ok: true,
           version: res.data.version ?? '',
+          protocol,
+          sessionId,
           role: res.data.role ?? 'fork',
           taskId: res.data.taskId ?? task.taskId,
           at: nowMs(),
         }
-        audit(AUDIT.ADAPTER_HANDSHAKE, { taskId: task.taskId, ok: true, version: task.adapter.version })
+        audit(AUDIT.ADAPTER_HANDSHAKE, { taskId: task.taskId, ok: true, version: task.adapter.version, protocol })
         return task.adapter
       }
       last = res
@@ -271,10 +305,59 @@ export function apply(ctx, config) {
       profile: t.profile,
       createdAt: t.createdAt,
       restarts: t.restarts ?? 0,
-      adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', error: t.adapter?.error ?? '' },
+      adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', protocol: t.adapter?.protocol ?? 0, error: t.adapter?.error ?? '' },
       collaborators: t.collaborators ?? [],
       seed: t.seed ?? null,
+      importedSession: t.importedSession ?? null,
     }
+  }
+
+  /**
+   * 把一个母体会话日志有界地导入分身自己的 $DSH_HOME（会话目录 + workspace 索引），
+   * 让分身原生 UI 能看到这段历史；超过 importMaxBytes 则不复制，只保留交接种子。
+   */
+  const importSessionIntoFork = (homeDir, meta) => {
+    const sessionId = String(meta?.sessionId ?? '').trim()
+    const sourceFile = String(meta?.sourceFile ?? '').trim()
+    if (!sessionId || !sourceFile) return { ok: false, reason: 'bad-import-meta' }
+    let bytes = 0
+    try { bytes = fs.statSync(sourceFile).size } catch { return { ok: false, reason: 'source-missing' } }
+    if (bytes > cfg.importMaxBytes) return { ok: false, reason: 'too-large', bytes, limit: cfg.importMaxBytes }
+    const workspacePath = String(meta?.workspacePath ?? '').trim() || 'imported-session'
+    const workspaceKey = encodeWorkspaceKey(workspacePath)
+    const workspaceTitle = String(meta?.workspaceTitle ?? '').trim() || '导入的会话'
+    const destDir = path.join(homeDir, 'sessions', workspaceKey, sessionId)
+    ensureDir(destDir)
+    fs.copyFileSync(sourceFile, path.join(destDir, 'session.v4.jsonl.zstd'))
+
+    const storagesDir = path.join(homeDir, 'storages')
+    ensureDir(storagesDir)
+    const indexFile = path.join(storagesDir, 'workspace.json')
+    let doc = null
+    try { doc = readJson(indexFile) } catch { doc = null }
+    if (!doc || typeof doc !== 'object') {
+      doc = { unit: { name: 'workspace', version: 2 }, global: { initialized: true, defaultWorkspaceId: null, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] }, tables: { workspaces: {} } }
+    }
+    doc.tables = doc.tables && typeof doc.tables === 'object' ? doc.tables : {}
+    doc.tables.workspaces = doc.tables.workspaces && typeof doc.tables.workspaces === 'object' ? doc.tables.workspaces : {}
+    doc.global = doc.global && typeof doc.global === 'object' ? doc.global : { initialized: true, defaultWorkspaceId: null, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] }
+    doc.global.workspaceIds = Array.isArray(doc.global.workspaceIds) ? doc.global.workspaceIds : []
+    const workspaceId = `ws-${sha256(workspacePath).slice(0, 12)}`
+    const existing = doc.tables.workspaces[workspaceId]
+    const sessionIds = Array.isArray(existing?.sessionIds) ? existing.sessionIds.filter((id) => typeof id === 'string') : []
+    if (!sessionIds.includes(sessionId)) sessionIds.push(sessionId)
+    doc.tables.workspaces[workspaceId] = {
+      path: workspacePath,
+      title: workspaceTitle,
+      sessionIds,
+      createdAt: existing?.createdAt ?? (Number.isFinite(meta?.createdAt) ? iso(meta.createdAt) : iso(nowMs())),
+      updatedAt: iso(nowMs()),
+    }
+    if (!doc.global.workspaceIds.includes(workspaceId)) doc.global.workspaceIds.push(workspaceId)
+    if (!doc.global.defaultWorkspaceId) doc.global.defaultWorkspaceId = workspaceId
+    doc.global.initialized = true
+    writeJsonAtomic(indexFile, doc)
+    return { ok: true, bytes, sessionId, workspacePath, workspaceKey, workspaceTitle, indexFile }
   }
 
   const service = {
@@ -366,6 +449,17 @@ export function apply(ctx, config) {
             task.seed = null
             audit(AUDIT.FORK_CRASHED + '-seed', { taskId, error: String(e?.message ?? e) })
           }
+        }
+
+        if (input.importSession && typeof input.importSession === 'object') {
+          try {
+            task.importedSession = importSessionIntoFork(homeDir, input.importSession)
+            audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
+          } catch (e) {
+            task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
+            audit(AUDIT.FORK_CRASHED + '-import', { taskId, error: task.importedSession.error })
+          }
+          persist()
         }
 
         const started = await f.spawn({
@@ -661,21 +755,34 @@ export function apply(ctx, config) {
     async derive(input = {}) {
       const sessionId = String(input.sessionId ?? '').trim()
       let seed = null
+      let importSession = null
       if (sessionId) {
         const catalog = safeGet(SERVICE.sessionCatalog)
-        if (!catalog || typeof catalog.digest !== 'function') {
+        if (!catalog || typeof catalog.seed !== 'function') {
           return { ok: false, error: 'session-catalog-unavailable' }
         }
-        const digest = await catalog.digest(sessionId)
-        if (!digest || digest.ok === false) {
-          return { ok: false, error: 'session-seed-failed', detail: digest?.code ?? digest?.error ?? 'unknown' }
+        const seeded = await catalog.seed(sessionId)
+        if (!seeded || seeded.ok === false) {
+          const code = seeded?.code ?? seeded?.error ?? 'unknown'
+          return { ok: false, error: code === 'session-empty' ? 'session-empty' : 'session-seed-failed', detail: code }
         }
-        seed = { sessionId, markdown: digest.markdown }
+        seed = { sessionId, markdown: seeded.markdown }
+        importSession = {
+          sessionId,
+          sourceFile: seeded.sourceFile,
+          workspacePath: seeded.workspacePath,
+          workspaceTitle: seeded.workspaceTitle,
+          workspaceId: seeded.workspaceId,
+          createdAt: seeded.createdAt,
+          cwd: seeded.cwd,
+          agentPreset: seeded.agentPreset,
+          sourceBytes: seeded.sourceBytes,
+        }
       }
       const title = String(input.title ?? '').trim()
         || (seed ? `从会话继续 · ${seed.sessionId.slice(-8)}` : `派生任务 ${tasks.size + 1}`)
-      const out = await service.createTask({ title, seed, collaborators: input.collaborators })
-      return { ...out, derivedFrom: seed ? { sessionId: seed.sessionId } : null }
+      const out = await service.createTask({ title, seed, importSession, collaborators: input.collaborators })
+      return { ...out, derivedFrom: seed ? { sessionId: seed.sessionId } : null, importedSession: out.importedSession ?? null }
     },
 
     /**
