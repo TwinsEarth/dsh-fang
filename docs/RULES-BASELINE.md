@@ -133,3 +133,28 @@ rules:
     match: { kind: command-pattern, patterns: [{ re: "\\brm\\s+-rf\\s+(?:dist|build)\\b" }] }
     evidence: { kind: pattern-match }
 ```
+
+### 8.1 严格层失败时的回退语义（v2.8.3）
+
+`applyLayer` 是**事务化**的：`rebuild` 改为纯计算（不修改 `effective`/`status`/`strictMode`），
+只有 `applied: true` 时才提交 `layers` / `effective` / `status`。因此失败层对后续层**完全不可见**。
+
+| 场景 | layers | effective | strictMode | 返回 |
+|---|---|---|---|---|
+| 严格层成功 | 追加 | 严格结果 | 新值 | `applied:true, source:'strict-replaced'` |
+| 严格层失败（锁定违规/正则编译错/未知 id 且 fatal） | **不追加** | 保持上一个成功层 | 保持上一个成功层 | `applied:false, revertedToLayerIndex:N` |
+| 失败后再加 `inherit:true` 层 | 追加到旧 layers 末尾 | 叠加到上一个成功层 | 保持 | `applied:true` |
+| 失败后再加另一个严格层 | 追加 | 以新严格层为起点重建 | 新值 | 视结果 |
+
+- `revertedToLayerIndex`：失败结果里的回退目标层索引（`-1` = 内置全集）。审计可直接回答
+  「第 N 层被拒绝，回退到第 N-1 层」而不只是「应用失败」。
+- 首个层就失败 → `layers` 为空、`effective` 为内置 15 条、`status.source='builtin'`、`strictMode=null`。
+- 测试覆盖：`test/rule-config.test.mjs` 组 4A–4E（见下）。
+
+### 8.2 YAML 解析修正：flow 映射（v2.8.3）
+
+这些测试顺带暴露了一个**真 bug**：`settings: { failOnInvalidPattern: true }` 这种 flow 映射
+在旧解析器里被当成**标量字符串**，导致 `settings` 全部回落到默认值（`failOnInvalidPattern:false`）——
+即「写了严格设置但被静默忽略」。现已支持 `{ k: v, k2: v2 }`（深度感知、尊重引号），
+flow 列表也改为嵌套感知（`[{ re: "..." }]` 可解析）。**无论对错都不会再静默**：解析失败会给明确错误。
+

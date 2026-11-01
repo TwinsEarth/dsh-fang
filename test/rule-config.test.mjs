@@ -803,3 +803,180 @@ rules:
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── 组 4 扩展：严格模式 + 语法/编译错误的回退语义（v2.8.3）─────────────────
+
+/** 一份"能通过 schema、但编译期失败（非法正则）"的严格模式配置。 */
+function brokenStrictConfig() {
+  const parsed = parseYamlSubset(`version: 1
+inherit: false
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: broken-declarative
+    category: destructive
+    light: red
+    reason: bad regex
+    match:
+      kind: command-pattern
+      patterns:
+        - re: "(["
+`)
+  assert.deepEqual(parsed.errors, [])
+  const validated = validateRuleConfig(parsed.value)
+  assert.deepEqual(validated.errors, [])
+  return validated.config
+}
+
+function goodLayerConfig(body) {
+  const text = String(body ?? '').trim()
+  const rulesSection = text === '' || text === '[]' ? 'rules: []' : `rules:\n${body}`
+  const parsed = parseYamlSubset(`version: 1
+settings: { failOnInvalidPattern: true }
+${rulesSection}`)
+  assert.deepEqual(parsed.errors, [])
+  const validated = validateRuleConfig(parsed.value)
+  assert.deepEqual(validated.errors, [])
+  return validated.config
+}
+
+test('组4A：严格模式层编译失败 → 整层拒绝，回退到上一个成功层（default）', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const defaultLayer = goodLayerConfig(`  - id: write-outside-buffer
+    light: red
+    reason: default layer
+`)
+  assert.equal(registry.applyLayer(defaultLayer).applied, true)
+
+  const failed = registry.applyLayer(brokenStrictConfig())
+  assert.equal(failed.applied, false)
+  assert.ok(failed.errors.length > 0)
+  assert.equal(failed.revertedToLayerIndex, 0, '回退到第 0 层（default）')
+
+  // 仍是 default 层的规则集：可调规则都在，write-outside-buffer 用 default 的覆盖
+  const ids = registry.ids()
+  assert.ok(ids.includes('dynamic-import'))
+  assert.ok(ids.includes('network-egress'))
+  assert.equal(registry.layerCount(), 1, '失败层不进入层栈')
+  const write = baseLight({ tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/x') } }, policy, registry)
+  assert.equal(write.light, 'red')
+  assert.equal(write.reason, 'default layer')
+})
+
+test('组4B：第二个严格层失败 → 回退到第一个严格层（不是内置全集）', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const strictGood = strictConfig(`  - id: write-outside-buffer
+    light: red
+    reason: 第一个严格层
+  - id: read-in-buffer
+    light: green
+    priority: 80
+`)
+  const first = registry.applyLayer(strictGood)
+  assert.equal(first.applied, true)
+  assert.equal(first.source, 'strict-replaced')
+  assert.deepEqual(first.strictMode.preservedHardRules.sort(), ['credential-access', 'destructive-command', 'dsh-lifecycle'].sort())
+
+  const second = registry.applyLayer(brokenStrictConfig())
+  assert.equal(second.applied, false)
+  assert.equal(second.revertedToLayerIndex, 0)
+
+  // 仍是第一个严格层的结果：可调规则只剩显式定义的两条 + 硬规则 + 兜底
+  const ids = registry.ids().sort()
+  assert.deepEqual(ids, ['credential-access', 'destructive-command', 'dsh-lifecycle', 'read-in-buffer', 'unknown-tool', 'write-outside-buffer'].sort())
+  assert.ok(!ids.includes('dynamic-import'))
+  assert.equal(registry.status().source, 'strict-replaced')
+  assert.ok(registry.status().strictMode, 'strictMode 仍是第一个严格层的信息')
+  assert.equal(registry.status().strictMode.discardedRuleCount, DEFAULT_ACTION_RULES.length - 4)
+  const write = baseLight({ tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/x') } }, policy, registry)
+  assert.equal(write.reason, '第一个严格层')
+})
+
+test('组4C：严格层失败后，后续 inherit:true 层叠加到上一个成功层（失败层不可见）', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const defaultLayer = goodLayerConfig(`  - id: write-outside-buffer
+    light: red
+    reason: default layer
+`)
+  assert.equal(registry.applyLayer(defaultLayer).applied, true)
+  assert.equal(registry.applyLayer(brokenStrictConfig()).applied, false)
+  assert.equal(registry.layerCount(), 1)
+
+  const envLayer = goodLayerConfig(`  - id: network-egress
+    light: blue
+    reason: env layer
+`)
+  const applied = registry.applyLayer(envLayer)
+  assert.equal(applied.applied, true)
+  assert.equal(registry.layerCount(), 2)
+  assert.equal(applied.revertedToLayerIndex, undefined)
+
+  // 叠加在 default 上：可调规则都在（严格模式没生效），env 覆盖生效
+  const ids = registry.ids()
+  assert.ok(ids.includes('dynamic-import'))
+  assert.ok(ids.includes('read-in-buffer'))
+  const egress = baseLight({ tool: 'web_fetch', target: { kind: 'url', value: 'https://evil.test/x' } }, policy, registry)
+  assert.equal(egress.light, 'blue')
+  assert.equal(egress.reason, 'env layer')
+  assert.equal(registry.status().strictMode, null)
+})
+
+test('组4D：失败层状态隔离（layers/effective/strictMode 均不被污染）', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const beforeIds = registry.ids()
+  const beforeStatus = registry.status()
+
+  // 首个层就失败：回退到内置全集（revertedToLayerIndex = -1）
+  const failed = registry.applyLayer(brokenStrictConfig())
+  assert.equal(failed.applied, false)
+  assert.equal(failed.revertedToLayerIndex, -1)
+  assert.equal(registry.layerCount(), 0)
+  assert.deepEqual(registry.ids(), beforeIds)
+  assert.equal(registry.status().source, 'builtin')
+  assert.equal(registry.status().strictMode, null)
+  assert.equal(beforeStatus.source, 'builtin')
+
+  // 后续成功层不受影响
+  assert.equal(registry.applyLayer(goodLayerConfig('  []')).applied, true)
+  assert.equal(registry.layerCount(), 1)
+  assert.equal(registry.status().source, 'layered')
+})
+
+test('组4E：插件层——项目严格层编译失败被拒绝，状态报告层与回退', () => {
+  const dir = tmpDir('fang-rules-strict-fail-')
+  const previousRole = process.env.DSH_FANG_ROLE
+  process.env.DSH_FANG_ROLE = 'mother'
+  const projectFile = path.join(dir, 'project.yaml')
+  fs.writeFileSync(projectFile, `version: 1
+inherit: false
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: broken-declarative
+    category: destructive
+    light: red
+    reason: bad regex
+    match:
+      kind: command-pattern
+      patterns:
+        - re: "(["
+`, 'utf8')
+  try {
+    const ctx = makeCtx()
+    try {
+      umbrellaPlugin.apply(ctx, { rulesFile: projectFile, rulesWatch: false, baselineFile: ':none:' })
+      const svc = ctx.get(SERVICE.umbrella)
+      const status = svc.ruleConfigStatus()
+      const projectLayer = status.layers.find((layer) => layer.name === 'project')
+      assert.ok(projectLayer)
+      assert.equal(projectLayer.applied, false)
+      assert.ok(projectLayer.errors.length > 0)
+      assert.equal(status.strictMode, null, '失败层不得让严格模式生效')
+      assert.equal(status.rules.length, DEFAULT_ACTION_RULES.length, '回退到内置全集')
+    } finally {
+      ctx.dispose()
+    }
+  } finally {
+    if (previousRole === undefined) delete process.env.DSH_FANG_ROLE
+    else process.env.DSH_FANG_ROLE = previousRole
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

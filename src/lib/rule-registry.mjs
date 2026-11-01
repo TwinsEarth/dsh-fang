@@ -69,30 +69,78 @@ function unescapeDouble(text) {
   return text.replace(/\\(["\\/nrt])/g, (_m, c) => (c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : c))
 }
 
+/** 按顶层逗号切分 flow 内容（尊重引号与嵌套 [] {}）。 */
+function splitFlowParts(inner) {
+  const parts = []
+  let current = ''
+  let inSingle = false
+  let inDouble = false
+  let depth = 0
+  for (const ch of inner) {
+    if (ch === "'" && !inDouble) inSingle = !inSingle
+    else if (ch === '"' && !inSingle) inDouble = !inDouble
+    else if (!inSingle && !inDouble) {
+      if (ch === '[' || ch === '{') depth += 1
+      else if (ch === ']' || ch === '}') depth -= 1
+      else if (ch === ',' && depth === 0) {
+        parts.push(current)
+        current = ''
+        continue
+      }
+    }
+    current += ch
+  }
+  if (current.trim().length > 0) parts.push(current)
+  return parts
+}
+
+/** flow 映射里第一个顶层冒号位置（引号/嵌套外）；没有则 -1。 */
+function findFlowColon(part) {
+  let inSingle = false
+  let inDouble = false
+  let depth = 0
+  for (let index = 0; index < part.length; index += 1) {
+    const ch = part[index]
+    if (ch === "'" && !inDouble) inSingle = !inSingle
+    else if (ch === '"' && !inSingle) inDouble = !inDouble
+    else if (!inSingle && !inDouble) {
+      if (ch === '[' || ch === '{') depth += 1
+      else if (ch === ']' || ch === '}') depth -= 1
+      else if (ch === ':' && depth === 0) return index
+    }
+  }
+  return -1
+}
+
+function unquoteFlowKey(raw) {
+  const text = String(raw ?? '').trim()
+  if (text.length >= 2 && ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'")))) {
+    return text.startsWith('"') ? unescapeDouble(text.slice(1, -1)) : text.slice(1, -1)
+  }
+  return text
+}
+
 function parseScalar(raw) {
   const text = String(raw ?? '').trim()
   if (text.length === 0) return null
   if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) return unescapeDouble(text.slice(1, -1))
   if (text.length >= 2 && text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1).replace(/''/g, "'")
-  if (text.startsWith('[') && text.endsWith(']')) {
+  if ((text.startsWith('[') && text.endsWith(']')) || (text.startsWith('{') && text.endsWith('}'))) {
+    const isList = text.startsWith('[')
     const inner = text.slice(1, -1).trim()
-    if (inner.length === 0) return []
-    const items = []
-    let current = ''
-    let inSingle = false
-    let inDouble = false
-    for (const ch of inner) {
-      if (ch === "'" && !inDouble) inSingle = !inSingle
-      else if (ch === '"' && !inSingle) inDouble = !inDouble
-      if (ch === ',' && !inSingle && !inDouble) {
-        items.push(parseScalar(current))
-        current = ''
+    if (inner.length === 0) return isList ? [] : {}
+    const parts = splitFlowParts(inner)
+    if (isList) return parts.map((part) => parseScalar(part))
+    const mapping = {}
+    for (const part of parts) {
+      const colon = findFlowColon(part)
+      if (colon < 0) {
+        mapping[unquoteFlowKey(part)] = null
         continue
       }
-      current += ch
+      mapping[unquoteFlowKey(part.slice(0, colon))] = parseScalar(part.slice(colon + 1))
     }
-    items.push(parseScalar(current))
-    return items
+    return mapping
   }
   if (text === 'true') return true
   if (text === 'false') return false
@@ -646,8 +694,11 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
   }
   resetToBuiltin()
 
-  /** 从内置 + 全部层重建一份新数组（不触碰 effective，直到确认可应用）。 */
-  const rebuild = () => {
+  /**
+   * 纯计算：从内置 + 给定层序列构建候选规则表。**不修改** effective/status，
+   * 由调用方在 applied 时提交——失败时三者全部保持上一次成功值。
+   */
+  const computeRebuild = (layerList) => {
     const warnings = []
     const errors = []
     const layerRecords = []
@@ -660,10 +711,10 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
     // inherit:false = 严格模式：丢弃此前所有可调规则，只保留硬规则 + fallback，
     // 然后从该层开始叠加。硬规则与 fallback 不能被任何配置拆掉。
     let startIndex = 0
-    for (let index = layers.length - 1; index >= 0; index -= 1) {
-      if (layers[index].inherit === false) { startIndex = index; break }
+    for (let index = layerList.length - 1; index >= 0; index -= 1) {
+      if (layerList[index].inherit === false) { startIndex = index; break }
     }
-    const strictMode = startIndex > 0 || (layers.length > 0 && layers[0].inherit === false)
+    const strictMode = startIndex > 0 || (layerList.length > 0 && layerList[0].inherit === false)
     let strictModeInfo = null
     if (strictMode) {
       const preserved = builtin.filter((rule) => isLockedRule(rule) || rule.category === 'fallback')
@@ -681,8 +732,8 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
     let fatal = false
     let lockViolation = false
 
-    for (let layerIndex = startIndex; layerIndex < layers.length; layerIndex += 1) {
-      const layer = layers[layerIndex]
+    for (let layerIndex = startIndex; layerIndex < layerList.length; layerIndex += 1) {
+      const layer = layerList[layerIndex]
       const layerErrors = []
       for (const entry of layer.rules) {
         const isDeclarative = entry.match !== undefined
@@ -784,21 +835,41 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
       warnings.push('fallback rule missing after rebuild')
       fatal = true
     }
-    const source = strictMode ? 'strict-replaced' : (layers.length > 0 ? 'layered' : 'builtin')
+    const source = strictMode ? 'strict-replaced' : (layerList.length > 0 ? 'layered' : 'builtin')
     if (fatal) {
-      return { applied: false, ruleCount: effective.length, warnings, errors, source, layers: layerRecords, strictMode: null }
+      // 失败：不提交任何状态（effective / status / strictMode 保持上一次成功值）
+      return {
+        applied: false,
+        ruleCount: effective.length,
+        warnings,
+        errors,
+        source,
+        layers: layerRecords,
+        strictMode: null,
+        effective,
+        status,
+      }
     }
-    effective = sorted
-    status = {
+    const nextStatus = {
       source,
       appliedAt: Date.now(),
       warnings,
       errors,
-      configVersion: layers.at(-1)?.version ?? null,
-      layers: layers.length,
+      configVersion: layerList.at(-1)?.version ?? null,
+      layers: layerList.length,
       strictMode: strictModeInfo,
     }
-    return { applied: true, ruleCount: sorted.length, warnings, errors, source, layers: layerRecords, strictMode: strictModeInfo }
+    return {
+      applied: true,
+      ruleCount: sorted.length,
+      warnings,
+      errors,
+      source,
+      layers: layerRecords,
+      strictMode: strictModeInfo,
+      effective: sorted,
+      status: nextStatus,
+    }
   }
 
   const find = (evidence, ctx) => effective.find((rule) => rule.match(evidence, ctx)) ?? effective[effective.length - 1] ?? null
@@ -844,32 +915,40 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
     resetToBuiltin,
     /** 用一份配置替换所有层（向后兼容 v2.8.0 的单文件语义）。 */
     applyConfig(config) {
-      const previous = layers
-      layers = [config]
-      const result = rebuild()
-      if (!result.applied) {
-        layers = previous
-        rebuild()
+      const out = computeRebuild([config])
+      if (out.applied) {
+        layers = [config]
+        effective = out.effective
+        status = out.status
+        return out
       }
-      return result
+      return { ...out, revertedToLayerIndex: layers.length - 1 }
     },
     /**
      * 追加一层（基线 → 项目 → 环境）。
-     * 事务化：该层被拒绝时**从层栈中弹出**，effective 恢复到不含它的上一次有效规则；
-     * 否则一个坏层会污染后续所有层的 rebuild。
+     * 事务化：失败时 layers / effective / status / strictMode 全部保持上一次成功值，
+     * 失败层对后续层完全不可见（否则坏层会污染后续所有 rebuild）。
+     * 失败结果带 revertedToLayerIndex（-1 = 内置全集），供审计回答"回退到了哪一层"。
      */
     applyLayer(config) {
-      layers.push(config)
-      const result = rebuild()
-      if (!result.applied) {
-        layers.pop()
-        rebuild()
+      const candidate = [...layers, config]
+      const out = computeRebuild(candidate)
+      if (out.applied) {
+        layers = candidate
+        effective = out.effective
+        status = out.status
+        return out
       }
-      return result
+      return { ...out, revertedToLayerIndex: layers.length - 1 }
     },
     clearLayers() {
-      layers = []
-      return rebuild()
+      const out = computeRebuild([])
+      if (out.applied) {
+        layers = []
+        effective = out.effective
+        status = out.status
+      }
+      return out
     },
     layerCount: () => layers.length,
     status: () => ({ ...status, ruleCount: effective.length }),

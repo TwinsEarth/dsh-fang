@@ -303,6 +303,7 @@ explain(evidence)   -> { light, matchedRule, category, tags, reason, evidence, t
 rules / ruleIds() / registerRule(rule, {before|after}) / overrideRule(id, patch) / removeRule(id) / resetRules()
 ruleConfigStatus() / reloadRules() / applyRuleConfig(config) / ruleRegistry   // v2.8.0 YAML 叠加层
 // v2.8.1: registry.applyLayer(config) 分层（基线→项目→环境）；hard-deny/non-negotiable 不可关闭/降级
+// v2.8.3: applyLayer 事务化——失败时 layers/effective/status 全部回滚，失败结果带 revertedToLayerIndex
 gradeFloor(grade) / effectiveLight(base, grade) / cachedGrade(id) / cacheStats() / invalidate(id) / clearCache()
 ```
 不变量（有测试）：`rank(effectiveLight) >= rank(baseLight)` 且 `>= rank(gradeFloor)`；
