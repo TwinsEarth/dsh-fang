@@ -8,10 +8,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import http from 'node:http'
+import zlib from 'node:zlib'
 
 import { makeCtx, makeWebServerStub, makeReq, makeRes } from './helpers.mjs'
 import { SERVICE } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
+import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
 const hasRemote = await import('../src/lib/remote.mjs').then(() => true).catch(() => false)
 const skipNoRemote = hasRemote ? {} : { skip: 'src/lib/remote.mjs not delivered yet (T5)' }
@@ -131,7 +133,7 @@ function cleanup(ctx, dataRoot) {
 test('orchestrator: registers service; status exposes tasks, forks compat, commercial flags', async () => {
   const { ctx, svc, dataRoot } = await boot()
   assert.ok(svc)
-  assert.equal(svc.version, '2.1.1')
+  assert.equal(svc.version, '2.2.0')
   assert.equal(svc.role, 'mother')
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
@@ -330,7 +332,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
   assert.equal(status.statusCode, 200)
-  assert.equal(status.json().version, '2.1.1')
+  assert.equal(status.json().version, '2.2.0')
 
   const wrongMethod = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'POST'), wrongMethod)
@@ -442,5 +444,36 @@ test('orchestrator: a fork that cannot resolve the bundle is reaped instead of b
   assert.equal(out.error, 'fork-bundle-unavailable')
   assert.equal(f.calls.reap.length, 1, 'the broken fork must be reaped')
   assert.deepEqual(svc.listTasks(), [], 'the failed task must not stay registered')
+  cleanup(ctx, dataRoot)
+})
+
+test('orchestrator: listForkSessions reads the fork-owned session log and extracts its title', async () => {
+  const { ctx, svc, dataRoot } = await boot()
+  await svc.createTask({ title: 'fork sessions' })
+  const task = svc.listTasks()[0]
+  const wsPath = 'E:\\fork-ws'
+  const sid = 'session-22222222-3333-4444-8555-666666666666'
+  const logDir = path.join(task.homeDir, 'sessions', encodeWorkspaceKey(wsPath), sid)
+  fs.mkdirSync(logDir, { recursive: true })
+  const frames = [
+    JSON.stringify({ type: 'session', version: 4, id: sid, createdAt: 1793500000000, cwd: wsPath }) + '\n',
+    JSON.stringify({ type: 'session/title', seq: 2, data: { title: '分身内会话标题', messageSeqs: [1] } }) + '\n',
+    JSON.stringify({ type: 'user/message', data: { content: [{ type: 'text', text: '分身内首条消息' }] } }) + '\n',
+  ]
+  fs.writeFileSync(path.join(logDir, 'session.v4.jsonl.zstd'), Buffer.concat(frames.map((x) => zlib.zstdCompressSync(Buffer.from(x, 'utf8')))))
+  fs.mkdirSync(path.join(task.homeDir, 'storages'), { recursive: true })
+  fs.writeFileSync(path.join(task.homeDir, 'storages', 'workspace.json'), JSON.stringify({
+    unit: { name: 'workspace', version: 2 },
+    global: { initialized: true, workspaceIds: ['w1'], archivedSessionIds: [], pinnedSessionIds: [] },
+    tables: { workspaces: { w1: { path: wsPath, title: 'ForkWS', sessionIds: [sid], createdAt: '2026-10-16T05:35:00.313Z', updatedAt: '2026-11-01T02:44:03.199Z' } } },
+  }))
+  const out = await svc.listForkSessions(task.taskId)
+  assert.equal(out.ok, true, JSON.stringify(out))
+  assert.equal(out.sessions.length, 1)
+  assert.equal(out.sessions[0].title, '分身内会话标题')
+  assert.equal(out.sessions[0].titleSource, 'session/title')
+  assert.match(out.sessions[0].preview, /分身内首条消息/)
+  assert.equal(out.sessions[0].workspaceTitle, 'ForkWS')
+  assert.equal((await svc.listForkSessions('task_nope')).error, 'unknown-task')
   cleanup(ctx, dataRoot)
 })

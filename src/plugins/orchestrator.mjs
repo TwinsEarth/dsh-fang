@@ -18,6 +18,8 @@ import {
   newId, iso, nowMs, bus, sleep, parseWebUrl, probeWebUrl,
   invokeCommercial, commercialConfigSchemaDefaults,
 } from '../kernel/index.mjs'
+import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
+import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
 export const inject = []
@@ -676,6 +678,63 @@ export function apply(ctx, config) {
       return { ...out, derivedFrom: seed ? { sessionId: seed.sessionId } : null }
     },
 
+    /**
+     * 分身（任务）内部的会话目录：只读该分身自己的 $DSH_HOME/sessions。
+     * 用于控制面板右栏「分身项目 & 会话」；有界解帧取会话标题，未知/超限如实降级。
+     */
+    async listForkSessions(taskId, options = {}) {
+      const task = tasks.get(String(taskId ?? ''))
+      if (!task) return { ok: false, error: 'unknown-task' }
+      const limit = Math.min(50, Math.max(1, Number(options.limit) || 20))
+      const sessionsRoot = path.join(task.homeDir, "sessions")
+      const storagesRoot = path.join(task.homeDir, "storages")
+      if (!exists(sessionsRoot)) return { ok: true, taskId: task.taskId, sessions: [], degraded: ['sessions-root-missing'] }
+      let index = { workspaces: [], global: { archivedSessionIds: [], pinnedSessionIds: [] }, degraded: [] }
+      try {
+        index = parseWorkspaceIndex(fs.readFileSync(path.join(storagesRoot, "workspace.json"), "utf8"))
+      } catch (e) {
+        index = { workspaces: [], global: { archivedSessionIds: [], pinnedSessionIds: [] }, degraded: [e?.code === 'ENOENT' ? 'index-not-found' : 'index-read-failed'] }
+      }
+      const fsApi = { statSync: fs.statSync, readdirSync: fs.readdirSync, openSync: fs.openSync, readSync: fs.readSync, closeSync: fs.closeSync }
+      let dirs = []
+      try {
+        dirs = fs.readdirSync(sessionsRoot, { withFileTypes: true })
+          .filter((entry) => entry && typeof entry.isDirectory === "function" && entry.isDirectory())
+          .map((entry) => entry.name)
+      } catch { /* 空目录/权限 */ }
+      const rows = scanSessionDirs({
+        sessionsDir: sessionsRoot,
+        workspaceIds: dirs,
+        archivedSessionIds: index.global.archivedSessionIds,
+        pinnedSessionIds: index.global.pinnedSessionIds,
+        fsApi,
+      }).slice(0, limit)
+      const keyMap = new Map()
+      for (const ws of index.workspaces) keyMap.set(encodeWorkspaceKey(ws.path), ws)
+      const sessions = rows.map((row) => {
+        const workspace = keyMap.get(row.workspaceId) ?? null
+        let title = null; let titleSource = null; let preview = null
+        const file = path.join(sessionsRoot, row.workspaceId, row.sessionId, "session.v4.jsonl.zstd")
+        try {
+          if (exists(file)) {
+            const decoded = readBoundedEvents({ file, maxFrames: 32, maxCompressedBytes: 1024 * 1024, fsApi, zstdDecompressSync: zlib.zstdDecompressSync })
+            const meta = extractSessionTitle(decoded.events)
+            title = meta.title; titleSource = meta.titleSource; preview = meta.preview
+          }
+        } catch { /* 标题失败不阻塞列出会话 */ }
+        return {
+          sessionId: row.sessionId,
+          title: title ?? (workspace ? workspace.title : "未命名会话"),
+          titleSource: titleSource ?? 'workspace',
+          preview,
+          updatedAt: row.updatedAt,
+          workspaceTitle: workspace ? workspace.title : row.workspaceId,
+          archived: row.archived,
+          pinned: row.pinned,
+        }
+      })
+      return { ok: true, taskId: task.taskId, sessions, degraded: index.degraded ?? [] }
+    },
     /** v2 归档：先让分身 flush + 落审计，再回收进程与 home。 */
     async archiveTask(taskId) {
       const id = String(taskId ?? '')
@@ -876,6 +935,11 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         const out = await service.derive({ title: body?.title, sessionId: body?.sessionId, collaborators: body?.collaborators })
         return json(res, out.ok ? 200 : 409, out)
+      })
+      route('GET', `${prefix}/api/tasks/sessions`, async (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const out = await service.listForkSessions(query.get("taskId") ?? "", { limit: query.get("limit") })
+        return json(res, out.ok === false ? 404 : 200, out)
       })
       // v1 兼容路由
       route('GET', `${prefix}/api/forks`, (req, res) => json(res, 200, { ok: true, forks: service.listForks() }))

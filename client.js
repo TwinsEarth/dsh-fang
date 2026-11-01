@@ -181,14 +181,37 @@ window.__ModuleLoader__.load({
       }, children)
     }
 
+    // ── 控制面板：3:7 分屏（左=母体项目&会话，右=分身项目&会话）───────────────
+    /** 按工作区把会话分组（组 = 项目），组内按更新时间倒序。 */
+    const groupSessionsByWorkspace = (items) => {
+      const groups = new Map()
+      for (const item of items) {
+        const key = item.workspaceId || item.workspaceKey || item.workspaceTitle || 'unknown'
+        if (!groups.has(key)) {
+          groups.set(key, {
+            key,
+            title: item.workspaceTitle || '未命名项目',
+            path: item.workspacePath || '',
+            sessions: [],
+          })
+        }
+        groups.get(key).sessions.push(item)
+      }
+      const out = [...groups.values()]
+      for (const group of out) group.sessions.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+      return out.sort((a, b) => String(a.title).localeCompare(String(b.title)))
+    }
+
     function FangPanel() {
       const [status, setStatus] = useState({ state: 'loading', data: null, error: '' })
       const [sessions, setSessions] = useState({ state: 'loading', items: [], error: '' })
       const [tasks, setTasks] = useState({ state: 'loading', items: [] })
-      const [selected, setSelected] = useState(null) // {kind:'session'|'task', item}
+      const [forkSessions, setForkSessions] = useState({})
+      const [selected, setSelected] = useState(null)
       const [derive, setDerive] = useState(state.derive)
       const [busy, setBusy] = useState('')
       const [notice, setNotice] = useState('')
+      const [collapsed, setCollapsed] = useState(() => new Set())
 
       const refresh = useCallback(async () => {
         const [s, t, sess] = await Promise.all([
@@ -198,13 +221,31 @@ window.__ModuleLoader__.load({
         ])
         if (s.status === 200 && s.body?.ok !== false) setStatus({ state: 'ready', data: s.body, error: '' })
         else setStatus({ state: 'error', data: null, error: s.body?.error ?? 'status-unavailable' })
-        setTasks({ state: 'ready', items: Array.isArray(t.body?.tasks) ? t.body.tasks : [] })
-        const sessionItems = Array.isArray(sess.body?.sessions) ? sess.body.sessions : Array.isArray(sess.body?.items) ? sess.body.items : []
+        const taskItems = Array.isArray(t.body?.tasks) ? t.body.tasks : []
+        setTasks({ state: 'ready', items: taskItems })
+        const sessionItems = Array.isArray(sess.body?.sessions) ? sess.body.sessions : []
         setSessions({ state: sess.status === 200 ? 'ready' : 'error', items: sessionItems, error: sess.body?.error ?? '' })
+        // 右栏：每个分身自己的会话（只对 ready/running 的分身拉取；失败只影响该分身）
+        const activeTasks = taskItems.filter((x) => x.status === 'ready' || x.status === 'running')
+        const results = await Promise.allSettled(activeTasks.map(async (task) => {
+          const res = await api('/fang/api/tasks/sessions?taskId=' + encodeURIComponent(task.taskId) + '&limit=20')
+          return [task.taskId, {
+            state: res.status === 200 ? 'ready' : 'error',
+            items: Array.isArray(res.body?.sessions) ? res.body.sessions : [],
+            error: res.body?.error ?? '',
+          }]
+        }))
+        const map = {}
+        for (const entry of results) if (entry.status === 'fulfilled') map[entry.value[0]] = entry.value[1]
+        setForkSessions(map)
       }, [])
 
-      useEffect(() => { refresh(); const timer = setInterval(refresh, 5000); return () => clearInterval(timer) }, [refresh])
-      useEffect(() => subscribe(setDerive), [])
+      useEffect(() => {
+        refresh()
+        const timer = setInterval(refresh, 5000)
+        const off = subscribe(setDerive)
+        return () => { clearInterval(timer); off() }
+      }, [refresh])
 
       const startDerive = async (payload, label) => {
         setBusy(label)
@@ -233,97 +274,171 @@ window.__ModuleLoader__.load({
         await refresh()
       }
 
+      const toggleTask = (taskId) => {
+        setCollapsed((prev) => {
+          const next = new Set(prev)
+          if (next.has(taskId)) next.delete(taskId)
+          else next.add(taskId)
+          return next
+        })
+      }
+
       const data = status.data
       const running = data?.tasks?.running ?? 0
       const ready = data?.tasks?.ready ?? 0
       const max = data?.tasks?.max ?? '?'
-      const adapterMode = data?.role ?? 'mother'
+      const readyCount = `${ready}/${max}`
 
-      return h('div', { style: { padding: '24px 28px', maxWidth: 980, margin: '0 auto', color: TEXT, font: FONT } },
-        // 门楣
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
-          h('span', { style: { display: 'inline-flex', width: 28, height: 28 } }, h(GateGlyph, { size: 24, active: true })),
-          h('h1', { style: { margin: 0, fontSize: 20, fontWeight: 600 } }, '瓮城'),
-          h(Chip, null, adapterMode === 'mother' ? '母体只读' : adapterMode),
-          h(Chip, null, `${ready}/${max} 就绪`),
-          h(Chip, null, `${running} 运行中`),
-          h('span', { style: { flex: 1 } }),
-          h(Btn, { primary: true, disabled: !!busy, onClick: () => startDerive({ title: '快速派生' }, 'derive') }, busy === 'derive' ? '派生中…' : '派生新分身'),
-          h(Btn, { onClick: refresh, disabled: !!busy }, '刷新')),
-        status.state === 'error'
-          ? h('div', { style: { marginTop: 12, padding: '8px 12px', border: `1px solid ${BORDER}`, borderRadius: 8, color: TEXT2 } },
-            `母体状态不可读 —— /fang/api/status: ${status.error}`, ' ',
-            h(Btn, { onClick: refresh }, '重试'))
-          : null,
-        notice ? h('div', { style: { marginTop: 12, fontSize: 13, color: TEXT2 } }, notice) : null,
-
-        // 最近一次快速派生结果（弹窗被拦时这里是兜底链接）
-        derive && !derive.pending && derive.ok
-          ? h('div', { style: { marginTop: 12, padding: '10px 12px', border: `1px solid ${BORDER}`, borderLeft: `3px solid ${ACCENT}`, borderRadius: 8, fontSize: 13, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' } },
-            h('span', null, `分身已就绪 · 端口 ${derive.port ?? '—'}`),
-            derive.url ? h('a', { href: derive.url, target: '_blank', rel: 'noopener', style: { color: 'inherit' } }, '打开分身 ↗') : null,
-            h(Btn, { onClick: () => { state.derive = null; state.notify() } }, '知道了'))
-          : null,
-
-        // 继续开发：会话
-        h('h2', { style: { fontSize: 14, fontWeight: 600, margin: '22px 0 6px', color: TEXT2 } }, '继续开发 · 已有会话'),
-        sessions.state === 'ready' && sessions.items.length === 0
-          ? h('div', { style: { padding: '10px 2px', fontSize: 13, color: TEXT2 } }, '还没有可继续的会话。开一个新对话后，它会出现在这里。')
-          : sessions.state === 'error'
-            ? h('div', { style: { padding: '10px 2px', fontSize: 13, color: TEXT2 } }, `会话目录不可读：${sessions.error || 'unknown'}`)
-            : sessions.items.slice(0, 8).map((s) => h(Row, {
+      // ── 左栏：母体项目 & 会话 ───────────────────────────────────────────
+      const motherGroups = groupSessionsByWorkspace(sessions.items)
+      const motherList = sessions.state === 'error'
+        ? h('div', { style: { padding: '14px', fontSize: 13, color: TEXT2 } },
+          `会话目录不可读：${sessions.error || 'unknown'}`, ' ',
+          h(Btn, { onClick: refresh }, '重试'))
+        : motherGroups.length === 0
+          ? h('div', { style: { padding: '14px', fontSize: 13, color: TEXT2 } }, '还没有可继续的母体会话。开一个新对话后，它会出现在这里。')
+          : motherGroups.map((group) => h('div', { key: 'g:' + group.key },
+            h('div', {
+              title: group.path || group.title,
+              style: {
+                padding: '8px 14px 4px', fontSize: 11, letterSpacing: '.04em', textTransform: 'uppercase',
+                color: TEXT2, borderTop: '1px solid ' + BORDER, background: 'transparent',
+              },
+            }, `${group.title} · ${group.sessions.length}`),
+            group.sessions.slice(0, 12).map((s) => h(Row, {
               key: 's:' + s.sessionId,
-              selected: selected?.kind === 'session' && selected.item.sessionId === s.sessionId,
-              onClick: () => setSelected({ kind: 'session', item: s }),
+              selected: selected?.kind === 'mother-session' && selected.item.sessionId === s.sessionId,
+              onClick: () => setSelected({ kind: 'mother-session', item: s }),
             },
             h('div', { style: { flex: 1, minWidth: 0 } },
               h('div', { title: s.title || s.preview || undefined, style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, sessionLabel(s)),
               h('div', { style: { fontSize: 12, color: TEXT2, fontFamily: MONO } },
-                `${short(s.sessionId, 12)} · ${fmtTime(s.updatedAt)}${s.workspaceTitle ? ' · ' + s.workspaceTitle : ''}${sessionSourceHint(s)}${s.archived ? ' · 已归档' : ''}`)),
-            h('span', { style: { fontSize: 12, color: TEXT2 } }, '选择'))),
+                `${short(s.sessionId, 12)} · ${fmtTime(s.updatedAt)}${sessionSourceHint(s)}${s.archived ? ' · 已归档' : ''}`)),
+            h('span', { style: { fontSize: 12, color: TEXT2 } }, '选择')))))
 
-        // 继续开发：任务
-        h('h2', { style: { fontSize: 14, fontWeight: 600, margin: '22px 0 6px', color: TEXT2 } }, '继续开发 · 任务'),
-        tasks.items.length === 0
-          ? h('div', { style: { padding: '10px 2px', fontSize: 13, color: TEXT2 } }, '还没有分身。点右上「派生新分身」，或双击左侧瓮城图标快速派生。')
-          : tasks.items.map((t) => h(Row, {
-            key: 't:' + t.taskId,
-            selected: selected?.kind === 'task' && selected.item.taskId === t.taskId,
-            onClick: () => setSelected({ kind: 'task', item: t }),
-          },
-          h('div', { style: { flex: 1, minWidth: 0 } },
-            h('div', { style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, t.title),
-            h('div', { style: { fontSize: 12, color: TEXT2, fontFamily: MONO } },
-              `${short(t.taskId, 12)} · ${t.status} · 端口 ${t.port ?? '—'} · adapter ${t.adapter?.ok ? 'ready' : (t.adapter?.error || 'down')}${t.seed?.sessionId ? ' · 种子 ' + short(t.seed.sessionId, 8) : ''}`)),
-          h('span', { style: { display: 'flex', gap: 6 } },
-            t.url ? h('a', { href: t.url, target: '_blank', rel: 'noopener', onClick: (e) => e.stopPropagation(), style: { fontSize: 12, color: 'inherit' } }, '打开') : null,
-            h(Btn, { onClick: (e) => { e.stopPropagation(); archiveTask(t.taskId) }, disabled: !!busy }, '归档')))),
+      // ── 右栏：分身项目 & 会话 ──────────────────────────────────────────
+      const taskBlock = (task) => {
+        const isCollapsed = collapsed.has(task.taskId)
+        const forks = forkSessions[task.taskId]
+        const sessionRows = forks?.state === 'error'
+          ? h('div', { style: { padding: '4px 14px 10px 34px', fontSize: 12, color: TEXT2 } }, `分身会话不可读：${forks.error || 'unknown'}`)
+          : !forks
+            ? h('div', { style: { padding: '4px 14px 10px 34px', fontSize: 12, color: TEXT2 } }, task.status === 'ready' || task.status === 'running' ? '读取分身会话…' : '（分身未运行）')
+            : forks.items.length === 0
+              ? h('div', { style: { padding: '4px 14px 10px 34px', fontSize: 12, color: TEXT2 } }, '这个分身还没有会话；打开后新开的对话会出现在这里。')
+              : forks.items.map((s) => h('div', {
+                key: task.taskId + ':' + s.sessionId,
+                role: 'button',
+                tabIndex: 0,
+                onClick: () => setSelected({ kind: 'fork-session', item: s, task }),
+                onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected({ kind: 'fork-session', item: s, task }) } },
+                style: {
+                  display: 'flex', gap: 10, alignItems: 'center', padding: '6px 14px 6px 34px', cursor: 'pointer',
+                  borderTop: '1px dashed ' + BORDER,
+                  background: selected?.kind === 'fork-session' && selected.item.sessionId === s.sessionId ? 'var(--dsw-alias-surface-raised, rgba(127,127,127,.08))' : 'transparent',
+                },
+              },
+              h('span', { 'aria-hidden': true, style: { width: 6, height: 6, borderRadius: '50%', background: 'var(--dsw-alias-label-tertiary, #bbb)', flexShrink: 0 } }),
+              h('div', { style: { flex: 1, minWidth: 0 } },
+                h('div', { title: s.title || s.preview || undefined, style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, sessionLabel(s)),
+                h('div', { style: { fontSize: 11, color: TEXT2, fontFamily: MONO } },
+                  `${short(s.sessionId, 12)} · ${fmtTime(s.updatedAt)}${sessionSourceHint(s)}`)),
+              h('span', { style: { fontSize: 11, color: TEXT2 } }, '选择')))
 
-        // 选中确认条
-        selected
-          ? h('div', { style: { marginTop: 14, padding: '12px 14px', border: `1px solid ${BORDER}`, borderLeft: `3px solid ${ACCENT}`, borderRadius: 8 } },
-            h('div', { style: { fontSize: 13, marginBottom: 8 } },
-              selected.kind === 'session'
-                ? `继续「${selected.item.title || '未命名会话'}」：将派生 1 个分身，注入手写摘要种子（lineage，不改母体会话）。`
-                : `继续任务「${selected.item.title}」：打开既有分身，或在其上继续开发。`),
-            h('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
-              h(Btn, { onClick: () => setSelected(null) }, '取消'),
-              selected.kind === 'session'
-                ? h(Btn, {
-                  primary: true,
-                  disabled: !!busy,
-                  onClick: () => startDerive({ sessionId: selected.item.sessionId, title: `从会话继续 · ${selected.item.title || short(selected.item.sessionId, 8)}` }, 'derive-session'),
-                }, busy === 'derive-session' ? '派生中…' : '继续开发 →')
-                : h(Btn, {
-                  primary: true,
-                  onClick: () => { if (selected.item.url) window.open(selected.item.url, '_blank', 'noopener') },
-                }, '打开分身 →')))
-          : null,
+        return h('div', { key: 't:' + task.taskId, style: { borderTop: '1px solid ' + BORDER } },
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', padding: '8px 12px' } },
+            h('button', {
+              type: 'button', onClick: () => toggleTask(task.taskId),
+              title: isCollapsed ? '展开分身会话' : '收起分身会话',
+              style: { width: 20, height: 20, padding: 0, border: 'none', background: 'transparent', color: TEXT2, cursor: 'pointer', fontSize: 12 },
+            }, isCollapsed ? '▸' : '▾'),
+            h('div', { style: { flex: 1, minWidth: 0 } },
+              h('div', { title: task.title, style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.title),
+              h('div', { style: { fontSize: 11, color: TEXT2, fontFamily: MONO } },
+                `${short(task.taskId, 12)} · ${task.status} · 端口 ${task.port ?? '—'} · adapter ${task.adapter?.ok ? 'ready' : (task.adapter?.error || 'down')}`)),
+            task.url ? h('a', { href: task.url, target: '_blank', rel: 'noopener', style: { fontSize: 12, color: 'inherit', textDecoration: 'underline' } }, '打开') : null,
+            h(Btn, { onClick: () => archiveTask(task.taskId), disabled: !!busy }, '归档')),
+          isCollapsed ? null : h('div', { style: { paddingBottom: 6 } }, sessionRows))
+      }
 
-        // 页脚
-        h('div', { style: { marginTop: 24, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 12, color: TEXT2, display: 'flex', gap: 12, flexWrap: 'wrap' } },
-          h('span', null, '双击左侧「瓮城」图标或输入框徽标 = 快速派生；单击 = 打开本面板。'),
-          h('a', { href: '/fang/panel', target: '_blank', rel: 'noopener', style: { color: 'inherit' } }, '独立门户 ↗')))
+      const rightList = tasks.items.length === 0
+        ? h('div', { style: { padding: '14px', fontSize: 13, color: TEXT2 } }, '还没有分身。点右上「派生新分身」，或双击左侧瓮城图标快速派生。')
+        : tasks.items.map(taskBlock)
+
+      return h('div', {
+        style: {
+          height: '100%', display: 'flex', flexDirection: 'column', gap: 10,
+          padding: '18px 22px', boxSizing: 'border-box', minHeight: 0,
+          color: TEXT, font: FONT,
+        },
+      },
+      // 门楣
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flexShrink: 0 } },
+        h('span', { style: { display: 'inline-flex', width: 26, height: 26 } }, h(GateGlyph, { size: 22, active: true })),
+        h('h1', { style: { margin: 0, fontSize: 19, fontWeight: 600 } }, '瓮城'),
+        h(Chip, null, (data?.role ?? 'mother') === 'mother' ? '母体只读' : String(data?.role)),
+        h(Chip, null, `${readyCount} 就绪`),
+        h(Chip, null, `${running} 运行中`),
+        h('span', { style: { flex: 1 } }),
+        h(Btn, { primary: true, disabled: !!busy, onClick: () => startDerive({ title: '快速派生' }, 'derive') }, busy === 'derive' ? '派生中…' : '派生新分身'),
+        h(Btn, { onClick: refresh, disabled: !!busy }, '刷新')),
+      status.state === 'error'
+        ? h('div', { style: { flexShrink: 0, padding: '6px 12px', border: '1px solid ' + BORDER, borderRadius: 8, color: TEXT2, fontSize: 13 } },
+          `母体状态不可读 —— /fang/api/status: ${status.error}`, ' ', h(Btn, { onClick: refresh }, '重试'))
+        : null,
+      notice ? h('div', { style: { flexShrink: 0, fontSize: 12, color: TEXT2 } }, notice) : null,
+      derive && !derive.pending && derive.ok
+        ? h('div', { style: { flexShrink: 0, padding: '8px 12px', border: '1px solid ' + BORDER, borderLeft: '3px solid ' + ACCENT, borderRadius: 8, fontSize: 12, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' } },
+          h('span', null, `分身已就绪 · 端口 ${derive.port ?? '—'}`),
+          derive.url ? h('a', { href: derive.url, target: '_blank', rel: 'noopener', style: { color: 'inherit' } }, '打开分身 ↗') : null,
+          h(Btn, { onClick: () => { state.derive = null; state.notify() } }, '知道了'))
+        : null,
+
+      // 3:7 分屏：左=母体，右=分身；各栏独立滚动
+      h('div', { style: { flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0,3fr) minmax(0,7fr)', gap: 12 } },
+        h('section', {
+          style: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, border: '1px solid ' + BORDER, borderRadius: 10, overflow: 'hidden', background: SURFACE },
+        },
+        h('div', { style: { flexShrink: 0, padding: '9px 14px', borderBottom: '1px solid ' + BORDER, display: 'flex', alignItems: 'center', gap: 8 } },
+          h('span', { style: { fontSize: 13, fontWeight: 600 } }, '母体 · 项目 & 会话'),
+          h('span', { style: { fontSize: 11, color: TEXT2 } }, '只读'),
+          h('span', { style: { flex: 1 } }),
+          h(Chip, null, `${sessions.items.length} 会话`)),
+        h('div', { style: { flex: 1, minHeight: 0, maxHeight: 'calc(100vh - 260px)', overflowY: 'auto' } }, motherList)),
+        h('section', {
+          style: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, border: '1px solid ' + BORDER, borderRadius: 10, overflow: 'hidden', background: SURFACE },
+        },
+        h('div', { style: { flexShrink: 0, padding: '9px 14px', borderBottom: '1px solid ' + BORDER, display: 'flex', alignItems: 'center', gap: 8 } },
+          h('span', { style: { fontSize: 13, fontWeight: 600 } }, '分身 · 项目 & 会话'),
+          h('span', { style: { fontSize: 11, color: TEXT2 } }, '每个任务一个项目'),
+          h('span', { style: { flex: 1 } }),
+          h(Chip, null, `${tasks.items.length} 项目`)),
+        h('div', { style: { flex: 1, minHeight: 0, maxHeight: 'calc(100vh - 260px)', overflowY: 'auto' } }, rightList))),
+
+      // 选中确认条（两段式：先选，再确认）
+      selected
+        ? h('div', { style: { flexShrink: 0, padding: '10px 14px', border: '1px solid ' + BORDER, borderLeft: '3px solid ' + ACCENT, borderRadius: 8, background: 'transparent' } },
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+            h('div', { style: { flex: 1, minWidth: 200, fontSize: 12 } },
+              selected.kind === 'mother-session'
+                ? `继续「${sessionLabel(selected.item)}」：将派生 1 个分身并注入 ≤32KiB 摘要种子（lineage，不改母体会话）。`
+                : `继续「${sessionLabel(selected.item)}」：该会话属于分身「${selected.task?.title ?? ''}」，将在该分身标签页里继续。`),
+            h(Btn, { onClick: () => setSelected(null) }, '取消'),
+            selected.kind === 'mother-session'
+              ? h(Btn, {
+                primary: true,
+                disabled: !!busy,
+                onClick: () => startDerive({ sessionId: selected.item.sessionId, title: `从会话继续 · ${sessionLabel(selected.item)}` }, 'derive-session'),
+              }, busy === 'derive-session' ? '派生中…' : '继续开发 →')
+              : h(Btn, {
+                primary: true,
+                onClick: () => { if (selected.task?.url) window.open(selected.task.url, '_blank', 'noopener') },
+              }, '打开分身 →')))
+        : null,
+
+      h('div', { style: { flexShrink: 0, fontSize: 11, color: TEXT2, display: 'flex', gap: 12, flexWrap: 'wrap' } },
+        h('span', null, '双击左侧「瓮城」图标或输入框徽标 = 快速派生；单击 = 打开本面板；两栏各自滚动。'),
+        h('a', { href: '/fang/panel', target: '_blank', rel: 'noopener', style: { color: 'inherit' } }, '独立门户 ↗')))
     }
 
     // ── 输入框 dock 徽标：状态 + 单手加速器 ────────────────────────────────

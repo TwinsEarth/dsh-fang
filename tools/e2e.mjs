@@ -172,7 +172,7 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 2.1.1', status.body?.version === '2.1.1')
+    check('status reports version 2.2.0', status.body?.version === '2.2.0')
     check('status reports role=mother', status.body?.role === 'mother')
     check('mother has forker service', status.body?.services?.forker === true)
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
@@ -224,6 +224,18 @@ async function main() {
     const tasksList = await api('/fang/api/tasks')
     check('GET /fang/api/tasks lists the task', Array.isArray(tasksList.body?.tasks) && tasksList.body.tasks.length === 1)
 
+    // ── the right pane of the panel: sessions owned by the fork itself ──
+    const forkHome = path.join(homeRoot, 'fang', 'e2e', 'forks', taskId)
+    const FORK_SESSION_ID = 'session-22222222-3333-4444-8555-666666666666'
+    if (fs.existsSync(forkHome)) {
+      seedSession(forkHome, { sessionId: FORK_SESSION_ID, workspacePath: 'E:\\fork-ws', title: 'e2e 分身会话标题' })
+      const fsessions = await api('/fang/api/tasks/sessions?taskId=' + encodeURIComponent(taskId))
+      check('GET /fang/api/tasks/sessions 200', fsessions.status === 200, `status=${fsessions.status}`)
+      const fitems = fsessions.body?.sessions ?? []
+      const ft = fitems.find((s) => s.sessionId === FORK_SESSION_ID)
+      check('fork session list contains the seeded session', Boolean(ft))
+      check('fork session title is native', ft?.title === 'e2e 分身会话标题', JSON.stringify(ft?.title ?? null))
+    }
     // ── archive the task (flush + reap) ────────────────────────────────
     const archived = await api('/fang/api/tasks/archive', {
       method: 'POST',

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "description": "dsh-Fang (瓮城) v1.0.0 — mother/fork plugin development environment: one readonly mother, a disposable child dsh-Web per task, 1 orchestrator + 9 sub-plugins.",
