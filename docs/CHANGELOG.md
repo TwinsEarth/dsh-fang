@@ -1,5 +1,44 @@
 # CHANGELOG
 
+## v2.8.0（2026-11-02）
+
+**主题：动作规则表 YAML 化 —— 内置规则 + 叠加层，按需启用/禁用/调参而不改代码。**
+
+### 新增
+- `src/lib/rule-registry.mjs`：
+  - **YAML 子集解析器**（`parseYamlSubset`）：块映射 / 序列 / 引号标量 / 简单 flow 列表 / 注释；
+    tab 缩进、多文档、结构错误都给出明确错误（不静默）；
+  - **schema 校验**（`validateRuleConfig`）：`version` / `settings` / 规则字段 / 9 种 matcher kind /
+    pattern 长度与数量上限；错误逐条给出，**不做部分接受**；
+  - **正则安全启发式**（`isSafePatternSource`）：拒绝明显灾难回溯形状（`(a+)+`、`(.*)*`）与超长模式，
+    `settings.rejectUnsafeRegex: false` 时可关闭（不推荐）；
+  - **声明式编译器**（`compileDeclarativeRule`）：9 种 matcher（`command-pattern` / `path-pattern` /
+    `path-outside` / `url-host-in` / `url-host-not-in` / `tool-in` / `pid-equal` / `always` / `never`）
+    + 3 种 evidence（`pattern-match` / `list-match` / `static`）；
+  - **RuleRegistry**（`createRuleRegistry`）：内置规则 + YAML 叠加，**事务化**应用
+    （失败保留旧规则）；支持 `enabled:false`、`light/priority/reason/tags/category` 覆盖、
+    给内置规则追加 `commandPatterns`/`pathPatterns`、声明式新规则、`resetToBuiltin`；
+  - **文件加载 + 热加载**：`loadRuleConfigFile` / `watchRuleConfigFile`（`fs.watch` + 防抖，失败保留旧规则）。
+- 插件 `fang-umbrella` 配置新增 `rulesFile` / `rulesWatch` / `rulesDebounceMs`；
+  服务面新增 `ruleConfigStatus()` / `reloadRules()` / `applyRuleConfig()` / `ruleRegistry`。
+- `createUmbrella({ registry })`：动作评分改用注册表规则（不传则沿用原规则集）。
+- `docs/UMBRELLA-RULES.example.yaml`：带注释的完整示例（开关 / 覆盖 / 追加正则 / 声明式新规则）。
+
+### 语义要点
+- 内置规则**永远存在**，YAML 只是叠加层；未提及的规则保持原样；
+- 优先级：`DEFAULT_RULE_PRIORITIES`（10…9999）为基线，YAML 可覆盖；同优先级按内置顺序稳定排序；
+- 未知 id 默认只警告；`settings.failOnUnknownRule: true` 时整份拒绝；
+- 正则编译失败：`failOnInvalidPattern: false` 跳过该条、`true` 整份拒绝；
+- 热加载失败 **不得** 让评分器裸奔：先构造新数组、校验通过才替换。
+
+### 测试
+- 新增 `test/rule-config.test.mjs` **18 项**（YAML 解析、schema、正则安全、9 种 matcher、
+  禁用/覆盖/优先级/追加正则、未知 id、failOnInvalidPattern 事务化、文件加载、热加载管线、
+  插件接线、门面 registry 接线）。
+- 全量测试 **464 → 482 项**。
+
+> 版本策略：`x.y.z` 每一位 0–9；`2.7.9` 已满位，本次进位到 `2.8.0`（v2.8 的首个补丁位）。
+
 ## v2.7.9（2026-11-02）
 
 **主题：把 `parseShellRedirects` 从正则升级为 shell 词法/语法解析（AST-lite）。**
