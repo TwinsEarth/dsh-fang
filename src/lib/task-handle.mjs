@@ -37,6 +37,8 @@ export const FORK_EVENT = Object.freeze({
   STARTED: 'fang/fork-started',
   CRASHED: 'fang/fork-crashed',
   REAPED: 'fang/fork-reaped',
+  /** v2.7.3：自动重启失败/放弃重启；payload { forkId, error, terminal }。 */
+  RESTART_FAILED: 'fang/fork-restart-failed',
 })
 
 const msgOf = (e) => String(e && e.message !== undefined ? e.message : e)
@@ -112,6 +114,7 @@ export class TaskHandle {
     this.onForkStarted = (payload) => this.handleForkStarted(payload)
     this.onForkCrashed = (payload) => this.handleForkCrashed(payload)
     this.onForkReaped = (payload) => this.handleForkReaped(payload)
+    this.onForkRestartFailed = (payload) => this.handleForkRestartFailed(payload)
   }
 
   get status() {
@@ -326,6 +329,7 @@ export class TaskHandle {
     this.busUnsubs.push(this.eventSource.on(FORK_EVENT.STARTED, this.onForkStarted))
     this.busUnsubs.push(this.eventSource.on(FORK_EVENT.CRASHED, this.onForkCrashed))
     this.busUnsubs.push(this.eventSource.on(FORK_EVENT.REAPED, this.onForkReaped))
+    this.busUnsubs.push(this.eventSource.on(FORK_EVENT.RESTART_FAILED, this.onForkRestartFailed))
   }
 
   detachForkEvents() {
@@ -365,6 +369,28 @@ export class TaskHandle {
     void this.detachClient()
     this.setState(TASK_HANDLE_STATE.STOPPED)
     this.rejectWaiters(makeError('task was reaped', { code: 'task-reaped' }))
+  }
+
+  /**
+   * v2.7.3：Forker 自动重启失败事件。
+   * - terminal=true（放弃重启/无 CLI）→ 立即结束等待，进入 failed（不等 restartTimeoutMs）；
+   * - terminal=false（本次尝试失败，Forker 还会再试）→ 只记录日志并继续等待，
+   *   由后续 fork-started 或 status 轮询兜底推进（避免把「还会重试」误判为终态）。
+   */
+  handleForkRestartFailed(payload) {
+    if (String(payload?.forkId ?? '') !== this.taskId) return
+    if (this.state !== TASK_HANDLE_STATE.RECONNECTING) return
+    const terminal = payload?.terminal !== false
+    const error = makeError(`fork restart failed: ${String(payload?.error ?? 'unknown')}`, {
+      code: terminal ? 'restart-failed' : 'restart-retry-failed',
+      terminal,
+    })
+    if (!terminal) {
+      this.logger.warn?.(`[task-handle] restart attempt failed (will retry): ${error.message}`)
+      return
+    }
+    this.logger.warn?.(`[task-handle] restart gave up: ${error.message}`)
+    this.restartSlot?.finish(error)
   }
 
   async handleCrash(payload) {

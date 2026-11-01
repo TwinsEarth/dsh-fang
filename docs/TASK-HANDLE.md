@@ -1,6 +1,6 @@
 # TaskHandle（v2.6.7）
 
-> 代码：`src/lib/task-handle.mjs`；单测：`test/task-handle.test.mjs`（17 项）。
+> 代码：`src/lib/task-handle.mjs`；单测：`test/task-handle.test.mjs`（20 项）。
 > 组合：Forker（进程层）+ ForkClient（传输/命令层 + CommandCache 幂等）。
 > 目标：把「创建/启动 fork → 连接 Adapter → 命令代理 → 崩溃重启后重连 → 停止/回收」
 > 收进一个生命周期对象，Orchestrator 只操作 `TaskHandle`，不直接拼 spawn + client。
@@ -46,8 +46,9 @@ Forker 子进程退出
   └─ bus: fang/fork-crashed { forkId, kind, code }
        └─ TaskHandle: emit crashed → state=reconnecting → 断开旧 client
             └─ waitForRestart()            // 事件优先 + status 轮询兜底
-                 ├─ bus: fang/fork-started  → forker.status() running/url
-                 └─ 或 poll forker.status()  // 覆盖事件丢失/重启很快的情况
+                 ├─ bus: fang/fork-started         → forker.status() running/url
+                 ├─ bus: fang/fork-restart-failed  → terminal=true 时立即失败
+                 └─ 或 poll forker.status()        // 覆盖事件丢失/重启很快的情况
             └─ 重新读 forker.adapterToken(taskId)（spawn 时已换新 token）
             └─ 用新 url + 新 token 建 ForkClient → connect
                  └─ state=running → 唤醒等待中的命令 → emit reconnected
@@ -57,6 +58,12 @@ Forker 子进程退出
   只存在内存（`adapterToken(forkId)`），不写 `fang-meta.json` / `forks.json`；
   `stop` 立即置空。TaskHandle 每次重建 client 都重新读取，所以重启后不会 401。
 - **事件缺失兜底**：`waitForRestart` 同时轮询 `forker.status`，不依赖单一事件。
+- **v2.7.3 重启失败事件**：Forker 在自动重启失败 / 放弃重启时发
+  `fang/fork-restart-failed { forkId, error, terminal }`：
+  - `terminal=true`（放弃重启、无 CLI）→ TaskHandle 立即 `failed`，不等 `restartTimeoutMs`；
+  - `terminal=false`（本次尝试失败、Forker 还会再试）→ 只记日志并继续 `reconnecting`，
+    由后续 `fork-started` 或轮询兜底推进（避免把「还会重试」误判为终态）。
+  - `stop()` 已有 `restartSlot.finish(stopping)`，会立即打断等待，不会挂到超时。
 
 ## 4. API
 
@@ -118,7 +125,7 @@ TaskHandle 依赖的 forker 方法（本仓库的 `fangForker` 服务）：
 **注意**：Forker 的自动重启默认 `supervise:false`（避免与 Orchestrator archive/reap 竞争）；
 要观察 TaskHandle 的崩溃重连，需显式打开 supervise（Forker config）或由上层重启后重新 `start()`。
 
-## 6. 测试清单（17 项，`test/task-handle.test.mjs`）
+## 6. 测试清单（20 项，`test/task-handle.test.mjs`）
 
 1. start：spawn → 用 forker token 建 client → running；
 2. start：fork 已运行时不重复 spawn；
@@ -136,7 +143,10 @@ TaskHandle 依赖的 forker 方法（本仓库的 `fangForker` 服务）：
 14. 事件聚合：onEvent 转发 + handler 异常隔离；
 15. 命令代理：op/payload 透传 + 便捷方法映射 ADAPTER_OP；
 16. 未启动 / 已停止时命令 fail-closed；
-17. dispose：释放订阅/client，不杀 fork。
+17. dispose：释放订阅/client，不杀 fork；
+18. v2.7.3：terminal `restart-failed` 立即 failed（不等超时）；
+19. v2.7.3：非 terminal `restart-failed` 继续等待，后续 `fork-started` 恢复；
+20. v2.7.3：taskId 不匹配的 `restart-failed` 被忽略。
 
 ## 7. TS 形状映射
 

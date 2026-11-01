@@ -1,5 +1,37 @@
 # CHANGELOG
 
+## v2.7.3（2026-11-01）
+
+**主题：重启结果事件化 —— Forker 发 `fork-restart-failed`，TaskHandle 终态 fail-fast。**
+
+### 新增
+- **事件 `fang/fork-restart-failed { forkId, error, terminal }`**（Forker）：
+  - 自动重启尝试失败（`restartFork` spawn 失败）→ `terminal:false`（Forker 可能按
+    supervise 计划再试）；
+  - 放弃重启（`planRestart` give-up / `restart-no-cli`）→ `terminal:true`（不会再有自动重试）。
+- **TaskHandle 订阅该事件**：
+  - `terminal=true` → 立即 `failed`，不再等 `restartTimeoutMs`（60s）；
+  - `terminal=false` → 只记日志、保持 `reconnecting`，由后续 `fork-started` 或
+    `forker.status()` 轮询兜底推进（不把「还会重试」误判为终态）；
+  - `taskId` 不匹配忽略；`stop()` 仍会立即打断等待（`restartSlot.finish`）。
+- 既有 `waitForRestart` 的「事件优先 + 轮询兜底」保留；`fork-started` 仍是成功的完成信号。
+
+### 说明
+- 设计稿的 `fork-restarted` 对应仓库既有 `fang/fork-started`（不再新增重复事件）；
+- TaskHandle 不自己挂 child `exit` handler，统一由 Forker 的 `fang/fork-crashed` 驱动，
+  因此没有「attach 两次」的重复挂载问题；
+- 非终态失败不 settle(false)：设计稿原方案会把「Forker 还会重试」误标成 failed，
+  这里改为继续等待（见 `docs/TASK-HANDLE.md §3`）。
+
+### 测试 / 文档
+- `test/task-handle.test.mjs` 新增 3 项（20 项）：terminal fail-fast、非终态继续等、
+  taskId 过滤；
+- `test/forker.test.mjs` 新增 1 项（27 项）：supervise give-up 时 emit
+  `fang/fork-restart-failed`（terminal=true）；
+- `docs/TASK-HANDLE.md §3`：事件驱动重启流程与 terminal 语义。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 3 个补丁位。
+
 ## v2.7.2（2026-11-01）
 
 **主题：Forker token 生命周期显式化 —— 补齐 TokenRegistry 公开面（getToken / onTokenRefresh）。**

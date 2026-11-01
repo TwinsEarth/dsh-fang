@@ -333,3 +333,63 @@ test('dispose：释放订阅与 client，不杀 fork', async () => {
   await sleep(20)
   assert.equal(status(h.handle), 'stopped')
 })
+
+// ── v2.7.3：事件驱动的重启结果（fail-fast / 非终态继续等 / taskId 过滤）────────
+
+test('v2.7.3 事件：terminal restart-failed 立即 failed（不等 restartTimeoutMs）', async () => {
+  const h = makeHarness({ running: true, restartTimeoutMs: 5000 })
+  await h.handle.start()
+  h.state.running = false
+  h.eventSource.emit('fang/fork-crashed', { forkId: 'task_1', kind: 'crash' })
+  await sleep(20)
+  assert.equal(status(h.handle), 'reconnecting')
+
+  const t0 = Date.now()
+  h.eventSource.emit('fang/fork-restart-failed', { forkId: 'task_1', error: 'port-exhausted', terminal: true })
+  await sleep(30)
+  assert.equal(status(h.handle), 'failed')
+  assert.ok(Date.now() - t0 < 1000, 'must fail fast instead of waiting restartTimeoutMs')
+  assert.ok(h.taskEvents.some((e) => e.kind === 'failed'))
+
+  await h.handle.stop()
+  h.eventSource.emit('fang/fork-restart-failed', { forkId: 'task_1', error: 'late', terminal: true })
+  await sleep(10)
+  assert.equal(status(h.handle), 'stopped')
+})
+
+test('v2.7.3 事件：非 terminal restart-failed 不误判终态，后续 fork-started 恢复', async () => {
+  const h = makeHarness({ running: true, restartTimeoutMs: 5000 })
+  await h.handle.start()
+  h.state.running = false
+  h.eventSource.emit('fang/fork-crashed', { forkId: 'task_1', kind: 'crash' })
+  await sleep(20)
+  assert.equal(status(h.handle), 'reconnecting')
+
+  h.eventSource.emit('fang/fork-restart-failed', { forkId: 'task_1', error: 'spawn-error', terminal: false })
+  await sleep(20)
+  assert.equal(status(h.handle), 'reconnecting', 'non-terminal failure must keep waiting')
+
+  h.state.running = true
+  h.state.pid = 222
+  h.state.token = 'adapter-token-2'
+  h.state.url = 'http://127.0.0.1:18001/?token=web-token-2'
+  h.eventSource.emit('fang/fork-started', { forkId: 'task_1', pid: 222, port: 18001 })
+  await sleep(30)
+  assert.equal(status(h.handle), 'running')
+  assert.equal(h.clients.length, 2, 'a new client is built for the restarted fork')
+  await h.handle.stop()
+})
+
+test('v2.7.3 事件：taskId 不匹配的 restart-failed 被忽略', async () => {
+  const h = makeHarness({ running: true, restartTimeoutMs: 5000 })
+  await h.handle.start()
+  h.state.running = false
+  h.eventSource.emit('fang/fork-crashed', { forkId: 'task_1', kind: 'crash' })
+  await sleep(20)
+  assert.equal(status(h.handle), 'reconnecting')
+
+  h.eventSource.emit('fang/fork-restart-failed', { forkId: 'task_other', error: 'x', terminal: true })
+  await sleep(20)
+  assert.equal(status(h.handle), 'reconnecting')
+  await h.handle.stop()
+})
