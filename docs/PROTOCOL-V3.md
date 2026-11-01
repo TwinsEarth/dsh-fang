@@ -212,7 +212,9 @@ data: {"cursor":"1","sessionId":"s-…","at":1730000000000,"event":{"kind":"comm
 
 - `id` 是 cursor；母体重连时显式带 `?since=<lastCursor>`（不依赖浏览器 `Last-Event-ID`）；
 - 心跳是**注释帧**（`: heartbeat`），不占 cursor、不进审计流；间隔 `heartbeatMs`（默认 5s），同时驱动待审批 diff；
-- 单帧上限 64KB（超限由业务插件拆成多个 `command-progress`，Adapter 不静默截断）。
+- 单帧上限 64KB（超限由业务插件拆成多个 `command-progress`，Adapter 不静默截断）；
+- 母体侧解析器 `src/lib/sse-parser.mjs`（v2.6.5）：只按 `\n` 切行、行尾裁一个 `\r`、空行切帧、
+  `flush()` 丢弃残帧；模糊测试见 `docs/FUZZ-SSE-PARSER.md`。
 
 ### 5.3 三种同步模式
 
@@ -455,11 +457,12 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 | `test/adapter.test.mjs`（+6，共 32） | v3 路由注册顺序、version/health/state 形状、审批 diff 事件、SSE 回放/session-changed/cursor-invalid/410/close 清理、命令幂等+202+参数校验、并发同 commandId 只执行一次、Bearer 401/放行 |
 | `test/adapter-client.test.mjs`（6） | connect 三步、协议过新拒绝、401 致命、409 重拉快照+续流、同 commandId 网络重试、400 不重试 |
 | `test/fork-client.test.mjs`（13，v2.6.4） | 同步直通/缓存、异步 accepted→command-done 终态、异步超时、传输失败不缓存、SSE 断开保留 inflight、session 变化清空、disconnect 清空、stale command-done、重复 trackingId、事件隔离、connect 失败、参数边界、9 个 op 便捷方法 |
+| `test/sse-parser-fuzz.test.mjs`（7，v2.6.5） | 帧边界/多行 data/CRLF/flush/超长行/UTF-8 字节切分、固定种子分块等价、随机 seed smoke、RNG 可复现、参考实现一致、roundtrip、flush 后可用 |
 | `test/remote.test.mjs`（+2，共 14） | v3 路径 + Bearer 头、eventsUrl 的 since/session/token |
 | `test/forker.test.mjs`（+1，共 25） | token 每次 spawn 重新生成、进 env、stop 作废、不落 forks.json/fang-meta.json/status |
 | `test/orchestrator.test.mjs`（18） | 版本号改从 `FANG_VERSION` 读取；握手/任务生命周期回归 |
 
-全量：**361 项（360 pass / 1 skip）**。
+全量：**368 项（367 pass / 1 skip）**。
 
 ---
 
