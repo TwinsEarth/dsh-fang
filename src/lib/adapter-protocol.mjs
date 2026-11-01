@@ -143,52 +143,9 @@ export class EventLog {
   }
 }
 
-/**
- * 命令幂等缓存（LRU）。键是 commandId；命中后重放第一次的结果，不重复执行副作用。
- * 命中会刷新 LRU 顺序（Map 保序：先删后插）。
- */
-export class CommandCache {
-  constructor({ capacity = DEFAULT_COMMAND_CACHE_SIZE } = {}) {
-    const size = Math.floor(Number(capacity))
-    this.capacity = Number.isFinite(size) && size > 0 ? size : DEFAULT_COMMAND_CACHE_SIZE
-    this.map = new Map()
-  }
-
-  get size() {
-    return this.map.size
-  }
-
-  /** 命中返回值（任意 JSON 兼容对象），未命中返回 null。 */
-  get(commandId) {
-    const key = String(commandId ?? '')
-    if (!key || !this.map.has(key)) return null
-    const value = this.map.get(key)
-    this.map.delete(key)
-    this.map.set(key, value)
-    return value
-  }
-
-  has(commandId) {
-    return this.map.has(String(commandId ?? ''))
-  }
-
-  set(commandId, value) {
-    const key = String(commandId ?? '')
-    if (!key) return null
-    if (this.map.has(key)) this.map.delete(key)
-    this.map.set(key, value)
-    while (this.map.size > this.capacity) {
-      const oldest = this.map.keys().next().value
-      if (oldest === undefined) break
-      this.map.delete(oldest)
-    }
-    return value
-  }
-
-  clear() {
-    this.map.clear()
-  }
-}
+// 命令幂等缓存已独立到 `command-cache.mjs`（v2.6.3 起：in-flight 合并 + 失败契约）；
+// 这里保留 re-export，避免 Adapter 与旧测试的 import 路径断裂。
+export { CommandCache, COMMAND_CACHE_DEFAULT_CAPACITY } from './command-cache.mjs'
 
 /**
  * 版本协商。父体拿到分身 /adapter/version 的 protocol 后调用。

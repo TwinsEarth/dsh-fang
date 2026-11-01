@@ -889,9 +889,12 @@ export function apply(ctx, config) {
 
   /**
    * v3 命令入口：commandId 幂等 + async 202。
-   * 幂等语义：同一个 commandId 重试时直接重放第一次的响应，**不重复执行副作用**。
+   * 幂等由 `CommandCache.run()` 保证：
+   *   * completed 命中 → 直接重放第一次的响应（不重复执行副作用）；
+   *   * running 命中（同一 commandId 并发提交）→ 等待同一个 promise，不会执行两次；
+   *   * 未命中 → 执行并把结果落缓存；fn 抛错（传输/编程错误）不缓存，允许重试。
    * async 语义：立刻返回 {status:'accepted', trackingId}，进度/结果走 SSE
-   * 的 command-done 事件；trackingId 与 commandId 是两个东西（追踪 vs 去重）。
+   * 的 command-done 事件；accepted 本身也进缓存，重复提交返回同一个 trackingId。
    */
   async function commands(input = {}) {
     const normalized = normalizeCommandEnvelope(input)
@@ -900,32 +903,44 @@ export function apply(ctx, config) {
     }
     const { commandId, op, payload, async: isAsync } = normalized
 
-    if (commandId) {
-      const cached = commandCache.get(commandId)
-      if (cached) return { ...cached, deduplicated: true }
+    // 无 commandId = 不幂等（兼容 v2 用法），直接执行。
+    if (!commandId) {
+      if (isAsync) {
+        const trackingId = newId('cmd')
+        void Promise.resolve()
+          .then(() => command({ op, payload }))
+          .then((result) => publish({ kind: ADAPTER_EVENT.COMMAND_DONE, trackingId, op, result }))
+          .catch((e) => publish({ kind: ADAPTER_EVENT.ERROR, code: 'handler-threw', message: msgOf(e), trackingId, op }))
+        return { ok: true, status: 'accepted', trackingId, op, commandId: null, async: true }
+      }
+      const result = await command({ op, payload })
+      publish({ kind: ADAPTER_EVENT.COMMAND, op, ok: result.ok !== false, code: result.code ?? null, commandId: null })
+      return { ...result, commandId: null }
     }
 
-    if (isAsync) {
-      const trackingId = commandId || newId('cmd')
-      const accepted = { ok: true, status: 'accepted', trackingId, op, commandId: commandId || null, async: true }
-      if (commandId) commandCache.set(commandId, accepted)
-      void Promise.resolve()
-        .then(() => command({ op, payload }))
-        .then((result) => {
-          publish({ kind: ADAPTER_EVENT.COMMAND_DONE, trackingId, op, result })
-          if (commandId) commandCache.set(commandId, { ...accepted, done: true, result })
-        })
-        .catch((e) => {
-          publish({ kind: ADAPTER_EVENT.ERROR, code: 'handler-threw', message: msgOf(e), trackingId, op })
-        })
-      return accepted
-    }
+    let executed = false
+    const envelope = await commandCache.run(commandId, async () => {
+      executed = true
+      if (isAsync) {
+        return { ok: true, status: 'accepted', trackingId: commandId, op, commandId, async: true }
+      }
+      const result = await command({ op, payload })
+      return { ...result, commandId }
+    })
 
-    const result = await command({ op, payload })
-    const envelope = { ...result, commandId: commandId || null }
-    if (commandId) commandCache.set(commandId, envelope)
-    publish({ kind: ADAPTER_EVENT.COMMAND, op, ok: result.ok !== false, code: result.code ?? null, commandId: commandId || null })
-    return envelope
+    if (executed) {
+      if (isAsync) {
+        // 异步命令：结果通过事件返回；缓存里保留 accepted（重放仍是同一个 trackingId）。
+        void Promise.resolve()
+          .then(() => command({ op, payload }))
+          .then((result) => publish({ kind: ADAPTER_EVENT.COMMAND_DONE, trackingId: commandId, op, result }))
+          .catch((e) => publish({ kind: ADAPTER_EVENT.ERROR, code: 'handler-threw', message: msgOf(e), trackingId: commandId, op }))
+      } else {
+        publish({ kind: ADAPTER_EVENT.COMMAND, op, ok: envelope.ok !== false, code: envelope.code ?? null, commandId })
+      }
+      return envelope
+    }
+    return { ...envelope, deduplicated: true }
   }
 
   const service = {
