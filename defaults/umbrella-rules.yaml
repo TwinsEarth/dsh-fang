@@ -1,0 +1,113 @@
+# dsh-Fang v2.8.1 — Umbrella 推荐基线配置（随包分发，项目不可替换，只能叠加）
+#
+# 加载顺序（后加载的层按 id 覆盖先加载的层；未列出的规则保持内置默认）：
+#   1) 本文件（包内基线）                    ← defaults/umbrella-rules.yaml
+#   2) 项目级 <project>/.dsh/umbrella-rules.yaml（插件配置 rulesFile）
+#   3) 环境级 $UMBRELLA_RULES_PATH（CI/部署注入，可选）
+#
+# 锁定语义：带 non-negotiable / hard-deny 标签的规则不可被**关闭**、不可被**降低灯色**；
+# 允许项目追加 pattern（扩大覆盖面）或提升灯色（更严格）。
+# 项目尝试关闭硬规则 → 该层错误；若该层 failOnInvalidPattern: true → 整层拒绝，回退到基线。
+#
+# 说明：本文件刻意**只显式写硬规则与兜底**。可调规则留空 = 使用内置默认值，
+# 项目按需在自己的叠加层里覆盖（示例见文件末尾注释与 docs/RULES-BASELINE.md）。
+
+version: 1
+
+settings:
+  failOnUnknownRule: false      # 未知 id 只警告，不阻断（基线可能领先于代码）
+  failOnInvalidPattern: true    # 正则/声明式规则编译失败视为配置错误，整层拒绝（宁可不启动）
+  rejectUnsafeRegex: true       # 拒绝明显灾难回溯的正则形状
+
+rules:
+  # ── 硬规则：显式锁定（不可关闭、不可降级）──────────────────────────────
+  - id: dsh-lifecycle
+    enabled: true
+    light: red
+    priority: 10
+    reason: "DSH 宿主的生命周期动作（重启/终止/进程级），必须转交 restart-guard 审批"
+    tags: [hard-deny, non-negotiable, delegate-to-restart-guard]
+
+  - id: destructive-command
+    enabled: true
+    light: red
+    priority: 20
+    reason: "破坏性 shell 命令（rm -rf / format / shutdown / 强制推送等），一律红色"
+    tags: [hard-deny, non-negotiable]
+
+  - id: credential-access
+    enabled: true
+    light: red
+    priority: 30
+    reason: "读取凭据路径（.ssh/.aws/.gnupg/.git-credentials 等），唯一硬拒绝出口"
+    tags: [hard-deny, non-negotiable]
+
+  # ── 兜底：安全网（不可关闭）──────────────────────────────────────────────
+  # 未登记的工具/没有可识别目标时落到这里；优先级 9999 保证它永远最后。
+  - id: unknown-tool
+    enabled: true
+    light: yellow
+    priority: 9999
+    reason: "未知工具或目标：行为不可预测，保守判黄（需审批）"
+    tags: [conservative, non-negotiable]
+
+# ── 可调规则：留空 = 使用内置默认。下面是**推荐值**（注释形式），项目按需覆盖 ──
+#
+# 用于参考的默认（与 DEFAULT_RULE_PRIORITIES 一致）：
+#   network-allowlisted   blue    40     外连命中允许列表 → 放行 + 标记
+#   network-egress        yellow  50     外连未在允许列表 → 拆审批
+#   dynamic-import        yellow  60     动态加载未评分模块 → 先扫描
+#   write-in-buffer       blue    70     写沙箱缓冲区 → 放行 + 标记
+#   write-in-allowlist    blue    80     写允许列表路径 → 放行 + 标记
+#   write-production      yellow  90     写生产区 → 需审批
+#   write-outside-buffer  yellow  100    写越界 → 需审批
+#   exec-read-only        blue    110    只读 shell（无重定向）→ 放行 + 标记
+#   exec-side-effect      yellow  120    shell 有副作用 → 需审批
+#   read-in-buffer        green   130    读沙箱缓冲区 → 自动放行
+#   read-outside-buffer   blue    140    读缓冲区外 → 放行 + 标记
+#
+# 项目级覆盖示例（写在 <project>/.dsh/umbrella-rules.yaml）：
+#
+# version: 1
+# settings:
+#   failOnInvalidPattern: true
+# rules:
+#   # 更严格：越界写从黄升红
+#   - id: write-outside-buffer
+#     light: red
+#     reason: "本项目：任何越界写都直接拒绝"
+#
+#   # 更严格：生产区写也需要人工审批（升红）
+#   - id: write-production
+#     light: red
+#
+#   # 追加凭据 pattern（硬规则允许"扩大覆盖面"，不允许关闭）
+#   - id: credential-access
+#     pathPatterns:
+#       - re: "\\.npmrc$"
+#         label: "npm registry token"
+#       - re: "secrets[\\\\/]"
+#         label: "project secrets directory"
+#
+#   # 项目专属声明式规则
+#   - id: project-build-guard
+#     category: destructive
+#     light: red
+#     reason: "禁止删除构建目录"
+#     priority: 25
+#     match:
+#       kind: command-pattern
+#       patterns:
+#         - re: "\\brm\\s+-rf\\s+(?:dist|build|out)\\b"
+#           label: "delete build directory"
+#     evidence:
+#       kind: pattern-match
+#
+#   # 以下写法会被拒绝（硬规则锁定）：
+#   # - id: destructive-command
+#   #   enabled: false      # → "cannot be disabled"
+#   # - id: credential-access
+#   #   light: yellow       # → "light cannot be lowered from red to yellow"
+#
+# 注意：`light: blue` 不能把 network-egress 变成"内网放行"——它的谓词看 allowHosts；
+# 要放行内网域请把它们加入 policy.networkAllowlist，而不是只改灯色。

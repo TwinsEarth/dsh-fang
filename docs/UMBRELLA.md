@@ -221,9 +221,16 @@ rules:
 | 明显灾难回溯正则 | `rejectUnsafeRegex: true`（默认）拒绝该模式；关闭需显式声明 |
 | 热加载失败 | 保留旧 `effective`，不破坏当前运行（先构造新数组、校验通过才替换） |
 
-**接线**：插件配置 `rulesFile` / `rulesWatch` / `rulesDebounceMs`；服务面 `ruleConfigStatus()`（来源/文件/是否应用/
-警告与错误）、`reloadRules()`、`applyRuleConfig(config)`、`ruleRegistry`。门面层 `createUmbrella({ registry })`
-使用注册表规则；不传则沿用原规则集（向后兼容）。
+**推荐基线与分层（v2.8.1）**：随包基线 `defaults/umbrella-rules.yaml` 默认自动加载，显式锁定
+`dsh-lifecycle` / `destructive-command` / `credential-access`（+ 兜底 `unknown-tool`）为 non-negotiable：
+项目层**不能关闭、不能降低灯色**，只能提升灯色或追加 pattern。加载顺序
+**基线 → 项目 `rulesFile` → 环境 `UMBRELLA_RULES_PATH`**（后层按 id 覆盖）；被拒绝的层会从层栈弹出并恢复上一次有效规则。
+详见 `docs/RULES-BASELINE.md`。
+
+**接线**：插件配置 `baselineFile` / `envRulesFile` / `rulesFile` / `rulesWatch` / `rulesDebounceMs`；
+服务面 `ruleConfigStatus()`（每层 name/file/applied/errors + 总来源与计数）、`reloadRules()`、
+`applyRuleConfig(config)`、`ruleRegistry`。门面层 `createUmbrella({ registry })` 使用注册表规则；
+不传则沿用原规则集（向后兼容）。
 
 **边界（如实声明）**：YAML 子集**不支持**锚点/别名/多文档/块标量（`|`、`>`）——遇到会明确报错，
 不做"猜一个近似值"；正则安全是**启发式**而非完整 ReDoS 分析；`types/` 的 TS 参考实现**尚未镜像**
