@@ -88,9 +88,14 @@ export function createAdapterClient(options = {}) {
     return () => listeners[kind].delete(fn)
   }
 
+  const pendingWaits = new Map()
+
   const wait = (ms) => new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    if (typeof timer?.unref === 'function') timer.unref()
+    const timer = setTimeout(() => {
+      pendingWaits.delete(timer)
+      resolve()
+    }, ms)
+    pendingWaits.set(timer, resolve)
   })
 
   const backoffFor = (attempt) => Math.min(backoff.maxMs, backoff.baseMs * 2 ** Math.min(attempt, 5))
@@ -281,7 +286,7 @@ export function createAdapterClient(options = {}) {
     return { ok: true, protocol, sessionId, state: lastState, lastCursor }
   }
 
-  /** 停止事件流（幂等）。 */
+  /** 停止事件流（幂等）。未到期的退避计时器会被立即唤醒，让重连循环看到 stopped 退出。 */
   function stop() {
     stopped = true
     try {
@@ -290,6 +295,11 @@ export function createAdapterClient(options = {}) {
       /* 老运行时没有 abort 也不影响逻辑 */
     }
     controller = null
+    for (const [timer, resolve] of pendingWaits) {
+      clearTimeout(timer)
+      resolve()
+    }
+    pendingWaits.clear()
     mode = 'idle'
   }
 

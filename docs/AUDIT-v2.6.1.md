@@ -29,10 +29,10 @@
 | 门禁 | 命令 | 结果 |
 |---|---|---|
 | 版本一致性 | `node tools/release/preflight.mjs --e2e` | **GREEN 2.6.1** |
-| 单元/集成测试 | 同上（内嵌全量） | **330 pass / 0 fail / 1 skip（331 项，15.4s）** |
-| e2e 实机验收 | 同上（内嵌 `tools/e2e.mjs`） | **45/45（12.4s）** |
+| 单元/集成测试 | 同上（内嵌全量） | **330 pass / 0 fail / 1 skip（331 项，15.9s）** |
+| e2e 实机验收 | 同上（内嵌 `tools/e2e.mjs`） | **45/45（12.6s）** |
 | 路由 allow-list + 秘密/本机路径扫描 | `node tools/release/allowlist.mjs --with-manifest` | **PASS**：34 路由、0 findings、112 文件扫描、包内 65 文件 allow-listed |
-| 构建 | `node tools/release/build.mjs` | `dist/dsh-fang-2.6.1.tgz`（**225,627 B，81 entries**）<br>sha256 `8aa3662797f6f5c37e6491cd319342b45c21ebd59174e5d4dbf57ca89b5e1558` |
+| 构建 | `node tools/release/build.mjs` | `dist/dsh-fang-2.6.1.tgz`（**225,749 B，81 entries**）<br>sha256 `11b5691f94639773425078653429ce93a36b8f6cb5574bcad3d9d461e24e9c28` |
 | 产物健康检查 | `node tools/release/healthz.mjs` | **HEALTHY** `@twinsearth/dsh-fang@2.6.1`（15 个模块可 import） |
 
 ## 3. 新增测试（25 项）
