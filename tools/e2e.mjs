@@ -172,7 +172,7 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 2.7.0', status.body?.version === '2.7.0')
+    check('status reports version 2.7.1', status.body?.version === '2.7.1')
     check('status reports role=mother', status.body?.role === 'mother')
     check('mother has forker service', status.body?.services?.forker === true)
 
@@ -244,25 +244,53 @@ async function main() {
       check('fork session list contains the seeded session', Boolean(ft))
       check('fork session title is native', ft?.title === 'e2e 分身会话标题', JSON.stringify(ft?.title ?? null))
     }
-    // ── archive the task (flush + reap) ────────────────────────────────
+    // ── archive the task (flush + stop, keep home for read/restore) ─────
     const archived = await api('/fang/api/tasks/archive', {
       method: 'POST',
       body: JSON.stringify({ taskId }),
     })
     check('POST /fang/api/tasks/archive accepted', archived.body?.ok === true, JSON.stringify(archived.body?.error ?? ''))
+    check('archive stopped the process', archived.body?.stopped === true && archived.body?.homeKept === true)
     const after = await api('/fang/api/status')
-    check('registry empty after archive', (after.body?.tasks?.total ?? -1) === 0)
+    check('archived task stays in the registry', (after.body?.tasks?.total ?? -1) === 1)
+    const archivedTask = (after.body?.tasks?.list ?? []).find((t) => t.taskId === taskId)
+    check('task status is archived', archivedTask?.status === 'archived', JSON.stringify(archivedTask?.status ?? null))
+    check('archived task has archivedAt', Number(archivedTask?.archivedAt) > 0)
+    check('archived task has no live url', !archivedTask?.url)
+    check('fork home kept after archive', fs.existsSync(forkHome), forkHome)
 
+    // ── restore the archive (new process/port/token, same home) ─────────
+    const restored = await api('/fang/api/tasks/restore', {
+      method: 'POST',
+      body: JSON.stringify({ taskId }),
+    })
+    check('POST /fang/api/tasks/restore accepted', restored.body?.ok === true, JSON.stringify(restored.body?.error ?? ''))
+    check('restored task is ready', restored.body?.adapter?.ok === true && Boolean(restored.body?.url))
+    check('fork home still exists after restore', fs.existsSync(forkHome), forkHome)
+    const reArchived = await api('/fang/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId }) })
+    check('re-archive after restore accepted', reArchived.body?.ok === true)
 
     // ── v2.1 derive endpoint (lineage-only quick derive, same path the double-click uses) ──
+    let derivedTaskId = ''
     const derived = await api('/fang/api/derive', { method: 'POST', body: JSON.stringify({ title: 'e2e derive' }) })
     check('POST /fang/api/derive accepted', derived.body?.ok === true, JSON.stringify(derived.body?.error ?? ''))
     if (derived.body?.ok) {
+      derivedTaskId = String(derived.body.taskId ?? '')
       const dStatus = await api('/fang/api/tasks/status?taskId=' + encodeURIComponent(derived.body.taskId))
       check('derive → task ready with adapter', dStatus.body?.status === 'ready' && dStatus.body?.adapter?.ok === true)
       const dArchived = await api('/fang/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId: derived.body.taskId }) })
       check('derive task archived', dArchived.body?.ok === true)
     }
+
+    // ── delete archives: stop + remove home, then the record ──────────
+    const deleted = await api('/fang/api/tasks/archive/delete', { method: 'POST', body: JSON.stringify({ taskId }) })
+    check('POST /fang/api/tasks/archive/delete accepted', deleted.body?.ok === true, JSON.stringify(deleted.body?.error ?? ''))
+    if (derivedTaskId) {
+      const dDeleted = await api('/fang/api/tasks/archive/delete', { method: 'POST', body: JSON.stringify({ taskId: derivedTaskId }) })
+      check('derived archive deleted', dDeleted.body?.ok === true, JSON.stringify(dDeleted.body?.error ?? ''))
+    }
+    const finalStatus = await api('/fang/api/status')
+    check('registry empty after delete', (finalStatus.body?.tasks?.total ?? -1) === 0)
 
     // ── audit ledger on the mother ─────────────────────────────────────
     const motherData = path.join(homeRoot, 'fang', 'e2e')
@@ -279,10 +307,10 @@ async function main() {
       check('audit records adapter handshake', kinds.has('adapter-handshake'))
     }
 
-    // ── fork home was reaped ───────────────────────────────────────────
+    // ── fork homes removed by delete-archive ───────────────────────────
     const forksRoot = path.join(motherData, 'forks')
     const leftover = fs.existsSync(forksRoot) ? fs.readdirSync(forksRoot) : []
-    check('fork home reaped after archive', leftover.length === 0, leftover.join(','))
+    check('fork home removed after delete-archive', leftover.length === 0, leftover.join(','))
 
     return results.every(r => r.ok) ? 0 : 1
   } catch (e) {

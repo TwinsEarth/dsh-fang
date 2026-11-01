@@ -19,7 +19,7 @@ const hasRemote = await import('../src/lib/remote.mjs').then(() => true).catch((
 const skipNoRemote = hasRemote ? {} : { skip: 'src/lib/remote.mjs not delivered yet (T5)' }
 
 function makeFakeForker(overrides = {}) {
-  const calls = { provision: [], spawn: [], reap: [] }
+  const calls = { provision: [], spawn: [], stop: [], reap: [] }
   const live = new Set()
   let counter = 0
   const fake = {
@@ -45,6 +45,12 @@ function makeFakeForker(overrides = {}) {
       live.delete(forkId)
       return { ok: true, removed: true }
     },
+    async stop(forkId) {
+      calls.stop.push(forkId)
+      live.delete(forkId)
+      return { ok: true, forkId, killed: true }
+    },
+    alive(forkId) { return live.has(forkId) },
     status(forkId) { return { running: live.has(forkId), pid: live.has(forkId) ? 6001 : null } },
     list() { return [...live].map(forkId => ({ forkId, running: true })) },
     logs() { return '' },
@@ -218,7 +224,7 @@ test('orchestrator: getTaskStatus merges the fork-side adapter status', skipNoRe
   } finally { await adapter.close() }
 })
 
-test('orchestrator: archiveTask asks the fork to flush, then reaps', skipNoRemote, async () => {
+test('orchestrator: archiveTask stops the fork and keeps the home (no reap)', skipNoRemote, async () => {
   const adapter = await makeAdapterServer()
   try {
     const { ctx, svc, forker, dataRoot } = await boot({ forker: makeFakeForker({ url: adapter.url, port: adapter.port }) })
@@ -226,9 +232,69 @@ test('orchestrator: archiveTask asks the fork to flush, then reaps', skipNoRemot
     const archived = await svc.archiveTask(created.taskId)
     assert.equal(archived.ok, true)
     assert.equal(archived.archived, true)
+    assert.equal(archived.stopped, true)
+    assert.equal(archived.homeKept, true)
     assert.ok(adapter.state.commands.some(c => c.op === 'archive'), 'fork received archive command')
+    assert.deepEqual(forker.calls.stop, [created.taskId])
+    assert.deepEqual(forker.calls.reap, [], 'archive must keep the home for read/restore')
+    const tasks = svc.listTasks()
+    assert.equal(tasks.length, 1, 'archived task stays in the archive list')
+    assert.equal(tasks[0].status, 'archived')
+    assert.ok(tasks[0].archivedAt > 0)
+    assert.equal(tasks[0].url, null)
+    cleanup(ctx, dataRoot)
+  } finally { await adapter.close() }
+})
+
+test('orchestrator: archiveTask reports stop-failed instead of pretending success', skipNoRemote, async () => {
+  const adapter = await makeAdapterServer()
+  try {
+    const forker = makeFakeForker({ url: adapter.url, port: adapter.port })
+    forker.stop = async () => ({ ok: true, killed: true })
+    forker.alive = () => true
+    const { ctx, svc, dataRoot } = await boot({ forker, config: { archiveStopTimeoutMs: 120 } })
+    const created = await svc.createTask({ title: '停不掉的任务' })
+    const archived = await svc.archiveTask(created.taskId)
+    assert.equal(archived.ok, false)
+    assert.equal(archived.error, 'stop-failed')
+    const task = svc.listTasks().find(t => t.taskId === created.taskId)
+    assert.ok(task, 'task must not disappear when stop fails')
+    assert.notEqual(task.status, 'archived')
+    cleanup(ctx, dataRoot)
+  } finally { await adapter.close() }
+})
+
+test('orchestrator: restoreTask re-spawns the archived home and updates url/token', skipNoRemote, async () => {
+  const adapter = await makeAdapterServer()
+  try {
+    const { ctx, svc, forker, dataRoot } = await boot({ forker: makeFakeForker({ url: adapter.url, port: adapter.port }) })
+    const created = await svc.createTask({ title: '可还原任务' })
+    await svc.archiveTask(created.taskId)
+    const restored = await svc.restoreTask(created.taskId)
+    assert.equal(restored.ok, true)
+    assert.equal(restored.restored, true)
+    assert.equal(forker.calls.spawn.length, 2, 'restore must spawn again')
+    assert.equal(forker.calls.spawn[1].homeDir, created.homeDir)
+    assert.equal(forker.calls.spawn[1].profile, forker.calls.spawn[0].profile)
+    const task = svc.listTasks().find(t => t.taskId === created.taskId)
+    assert.ok(task)
+    assert.notEqual(task.status, 'archived')
+    assert.equal(task.archivedAt, null)
+    assert.match(task.url, /token=/)
+    cleanup(ctx, dataRoot)
+  } finally { await adapter.close() }
+})
+
+test('orchestrator: deleteArchivedTask reaps the home and removes the record', skipNoRemote, async () => {
+  const adapter = await makeAdapterServer()
+  try {
+    const { ctx, svc, forker, dataRoot } = await boot({ forker: makeFakeForker({ url: adapter.url, port: adapter.port }) })
+    const created = await svc.createTask({ title: '待删除存档' })
+    await svc.archiveTask(created.taskId)
+    const deleted = await svc.deleteArchivedTask(created.taskId)
+    assert.equal(deleted.ok, true)
     assert.deepEqual(forker.calls.reap, [created.taskId])
-    assert.deepEqual(svc.listTasks(), [])
+    assert.equal(svc.listTasks().some(t => t.taskId === created.taskId), false)
     cleanup(ctx, dataRoot)
   } finally { await adapter.close() }
 })
@@ -317,7 +383,8 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const paths = webServer.paths()
   for (const p of [
     '/fang/panel', '/fang/api/status', '/fang/api/tasks', '/fang/api/tasks/create',
-    '/fang/api/tasks/status', '/fang/api/tasks/archive', '/fang/api/tasks/promote',
+    '/fang/api/tasks/status', '/fang/api/tasks/archive', '/fang/api/tasks/restore',
+    '/fang/api/tasks/archive/delete', '/fang/api/tasks/promote',
     '/fang/api/forks', '/fang/api/forks/create', '/fang/api/reap', '/fang/api/promote',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)

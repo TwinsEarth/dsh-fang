@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## v2.7.1（2026-11-01）
+
+**主题：修复归档不生效 + 新增「读档」存档管理（还原 / 删除）。**
+
+### 修复
+- **归档失败却显示成功**：旧实现 `archiveTask` 调 `service.reap()`（停进程 + 删 home），
+  且 `reap` 失败时仍返回 `ok:true`。现在归档 = **停止进程 + 保留 home**：
+  - 调 `forker.stop()` 后用 `forker.alive()`（真实 PID 存活）确认进程退出；
+  - 超时/停不掉 → `{ok:false, error:'stop-failed'}`，任务保持原样，不再假装归档成功；
+  - 只有确认退出后才写 `status:'archived'`、`archivedAt`、清空 url/port/token。
+- `autoReapIdleMinutes` 的空闲回收改回 `reap()`（删 home），不再误用归档。
+
+### 新增
+- **读档 / 存档管理**：
+  - `POST /api/tasks/archive`：归档（保留 home，url/port/token 清空）；
+  - `POST /api/tasks/restore`：用原 home/profile 重新 spawn（新端口/新 token）+ 握手；
+  - `POST /api/tasks/archive/delete`：reap 删除 home + 记录（forker 记录丢失时按 home 兜底）；
+  - `GET /api/tasks` 的 archived 任务新增 `archivedAt` / `archiveRemote` 字段。
+- **面板顶栏「读档 (N)」按钮**：切换存档视图；存档卡片支持「还原」「删除存档」，
+  普通右栏只保留存档提示 +「打开读档」入口。
+- `forker.alive(forkId)`：真实 PID 存活判断（归档确认用，不只看 `rec.running`）。
+- `archiveStopTimeoutMs` 配置（100–30000，默认 3000）。
+
+### 测试 / 文档
+- `test/orchestrator.test.mjs` 新增 3 项：归档停进程且保留 home、stop-failed 不假装成功、
+  还原重新 spawn、删除存档 reap 并移除记录（21 项）；
+- `docs/ARCHIVE.md`：生命周期、接口、UI、配置、兼容与边界。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 1 个补丁位。
+
 ## v2.7.0（2026-11-01）
 
 **主题：ForkSseClient（SSE 层）网络层模糊测试 —— 随机分块 + 随机断连的等价性。**
