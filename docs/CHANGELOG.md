@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v2.7.2（2026-11-01）
+
+**主题：Forker token 生命周期显式化 —— 补齐 TokenRegistry 公开面（getToken / onTokenRefresh）。**
+
+### 说明
+- token 生命周期本身自 v2.6.1 起已在 `forker.mjs` 内联实现（每次 spawn 生成、
+  stop 作废、重启重生成、内存 only、env 注入）；本版本补齐设计稿 `TokenRegistry`
+  的**公开 API** 并对齐命名。
+
+### 新增
+- `forker.getToken(forkId)`：`adapterToken(forkId)` 的别名；
+- `forker.onTokenRefresh(handler) → disposer`：每次 `spawn()` 重新生成/刷新 token 时广播
+  `(forkId, token)`；handler 异常隔离，disposer 幂等；
+  - 首次派生（生成）与崩溃重启（刷新）都会触发；语义是「当前 token」，不是「进程就绪」。
+
+### 测试 / 文档
+- `test/forker.test.mjs` 新增 1 项（26 项）：onTokenRefresh 每次 spawn 广播、getToken 别名、
+  异常隔离、disposer；既有 adapterToken 生命周期测试保持不变；
+- `docs/FORKER-TOKEN.md`：现状、公开面、TS 形状映射、边界（含 adapterPort → webServer 复用）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 2 个补丁位。
+
 ## v2.7.1（2026-11-01）
 
 **主题：修复归档不生效 + 新增「读档」存档管理（还原 / 删除）。**
