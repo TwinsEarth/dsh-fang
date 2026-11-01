@@ -1,5 +1,39 @@
 # CHANGELOG
 
+## v2.7.0（2026-11-01）
+
+**主题：ForkSseClient（SSE 层）网络层模糊测试 —— 随机分块 + 随机断连的等价性。**
+
+### 新增
+- **`tools/fuzz/sse-client-mock.mjs`**：真实 `http.createServer` mock：
+  - `/fang/adapter/version`、`/state`、`/events` 三个端点；
+  - `/events` 按 `since` 过滤帧并记录 `{since, session}`；
+  - plan 控制 200/401/409/410/503、`serve` 帧数、`ending`（hold/end/destroy）、心跳插入；
+  - `destroy` 前等最后一个 write 回调 + 5ms，降低“数据未到 TCP 就断开”的 flake。
+- **`tools/fuzz/sse-client-generators.mjs`**：事件序列（3–10 帧）、每帧 4 种切块模式、
+  四类策略（无断/单断/多断/心跳）、`expectedSinceFor()`。
+- **`tools/fuzz/sse-client-fuzz.mjs`**：
+  - 性质：401 致命不重试；409/410 触发 `resetCursor=true` + 快照重置；心跳不产生事件；
+    断连后 cursor 无重复/无空洞且 `since` 正确；
+  - 随机：逐 case 配置 mock → 新 client → `connect()` → 等覆盖全部 cursor →
+    比较**未去重**的 cursor 序列与请求 `since`；失败报告含 seed/iteration/strategy/
+    expectedCursors/actualCursors/requests；
+  - CLI `--iterations` / `--seed`。
+- **`test/sse-client-fuzz.test.mjs`（3 项）**：性质测试全通过；120 次随机 fuzz 0 failures
+  且四类策略均覆盖；同 seed 可复现。
+
+### 文档
+- `docs/FUZZ-SSE-CLIENT.md`：与 SseParser fuzz 的区别、MockSseServer 能力、I1–I7 不变量、
+  生成器、性质测试、CLI、证据与边界。
+- `docs/PROTOCOL-V3.md §11/§12`：测试与实现记录。
+
+### 本机证据
+- 200 次随机 fuzz（seed=20261110）：**0 failures**；
+  noDisconnect 47 / singleDisconnect 51 / multiDisconnect 53 / withHeartbeats 49；
+- 60 次：3.6s；200 次：10.8s（mock 无每 chunk 延迟，靠 write 回调保序）。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；v2.6 的补丁位已到 9，本次进位为 **v2.7.0**。
+
 ## v2.6.9（2026-11-01）
 
 **主题：SseParser 定向生成器 —— 为 9 个分支各构造“边界恰好命中”的最小输入。**
