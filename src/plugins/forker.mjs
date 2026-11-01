@@ -364,10 +364,23 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 广播 Adapter token 刷新/生成；handler 异常隔离，绝不影响 spawn 流程。 */
+  const emitTokenRefresh = (forkId, token) => {
+    for (const handler of [...tokenRefreshHandlers]) {
+      try {
+        handler(forkId, token)
+      } catch {
+        /* 订阅者异常不得打断 spawn */
+      }
+    }
+  }
+
   /** forkId -> fork record. Only the live child handle and log tail are in-memory-only. */
   const records = new Map()
   /** forkId -> disposer for an in-flight spawn promise (so plugin dispose cannot hang one). */
   const pendingSpawns = new Set()
+  /** (forkId, token) 订阅者：每次 spawn 重新生成 Adapter token 时广播（首次派生与重启都会触发）。 */
+  const tokenRefreshHandlers = new Set()
   /** port -> forkId reserved/assigned by THIS plugin instance (never release another instance's). */
   const ownedPorts = new Map()
   /** port -> {forkId,pid,at} persisted view of the pool (loaded lazily). */
@@ -829,6 +842,9 @@ export function apply(ctx, config) {
     })
     records.set(forkId, rec)
     writeForkMetaOf(rec)
+    // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
+    // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。
+    emitTokenRefresh(forkId, rec.adapterToken)
 
     // Port: explicit spawn option > deterministic pool allocation > v1 --port 0.
     const requested = Math.floor(Number(opts.port))
@@ -1220,6 +1236,12 @@ export function apply(ctx, config) {
     list,
     logs,
     adapterToken,
+    getToken: adapterToken,
+    onTokenRefresh(handler) {
+      if (typeof handler !== 'function') return () => {}
+      tokenRefreshHandlers.add(handler)
+      return () => tokenRefreshHandlers.delete(handler)
+    },
     allocatePort,
     releasePort,
     ensureTemplate,
