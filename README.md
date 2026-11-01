@@ -33,6 +33,9 @@
 - 🔧 v2.3.1（3:7 分屏面板 + 分身会话 API + 会话原生标题 + 僵尸防护）代码与测试已就绪；
   宿主侧需**重启**加载、页面刷新即可看到新布局与新标题。
   交付与证据见 [docs/v2.3.1-交付报告.md](docs/v2.3.1-交付报告.md) 与 [docs/UI-瓮城入口.md](docs/UI-瓮城入口.md)。
+- ✅ v2.3.1 已发布：GitHub Release 附 `dsh-fang-2.3.1.tgz` + `manifest.json`，CI/compat 全绿；
+- ⏳ npm：`@twinsearth/dsh-fang@2.3.1` 构建与本地 healthz 已就绪，等待 npm 组织 `@twinsearth` 创建后发布；
+- 🔒 **main 为 PR-only**：直接 push 会被拒绝；变更走分支 + PR + 维护者手动审核合并（见 [CONTRIBUTING](CONTRIBUTING.md)）。
 
 ---
 
