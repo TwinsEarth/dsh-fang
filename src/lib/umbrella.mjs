@@ -398,45 +398,357 @@ const SHELL_TOOLS = new Set(['bash', 'bash_pwsh', 'pwsh', 'powershell', 'shell',
 const WRITE_TOOL_NAMES = new Set(['write', 'edit', 'multi-edit', 'append', 'patch', 'apply_patch'])
 const READ_TOOL_NAMES = new Set(['read', 'grep', 'glob', 'ls', 'stat', 'list'])
 
-const WRITE_REDIRECT_CAPTURE_RE = /(?:^|[^>])>{1,2}\s*([^\s|;&<>]+)/g
-const TEE_CAPTURE_RE = /\btee\b(?:\s+-a)?\s+([^\s|;&<>]+)/gi
-const DD_CAPTURE_RE = /\bdd\b[^\n]*?\bof=([^\s]+)/gi
-const PS_WRITE_CAPTURE_RE = /\b(?:Set-Content|Out-File)\b(?:\s+-(?:Path|FilePath))?\s+([^\s|;&<>]+)/gi
-const READ_CMD_CAPTURE_RE = /(?:^|[|;&]\s*)(?:cat|less|head|tail|more|Get-Content|type)\s+([^\s|;&<>]+)/gi
+// ─────────────────────────────────────────────────────────────────────────────
+// shell 词法 / 语法（AST-lite）：重定向目标的唯一来源
+//
+// 为什么不用 shell-quote：它只把字符串切成 token，不区分操作符与命令边界
+// （`2>&1` 会被当成「写目标 &1」），给不了重定向语义。
+// 为什么不用 @aliou/sh：它是真 AST 解析器（v0.3.4，MIT AND BSD-3-Clause，零运行时依赖，
+// unpacked ~315 KB），但**引入第三方运行时依赖会破坏本仓库的零依赖约束**（CI 与安装都依赖这一点）。
+// 所以这里手写一个只覆盖「重定向目标提取」的 AST-lite 扫描器：
+//   * 引号（单/双/反斜杠转义）、$VAR / $(...) / 反引号 / 通配 → 动态，不可静态解析
+//   * fd 前缀（2>、3>>）、>| &> &>> >& <& <> << <<- <<<
+//   * heredoc 正文整段跳过（正文里的 `>` 是数据，不是重定向）
+//   * 命令分隔符（换行 ; && || | & 括号）划分命令段，段内识别 tee / dd / Set-Content / Get-Content 这类隐式文件命令
+// 任何无法确定的情况一律 fail-closed：parseFailed = true，由规则判黄，绝不猜。
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** 动态构造（$(...)、$ENV、反引号、通配符）的路径不静态解析：交给兜底规则判黄。 */
-function isStaticToken(token) {
-  return typeof token === 'string'
-    && token.length > 0
-    && token !== '&'
-    && !/[$`*?]/.test(token)
+const SHELL_SEPARATORS = new Set(['newline', ';', ';;', '&&', '||', '|', '&', '(', ')'])
+
+/** 重定向操作符匹配（最长优先）。返回 { op, len } 或 null。 */
+function matchRedirectOp(text, i) {
+  const ch = text[i]
+  const two = text.slice(i, i + 2)
+  const three = text.slice(i, i + 3)
+  if (ch === '&') {
+    if (three === '&>>') return { op: '&>>', len: 3 }
+    if (two === '&>') return { op: '&>', len: 2 }
+    return null
+  }
+  if (ch === '>') {
+    if (three === '>>|') return null
+    if (two === '>>') return { op: '>>', len: 2 }
+    if (two === '>|') return { op: '>|', len: 2 }
+    if (two === '>&') return { op: '>&', len: 2 }
+    if (two === '>=') return null
+    return { op: '>', len: 1 }
+  }
+  if (ch === '<') {
+    if (three === '<<<') return { op: '<<<', len: 3 }
+    if (three === '<<-') return { op: '<<-', len: 3 }
+    if (two === '<<') return { op: '<<', len: 2 }
+    if (two === '<&') return { op: '<&', len: 2 }
+    if (two === '<>') return { op: '<>', len: 2 }
+    if (two === '<=') return null
+    return { op: '<', len: 1 }
+  }
+  return null
 }
 
-function resolveMaybePath(value, policy) {
-  return resolvePathValue(value, policy.root)
+/** 跳过 `$( ... )`：计数括号，忽略引号内的括号。返回结束后一位。 */
+function skipParenGroup(text, i) {
+  let depth = 0
+  let j = i
+  while (j < text.length) {
+    const ch = text[j]
+    if (ch === '\\') { j += 2; continue }
+    if (ch === '(') depth += 1
+    else if (ch === ')') { depth -= 1; if (depth === 0) return j + 1 }
+    j += 1
+  }
+  return -1
 }
 
-/** 保守解析 shell 的写/读目标：只取字面量，动态构造一律跳过。 */
+/**
+ * 扫描一个 word（不含分隔符）。返回 { value, dynamic, end, error }。
+ * dynamic = true 表示包含参数展开/命令替换/通配，无法作为字面量路径。
+ */
+function scanWord(text, i) {
+  let value = ''
+  let dynamic = false
+  let j = i
+  while (j < text.length) {
+    const ch = text[j]
+    if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') break
+    if (SHELL_SEPARATORS.has(ch) || ch === '>' || ch === '<' || ch === ';') break
+    if (ch === '\\') {
+      const next = text[j + 1]
+      if (next === undefined) return { value, dynamic, end: j + 1, error: 'trailing-backslash' }
+      if (next === '\n') { j += 2; continue }
+      value += next
+      j += 2
+      continue
+    }
+    if (ch === "'") {
+      const close = text.indexOf("'", j + 1)
+      if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-single-quote' }
+      value += text.slice(j + 1, close)
+      j = close + 1
+      continue
+    }
+    if (ch === '"') {
+      let k = j + 1
+      let closed = false
+      while (k < text.length) {
+        const c = text[k]
+        if (c === '\\') {
+          const next = text[k + 1]
+          if (next === undefined) break
+          if (next === '"' || next === '\\' || next === '$' || next === '`') value += next
+          else value += `\\${next}`
+          k += 2
+          continue
+        }
+        if (c === '"') { closed = true; k += 1; break }
+        if (c === '$' || c === '`') dynamic = true
+        value += c
+        k += 1
+      }
+      if (!closed) return { value, dynamic, end: text.length, error: 'unterminated-double-quote' }
+      j = k
+      continue
+    }
+    if (ch === '$') {
+      dynamic = true
+      const next = text[j + 1]
+      if (next === '(') {
+        const end = skipParenGroup(text, j + 1)
+        if (end < 0) return { value, dynamic, end: text.length, error: 'unterminated-substitution' }
+        j = end
+        continue
+      }
+      if (next === '{') {
+        const close = text.indexOf('}', j + 2)
+        if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-brace-expansion' }
+        j = close + 1
+        continue
+      }
+      // $'...' / $VAR
+      if (next === "'") {
+        const close = text.indexOf("'", j + 2)
+        if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-ansi-c' }
+        value += text.slice(j + 2, close)
+        j = close + 1
+        continue
+      }
+      j += 1
+      while (j < text.length && /[A-Za-z0-9_]/.test(text[j])) j += 1
+      continue
+    }
+    if (ch === '`') {
+      dynamic = true
+      const close = text.indexOf('`', j + 1)
+      if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-backtick' }
+      j = close + 1
+      continue
+    }
+    if (ch === '*' || ch === '?' || ch === '[' || ch === '{') dynamic = true
+    value += ch
+    j += 1
+  }
+  return { value, dynamic, end: j, error: null }
+}
+
+/**
+ * 词法扫描：产出 word / redirect / op token，并把 heredoc 正文整段吞掉。
+ * @returns {{tokens: object[], errors: string[], heredocs: number}}
+ */
+export function tokenizeShell(commandText) {
+  const text = String(commandText ?? '')
+  const tokens = []
+  const errors = []
+  let heredocs = 0
+  let pendingHeredocs = []
+  let i = 0
+  let lastEnd = -1
+
+  const consumeHeredocBodies = () => {
+    for (const hd of pendingHeredocs) {
+      heredocs += 1
+      let k = i
+      let closed = false
+      while (k <= text.length) {
+        const lineEnd = text.indexOf('\n', k)
+        const line = text.slice(k, lineEnd < 0 ? text.length : lineEnd)
+        const compare = hd.strip ? line.replace(/^\t+/, '') : line
+        k = lineEnd < 0 ? text.length : lineEnd + 1
+        if (compare === hd.delimiter) { closed = true; break }
+        if (lineEnd < 0) break
+      }
+      if (!closed) errors.push('unterminated-heredoc')
+      i = k
+    }
+    pendingHeredocs = []
+  }
+
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch === ' ' || ch === '\t' || ch === '\r') { i += 1; continue }
+    if (ch === '\\' && text[i + 1] === '\n') { i += 2; continue }
+    if (ch === '\n') {
+      tokens.push({ type: 'op', value: 'newline' })
+      i += 1
+      if (pendingHeredocs.length > 0) consumeHeredocBodies()
+      continue
+    }
+    // 重定向（可能带 fd 前缀）
+    const redir = matchRedirectOp(text, i)
+    if (redir !== null) {
+      let fd = null
+      const prev = tokens[tokens.length - 1]
+      if (prev !== undefined && prev.type === 'word' && prev.end === i && /^\d+$/.test(prev.value) && !prev.dynamic) {
+        fd = Number(prev.value)
+        tokens.pop()
+      }
+      i += redir.len
+      while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1
+      let target = null
+      const next = text[i]
+      const targetIsWord = next !== undefined
+        && next !== '\n' && next !== ';' && next !== '|' && next !== '&' && next !== '>' && next !== '<'
+      if (targetIsWord) {
+        const word = scanWord(text, i)
+        if (word.error !== null) errors.push(word.error)
+        target = { value: word.value, dynamic: word.dynamic }
+        i = word.end
+      }
+      tokens.push({ type: 'redirect', op: redir.op, fd, target })
+      if ((redir.op === '<<' || redir.op === '<<-') && target !== null) {
+        if (target.dynamic) errors.push('dynamic-heredoc-delimiter')
+        else pendingHeredocs.push({ delimiter: target.value, strip: redir.op === '<<-' })
+      }
+      continue
+    }
+    // 命令分隔 / 管道 / 括号
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '(' || ch === ')') {
+      const two = text.slice(i, i + 2)
+      let value = ch
+      if (two === ';;' || two === '&&' || two === '||') value = two
+      tokens.push({ type: 'op', value })
+      i += value.length
+      continue
+    }
+    const word = scanWord(text, i)
+    if (word.error !== null) errors.push(word.error)
+    tokens.push({ type: 'word', value: word.value, dynamic: word.dynamic, start: i, end: word.end })
+    if (word.end <= i) { i += 1; continue }
+    i = word.end
+    lastEnd = word.end
+  }
+  return { tokens, errors, heredocs, lastEnd }
+}
+
+const IMPLICIT_WRITE_COMMANDS = new Set(['tee', 'tee-object', 'out-file', 'set-content', 'add-content'])
+const IMPLICIT_READ_COMMANDS = new Set(['cat', 'type', 'less', 'head', 'tail', 'more', 'get-content', 'gc'])
+
+/** 段内隐式文件命令（tee / dd / Set-Content / Get-Content …）的目标。 */
+function collectImplicitTargets(argv, writeTargets, readTargets) {
+  const first = argv[0]
+  if (first === undefined || first.dynamic) return
+  const name = String(first.value).split(/[\\/]/).pop()?.toLowerCase() ?? ''
+  const rest = argv.slice(1)
+  const positional = []
+  for (let index = 0; index < rest.length; index += 1) {
+    const word = rest[index]
+    if (word.dynamic) continue
+    const value = String(word.value)
+    if (value === '--') continue
+    if (value.startsWith('-')) continue
+    positional.push({ value, previous: rest[index - 1]?.value })
+  }
+  if (name === 'tee') {
+    for (const item of positional) writeTargets.push(item.value)
+    return
+  }
+  if (name === 'dd') {
+    for (const word of rest) {
+      if (word.dynamic) continue
+      const value = String(word.value)
+      if (value.startsWith('of=')) writeTargets.push(value.slice(3))
+      else if (value.startsWith('if=')) readTargets.push(value.slice(3))
+    }
+    return
+  }
+  if (IMPLICIT_WRITE_COMMANDS.has(name)) {
+    const flagged = positional.find((item) => String(item.previous ?? '').toLowerCase() === '-path' || String(item.previous ?? '').toLowerCase() === '-filepath')
+    if (flagged !== undefined) writeTargets.push(flagged.value)
+    else if (positional.length > 0) writeTargets.push(String(positional[0].value))
+    return
+  }
+  if (IMPLICIT_READ_COMMANDS.has(name)) {
+    for (const item of positional) readTargets.push(item.value)
+  }
+}
+
+/**
+ * 从命令文本提取写/读重定向目标（AST-lite）。
+ * @returns {{writeTargets:string[], readTargets:string[], parseFailed:boolean,
+ *   parseError:string|null, heredocs:number, warnings:string[]}}
+ */
 export function parseShellRedirects(commandText, policyInput = {}) {
   const policy = policyInput && policyInput.__normalized === true ? policyInput : normalizePolicy(policyInput ?? {})
   const text = String(commandText ?? '')
-  const writeTargets = []
-  const readTargets = []
-  if (text.length === 0) return { writeTargets, readTargets }
-  const push = (list, raw) => {
-    if (!isStaticToken(raw)) return
-    const abs = resolveMaybePath(raw, policy)
-    if (abs !== null && !list.includes(abs)) list.push(abs)
+  const empty = { writeTargets: [], readTargets: [], parseFailed: false, parseError: null, heredocs: 0, warnings: [] }
+  if (text.trim().length === 0) return empty
+
+  const lex = tokenizeShell(text)
+  const writeRaw = []
+  const readRaw = []
+  const warnings = []
+  let argv = []
+
+  const flushCommand = () => {
+    if (argv.length > 0) collectImplicitTargets(argv, writeRaw, readRaw)
+    argv = []
   }
-  for (const re of [WRITE_REDIRECT_CAPTURE_RE, TEE_CAPTURE_RE, DD_CAPTURE_RE, PS_WRITE_CAPTURE_RE]) {
-    re.lastIndex = 0
-    let m
-    while ((m = re.exec(text)) !== null) push(writeTargets, m[1])
+
+  for (const token of lex.tokens) {
+    if (token.type === 'op') {
+      if (SHELL_SEPARATORS.has(token.value)) flushCommand()
+      continue
+    }
+    if (token.type === 'word') { argv.push({ value: token.value, dynamic: token.dynamic }); continue }
+    if (token.type === 'redirect') {
+      const target = token.target
+      const op = token.op
+      if (op === '<<' || op === '<<-' || op === '<<<') continue // heredoc / herestring 的内容不是文件路径
+      if (target === null) { warnings.push(`${op}-missing-target`); continue }
+      if (target.dynamic) { warnings.push(`${op}-dynamic-target`); continue }
+      const value = String(target.value)
+      if (op === '>' || op === '>>' || op === '>|' || op === '&>' || op === '&>>') {
+        writeRaw.push(value)
+      } else if (op === '<') {
+        readRaw.push(value)
+      } else if (op === '<>') {
+        readRaw.push(value)
+        writeRaw.push(value)
+      } else if (op === '>&' || op === '<&') {
+        // 纯数字目标是 fd 复制（2>&1），不是文件
+        if (/^\d+$/.test(value)) continue
+        if (op === '>&') writeRaw.push(value)
+        else readRaw.push(value)
+      }
+    }
   }
-  READ_CMD_CAPTURE_RE.lastIndex = 0
-  let r
-  while ((r = READ_CMD_CAPTURE_RE.exec(text)) !== null) push(readTargets, r[1])
-  return { writeTargets, readTargets }
+  flushCommand()
+
+  const resolve = (list) => {
+    const out = []
+    for (const raw of list) {
+      const abs = resolvePathValue(String(raw), policy.root)
+      if (abs !== null && !out.includes(abs)) out.push(abs)
+    }
+    return out
+  }
+  const parseFailed = lex.errors.length > 0
+  return {
+    writeTargets: resolve(writeRaw),
+    readTargets: resolve(readRaw),
+    parseFailed,
+    parseError: parseFailed ? lex.errors[0] : null,
+    heredocs: lex.heredocs,
+    warnings,
+  }
 }
 
 /** URL → { raw, host, hostPort }；坏 URL 返回 null（由 network-egress 判黄兜住）。 */
@@ -488,6 +800,10 @@ export function buildActionContext(evidence = {}, policyInput = {}) {
     targetPid: Number.isFinite(targetPid) ? targetPid : null,
     writeTargets: redirects.writeTargets,
     readTargets: redirects.readTargets,
+    parseFailed: redirects.parseFailed,
+    parseError: redirects.parseError,
+    heredocs: redirects.heredocs,
+    warnings: redirects.warnings,
     policy,
   }
 }
@@ -669,16 +985,20 @@ export const DEFAULT_ACTION_RULES = Object.freeze([
     reason: '写越出沙箱',
     tags: ['needs-approval'],
     match: (ev, ctx) => {
+      // fail-closed：命令里出现重定向符号但语法解析失败 → 不猜目标，直接判黄（需审批）
+      if (ctx.parseFailed === true && /[>]/.test(shellCommandOf(ctx))) return true
       if (ctx.mode !== 'write') return false
       const targets = writeTargetsOf(ctx)
       if (targets.length === 0) return true
       return targets.some((t) => !withinPath(t, ctx.policy.bufferRoot) && !inAllowList(t, ctx.policy))
     },
     evidence: (ev, ctx) => ({
-      matchedPattern: 'outside-buffer-and-allowlist',
+      matchedPattern: ctx.parseFailed === true ? 'unparsed-redirect-fail-closed' : 'outside-buffer-and-allowlist',
       targets: writeTargetsOf(ctx),
       bufferRoot: ctx.policy.bufferRoot,
       allowPaths: ctx.policy.allowPaths,
+      parseFailed: ctx.parseFailed === true,
+      parseError: ctx.parseError ?? null,
     }),
   },
   {
@@ -687,7 +1007,8 @@ export const DEFAULT_ACTION_RULES = Object.freeze([
     light: LIGHT.BLUE,
     reason: '只读 shell 命令（无重定向）',
     tags: ['allow-with-audit'],
-    match: (ev, ctx) => ctx.mode === 'exec' && execLooksReadOnly(ev, ctx.policy),
+    // 解析失败时不宣称只读：宁可判黄，也不把没看懂的语法放成蓝/绿
+    match: (ev, ctx) => ctx.mode === 'exec' && ctx.parseFailed !== true && execLooksReadOnly(ev, ctx.policy),
     evidence: (ev, ctx) => ({ matchedPattern: 'read-only-prefix', commandSnippet: shellCommandOf(ctx).slice(0, 200) }),
   },
   {
@@ -697,7 +1018,13 @@ export const DEFAULT_ACTION_RULES = Object.freeze([
     reason: 'shell 命令有副作用，不在只读白名单',
     tags: ['needs-approval'],
     match: (ev, ctx) => ctx.mode === 'exec',
-    evidence: (ev, ctx) => ({ matchedPattern: 'side-effect', commandSnippet: shellCommandOf(ctx).slice(0, 200), writeTargets: ctx.writeTargets }),
+    evidence: (ev, ctx) => ({
+      matchedPattern: ctx.parseFailed === true ? 'unparsed-command-fail-closed' : 'side-effect',
+      commandSnippet: shellCommandOf(ctx).slice(0, 200),
+      writeTargets: ctx.writeTargets,
+      parseFailed: ctx.parseFailed === true,
+      parseError: ctx.parseError ?? null,
+    }),
   },
   {
     id: 'read-in-buffer',

@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## v2.7.9（2026-11-02）
+
+**主题：把 `parseShellRedirects` 从正则升级为 shell 词法/语法解析（AST-lite）。**
+
+### 变更
+- `src/lib/umbrella.mjs` 新增 **AST-lite 词法器**（`tokenizeShell`），`parseShellRedirects` 改为在其上按语法结构提目标：
+  - 重定向操作符语义化：`>` `>>` `>|` `&>` `&>>`、`<`、`<>`、`>&`、`<&`、`<<`、`<<-`、`<<<`，支持 fd 前缀（`2>` `3>>`）；
+  - **fd 复制不是文件**：`2>&1` 不再被误判为「写目标 `&1`」；
+  - **heredoc 正文整段跳过**（`cat <<EOF > out.txt` 只认 `out.txt`，正文里的 `>` 是数据）；
+  - **引号内的 `>` 不是重定向**（`bash -c 'echo x > out.txt'` 不误抓，落 exec 规则判黄）；
+  - 动态目标（`$VAR` / `$(...)` / 反引号 / brace / 通配）标记 `dynamic` 并写进 `warnings`，不当作路径；
+  - 命令段边界（`;` `&&` `||` `|` `&` 括号 换行）使重定向只归属自己那段命令；
+  - 隐式文件命令从 argv 取目标：`tee`、`dd if=/of=`、`Set-Content`/`Out-File`/`Add-Content`、`cat/Get-Content/type/less/head/tail/more`。
+- `buildActionContext()` 新增 `parseFailed` / `parseError` / `heredocs` / `warnings`；规则据此 **fail-closed**：
+  - `exec-read-only` 在解析失败时不再匹配（不宣称只读）；
+  - 有 `>` 且解析失败 → `write-outside-buffer` 命中，证据 `unparsed-redirect-fail-closed`（黄）；
+  - 否则 → `exec-side-effect` 的 `unparsed-command-fail-closed`（黄）。
+- 未引入第三方依赖：`shell-quote` 只 tokenize 不认操作符，`@aliou/sh`（v0.3.4，MIT AND BSD-3-Clause，零运行时依赖）
+  虽是合理选择但会破坏本仓库零依赖约束，因此手写只覆盖重定向提取的词法器；PowerShell 走同一词法器并如实声明边界。
+- TypeScript 参考实现同步（`tokenizeShell` / 新 `parseShellRedirects` / `parseFailed` / 规则 fail-closed）。
+
+### 测试
+- `test/umbrella.test.mjs` **45 → 53 项**：操作符全覆盖、fd 复制、heredoc 跳过、引号、动态目标、命令边界、
+  隐式文件命令、语法错误 fail-closed、token 结构断言。
+- 全量测试 **456 → 464 项**；TS 参考实现行为断言 **76 → 95 项**。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 9 个补丁位。
+
 ## v2.7.8（2026-11-02）
 
 **主题：动作规则表声明化 —— 与 AST 规则表同粒度（`match` / `evidence` 可独立测试）。**

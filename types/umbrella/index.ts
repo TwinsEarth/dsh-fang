@@ -46,6 +46,7 @@ export {
   rankOf,
   scopeOf,
   targetOf,
+  tokenizeShell,
 } from './action-scorer.js'
 export type { ActionScorerOptions, AssessOptions } from './action-scorer.js'
 export { PluginScorer, normalizeGrade } from './plugin-scorer.js'

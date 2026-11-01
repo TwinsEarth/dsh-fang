@@ -368,40 +368,376 @@ function inAllowList(absPath: string | null, policy: ActionPolicy): boolean {
 // 规则上下文：命令 / 重定向 / 路径 / URL / PID 一次解析
 // ─────────────────────────────────────────────────────────────────────────────
 
-const WRITE_REDIRECT_CAPTURE_RE = /(?:^|[^>])>{1,2}\s*([^\s|;&<>]+)/g
-const TEE_CAPTURE_RE = /\btee\b(?:\s+-a)?\s+([^\s|;&<>]+)/gi
-const DD_CAPTURE_RE = /\bdd\b[^\n]*?\bof=([^\s]+)/gi
-const PS_WRITE_CAPTURE_RE = /\b(?:Set-Content|Out-File)\b(?:\s+-(?:Path|FilePath))?\s+([^\s|;&<>]+)/gi
-const READ_CMD_CAPTURE_RE = /(?:^|[|;&]\s*)(?:cat|less|head|tail|more|Get-Content|type)\s+([^\s|;&<>]+)/gi
+// AST-lite shell 词法：只覆盖「重定向 / 隐式文件命令」所需的语法。
+// 不用 shell-quote（只 tokenize，不认操作符）；不引入 @aliou/sh（真 AST，但是第三方运行时依赖，
+// 会破坏本仓库零依赖约束）。无法确定的情况一律 parseFailed = true，由规则 fail-closed 判黄。
 
-/** 动态构造（$VAR / $(...) / 通配）的路径不静态解析：交给兜底规则判黄。 */
-function isStaticToken(token: string): boolean {
-  return token.length > 0 && token !== '&' && !/[$`*?]/.test(token)
+const SHELL_SEPARATORS = new Set(['newline', ';', ';;', '&&', '||', '|', '&', '(', ')'])
+const IMPLICIT_WRITE_COMMANDS = new Set(['tee', 'tee-object', 'out-file', 'set-content', 'add-content'])
+const IMPLICIT_READ_COMMANDS = new Set(['cat', 'type', 'less', 'head', 'tail', 'more', 'get-content', 'gc'])
+
+export interface ShellWordToken {
+  readonly type: 'word'
+  readonly value: string
+  readonly dynamic: boolean
+  readonly start: number
+  readonly end: number
+}
+export interface ShellOpToken {
+  readonly type: 'op'
+  readonly value: string
+}
+export interface ShellRedirectToken {
+  readonly type: 'redirect'
+  readonly op: string
+  readonly fd: number | null
+  readonly target: { readonly value: string; readonly dynamic: boolean } | null
+}
+export type ShellToken = ShellWordToken | ShellOpToken | ShellRedirectToken
+
+export interface ShellLexResult {
+  readonly tokens: readonly ShellToken[]
+  readonly errors: readonly string[]
+  readonly heredocs: number
 }
 
-/** 保守解析 shell 的写/读目标：只取字面量。 */
-export function parseShellRedirects(
-  commandText: string,
-  policy: ActionPolicy,
-): { writeTargets: readonly string[]; readTargets: readonly string[] } {
+export interface RedirectParseResult {
+  readonly writeTargets: readonly string[]
+  readonly readTargets: readonly string[]
+  readonly parseFailed: boolean
+  readonly parseError: string | null
+  readonly heredocs: number
+  readonly warnings: readonly string[]
+}
+
+function matchRedirectOp(text: string, index: number): { readonly op: string; readonly len: number } | null {
+  const ch = text.charAt(index)
+  const two = text.slice(index, index + 2)
+  const three = text.slice(index, index + 3)
+  if (ch === '&') {
+    if (three === '&>>') return { op: '&>>', len: 3 }
+    if (two === '&>') return { op: '&>', len: 2 }
+    return null
+  }
+  if (ch === '>') {
+    if (two === '>>') return { op: '>>', len: 2 }
+    if (two === '>|') return { op: '>|', len: 2 }
+    if (two === '>&') return { op: '>&', len: 2 }
+    return { op: '>', len: 1 }
+  }
+  if (ch === '<') {
+    if (three === '<<<') return { op: '<<<', len: 3 }
+    if (three === '<<-') return { op: '<<-', len: 3 }
+    if (two === '<<') return { op: '<<', len: 2 }
+    if (two === '<&') return { op: '<&', len: 2 }
+    if (two === '<>') return { op: '<>', len: 2 }
+    return { op: '<', len: 1 }
+  }
+  return null
+}
+
+function skipParenGroup(text: string, index: number): number {
+  let depth = 0
+  let i = index
+  while (i < text.length) {
+    const ch = text.charAt(i)
+    if (ch === '\\') { i += 2; continue }
+    if (ch === '(') depth += 1
+    else if (ch === ')') {
+      depth -= 1
+      if (depth === 0) return i + 1
+    }
+    i += 1
+  }
+  return -1
+}
+
+interface ScannedWord {
+  readonly value: string
+  readonly dynamic: boolean
+  readonly end: number
+  readonly error: string | null
+}
+
+function scanWord(text: string, index: number): ScannedWord {
+  let value = ''
+  let dynamic = false
+  let i = index
+  while (i < text.length) {
+    const ch = text.charAt(i)
+    if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') break
+    if (SHELL_SEPARATORS.has(ch) || ch === '>' || ch === '<' || ch === ';') break
+    if (ch === '\\') {
+      const next = text.charAt(i + 1)
+      if (next === '') return { value, dynamic, end: i + 1, error: 'trailing-backslash' }
+      if (next === '\n') { i += 2; continue }
+      value += next
+      i += 2
+      continue
+    }
+    if (ch === "'") {
+      const close = text.indexOf("'", i + 1)
+      if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-single-quote' }
+      value += text.slice(i + 1, close)
+      i = close + 1
+      continue
+    }
+    if (ch === '"') {
+      let k = i + 1
+      let closed = false
+      while (k < text.length) {
+        const c = text.charAt(k)
+        if (c === '\\') {
+          const next = text.charAt(k + 1)
+          if (next === '') break
+          value += next === '"' || next === '\\' || next === '$' || next === '`' ? next : `\\${next}`
+          k += 2
+          continue
+        }
+        if (c === '"') { closed = true; k += 1; break }
+        if (c === '$' || c === '`') dynamic = true
+        value += c
+        k += 1
+      }
+      if (!closed) return { value, dynamic, end: text.length, error: 'unterminated-double-quote' }
+      i = k
+      continue
+    }
+    if (ch === '$') {
+      dynamic = true
+      const next = text.charAt(i + 1)
+      if (next === '(') {
+        const end = skipParenGroup(text, i + 1)
+        if (end < 0) return { value, dynamic, end: text.length, error: 'unterminated-substitution' }
+        i = end
+        continue
+      }
+      if (next === '{') {
+        const close = text.indexOf('}', i + 2)
+        if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-brace-expansion' }
+        i = close + 1
+        continue
+      }
+      if (next === "'") {
+        const close = text.indexOf("'", i + 2)
+        if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-ansi-c' }
+        value += text.slice(i + 2, close)
+        i = close + 1
+        continue
+      }
+      i += 1
+      while (i < text.length && /[A-Za-z0-9_]/.test(text.charAt(i))) i += 1
+      continue
+    }
+    if (ch === '`') {
+      dynamic = true
+      const close = text.indexOf('`', i + 1)
+      if (close < 0) return { value, dynamic, end: text.length, error: 'unterminated-backtick' }
+      i = close + 1
+      continue
+    }
+    if (ch === '*' || ch === '?' || ch === '[' || ch === '{') dynamic = true
+    value += ch
+    i += 1
+  }
+  return { value, dynamic, end: i, error: null }
+}
+
+export function tokenizeShell(commandText: string): ShellLexResult {
   const text = String(commandText ?? '')
-  const writeTargets: string[] = []
-  const readTargets: string[] = []
-  if (text.length === 0) return { writeTargets, readTargets }
-  const push = (list: string[], raw: string | undefined): void => {
-    if (raw === undefined || !isStaticToken(raw)) return
-    const abs = resolveMaybePath(raw, policy)
-    if (abs !== null && !list.includes(abs)) list.push(abs)
+  const tokens: ShellToken[] = []
+  const errors: string[] = []
+  let heredocs = 0
+  let pendingHeredocs: Array<{ readonly delimiter: string; readonly strip: boolean }> = []
+  let i = 0
+
+  const consumeHeredocBodies = (): void => {
+    for (const hd of pendingHeredocs) {
+      heredocs += 1
+      let k = i
+      let closed = false
+      while (k <= text.length) {
+        const lineEnd = text.indexOf('\n', k)
+        const line = text.slice(k, lineEnd < 0 ? text.length : lineEnd)
+        const compare = hd.strip ? line.replace(/^\t+/, '') : line
+        k = lineEnd < 0 ? text.length : lineEnd + 1
+        if (compare === hd.delimiter) { closed = true; break }
+        if (lineEnd < 0) break
+      }
+      if (!closed) errors.push('unterminated-heredoc')
+      i = k
+    }
+    pendingHeredocs = []
   }
-  for (const re of [WRITE_REDIRECT_CAPTURE_RE, TEE_CAPTURE_RE, DD_CAPTURE_RE, PS_WRITE_CAPTURE_RE]) {
-    re.lastIndex = 0
-    let m: RegExpExecArray | null
-    while ((m = re.exec(text)) !== null) push(writeTargets, m[1])
+
+  while (i < text.length) {
+    const ch = text.charAt(i)
+    if (ch === ' ' || ch === '\t' || ch === '\r') { i += 1; continue }
+    if (ch === '\\' && text.charAt(i + 1) === '\n') { i += 2; continue }
+    if (ch === '\n') {
+      tokens.push({ type: 'op', value: 'newline' })
+      i += 1
+      if (pendingHeredocs.length > 0) consumeHeredocBodies()
+      continue
+    }
+    const redirect = matchRedirectOp(text, i)
+    if (redirect !== null) {
+      let fd: number | null = null
+      const prev = tokens[tokens.length - 1]
+      if (prev !== undefined && prev.type === 'word' && prev.end === i && /^\d+$/.test(prev.value) && !prev.dynamic) {
+        fd = Number(prev.value)
+        tokens.pop()
+      }
+      i += redirect.len
+      while (i < text.length && (text.charAt(i) === ' ' || text.charAt(i) === '\t')) i += 1
+      let target: { value: string; dynamic: boolean } | null = null
+      const next = text.charAt(i)
+      const targetIsWord = next !== '' && next !== '\n' && next !== ';' && next !== '|' && next !== '&' && next !== '>' && next !== '<'
+      if (targetIsWord) {
+        const word = scanWord(text, i)
+        if (word.error !== null) errors.push(word.error)
+        target = { value: word.value, dynamic: word.dynamic }
+        i = word.end
+      }
+      tokens.push({ type: 'redirect', op: redirect.op, fd, target })
+      if ((redirect.op === '<<' || redirect.op === '<<-') && target !== null) {
+        if (target.dynamic) errors.push('dynamic-heredoc-delimiter')
+        else pendingHeredocs.push({ delimiter: target.value, strip: redirect.op === '<<-' })
+      }
+      continue
+    }
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '(' || ch === ')') {
+      const two = text.slice(i, i + 2)
+      let value = ch
+      if (two === ';;' || two === '&&' || two === '||') value = two
+      tokens.push({ type: 'op', value })
+      i += value.length
+      continue
+    }
+    const word = scanWord(text, i)
+    if (word.error !== null) errors.push(word.error)
+    tokens.push({ type: 'word', value: word.value, dynamic: word.dynamic, start: i, end: word.end })
+    i = word.end <= i ? i + 1 : word.end
   }
-  READ_CMD_CAPTURE_RE.lastIndex = 0
-  let r: RegExpExecArray | null
-  while ((r = READ_CMD_CAPTURE_RE.exec(text)) !== null) push(readTargets, r[1])
-  return { writeTargets, readTargets }
+  return { tokens, errors, heredocs }
+}
+
+function collectImplicitTargets(
+  argv: readonly { readonly value: string; readonly dynamic: boolean }[],
+  writeTargets: string[],
+  readTargets: string[],
+): void {
+  const first = argv[0]
+  if (first === undefined || first.dynamic) return
+  const segments = String(first.value).split(/[\\/]/)
+  const name = (segments[segments.length - 1] ?? '').toLowerCase()
+  const rest = argv.slice(1)
+  const positional: Array<{ readonly value: string; readonly previous: string | undefined }> = []
+  for (let index = 0; index < rest.length; index += 1) {
+    const word = rest[index]
+    if (word === undefined || word.dynamic) continue
+    const value = String(word.value)
+    if (value === '--' || value.startsWith('-')) continue
+    positional.push({ value, previous: rest[index - 1]?.value })
+  }
+  if (name === 'tee') {
+    for (const item of positional) writeTargets.push(item.value)
+    return
+  }
+  if (name === 'dd') {
+    for (const word of rest) {
+      if (word.dynamic) continue
+      const value = String(word.value)
+      if (value.startsWith('of=')) writeTargets.push(value.slice(3))
+      else if (value.startsWith('if=')) readTargets.push(value.slice(3))
+    }
+    return
+  }
+  if (IMPLICIT_WRITE_COMMANDS.has(name)) {
+    const flagged = positional.find((item) => {
+      const prev = String(item.previous ?? '').toLowerCase()
+      return prev === '-path' || prev === '-filepath'
+    })
+    if (flagged !== undefined) writeTargets.push(flagged.value)
+    else if (positional[0] !== undefined) writeTargets.push(String(positional[0].value))
+    return
+  }
+  if (IMPLICIT_READ_COMMANDS.has(name)) {
+    for (const item of positional) readTargets.push(item.value)
+  }
+}
+
+/** 从命令文本提取写/读重定向目标（AST-lite；语法错误 → parseFailed）。 */
+export function parseShellRedirects(commandText: string, policy: ActionPolicy): RedirectParseResult {
+  const text = String(commandText ?? '')
+  const empty: RedirectParseResult = {
+    writeTargets: [],
+    readTargets: [],
+    parseFailed: false,
+    parseError: null,
+    heredocs: 0,
+    warnings: [],
+  }
+  if (text.trim().length === 0) return empty
+
+  const lex = tokenizeShell(text)
+  const writeRaw: string[] = []
+  const readRaw: string[] = []
+  const warnings: string[] = []
+  let argv: Array<{ value: string; dynamic: boolean }> = []
+
+  const flushCommand = (): void => {
+    if (argv.length > 0) collectImplicitTargets(argv, writeRaw, readRaw)
+    argv = []
+  }
+
+  for (const token of lex.tokens) {
+    if (token.type === 'op') {
+      if (SHELL_SEPARATORS.has(token.value)) flushCommand()
+      continue
+    }
+    if (token.type === 'word') {
+      argv.push({ value: token.value, dynamic: token.dynamic })
+      continue
+    }
+    const op = token.op
+    const target = token.target
+    if (op === '<<' || op === '<<-' || op === '<<<') continue
+    if (target === null) { warnings.push(`${op}-missing-target`); continue }
+    if (target.dynamic) { warnings.push(`${op}-dynamic-target`); continue }
+    const value = String(target.value)
+    if (op === '>' || op === '>>' || op === '>|' || op === '&>' || op === '&>>') {
+      writeRaw.push(value)
+    } else if (op === '<') {
+      readRaw.push(value)
+    } else if (op === '<>') {
+      readRaw.push(value)
+      writeRaw.push(value)
+    } else if (op === '>&' || op === '<&') {
+      if (/^\d+$/.test(value)) continue
+      if (op === '>&') writeRaw.push(value)
+      else readRaw.push(value)
+    }
+  }
+  flushCommand()
+
+  const resolve = (list: readonly string[]): string[] => {
+    const out: string[] = []
+    for (const raw of list) {
+      const abs = resolveMaybePath(raw, policy)
+      if (abs !== null && !out.includes(abs)) out.push(abs)
+    }
+    return out
+  }
+  const parseFailed = lex.errors.length > 0
+  return {
+    writeTargets: resolve(writeRaw),
+    readTargets: resolve(readRaw),
+    parseFailed,
+    parseError: parseFailed ? (lex.errors[0] ?? 'parse-error') : null,
+    heredocs: lex.heredocs,
+    warnings,
+  }
 }
 
 export function buildActionContext(evidence: ActionEvidence, policy: ActionPolicy): ActionContext {
@@ -421,6 +757,10 @@ export function buildActionContext(evidence: ActionEvidence, policy: ActionPolic
     targetPid: pid !== null && Number.isFinite(pid) ? pid : null,
     writeTargets: redirects.writeTargets,
     readTargets: redirects.readTargets,
+    parseFailed: redirects.parseFailed,
+    parseError: redirects.parseError,
+    heredocs: redirects.heredocs,
+    warnings: redirects.warnings,
     policy,
   }
 }
@@ -587,13 +927,16 @@ const BUILTIN_RULES: ActionRule[] = [
     reason: '写越出沙箱',
     tags: ['needs-approval'],
     match: (_evidence, context) => {
+      // fail-closed：语法解析失败且命令里有 > → 不猜目标，直接判黄
+      if (context.parseFailed === true && context.commandText.includes('>')) return true
       if (context.mode !== 'write') return false
       const targets = writeTargetsOf(context)
       if (targets.length === 0) return true
       return targets.some((t) => !isWithin(t, context.policy.bufferRoot, context.policy.caseInsensitive) && !inAllowList(t, context.policy))
     },
     evidence: (_evidence, context) => ({
-      matchedPattern: 'outside-buffer-and-allowlist',
+      matchedPattern: context.parseFailed === true ? 'unparsed-redirect-fail-closed' : 'outside-buffer-and-allowlist',
+      parseFailed: context.parseFailed === true,
       targets: writeTargetsOf(context),
       bufferRoot: context.policy.bufferRoot,
       allowPaths: context.policy.allowPaths,
@@ -605,7 +948,7 @@ const BUILTIN_RULES: ActionRule[] = [
     light: 'blue',
     reason: '只读 shell 命令（无重定向）',
     tags: ['allow-with-audit'],
-    match: (evidence, context) => context.mode === 'exec' && execLooksReadOnly(evidence, context.policy),
+    match: (evidence, context) => context.mode === 'exec' && context.parseFailed !== true && execLooksReadOnly(evidence, context.policy),
     evidence: (_evidence, context) => ({ matchedPattern: 'read-only-prefix', commandSnippet: context.commandText.slice(0, 200) }),
   },
   {
@@ -615,7 +958,12 @@ const BUILTIN_RULES: ActionRule[] = [
     reason: 'shell 命令有副作用，不在只读白名单',
     tags: ['needs-approval'],
     match: (_evidence, context) => context.mode === 'exec',
-    evidence: (_evidence, context) => ({ matchedPattern: 'side-effect', commandSnippet: context.commandText.slice(0, 200), writeTargets: context.writeTargets }),
+    evidence: (_evidence, context) => ({
+      matchedPattern: context.parseFailed === true ? 'unparsed-command-fail-closed' : 'side-effect',
+      commandSnippet: context.commandText.slice(0, 200),
+      writeTargets: context.writeTargets,
+      parseFailed: context.parseFailed === true,
+    }),
   },
   {
     id: 'read-in-buffer',
