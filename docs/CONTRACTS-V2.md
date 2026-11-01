@@ -304,7 +304,7 @@ gradeFloor(grade) / effectiveLight(base, grade) / cachedGrade(id) / cacheStats()
 默认 15 条，数组顺序即优先级、**首个命中胜出**；`register` 必须给 `before`/`after`（追加到表尾等于永不命中），
 形状不合法在注册时抛错。`evidence` 返回结构化 `{ matchedPattern, ... }` 进审计，回答「为什么是这个灯色」；
 上下文由 `buildActionContext()` 一次解析（`mode`/`commandText`/`writeTargets`/`readTargets`/`targetPath`/`url`/`targetPid`），
-shell 重定向只静态解析字面量，动态构造交给兜底规则判黄。
+shell 重定向由 AST-lite 词法器解析（v2.7.9）：操作符语义、fd 复制、heredoc 跳过、引号、命令边界；语法错误 → parseFailed，规则 fail-closed 判黄。
 
 审计：一次 `decideAction` 一条 `AUDIT.UMBRELLA_DECISION`（`kind:'umbrella-decision'`，含 `category` 与 `evidence`）；
 插件评分不重复写（沿用 5.4 的 `AUDIT.SCORE`）。

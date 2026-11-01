@@ -40,6 +40,7 @@ import {
   rankOf,
   resolveFloorTable,
   scopeOf,
+  tokenizeShell,
 } from '../src/lib/umbrella.mjs'
 import * as umbrellaPlugin from '../src/plugins/umbrella.mjs'
 
@@ -895,3 +896,118 @@ test('规则表不因评分调用被改动（纯函数语义）', () => {
   assert.deepEqual(outer, inner)
   assert.equal(JSON.stringify(DEFAULT_ACTION_RULES.map((r) => r.id)), before)
 })
+
+// ── shell AST-lite 解析（v2.7.9）─────────────────────────────────────────────
+
+const resolveTarget = (value) => path.resolve('C:/fangs', value)
+
+test('AST-lite：所有重定向操作符按语义分类（fd 复制不是文件）', () => {
+  const cases = [
+    { cmd: 'echo x > out.txt', w: ['out.txt'], r: [] },
+    { cmd: 'echo x >> out.txt', w: ['out.txt'], r: [] },
+    { cmd: 'echo x >| out.txt', w: ['out.txt'], r: [] },
+    { cmd: 'cmd &> out.txt', w: ['out.txt'], r: [] },
+    { cmd: 'cmd &>> out.txt', w: ['out.txt'], r: [] },
+    { cmd: 'cmd >& file.txt', w: ['file.txt'], r: [] },
+    { cmd: 'grep x < in.txt > out.txt', w: ['out.txt'], r: ['in.txt'] },
+    { cmd: 'cmd <& in.txt', w: [], r: ['in.txt'] },
+    { cmd: 'cmd <> f.txt', w: ['f.txt'], r: ['f.txt'] },
+    { cmd: 'cmd 2>&1', w: [], r: [] },
+    { cmd: 'cmd 2> err.txt', w: ['err.txt'], r: [] },
+    { cmd: 'cmd <<< "here"', w: [], r: [] },
+  ]
+  for (const c of cases) {
+    const out = parseShellRedirects(c.cmd, policy)
+    assert.deepEqual(out.writeTargets, c.w.map(resolveTarget), `${c.cmd} write`)
+    assert.deepEqual(out.readTargets, c.r.map(resolveTarget), `${c.cmd} read`)
+    assert.equal(out.parseFailed, false, `${c.cmd} parseFailed`)
+  }
+})
+
+test('AST-lite：heredoc 正文整段跳过，正文里的 > 不算重定向', () => {
+  const cmd = 'cat <<EOF > out.txt\nthis line contains > sneaky.txt and > $(rm -rf /)\nEOF\n'
+  const out = parseShellRedirects(cmd, policy)
+  assert.deepEqual(out.writeTargets, [resolveTarget('out.txt')])
+  assert.deepEqual(out.readTargets, [])
+  assert.equal(out.heredocs, 1)
+  assert.equal(out.parseFailed, false)
+
+  const tab = 'cat <<-EOF > out2.txt\n\tbody\n\tEOF\n'
+  const out2 = parseShellRedirects(tab, policy)
+  assert.deepEqual(out2.writeTargets, [resolveTarget('out2.txt')])
+  assert.equal(out2.parseFailed, false)
+})
+
+test('AST-lite：引号内的 > 不是重定向；带空格的引号目标仍是字面量', () => {
+  assert.deepEqual(parseShellRedirects('echo "a > b"', policy).writeTargets, [])
+  assert.deepEqual(parseShellRedirects("echo x > 'out file.txt'", policy).writeTargets, [resolveTarget('out file.txt')])
+  assert.deepEqual(parseShellRedirects('echo x > "out file.txt"', policy).writeTargets, [resolveTarget('out file.txt')])
+  // 嵌套 shell 的字符串：外层看到的是引号内容，不做重定向解析（fail-closed 交给 exec 规则）
+  assert.deepEqual(parseShellRedirects("bash -c 'echo x > out.txt'", policy).writeTargets, [])
+})
+
+test('AST-lite：动态目标（变量/命令替换/反引号/通配）不当作字面量路径', () => {
+  for (const cmd of ['echo x > $DIR/f.txt', 'echo x > "$(mktemp)"', 'echo x > `mktemp`', 'echo x > *.txt']) {
+    const out = parseShellRedirects(cmd, policy)
+    assert.deepEqual(out.writeTargets, [], cmd)
+    assert.equal(out.parseFailed, false, cmd)
+    assert.ok(out.warnings.includes('>-dynamic-target'), `${cmd} warnings=${JSON.stringify(out.warnings)}`)
+  }
+})
+
+test('AST-lite：命令边界分隔，重定向只归属自己那段命令', () => {
+  const out = parseShellRedirects('git status; rm -rf build > out.txt && echo done', policy)
+  assert.deepEqual(out.writeTargets, [resolveTarget('out.txt')])
+  const piped = parseShellRedirects('cat in.txt | tee out.txt', policy)
+  assert.deepEqual(piped.readTargets, [resolveTarget('in.txt')])
+  assert.deepEqual(piped.writeTargets, [resolveTarget('out.txt')])
+})
+
+test('AST-lite：隐式文件命令（tee/dd/Set-Content/Get-Content）', () => {
+  const tee = parseShellRedirects('tee -a out.txt', policy)
+  assert.deepEqual(tee.writeTargets, [resolveTarget('out.txt')])
+
+  const dd = parseShellRedirects('dd if=in.img of=out.img bs=1', policy)
+  assert.deepEqual(dd.readTargets, [resolveTarget('in.img')])
+  assert.deepEqual(dd.writeTargets, [resolveTarget('out.img')])
+
+  const ps = parseShellRedirects("Set-Content -Path out.txt 'content'", policy)
+  assert.deepEqual(ps.writeTargets, [resolveTarget('out.txt')])
+
+  const gc = parseShellRedirects('Get-Content in.txt', policy)
+  assert.deepEqual(gc.readTargets, [resolveTarget('in.txt')])
+
+  const cat = parseShellRedirects('cat a.txt b.txt', policy)
+  assert.deepEqual(cat.readTargets, [resolveTarget('a.txt'), resolveTarget('b.txt')])
+})
+
+test('AST-lite：语法错误 → parseFailed，规则 fail-closed 判黄而不是猜', () => {
+  const unterminated = parseShellRedirects('echo "unclosed', policy)
+  assert.equal(unterminated.parseFailed, true)
+  assert.equal(unterminated.parseError, 'unterminated-double-quote')
+  assert.deepEqual(unterminated.writeTargets, [])
+
+  // 解析失败 + 命令里有 > ：write-outside-buffer 兜住（黄，需审批），证据标注 fail-closed
+  const risky = baseLight({ tool: 'bash', args: { command: 'echo "x > out.txt' } }, policy)
+  assert.equal(risky.light, 'yellow')
+  assert.equal(risky.matchedRule, 'write-outside-buffer')
+  assert.equal(risky.evidence.matchedPattern, 'unparsed-redirect-fail-closed')
+  assert.equal(risky.evidence.parseFailed, true)
+
+  // 解析失败但没有重定向符号：不宣称只读，落 exec-side-effect 判黄
+  const noRedirect = baseLight({ tool: 'bash', args: { command: 'git status "unclosed' } }, policy)
+  assert.equal(noRedirect.light, 'yellow')
+  assert.equal(noRedirect.matchedRule, 'exec-side-effect')
+  assert.equal(noRedirect.evidence.matchedPattern, 'unparsed-command-fail-closed')
+})
+
+test('tokenizeShell：fd 前缀与操作符被结构化（不是字符串猜测）', () => {
+  const lex = tokenizeShell('cmd 2>&1 > out.txt')
+  const redirects = lex.tokens.filter((t) => t.type === 'redirect')
+  assert.equal(redirects.length, 2)
+  assert.deepEqual({ op: redirects[0].op, fd: redirects[0].fd, target: redirects[0].target.value }, { op: '>&', fd: 2, target: '1' })
+  assert.deepEqual({ op: redirects[1].op, fd: redirects[1].fd, target: redirects[1].target.value }, { op: '>', fd: null, target: 'out.txt' })
+  assert.equal(lex.errors.length, 0)
+})
+
+

@@ -135,10 +135,46 @@ umbrella.ruleIds()                                        // 当前顺序（= �
 |---|---|---|
 | `mode` | `evidence.mode` 或工具名映射（`TOOL_MODE`） | `read/write/exec/network/import/unknown` |
 | `commandText` | `target.kind==='command'` 或 `args.command` | shell 规则的操作对象 |
-| `writeTargets` / `readTargets` | `parseShellRedirects()`：`>` `>>`、`tee`、`dd of=`、`Set-Content`/`Out-File`；`cat/less/head/tail/more/Get-Content/type` | 只取**字面量**；`$VAR`/`$(...)`/通配等动态构造一律跳过（交给兜底判黄，不静默放行） |
+| `writeTargets` / `readTargets` | `parseShellRedirects()`（**AST-lite 词法器**，v2.7.9 起） | 见下节：操作符语义、heredoc 跳过、字面量判定、`parseFailed` fail-closed |
 | `targetPath` | `target.kind==='path'` 按 `policy.root` 解析 | 相对路径可判 |
 | `url` | `parseUrlParts()`：`{raw, host, hostPort}`，含默认端口（http 80 / https 443） | 不依赖 `URL` 全局对象 |
 | `targetPid` | `target.kind==='pid'` | 数字，NaN → null |
+| `parseFailed` / `parseError` | 词法器语法错误（未闭合引号 / heredoc / 替换） | 规则据此 **fail-closed 判黄**，绝不猜 |
+
+### 2.3 shell 解析：AST-lite（v2.7.9）
+
+旧版用正则抓 `>` 后面的 token，误判两类情况：`2>&1` 被当成「写目标 `&1`」、引号内的 `>` 被当成重定向。
+现在改为**先词法分析、再按语法结构提目标**：
+
+```
+tokenizeShell(commandText) -> { tokens[], errors[], heredocs }
+  tokens: word{value,dynamic} | op{;} | redirect{op, fd, target}
+parseShellRedirects(commandText, policy) -> { writeTargets, readTargets,
+                                              parseFailed, parseError, heredocs, warnings }
+```
+
+| 语法 | 处理 |
+|---|---|
+| `>` `>>` `>|` `&>` `&>>`（含 fd 前缀 `2>` `3>>`） | 写目标 |
+| `<` `<>`（`<>` 同时读写） | 读目标（`<>` 也进写目标） |
+| `>& n` / `<& n` 且目标纯数字（`2>&1`） | **fd 复制，不是文件**，不提取 |
+| `>& file` / `<& file` | 写 / 读目标 |
+| `<<EOF` / `<<-EOF` | heredoc：正文整段吞掉（正文里的 `>` 是数据），不提取 |
+| `<<< "here"` | herestring：内容是数据，不提取 |
+| 引号（`'…'` / `"…"` / `$'…'`）与 `\` 转义 | 引号内 `>` 不是重定向；引号内的字面量目标仍是字面量 |
+| `$VAR` / `$(...)` / 反引号 / `{a,b}` / 通配 `*?[` | 目标标记 `dynamic`，**不当作路径**，写进 `warnings`（`>-dynamic-target`） |
+| `;` `&&` `||` `|` `&` `(` `)` 换行 | 命令段边界：重定向只归属自己那段命令 |
+| `tee` `dd if=/of=` `Set-Content`/`Out-File`/`Add-Content` `cat/Get-Content/type/less/head/tail/more` | 隐式文件命令：从 argv 取目标（不是重定向），同样只取字面量 |
+
+**fail-closed 落点**：`parseFailed=true` 时，`exec-read-only` 不再匹配（不宣称只读）；
+命令里出现 `>` 则 `write-outside-buffer` 直接命中、证据 `unparsed-redirect-fail-closed`（黄，需审批）；
+否则落 `exec-side-effect` 的 `unparsed-command-fail-closed`。两类都只会**多问一次**，不会静默放行。
+
+**为什么不用现成解析器**：`shell-quote` 只 tokenize（不认操作符与命令边界，`2>&1` 直接误判）；
+`@aliou/sh` 是真 AST（v0.3.4，`MIT AND BSD-3-Clause`，零运行时依赖，unpacked ≈315 KB），
+但**引入第三方运行时依赖会破坏本仓库的零依赖约束**（CI 与 profile 安装都依赖这一点），所以手写这个小词法器。
+PowerShell 走同一套词法器（`>` 在 PS 里就是 Out-File），但 PS 专有语义（`-RedirectStandardOutput`、
+`2>&1` 的流合并细节）不解析——遇到可疑语法由兜底规则判黄，文档如实声明。
 
 **两处与设计稿不同，都是为了诚实**：
 

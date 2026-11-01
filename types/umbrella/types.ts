@@ -172,6 +172,13 @@ export interface ActionContext {
   readonly targetPid: number | null
   readonly writeTargets: readonly string[]
   readonly readTargets: readonly string[]
+  /** shell 语法解析失败（未闭合引号/heredoc 等）：规则必须 fail-closed 判黄，不许猜。 */
+  readonly parseFailed: boolean
+  readonly parseError: string | null
+  /** heredoc 正文段数（正文不参与重定向解析）。 */
+  readonly heredocs: number
+  /** 跳过的目标说明，如 `>-dynamic-target`。 */
+  readonly warnings: readonly string[]
   readonly policy: ActionPolicy
 }
 
