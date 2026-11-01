@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## v2.6.0（2026-11-01）
+
+**主题：Forker 完整化 —— 端口池/健康探测/崩溃退避/孤儿恢复/每分身 meta。**
+
+### 新增
+- **每分身 `fang-meta.json`**（原子写、0600）：status/pid/port/url/profile/crashCount/restartCount/lastError/时间戳；
+  reap 前写入，删除 home 后不会复活目录（修复了"meta 写晚导致 home 重建"的回归）。
+- **崩溃退避**：`supervise=true` 时，已就绪分身崩溃按指数退避（默认 1s/2s/4s，上限 30s、±20% 抖动）自动重启，
+  最多 3 次；只重启 **ready 过** 的分身（首启失败直接如实报错，避免 loop-spawn）。
+- **孤儿恢复**：`recover()` 对账持久化记录：pid 已死 → 标 crashed + 归还端口；pid 存活 → 保留（绝不 kill 别的实例）。
+- **健康探测**：`health(forkId)` = 进程状态 + 回环 HTTP 探测（任何响应都算活着）；
+  `probeHttpAlive` 作为纯函数可测。
+- **纯函数库**：`src/lib/fork-supervisor.mjs`（backoff / planRestart / reconcileOrphans / meta 读写 / HTTP 探测）。
+- 配置：`supervise/maxRestarts/backoffBaseMs/backoffMaxMs/backoffJitter/healthPath`；默认 **opt-in**（patch 行 `supervise: false`），
+  因为自动重启会与 Orchestrator 的 archive/reap 生命周期竞争；需要时显式打开。
+
+### 测试
+- 新增 `test/fork-supervisor.test.mjs`（5 项）：退避边界/抖动、重启策略、孤儿对账、meta 原子读写、HTTP 探测。
+- forker 服务契约新增 `health/recover`；全量 306 项（305 pass / 1 skip），e2e 45/45。
+
 ## v2.5.0（2026-11-01）
 
 **主题：同步 / 桥接 / 混合路由三个子插件（P0 契约版，API + 纯函数 + 测试）。**

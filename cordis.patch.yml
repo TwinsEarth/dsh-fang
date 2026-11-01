@@ -17,6 +17,12 @@
         profileTemplate: ''
         startTimeoutMs: 60000
         maxForks: 8
+        supervise: false
+        maxRestarts: 3
+        backoffBaseMs: 1000
+        backoffMaxMs: 30000
+        backoffJitter: 0.2
+        healthPath: /
 
     - id: fang-buffer-keeper
       name: '@local/dsh-fang/buffer-keeper'

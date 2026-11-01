@@ -55,6 +55,7 @@ import {
   writeJsonAtomic,
   z,
 } from '../kernel/index.mjs'
+import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
 
 export const name = 'fang-forker'
 export const inject = []
@@ -125,6 +126,18 @@ export const Config = z
       .description('true：用内置干净模板（不继承母体脏 profile）；false：沿用 profileTemplate'),
     bundleName: z.string().default('@local/dsh-fang').description('干净模板 profile.bundles 的第三个 bundle'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),
+    supervise: z.boolean().default(false)
+      .description('restart a crashed (already-ready) fork with exponential backoff; the patch layer enables it'),
+    maxRestarts: z.natural().default(SUPERVISION_DEFAULTS.maxRestarts)
+      .description('max automatic restarts per fork'),
+    backoffBaseMs: z.natural().default(SUPERVISION_DEFAULTS.baseMs)
+      .description('backoff base in milliseconds'),
+    backoffMaxMs: z.natural().default(SUPERVISION_DEFAULTS.maxMs)
+      .description('backoff cap in milliseconds'),
+    backoffJitter: z.number().min(0).max(0.9).default(SUPERVISION_DEFAULTS.jitter)
+      .description('backoff jitter ratio'),
+    healthPath: z.string().default(SUPERVISION_DEFAULTS.healthPath)
+      .description('HTTP liveness path (any response counts)')
   })
   .description('fang-forker 配置')
 
@@ -752,6 +765,17 @@ export function apply(ctx, config) {
    * @returns {Promise<{ok:boolean, forkId?:string, pid?:number|null, port?:number, url?:string,
    *   token?:string, error?:string, expectedPort?:number}>}
    */
+  const writeForkMetaOf = (rec) => {
+    if (!rec?.homeDir) return false
+    return writeForkMeta(rec.homeDir, {
+      forkId: rec.forkId, status: rec.status, pid: rec.pid ?? null, port: rec.port ?? null,
+      url: rec.url ?? null, profile: rec.profile ?? null,
+      crashCount: rec.crashCount ?? 0, restartCount: rec.restartCount ?? 0,
+      lastError: rec.lastError ?? null, startedAt: rec.startedAt ?? null,
+      exitedAt: rec.exitedAt ?? null, restartScheduledAt: rec.restartScheduledAt ?? null,
+    })
+  }
+
   const spawn = async (opts = {}) => {
     ensureRegistry()
     ensurePorts()
@@ -789,9 +813,15 @@ export function apply(ctx, config) {
       lastError: null,
       intentionalStop: false,
       startedAt: nowMs(),
+      ready: false,
+      cliPath,
+      crashCount: rec.crashCount ?? 0,
+      restartCount: rec.restartCount ?? 0,
+      restartScheduledAt: null,
       log: collector,
     })
     records.set(forkId, rec)
+    writeForkMetaOf(rec)
 
     // Port: explicit spawn option > deterministic pool allocation > v1 --port 0.
     const requested = Math.floor(Number(opts.port))
@@ -920,7 +950,9 @@ export function apply(ctx, config) {
         rec.status = FORK_STATUS.RUNNING
         rec.running = true
         rec.starting = false
+        rec.ready = true
         rec.startedAt = nowMs()
+        writeForkMetaOf(rec)
         if (expectedPort > 0 && rec.pid) bindPortToPid(expectedPort, forkId, rec.pid)
         persist()
         emit(EVENTS.started, { forkId, pid: rec.pid, port: rec.port })
@@ -969,7 +1001,31 @@ export function apply(ctx, config) {
         }
         // A dead child never keeps a deterministic port: release it on every exit path.
         releaseReserved()
-        persist()
+        if (!rec.intentionalStop) rec.crashCount = (rec.crashCount ?? 0) + 1
+        // A reap may already have deleted the record + home; never resurrect it from the exit handler.
+        if (records.get(forkId) === rec) {
+          writeForkMetaOf(rec)
+          persist()
+        }
+        if (!rec.intentionalStop && cfg.supervise && !disposed) {
+          const plan = planRestart(exitInfo, rec, {
+            maxRestarts: cfg.maxRestarts, baseMs: cfg.backoffBaseMs,
+            maxMs: cfg.backoffMaxMs, jitter: cfg.backoffJitter,
+          })
+          if (plan.action === 'restart' && rec.cliPath && records.get(forkId) === rec) {
+            rec.restartCount = (rec.restartCount ?? 0) + 1
+            rec.restartScheduledAt = nowMs() + plan.delayMs
+            rec.status = FORK_STATUS.PROVISIONING
+            rec.lastError = `crash-restart-in-${plan.delayMs}ms`
+            writeForkMetaOf(rec)
+            rec.restartTimer = setTimeout(() => { rec.restartTimer = null; void restartFork(rec) }, plan.delayMs)
+            audit(AUDIT.FORK_CRASHED, { forkId, restartInMs: plan.delayMs, attempt: plan.attempt, cause: plan.reason })
+          } else if (plan.action === 'give-up') {
+            rec.lastError = `restart-given-up:${plan.reason}`
+            writeForkMetaOf(rec)
+            audit(AUDIT.FORK_CRASHED, { forkId, restartGivenUp: plan.reason })
+          }
+        }
         finish({ ok: false, error: 'exited', code: exitInfo.code, signal, kind: exitInfo.kind, log: collector.tail(20) })
       })
 
@@ -993,6 +1049,9 @@ export function apply(ctx, config) {
   /** Shared stop primitive: kill the tree, mark stopped, release the port. Idempotent. */
   const stopRecord = (rec) => {
     rec.intentionalStop = true
+    if (rec.restartTimer) { clearTimeout(rec.restartTimer); rec.restartTimer = null }
+    rec.restartScheduledAt = null
+    rec.ready = false
     const wasRunning = !!rec.running || !!rec.child || !!rec.starting
     const pid = rec.pid ?? rec.child?.pid ?? null
     if (wasRunning) {
@@ -1029,10 +1088,11 @@ export function apply(ctx, config) {
     const rec = records.get(id)
     if (!rec) return { ok: false, error: 'not-found', forkId: id }
     stop(id)
+    rec.status = FORK_STATUS.REAPED
+    writeForkMetaOf(rec)
     const homeDir = rec.homeDir ? path.resolve(rec.homeDir) : ''
     let removed = false
     if (homeDir && isSafeToRemove(homeDir)) removed = exists(homeDir) ? removeTree(homeDir) : false
-    rec.status = FORK_STATUS.REAPED
     records.delete(id)
     persist()
     emit(EVENTS.reaped, { forkId: id })
@@ -1063,12 +1123,66 @@ export function apply(ctx, config) {
     return rec.log.tail(tailLines)
   }
 
+  /** Re-spawn a crashed-but-ready fork after the backoff timer fires. */
+  const restartFork = async (rec) => {
+    if (disposed || rec.intentionalStop || records.get(rec.forkId) !== rec) return
+    if (!rec.cliPath) { rec.lastError = 'restart-no-cli'; writeForkMetaOf(rec); return }
+    rec.ready = false
+    const out = await spawn({
+      forkId: rec.forkId, homeDir: rec.homeDir, profile: rec.profile,
+      cliPath: rec.cliPath, taskTitle: rec.taskTitle ?? '',
+    })
+    if (!out.ok && !disposed && records.get(rec.forkId) === rec) {
+      rec.lastError = `restart-failed:${out.error}`
+      writeForkMetaOf(rec)
+    }
+  }
+
+  /** HTTP liveness for a fork (any response counts); process state is reported separately. */
+  const health = async (forkId) => {
+    ensureRegistry()
+    ensurePorts()
+    const id = String(forkId ?? '').trim()
+    const rec = records.get(id)
+    if (!rec) return { ok: false, error: 'not-found', forkId: id }
+    const alive = !!rec.running && !!rec.child && rec.child.exitCode === null
+    const http = alive && rec.port ? await probeHttpAlive(rec.port, { path: cfg.healthPath }) : false
+    return { ok: true, forkId: id, status: rec.status, running: alive, pid: rec.pid ?? null, port: rec.port ?? null, http, url: rec.url ?? null }
+  }
+
+  /** Reconcile persisted records after a mother restart; never kills a live foreign pid. */
+  const recover = async () => {
+    ensureRegistry()
+    ensurePorts()
+    const actions = reconcileOrphans(
+      [...records.values()].map((rec) => ({ forkId: rec.forkId, status: rec.status, pid: rec.pid })),
+      isPidAlive,
+    )
+    for (const action of actions) {
+      if (action.action !== 'mark-crashed') continue
+      const rec = records.get(action.forkId)
+      if (!rec) continue
+      rec.pid = null
+      rec.running = false
+      rec.child = null
+      rec.ready = false
+      rec.status = FORK_STATUS.CRASHED
+      rec.lastError = `orphaned:${action.reason}`
+      if (rec.port) releaseOwnedPort(rec.port, rec.forkId)
+      writeForkMetaOf(rec)
+    }
+    persist()
+    return { ok: true, actions, forks: actions.filter((a) => a.action === 'mark-crashed').length }
+  }
+
   const service = {
     role: gate.role,
     provision,
     spawn,
     stop,
     reap,
+    health,
+    recover,
     status,
     list,
     logs,
@@ -1097,6 +1211,7 @@ export function apply(ctx, config) {
       }
     }
     for (const rec of records.values()) {
+      if (rec.restartTimer) { clearTimeout(rec.restartTimer); rec.restartTimer = null }
       if (rec.running || rec.child || rec.starting) {
         rec.intentionalStop = true
         killTree(rec)
