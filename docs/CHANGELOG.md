@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v2.5.0（2026-11-01）
+
+**主题：同步 / 桥接 / 混合路由三个子插件（P0 契约版，API + 纯函数 + 测试）。**
+
+### 新增
+- **角色**：`consumer`（PC 消费端）成为一等形式；矩阵 15 个插件。
+- **`fang-session-bridge`（桥接）**：mother 侧只读 façade，复用 PC 宿主 `desktop-bridge.json`
+  （127.0.0.1 + Bearer，端口/token 每次重读，拒绝非回环 descriptor）；
+  暴露 list / events / send(1–4096B) / create，路由 `/fang/api/bridge/*`；PC 不可达时 `bridge-unavailable`。
+- **`fang-session-sync`（同步）**：勾选会话导出到 staging bundle（manifest + 每文件 sha256，源只读），
+  导入按工作区路径/名称精确匹配，**永不覆盖**：冲突保留 `.fork-<ts>` 副本；未匹配进 `pendingMatch`。
+  路由 `/fang/api/sync/{status,export,import}`。
+- **`fang-session-router`（混合路由）**：纯函数 `chooseMode`：
+  跨机+实时 → `deny`；一次性迁移 → `sync`；同机+宿主在跑+bridge+实时 → `bridge`；其余 `sync`。
+  路由 `/fang/api/route` 返回决策与理由。
+- 历史隔离说明：PC 与 Web 的会话数据不会自动双向流动；sync 是"文件搬运"（可离线/跨机），
+  bridge 是"驱动活进程"（仅同机回环）。派生 fork 的默认回退仍是文件导入（v2.4.0 的 importSession）。
+
+### 验证
+- 新增 7 个测试：descriptor 校验与 token 不泄漏、四个 bridge 调用、bundle 导出只读/冲突保留/待匹配、
+  路由真值表；全量 301 项（300 pass / 1 skip）；e2e 45/45；新增 allow-list 自检门禁（29 路由、0 findings）。
+
 ## v2.4.0（2026-11-01）
 
 **主题：母体会话数据修正 + 派生时真正继承历史 + 「瓮城」控制面板重设计。**

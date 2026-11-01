@@ -84,6 +84,13 @@ const manifest = {
 }
 fs.writeFileSync(path.join(ROOT, 'dist', 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
 
+const allow = run(process.execPath, ['tools/release/allowlist.mjs', '--with-manifest', '--json'], { timeoutMs: 120000 })
+if (allow.status !== 0) {
+  console.error('FAIL allow-list (package):\n' + (allow.stderr || allow.stdout).slice(-1500))
+  process.exit(1)
+}
+console.log('PASS  allow-list (package)')
+
 console.log(`PASS  build ${PUBLISH_NAME}@${version}`)
 console.log(`      tarball : dist/${path.basename(tarball)} (${manifest.size} bytes, ${manifest.entries} entries)`)
 console.log(`      sha256  : ${manifest.sha256}`)

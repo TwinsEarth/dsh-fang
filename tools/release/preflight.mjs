@@ -26,6 +26,11 @@ add('license: commercial + CLA + NOTICE', ['LICENSE-COMMERCIAL', 'CLA.md', 'NOTI
 const lic = nodeRun(['test/licensing.test.mjs'])
 add('license layering guard', lic.status === 0, lic.status === 0 ? 'green' : (lic.stderr || lic.stdout).slice(-300))
 
+const allow = nodeRun(['tools/release/allowlist.mjs', '--json'])
+let allowReport = null
+try { allowReport = JSON.parse(allow.stdout) } catch { allowReport = null }
+add('allow-list self-check', allow.status === 0 && allowReport?.ok === true, allowReport ? `routes=${allowReport.routes?.count ?? '?'} findings=${allowReport.findings?.length ?? '?'}` : (allow.stderr || allow.stdout).slice(-300))
+
 // full suite
 const files = listTestFiles()
 const started = Date.now()
