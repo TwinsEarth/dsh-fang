@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## v2.8.2（2026-11-02）
+
+**主题：`inherit: false` 严格模式 —— 项目可完全替换可调规则集，但拆不掉安全边界。**
+
+### 新增
+- YAML 顶层 `inherit`（boolean，默认 `true`）。`inherit: false` 表示**丢弃此层之前所有可调规则**，
+  只保留硬规则（`hard-deny`/`non-negotiable`）+ 兜底 `unknown-tool`，再从该层开始叠加。
+- `registry.applyLayer` 支持多段严格模式：以**最后一个** `inherit: false` 层为起点重建；它之前的层全部丢弃；
+  之后的 `inherit: true` 层叠加在严格结果上，**不会**恢复被丢弃的内置可调规则。
+- 后续层可按 id **重新引入**被丢弃的内置规则（用内置定义"复活"再覆盖），避免严格模式后必须重写谓词。
+- 严格模式返回 `source: 'strict-replaced'` 与 `strictMode: { layerIndex, preservedHardRules, preservedFallback, discardedRuleCount }`；
+  `ruleConfigStatus().strictMode` 同步可见。
+- 审计：严格模式激活时写一条 `AUDIT.UMBRELLA_STRICT_MODE`（`umbrella-strict-mode`），
+  记录层号、保留的硬规则、丢弃数量与各层应用结果（新增 kernel 审计类型）。
+- 安全网：rebuild 结果若不含 fallback 规则视为 bug，直接拒绝应用。
+- `docs/RULES-BASELINE.md §8`：严格模式语义矩阵、优先级重置、审计、示例；`CONTRACTS-V2.md §5.9` 同步。
+
+### 语义要点
+- `inherit: false` + 无规则定义 = 只剩 3 条硬规则 + 兜底的「极简安全模式」，**合法**，不报错；
+- 硬规则在严格模式下仍受锁定约束：不可关闭、不可降级；可追加 pattern、可提升灯色；
+- 严格模式层自身的 `errors` 按该层 `settings` 判定 fatal；锁定违规一律 fatal；
+- 被拒绝的层从层栈弹出，effective 保持上一次有效规则。
+
+### 测试
+- `test/rule-config.test.mjs` 23 → **30 项**：极简严格模式、只保留自定义可调规则、硬规则拒绝关闭/降级、
+  严格后叠加不回退、较晚严格模式覆盖较早层、`inherit` schema、插件状态与审计事件。
+- 全量测试 **487 → 494 项**（493 pass / 1 skip）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 2 个补丁位。
+
 ## v2.8.1（2026-11-02）
 
 **主题：Umbrella 推荐基线配置 + 三层叠加 + 硬规则锁定。**

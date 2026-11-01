@@ -111,6 +111,7 @@ export const AUDIT = {
   ROUND_RESET: 'round-reset',
   SCORE: 'score',
   UMBRELLA_DECISION: 'umbrella-decision',
+  UMBRELLA_STRICT_MODE: 'umbrella-strict-mode',
   ROUTE: 'route',
   BUFFER_FLUSH: 'buffer-flush',
   TASK_READY: 'task-ready',
@@ -121,7 +122,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.8.1'
+export const FANG_VERSION = '2.8.2'
 
 /**
  * @typedef {object} ForkInfo

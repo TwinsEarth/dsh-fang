@@ -284,6 +284,7 @@ Config = z.object({
   baselineFile: z.string().default(''),  // v2.8.1：基线（默认随包 defaults/umbrella-rules.yaml；:none: 关闭）
   envRulesFile: z.string().default(''),    // v2.8.1：环境层（空 = 读 UMBRELLA_RULES_PATH）
   rulesFile: z.string().default(''),      // v2.8.0：项目层（空 = 只用基线+内置）
+  // v2.8.2：YAML 顶层 inherit:false = 严格模式（丢弃此前可调规则，只保留 hard-deny + fallback）
   rulesWatch: z.boolean().default(true),    // 热加载（失败保留上一次有效规则）
   rulesDebounceMs: z.natural().default(200),
 })

@@ -381,6 +381,7 @@ export function validateRuleConfig(raw) {
   if (raw.version !== RULE_CONFIG_VERSION) {
     errors.push(`version: must be ${RULE_CONFIG_VERSION}`)
   }
+  if (raw.inherit !== undefined && typeof raw.inherit !== 'boolean') errors.push('inherit: boolean')
   const settings = isPlainObject(raw.settings) ? raw.settings : {}
   for (const key of ['failOnUnknownRule', 'failOnInvalidPattern', 'rejectUnsafeRegex']) {
     if (settings[key] !== undefined && typeof settings[key] !== 'boolean') errors.push(`settings.${key}: boolean`)
@@ -395,6 +396,7 @@ export function validateRuleConfig(raw) {
   return {
     config: {
       version: RULE_CONFIG_VERSION,
+      inherit: raw.inherit !== false,
       settings: {
         failOnUnknownRule: settings.failOnUnknownRule === true,
         failOnInvalidPattern: settings.failOnInvalidPattern === true,
@@ -617,7 +619,7 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
   const defaultPriorities = { ...DEFAULT_RULE_PRIORITIES, ...(options.priorities ?? {}) }
   let effective = []
   let layers = []
-  let status = { source: 'builtin', appliedAt: null, warnings: [], errors: [], configVersion: null, layers: 0 }
+  let status = { source: 'builtin', appliedAt: null, warnings: [], errors: [], configVersion: null, layers: 0, strictMode: null }
 
   const priorityBase = (rule, priorities) => {
     const explicit = priorities[rule.id]
@@ -639,7 +641,7 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
   const resetToBuiltin = () => {
     layers = []
     effective = sortRules(builtin, defaultPriorities)
-    status = { source: 'builtin', appliedAt: Date.now(), warnings: [], errors: [], configVersion: null, layers: 0 }
+    status = { source: 'builtin', appliedAt: Date.now(), warnings: [], errors: [], configVersion: null, layers: 0, strictMode: null }
     return effective
   }
   resetToBuiltin()
@@ -650,13 +652,37 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
     const errors = []
     const layerRecords = []
     const priorities = { ...defaultPriorities }
-    const byId = new Map(builtin.map((rule) => [rule.id, rule]))
-    const order = builtin.map((rule) => rule.id)
+    let byId = new Map(builtin.map((rule) => [rule.id, rule]))
+    let order = builtin.map((rule) => rule.id)
     const locked = new Set()
+    const builtinById = new Map(builtin.map((rule) => [rule.id, rule]))
+
+    // inherit:false = 严格模式：丢弃此前所有可调规则，只保留硬规则 + fallback，
+    // 然后从该层开始叠加。硬规则与 fallback 不能被任何配置拆掉。
+    let startIndex = 0
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+      if (layers[index].inherit === false) { startIndex = index; break }
+    }
+    const strictMode = startIndex > 0 || (layers.length > 0 && layers[0].inherit === false)
+    let strictModeInfo = null
+    if (strictMode) {
+      const preserved = builtin.filter((rule) => isLockedRule(rule) || rule.category === 'fallback')
+      byId = new Map(preserved.map((rule) => [rule.id, rule]))
+      order = preserved.map((rule) => rule.id)
+      for (const id of Object.keys(priorities)) if (!byId.has(id)) delete priorities[id]
+      strictModeInfo = {
+        activatedAt: Date.now(),
+        layerIndex: startIndex,
+        preservedHardRules: preserved.filter((rule) => isLockedRule(rule)).map((rule) => rule.id),
+        preservedFallback: preserved.filter((rule) => rule.category === 'fallback').map((rule) => rule.id),
+        discardedRuleCount: builtin.length - preserved.length,
+      }
+    }
     let fatal = false
     let lockViolation = false
 
-    for (const layer of layers) {
+    for (let layerIndex = startIndex; layerIndex < layers.length; layerIndex += 1) {
+      const layer = layers[layerIndex]
       const layerErrors = []
       for (const entry of layer.rules) {
         const isDeclarative = entry.match !== undefined
@@ -678,7 +704,9 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
           continue
         }
 
-        const base = byId.get(entry.id)
+        // 严格模式丢弃过内置规则后，后续层仍可按 id 引用它（重新引入内置定义再覆盖），
+        // 这样 inherit:false 之后的 inherit:true 层是"叠加"而不是"必须重写谓词"。
+        const base = byId.get(entry.id) ?? builtinById.get(entry.id)
         if (base === undefined) {
           const message = `unknown rule id "${entry.id}"`
           if (layer.settings.failOnUnknownRule) layerErrors.push(message)
@@ -706,6 +734,10 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
           continue
         }
 
+        if (!byId.has(entry.id)) {
+          if (!order.includes(entry.id)) order.push(entry.id)
+          if (priorities[entry.id] === undefined) priorities[entry.id] = defaultPriorities[entry.id] ?? 500
+        }
         let patched = {
           ...base,
           light: entry.light ?? base.light,
@@ -741,25 +773,32 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
       errors.push(...layerErrors)
       if (layer.settings.failOnInvalidPattern && layerErrors.length > 0) fatal = true
       if (layer.settings.failOnUnknownRule && layerErrors.some((e) => e.startsWith('unknown rule id'))) fatal = true
-      layerRecords.push({ version: layer.version, rules: layer.rules.length, errors: layerErrors.length })
+      layerRecords.push({ index: layerIndex, inherit: layer.inherit !== false, version: layer.version, rules: layer.rules.length, errors: layerErrors.length })
     }
 
     if (lockViolation) fatal = true
     const merged = order.map((id) => byId.get(id)).filter((rule) => rule !== undefined)
     const sorted = sortRules(merged, priorities)
+    // 安全网：任何 rebuild 结果都必须有 fallback（未知动作的兜底）
+    if (!sorted.some((rule) => rule.category === 'fallback')) {
+      warnings.push('fallback rule missing after rebuild')
+      fatal = true
+    }
+    const source = strictMode ? 'strict-replaced' : (layers.length > 0 ? 'layered' : 'builtin')
     if (fatal) {
-      return { applied: false, ruleCount: effective.length, warnings, errors, source: status.source, layers: layerRecords }
+      return { applied: false, ruleCount: effective.length, warnings, errors, source, layers: layerRecords, strictMode: null }
     }
     effective = sorted
     status = {
-      source: layers.length > 0 ? 'layered' : 'builtin',
+      source,
       appliedAt: Date.now(),
       warnings,
       errors,
       configVersion: layers.at(-1)?.version ?? null,
       layers: layers.length,
+      strictMode: strictModeInfo,
     }
-    return { applied: true, ruleCount: sorted.length, warnings, errors, source: status.source, layers: layerRecords }
+    return { applied: true, ruleCount: sorted.length, warnings, errors, source, layers: layerRecords, strictMode: strictModeInfo }
   }
 
   const find = (evidence, ctx) => effective.find((rule) => rule.match(evidence, ctx)) ?? effective[effective.length - 1] ?? null
