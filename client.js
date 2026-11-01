@@ -531,6 +531,8 @@ window.__ModuleLoader__.load({
 
     /** 分身 Web UI 的「瓮城」说明页（v2.6.6）：母体 API 不在分身里，别把 404 当故障。 */
     function ForkHostNotice({ role }) {
+      // v2.9.0：分身旁路「母体连接」——地址与令牌只本次会话内存态，不落盘（分身不保存插件设置）。
+      const [showLink, setShowLink] = useState(false)
       return h('div', {
         role: 'region',
         'aria-label': '瓮城 · 分身 Web UI',
@@ -550,7 +552,144 @@ window.__ModuleLoader__.load({
       h('span', { style: { fontSize: 15, fontWeight: 600, lineHeight: '22px', color: TEXT } }, '当前页面是分身的 Web UI'),
       h('span', { style: { maxWidth: 560, fontSize: 12, lineHeight: '20px', color: TEXT2 } }, '瓮城母体面板只在母体宿主中可用；这个页面是 dsh-Fang 派生的分身（role=fork）。母体接口 /fang/api/* 在分身里不存在，所以这里不显示任务与会话——这是预期行为，不是插件故障。'),
       h('span', { style: { maxWidth: 560, fontSize: 12, lineHeight: '20px', color: TEXT2 } }, '要派生、归档或管理分身，请回到母体窗口的「瓮城」面板；当前标签页继续使用分身自己的会话与工具即可。'),
+      h(Btn, {
+        size: 'sm',
+        variant: showLink ? 'primary' : 'ghost',
+        onClick: () => setShowLink((value) => !value),
+        title: '母体连接：填写母体地址并测试连通；配置只在本次会话内存中',
+      }, showLink ? '收起母体连接' : '母体连接'),
+      showLink ? h(MotherLinkCard, { mode: 'fork', onClose: () => setShowLink(false) }) : null,
       role?.error ? h('code', { style: { fontFamily: MONO, fontSize: 10.5, color: TEXT3 } }, 'probe: ' + role.error) : null)
+    }
+
+    /**
+     * v2.9.0 母体连接卡片：母体侧读取 /fang/api/mother-link 并做连通性探测；
+     * 分身侧只提供“母体地址 + 测试”入口（仅本次会话内存态，不落盘、不写插件设置）。
+     * 说明：探测是只读 GET；跨源失败会给出可读原因，不假装成功。
+     */
+    function MotherLinkCard({ mode, onClose }) {
+      const [described, setDescribed] = useState({ state: 'loading', data: null, error: '' })
+      const [target, setTarget] = useState(() => (mode === 'mother' && typeof window !== 'undefined' ? window.location.origin : ''))
+      const [probe, setProbe] = useState(null)
+      const [probeBusy, setProbeBusy] = useState(false)
+      const [copied, setCopied] = useState('')
+
+      useEffect(() => {
+        if (mode !== 'mother') return undefined
+        let alive = true
+        api('/fang/api/mother-link').then((result) => {
+          if (!alive) return
+          const body = result.body
+          if (result.status === 200 && body && body.ok !== false) setDescribed({ state: 'ready', data: body, error: '' })
+          else setDescribed({ state: 'error', data: null, error: String(body?.error ?? ('http-' + result.status)) })
+        }).catch((e) => { if (alive) setDescribed({ state: 'error', data: null, error: String(e?.message ?? e) }) })
+        return () => { alive = false }
+      }, [mode])
+
+      const copy = async (text, label) => {
+        try {
+          await navigator.clipboard.writeText(String(text))
+          setCopied(label)
+          setTimeout(() => setCopied(''), 1500)
+        } catch {
+          setCopied(label + '（复制失败：浏览器未授权剪贴板）')
+        }
+      }
+
+      const runProbe = async () => {
+        const value = String(target ?? '').trim()
+        setProbeBusy(true)
+        setProbe(null)
+        try {
+          if (mode === 'mother') {
+            const result = await api('/fang/api/mother-link/probe', { method: 'POST', body: JSON.stringify({ target: value }) })
+            setProbe(result.body ?? { ok: false, error: 'http-' + result.status })
+          } else {
+            // 分身侧：直接尝试读取母体 status；CORS 未放开时给出可读原因，不伪造成功。
+            const started = Date.now()
+            try {
+              const response = await fetch(value.replace(/\/+$/, '') + '/fang/api/status', { headers: { accept: 'application/json' } })
+              const body = await response.json().catch(() => null)
+              setProbe({ ok: response.ok, httpStatus: response.status, latencyMs: Date.now() - started, version: body?.version ?? null })
+            } catch (e) {
+              setProbe({ ok: false, error: 'cross-origin-or-network', message: String(e?.message ?? e) })
+            }
+          }
+        } finally {
+          setProbeBusy(false)
+        }
+      }
+
+      const row = (label, value, mono = false) => h('div', {
+        style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 11.5, lineHeight: '18px' },
+      },
+      h('span', { style: { color: TEXT3, minWidth: 76 } }, label),
+      h('span', { style: { color: TEXT, ...(mono ? { fontFamily: MONO, fontSize: 10.5 } : {}) } }, value))
+
+      const data = described.data
+      const probeTone = probe === null ? 'neutral' : probe.ok ? 'success' : 'danger'
+      return h('section', {
+        role: 'region',
+        'aria-label': '母体连接',
+        style: {
+          flexShrink: 0, border: `1px solid ${ACCENT_LINE}`, borderRadius: 10,
+          background: SURFACE_SOLID, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8,
+        },
+      },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+        h('span', { style: { fontSize: 12.5, fontWeight: 600, color: TEXT } }, '母体连接'),
+        h(Tag, { tone: mode === 'mother' ? 'success' : 'info' }, mode === 'mother' ? '母体侧' : '分身旁路'),
+        h('span', { style: { flex: 1 } }),
+        h(Btn, { size: 'sm', variant: 'quiet', onClick: onClose, title: '关闭母体连接卡片' }, '收起')),
+      mode === 'mother' && described.state === 'loading'
+        ? h('span', { style: { fontSize: 11.5, color: TEXT2 } }, '读取 /fang/api/mother-link…')
+        : null,
+      mode === 'mother' && described.state === 'error'
+        ? h('span', { style: { fontSize: 11.5, color: DANGER } }, `读取失败：${described.error}（宿主可能未安装 v2.9.0 路由）`)
+        : null,
+      data
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
+          row('母体版本', String(data.version || '—'), true),
+          row('母体 API', String(data.motherApiBase || '/fang/api'), true),
+          row('分身 Adapter', String(data.adapterBase || '/fang/adapter'), true),
+          row('共享配置', data.sharedConfig
+            ? `profile 层${data.sharedConfig.profile ? ` · ${data.sharedConfig.profile}` : ''}${typeof data.sharedConfig.bundles === 'number' ? ` · ${data.sharedConfig.bundles} 个 bundle` : ''}（分身只读继承）`
+            : '未提供'),
+          row('令牌策略', String(data.tokenPolicy || '不落盘')))
+        : null,
+      h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+        h('input', {
+          value: target,
+          onChange: (event) => setTarget(event.target.value),
+          placeholder: '母体地址，如 http://127.0.0.1:51963',
+          'aria-label': '母体地址',
+          style: {
+            flex: '1 1 260px', minWidth: 0, height: 28, padding: '0 8px',
+            font: 'inherit', fontSize: 11.5, color: TEXT,
+            background: 'transparent', border: `1px solid ${BORDER}`, borderRadius: 7,
+          },
+        }),
+        h(Btn, { size: 'sm', variant: 'ghost', onClick: () => copy(target, '地址'), title: '复制母体地址' }, copied.startsWith('地址') ? (copied.includes('失败') ? copied : '已复制') : '复制地址'),
+        h(Btn, {
+          size: 'sm', variant: 'primary', disabled: probeBusy || String(target).trim().length === 0,
+          onClick: runProbe, title: '只读探测母体 /fang/api/status；不写入任何配置',
+        }, probeBusy ? '测试中…' : '测试连通')),
+      probe
+        ? h('div', {
+          role: 'status',
+          style: {
+            display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+            fontSize: 11.5, lineHeight: '18px', color: probe.ok ? SUCCESS : DANGER,
+          },
+        },
+        h(Tag, { tone: probeTone }, probe.ok ? '连通' : '不可达'),
+        h('span', null, probe.ok
+          ? `${probe.target || target} · ${probe.latencyMs ?? 0}ms${probe.version ? ` · 版本 ${probe.version}` : ''}`
+          : `原因：${probe.error || 'unknown'}${probe.message ? ` · ${probe.message}` : ''}`))
+        : null,
+      mode === 'fork'
+        ? h('span', { style: { fontSize: 11, lineHeight: '17px', color: TEXT2 } }, '分身不保存插件设置：地址只保留在本次会话内存里；跨源读取失败通常是因为母体宿主未开放 CORS，可直接回到母体窗口的瓮城面板查看。')
+        : null)
     }
 
     function Tag({ children, tone = 'neutral', mono = false, title }) {
@@ -1224,6 +1363,8 @@ window.__ModuleLoader__.load({
       const [showTemporary, setShowTemporary] = useState(() => readPanelBoolPref(PANEL_TEMP_PREF_KEY, true))
       // v2.7.1 读档：顶栏切换存档 UI；存档 = 进程已停止、home 保留的已归档任务。
       const [showArchive, setShowArchive] = useState(false)
+      // v2.9.0 母体连接卡片（顶栏开关；只读描述 + 连通性探测）。
+      const [showLink, setShowLink] = useState(false)
       const toggleTemporary = () => {
         setShowTemporary((value) => {
           const next = !value
@@ -1766,6 +1907,12 @@ window.__ModuleLoader__.load({
             style: isNarrow ? { flex: '1 1 auto' } : undefined,
           }, h(IconRefresh, { size: 13 }), refreshing ? '刷新中…' : '刷新'),
           h(Btn, {
+            variant: showLink ? 'primary' : 'quiet',
+            size: 'sm',
+            onClick: () => setShowLink((value) => !value),
+            title: '母体连接：查看母体地址、接入说明与共享配置摘要，并测试连通性（只读，不写配置）',
+          }, showLink ? '收起连接' : '母体连接'),
+          h(Btn, {
             variant: 'primary',
             size: 'lg',
             onClick: () => startDerive({ title: '快速派生' }, 'derive'),
@@ -2253,6 +2400,7 @@ window.__ModuleLoader__.load({
       if (showArchive) {
         return h('div', { role: 'region', 'aria-label': '瓮城读档', style: rootStyle },
           header,
+          showLink ? h(MotherLinkCard, { mode: 'mother', onClose: () => setShowLink(false) }) : null,
           noticeView,
           h('div', { style: { flex: 1, minHeight: 0, display: 'flex' } }, archiveView))
       }
@@ -2262,6 +2410,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { role: 'region', 'aria-label': '瓮城控制台', style: rootStyle },
         header,
+        showLink ? h(MotherLinkCard, { mode: 'mother', onClose: () => setShowLink(false) }) : null,
         statusBanner,
         deriveBar,
         noticeView,
