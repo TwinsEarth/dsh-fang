@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI: 零第三方依赖 —— 直接跑 node:test，外加许可分层回归。
+# CI: 零第三方依赖 —— 直接跑 node:test；Windows 是产品目标平台（AppContainer/junction/taskkill），
+# 因此功能测试跑 windows-latest；许可分层回归与源码扫描这类跨平台检查跑 ubuntu。
 name: ci
 
 on:
@@ -13,7 +14,7 @@ permissions:
 jobs:
   test:
     name: test (node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -25,14 +26,23 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: full unit + integration suite
         run: node --test --test-concurrency=1 "test/*.test.mjs"
+      - name: offline status (informational, clean runner has no profile)
+        run: node tools/fangctl.mjs status
+
+  license:
+    name: license layering guard (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: license layering guard
         run: node test/licensing.test.mjs
-      - name: offline doctor (self-check, no DSH required)
-        run: node tools/fangctl.mjs doctor
 
   e2e:
-    name: real dsh e2e (optional, self-hosted)
-    runs-on: self-hosted
+    name: real dsh e2e (optional, self-hosted windows)
+    runs-on: [self-hosted, windows]
     if: ${{ vars.RUN_E2E == '1' }}
     steps:
       - uses: actions/checkout@v4

@@ -17,7 +17,7 @@ import * as sessionCatalog from '../src/plugins/session-catalog.mjs'
 
 const SERVICE_KEY = SERVICE.sessionCatalog // 'fangSessionCatalog'
 
-const WS_GPT = { id: 'ws-gpt', path: 'E:\\GPT', title: 'GPT' }
+const WS_GPT = { id: 'ws-gpt', path: 'E:\\workspace', title: 'GPT' }
 const WS_DSH = { id: 'ws-dsh', path: 'E:\\DSH', title: 'DSH' }
 const UUID_A = '11111111-2222-4333-8444-555555555555'
 const UUID_B = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
@@ -33,7 +33,7 @@ function headerLine(sessionId, extra = {}) {
     version: 4,
     id: sessionId,
     createdAt: HEADER_TIME,
-    cwd: 'E:\\GPT',
+    cwd: 'E:\\workspace',
     isSeeded: false,
     delegationDepth: 0,
     agentPreset: 'standard',
@@ -323,7 +323,7 @@ test('getSession: 元数据来自索引+stat，header 来自第一帧（不解�
     assert.equal(out.session.workspaceTitle, 'GPT')
     assert.equal(out.session.createdAt, HEADER_TIME)
     assert.equal(out.session.sessionVersion, 4)
-    assert.equal(out.session.cwd, 'E:\\GPT')
+    assert.equal(out.session.cwd, 'E:\\workspace')
     assert.equal(out.session.agentPreset, 'coder')
     assert.equal(out.session.header.type, 'session')
     assert.equal(out.session.head.lines, 1, '只解第一帧：header 单行')
@@ -364,7 +364,7 @@ test('readHead: 只解第一帧、逐行脱敏、可配 lines 上限', () => {
     const secret = 'sk-supersecret-1234567890'
     const firstFrame = [
       headerLine(SESSION_A),
-      JSON.stringify({ type: 'event', seq: 1, data: { url: 'http://x/?token=topsecret123', path: 'E:\\GPT\\secret.txt', mail: 'dev@example.com' } }),
+      JSON.stringify({ type: 'event', seq: 1, data: { url: 'http://x/?token=topsecret123', path: 'E:\\work\\secret.txt', mail: 'dev@example.com' } }),
       JSON.stringify({ type: 'event', seq: 2, data: { api_key: secret } }),
     ].join('\n') + '\n'
     const frames = [firstFrame, `${JSON.stringify({ type: 'event', seq: 3, data: { text: 'second frame' } })}\n`]
@@ -377,7 +377,7 @@ test('readHead: 只解第一帧、逐行脱敏、可配 lines 上限', () => {
     const joined = head.lines.join('\n')
     assert.equal(head.lines.some((l) => l.includes('topsecret123')), false, 'token 不得泄漏')
     assert.equal(joined.includes('dev@example.com'), false, '邮箱不得泄漏')
-    assert.equal(joined.includes('E:\\GPT\\secret.txt'), false, '绝对路径不得泄漏')
+    assert.equal(joined.includes('E:\\work\\secret.txt'), false, '绝对路径不得泄漏')
     assert.ok(head.redactions >= 3, `应有多次脱敏，实际 ${head.redactions}`)
     assert.ok(head.bytesRead > 0)
     assert.ok(head.degraded.includes('first-frame-only'), '多帧日志必须如实标记只读第一帧')

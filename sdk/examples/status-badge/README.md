@@ -10,7 +10,7 @@
 
 ```powershell
 # DSH 会话里：
-#   plugin_manager install_bundle(target="E:\\GPT\\dsh-fang\\sdk\\examples\\status-badge")
+#   plugin_manager install_bundle(target="<repo>\\sdk\\examples\\status-badge")
 ```
 
 失败态：拉不到 `/fang/api/status` 时显示「瓮城离线」，不假装有数据。

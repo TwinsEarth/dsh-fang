@@ -96,10 +96,10 @@ test('parseWorkspaceIndex: 真实 shape（unit/global/tables）解析出工作�
     },
     tables: {
       workspaces: {
-        'ws-1': { path: 'E:\\GPT', title: 'GPT', sessionIds: [SESSION_A, SESSION_B], createdAt: 'c', updatedAt: 'u' },
+        'ws-1': { path: 'E:\\workspace', title: 'GPT', sessionIds: [SESSION_A, SESSION_B], createdAt: 'c', updatedAt: 'u' },
         'ws-2': { path: 'E:\\DSH', sessionIds: [] },
         'ws-3': { title: '无 path 的工作区' },
-        'ws-4': { path: 'E:\\GPT', title: '重复 path' },
+        'ws-4': { path: 'E:\\workspace', title: '重复 path' },
       },
     },
   })
@@ -108,7 +108,7 @@ test('parseWorkspaceIndex: 真实 shape（unit/global/tables）解析出工作�
   assert.equal(idx.workspaces.length, 2, '无 path / 重复 path 被忽略')
   assert.deepEqual(idx.workspaces.map((w) => w.id).sort(), ['ws-1', 'ws-2'])
   const gpt = idx.workspaces.find((w) => w.id === 'ws-1')
-  assert.equal(gpt.path, 'E:\\GPT')
+  assert.equal(gpt.path, 'E:\\workspace')
   assert.equal(gpt.title, 'GPT')
   assert.deepEqual(gpt.sessionIds, [SESSION_A, SESSION_B])
   assert.equal(idx.workspaces.find((w) => w.id === 'ws-2').title, 'E:\\DSH', '缺 title 时回退 path')
@@ -149,10 +149,10 @@ test('parseWorkspaceIndex: 容错（空/坏 JSON/缺表/BOM/对象输入）', ()
 // ── workspaceKey 编码 ───────────────────────────────────────────────────────
 
 test('encodeWorkspaceKey: 实测编码 --E-GPT--，仅显示用、拒绝反解假设', () => {
-  assert.equal(encodeWorkspaceKey('E:\\GPT'), '--E-GPT--')
+  assert.equal(encodeWorkspaceKey('E:\\workspace'), '--E-workspace--')
   assert.equal(encodeWorkspaceKey('E:\\DSH'), '--E-DSH--')
-  assert.equal(encodeWorkspaceKey('C:\\Users\\fangw\\Documents\\deepseek-harness\\default-workspace'),
-    '--C-Users-fangw-Documents-deepseek-harness-default-workspace--')
+  assert.equal(encodeWorkspaceKey('C:\\Users\\example\\Documents\\deepseek-harness\\default-workspace'),
+    '--C-Users-example-Documents-deepseek-harness-default-workspace--')
   assert.equal(encodeWorkspaceKey('E:/GPT/'), '--E-GPT--', '正斜杠 + 尾部分隔符归一')
   assert.equal(encodeWorkspaceKey('E:\\my  work'), '--E-my-work--', '连续非法字符折叠为单个 -')
   assert.equal(encodeWorkspaceKey(''), '')
@@ -164,7 +164,7 @@ test('encodeWorkspaceKey: 实测编码 --E-GPT--，仅显示用、拒绝反解�
 test('scanSessionDirs: 只 stat 目录/日志，归档/置顶标记，跳过非法目录与缺日志', () => {
   const sessionsDir = makeSessionsRoot()
   try {
-    const wsKey = encodeWorkspaceKey('E:\\GPT')
+    const wsKey = encodeWorkspaceKey('E:\\workspace')
     const f1 = sessionFile(sessionsDir, wsKey, SESSION_A)
     const f2 = sessionFile(sessionsDir, wsKey, SESSION_B)
     writeLog(f1, ['{"type":"session"}\n'])
@@ -306,7 +306,7 @@ test('redact: 凭证/邮箱/手机号/绝对路径全部替换并计数', () => 
     ['mail me at dev@example.com', 'mail me at <email>'],
     ['call 13812345678 now', 'call <phone> now'],
     ['intl +8613812345678', 'intl <phone>'],
-    ['open E:\\GPT\\dsh-fang\\a.mjs', 'open <path>'],
+    ['open E:\\workspace\\dsh-fang\\a.mjs', 'open <path>'],
     ['{"cwd":"E:\\\\GPT\\\\x"}', '{"cwd":"<path>"}'],
     ['read /home/user/secret/file.txt', 'read <path>'],
     ['unc \\\\server\\share\\file', 'unc <path>'],
@@ -319,13 +319,13 @@ test('redact: 凭证/邮箱/手机号/绝对路径全部替换并计数', () => 
 })
 
 test('redact: 多类混合计数 / 干净文本零改动 / 原始秘密不残留', () => {
-  const text = 'token=topsecret123 mail dev@example.com path E:\\GPT\\x call 13812345678 token=second456'
+  const text = 'token=topsecret123 mail dev@example.com path E:\\work\\x call 13812345678 token=second456'
   const out = redact(text)
   assert.equal(out.redactions, 5, '两个 token + 邮箱 + 手机号 + 路径')
   assert.equal(out.text.includes('topsecret123'), false)
   assert.equal(out.text.includes('second456'), false)
   assert.equal(out.text.includes('dev@example.com'), false)
-  assert.equal(out.text.includes('E:\\GPT\\x'), false)
+  assert.equal(out.text.includes('E:\\work\\x'), false)
   assert.equal(out.text.includes('13812345678'), false)
   assert.ok(out.text.includes('<redacted>'))
   assert.ok(out.text.includes('<email>'))
