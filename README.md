@@ -3,15 +3,7 @@
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
 [![npm](https://img.shields.io/badge/npm-dsh--fang-red.svg)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
 
-# 瓮城
-
-## 让DSH不再需要反复重启客户端：
-加载、运行、更新、回滚、卸载、回收，全生命周期管理。
-
-### 技术原理：
-
-1.用dsh-Web，当瓮城完成风险阻隔&审批（Beta）
-2.DeepSeekHarness，当主城保存原样不变（稳定版）
+# dsh-Fang v2.3.1
 
 **母体大脑 + 分身器官 + 容器兜底**：一个只读母体，每个任务派生一个用完即弃的子 dsh-Web；
 开发都在分身里，母体只在「提升」时被显式更新。崩溃不扩散、污染不残留、插件不串味。
@@ -72,7 +64,7 @@ node tools/e2e.mjs
 
 ---
 
-## 十一个插件（部署矩阵）
+## 十二个插件（部署矩阵）
 
 | 行 id | 模块 | 母体 | 分身 | 职责 | 服务 key |
 |---|---|---|---|---|---|
@@ -80,6 +72,7 @@ node tools/e2e.mjs
 | `fang-forker` | forker.mjs | ✅ | ❌ | 端口池、spawn/kill、junction、URL 解析 | `fangForker` |
 | `fang-restart-guard` | restart-guard.mjs | ✅ | ❌ | 母体重启唯一闸门（只决策/审批/审计） | `fangRestart` |
 | `fang-scorer` | scorer.mjs | ✅（复核） | ✅（主） | 静态 A–E + 动作灯色，阈值按环境分叉 | `fangScorer` |
+| `fang-umbrella` | umbrella.mjs | ✅ | ✅ | 保护伞：A–E 下限抬高动作灯色 + allow/mark/ask/delegate/deny | `fangUmbrella` |
 | `fang-router` | router.mjs | ✅（初判） | ✅（复核） | decide / confirm（只升不降）/ 容器分支 | `fangRouter` |
 | `fang-healer` | healer.mjs | ❌ | ✅ | 自检/证据/G1–G12/补丁建议（不放行） | `fangHealer` |
 | `fang-approver` | approver.mjs | ✅（汇总） | ✅（本地） | 待批队列/A-B/监控/回滚 | `fangApprover` |
@@ -125,6 +118,6 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 - 逐目录许可地图：[NOTICE](NOTICE)；方案与边界分析：[docs/LICENSING.md](docs/LICENSING.md)。
 - 许可全文：[LICENSE-CORE](LICENSE-CORE) · [LICENSE-SDK](LICENSE-SDK) · [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL)。
 - 贡献前请阅读并签署 [CLA.md](CLA.md)（用于双许可证与商业授权）。
-- 商业授权/OEM：`fangwenxin@geefish.com`。
+- 商业授权/OEM：`licensing@example.com`（占位，发布前替换）。
 - 本仓库不含第三方运行时依赖；vendored schemastery/cosmokit 保留上游 MIT（见 [LICENSES/cordis-MIT.txt](LICENSES/cordis-MIT.txt)）。
 - 所有源码文件头带 `SPDX-License-Identifier`；`test/licensing.test.mjs` 防止分层漂移。

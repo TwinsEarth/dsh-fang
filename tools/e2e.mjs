@@ -172,7 +172,7 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 2.7.5', status.body?.version === '2.7.5')
+    check('status reports version 2.7.6', status.body?.version === '2.7.6')
     check('status reports role=mother', status.body?.role === 'mother')
     check('mother has forker service', status.body?.services?.forker === true)
 
@@ -226,6 +226,7 @@ async function main() {
     check('fork adapter is up', forkServices.adapter === true, JSON.stringify(forkServices))
     check('fork has hot-reloader organ', forkServices.hotReloader === true)
     check('fork has scorer organ', forkServices.scorer === true)
+    check('fork has umbrella organ', forkServices.umbrella === true)
     check('fork does NOT expose orchestrator', forkServices.orchestrator !== true)
     check('fork does NOT expose forker', forkServices.forker !== true)
 

@@ -457,6 +457,7 @@ export function apply(ctx, config) {
 
   const servicesView = () => ({
     scorer: hasService(SERVICE.scorer),
+    umbrella: hasService(SERVICE.umbrella),
     router: hasService(SERVICE.router),
     healer: hasService(SERVICE.healer),
     approver: hasService(SERVICE.approver),

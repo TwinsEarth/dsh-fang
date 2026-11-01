@@ -266,7 +266,43 @@ archiveTask(taskId) -> { ok, archived, reaped }
 ```
 事件话题（bus）：`fang/task-created`、`fang/task-ready`、`fang/task-archived`、`fang/task-failed`、`fang/adapter-command`。
 
+### 5.9 Umbrella / 保护伞（v2.7.6）
+一个证据管道、两个评分出口：插件等级（静态，来自 5.4 的 scorer）与动作灯色（动态，本插件自算）。
+```js
+Config = z.object({
+  bufferRoot: z.string().default(''),         // 空 = 取 buffer-keeper 的实时 dir
+  productionRoot: z.string().default(''),
+  allowPaths: z.array(z.string()).default([]),
+  networkAllowlist: z.array(z.string()).default([]),
+  credentialPatterns: z.array(z.string()).default([]),   // 空 = 内置默认；非空 = 完全替换
+  destructivePatterns: z.array(z.string()).default([]),
+  lifecyclePatterns: z.array(z.string()).default([]),
+  lifecycleTools: z.array(z.string()).default([]),
+  gradeFloorTable: z.string().default('umbrella'),       // umbrella | strict
+  cacheSize: z.natural().default(200),
+  auditDecisions: z.boolean().default(true),
+})
+
+assessPlugin({pluginId?, dir?, manifest?, source?, pkg?, version?, refresh?}) -> {
+  pluginId, version, grade:'A'|'B'|'C'|'D'|'E', score, color, veto, degraded,
+  signals, reasons, basis, entry, dir, cachedAt, fingerprint, durationMs, fromCache
+}                                              // 无 scorer / 扫描异常 = grade 'E' + degraded
+assessAction(evidence, {grade?|assessment?|pluginId?}) -> {
+  light, baseLight, gradeFloor, raised, pluginGrade, gradeBasis,
+  matchedRule, lifecycle, credential, reason, tool, target, path, durationMs
+}
+decideAction(evidence, opts?) -> assessAction 结果 + { decision:'allow'|'mark'|'ask'|'delegate'|'deny', severity, decisionRecord }
+baseLight(evidence) -> { light, matchedRule, lifecycle, credential, target, path, reason }
+gradeFloor(grade) / effectiveLight(base, grade) / cachedGrade(id) / cacheStats() / invalidate(id) / clearCache()
+```
+不变量（有测试）：`rank(effectiveLight) >= rank(baseLight)` 且 `>= rank(gradeFloor)`；
+等级永不降低动作风险；未知等级按 E、未知工具按黄、未知灯色按黄。
+审计：一次 `decideAction` 一条 `AUDIT.UMBRELLA_DECISION`（`kind:'umbrella-decision'`）；
+插件评分不重复写（沿用 5.4 的 `AUDIT.SCORE`）。
+**边界**：本仓库没有工具执行钩子，本服务提供决策而**不强制拦截**；`delegate`/`ask` 的落点
+（restart-guard / approver）需要调用方显式投递。详见 `docs/UMBRELLA.md §7`。
 ---
+
 
 ## 6. 商用接入点（钩子已就绪，实现不在本期）
 
