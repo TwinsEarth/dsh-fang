@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## v2.8.4（2026-11-02）
+
+**主题：公共仓 / 私有镜像仓 发布管理 —— 可重复的 REST 同步 + 内容树/资产双重校验。**
+
+### 新增
+- `tools/release/sync-private.mjs`（零依赖，仅 GitHub REST API）：
+  - `verify --tag vX.Y.Z`：比较两仓 tag→commit→**内容树 SHA**，下载各自 Release tarball 校验
+    `manifest.json`、`.sha256`、实际哈希三者自洽；不一致退出码 1；支持 `--json`；
+  - `sync --tag vX.Y.Z`：以内容寻址做增量 blob（复用未变文件）、断言私有 tree == 公共 tree、
+    私有 `main` 仅 fast-forward、创建 annotated tag 与 Release 资产；支持 `--dry-run`；
+  - 用 REST 而非 git push：发布机只放行 `api.github.com`/`uploads.github.com`。
+- `docs/RELEASE-MIRROR.md`：两仓定位（公共=唯一事实来源、私有=只读镜像）、版本流转、
+  同步语义、发布后三件核对、故障表与红线（禁手工提交/禁 force push/同步后必须 verify）。
+- `test/sync-mirror.test.mjs` 8 项：参数解析、增量 blob 计划、资产自洽判定、树比较、SHA-256 向量。
+
+### 同步实践（v2.8.3 已镜像）
+- 私有仓 `main` 更新到 **v2.8.3 内容**（tree `cd9e53f4…`，与公共仓 tag 树一致），annotated tag `v2.8.3`，
+  Release 资产 3 个（tarball 286,944 B / sha256 `3c97748e…`、`manifest.json`、`.sha256`）；
+- 公共 Release v2.8.3 的 `.sha256` 已按 CI 重建产物校正为 `8bc30c67…`（286,952 B）；
+- `verify --tag v2.8.3` 通过（`trees.ok=true`、两仓资产均自洽）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 4 个补丁位。
+
 ## v2.8.3（2026-11-02）
 
 **主题：严格模式 + 语法错误的回退语义（组 4 扩展）——事务化 rebuild，失败层对后续层不可见。**

@@ -83,6 +83,7 @@ node tools/e2e.mjs
 
 契约：[CONTRACTS-V2.md](docs/CONTRACTS-V2.md) · 协议：[PROTOCOL-V2.md](docs/PROTOCOL-V2.md) ·
 架构：[ARCHITECTURE-V2.md](docs/ARCHITECTURE-V2.md) · 变更：[CHANGELOG.md](docs/CHANGELOG.md)。
+发布：[RULES-BASELINE.md](docs/RULES-BASELINE.md)（规则基线） · [RELEASE-MIRROR.md](docs/RELEASE-MIRROR.md)（公共/私有仓发布管理）。
 
 ---
 
