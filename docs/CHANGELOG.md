@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## v2.6.5（2026-11-01）
+
+**主题：SSE 解析器独立成类 + 模糊测试（随机输入 / 分块等价 / 参考实现 / 帧边界）。**
+
+### 新增
+- **`src/lib/sse-parser.mjs`**：`SseParser` 类（行式增量解析，`push()`/`flush()`）。
+  只按 `\n` 切行、行尾裁一个 `\r`（CRLF 支持）；空行切帧、无 data 帧丢弃、注释/`retry`/未知字段忽略；
+  多行 data 用 `\n` 拼接；`flush()` 按 SSE 规范丢弃未完成残帧。
+- **模糊测试工具** `tools/fuzz/`：可复现种子 RNG（SplitMix32 + XorShift128）、9 种输入模式、
+  独立参考实现 oracle、6 种字符串分块 + 字节级切分、roundtrip、flush 不变量、失败报告（seed/hex/chunks）。
+- **CI 档位** `test/sse-parser-fuzz.test.mjs`（7 项）：性质断言 + 固定种子 × 6 × 25 iterations +
+  随机 seed smoke + 可复现性 + 已知 CRLF/多行/字节切分边界。
+- CLI：`node tools/fuzz/sse-parser-fuzz.mjs --iterations 5000 --seed <seed>`；失败时打印可复现命令。
+- 文档 `docs/FUZZ-SSE-PARSER.md`：不变量 I1–I6、结构、分块策略、复现方式、已知边界。
+
+### 修复 / 行为变化
+- **CRLF 帧边界**：旧 `createSseParser` 用 `indexOf('\n\n')` 找块边界，`\r\n\r\n` 不含 `\n\n`，
+  CRLF 流会延迟到 flush 且把 `\r` 混进 data；新 `SseParser` 逐行处理，CRLF 正常切帧。
+- `flush()` 不再解析残帧（SSE 规范：EOF 丢弃未完成事件）；解析器也不再把无 `event:` 的帧
+  默认成 `event:'message'`（字段缺失即省略）。
+- `adapter-protocol.mjs` 的 `createSseParser()` 改为 re-export `SseParser`（单一实现）。
+
+### 测试
+- 新增 `test/sse-parser-fuzz.test.mjs`（7 项）；CLI 额外跑过 5000 iterations，0 failure。
+  全量门禁见 `docs/AUDIT-v2.6.5.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 5 个补丁位。
+
 ## v2.6.4（2026-11-01）
 
 **主题：ForkClient 完整实现 —— inflight 追踪、command-done 匹配、超时兜底。**
