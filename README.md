@@ -3,10 +3,12 @@
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
 [![npm](https://img.shields.io/badge/npm-dsh--fang-red.svg)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
 
-# dsh-Fang v2.3.1
+# 瓮城
 
-##让DSH不再需要反复重启客户端：加载、运行、更新、回滚、卸载，全生命周期管理。
-###技术原理：
+## 让DSH不再需要反复重启客户端：加载、运行、更新、回滚、卸载，全生命周期管理。
+
+### 技术原理：
+
 1.用dsh-Web，当瓮城完成风险阻隔&审批（Beta）
 2.DeepSeekHarness，当主城保存原样不变（稳定版）
 
@@ -122,6 +124,6 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 - 逐目录许可地图：[NOTICE](NOTICE)；方案与边界分析：[docs/LICENSING.md](docs/LICENSING.md)。
 - 许可全文：[LICENSE-CORE](LICENSE-CORE) · [LICENSE-SDK](LICENSE-SDK) · [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL)。
 - 贡献前请阅读并签署 [CLA.md](CLA.md)（用于双许可证与商业授权）。
-- 商业授权/OEM：`licensing@example.com`（占位，发布前替换）。
+- 商业授权/OEM：`fangwenxin@geefish.com`。
 - 本仓库不含第三方运行时依赖；vendored schemastery/cosmokit 保留上游 MIT（见 [LICENSES/cordis-MIT.txt](LICENSES/cordis-MIT.txt)）。
 - 所有源码文件头带 `SPDX-License-Identifier`；`test/licensing.test.mjs` 防止分层漂移。
