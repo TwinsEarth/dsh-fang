@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 # dsh-Fang v1.0.0 — bundle layer.
-# One installable bundle; ten plugin rows. The row order is a dependency order:
-# auditor/forker/buffer feed the middle tier, orchestrator comes last.
+# One installable bundle; one loader row per plugin. The row order is a dependency
+# order: auditor/forker/buffer feed the middle tier, orchestrator comes last.
 - insert:
     - id: fang-auditor
       name: '@local/dsh-fang/auditor'
@@ -35,6 +35,21 @@
       name: '@local/dsh-fang/scorer'
       config:
         allowlist: []
+
+    - id: fang-umbrella
+      name: '@local/dsh-fang/umbrella'
+      config:
+        bufferRoot: ''
+        productionRoot: ''
+        allowPaths: []
+        networkAllowlist: []
+        credentialPatterns: []
+        destructivePatterns: []
+        lifecyclePatterns: []
+        lifecycleTools: []
+        gradeFloorTable: umbrella
+        cacheSize: 200
+        auditDecisions: true
 
     - id: fang-healer
       name: '@local/dsh-fang/healer'

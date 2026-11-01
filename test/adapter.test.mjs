@@ -136,6 +136,7 @@ function makeAllServices({ dir = '', auditorRecords = [] } = {}) {
     [SERVICE.approver]: makeApprover({ items: [{ id: 'a1' }, { id: 'a2' }] }),
     [SERVICE.auditor]: makeAuditor(auditorRecords),
     [SERVICE.scorer]: makeScorer(),
+    [SERVICE.umbrella]: { decideAction: () => ({ decision: 'ask' }), assessAction: () => ({ light: 'yellow' }) },
     [SERVICE.router]: makeRouter(),
     [SERVICE.healer]: { gates: () => ({ pass: true, gates: [] }) },
     [SERVICE.hotReloader]: { swap: async () => ({ ok: true }) },
@@ -352,7 +353,7 @@ test('HTTP GET status: 200 + 服务表/缓冲三态/待批数/审计头', async 
     assert.equal(body.ok, true)
     assert.equal(body.role, 'fork')
     assert.equal(body.taskId, 'task_http')
-    for (const key of ['scorer', 'router', 'healer', 'approver', 'hotReloader', 'buffer', 'auditor', 'adapter']) {
+    for (const key of ['scorer', 'umbrella', 'router', 'healer', 'approver', 'hotReloader', 'buffer', 'auditor', 'adapter']) {
       assert.equal(body.services[key], true, `services.${key} 应为 true`)
     }
     assert.equal(body.services.adapter, true)

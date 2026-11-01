@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## v2.7.6（2026-11-01）
+
+**主题：保护伞系统（Umbrella）—— 一个证据管道，两个评分出口。**
+
+### 新增
+- 新增子插件 `fang-umbrella`（`src/plugins/umbrella.mjs`，loader 行 `fang-umbrella`，
+  服务键 `fangUmbrella`，母体 + 分身都激活）与纯逻辑库 `src/lib/umbrella.mjs`：
+  - **插件评分**：复用既有 `fang-scorer` 的 import 层扫描与 A–E 分档（不重复扫源码），
+    按入口文件 `mtime`（或 inline 源码 sha1）做 LRU 缓存；拿不到 scorer 时失败往坏里判（E + degraded）。
+  - **动作评分**：`green / blue / yellow / red` 四色，15 条规则（生命周期、破坏性、凭据、外连、
+    动态加载、写、只读 shell、只读、未知工具），每条带 `matchedRule` 供审计追溯。
+  - **耦合**：`effectiveLight = max(baseLight, gradeFloor(grade))`，等级只抬不降；
+    下限表 `umbrella`（A/B 绿、C 蓝、D 黄、E 红，= 设计稿）与 `strict`（= kernel `GRADE_COLOR`）可选。
+  - **决策矩阵**：`allow / mark / ask / delegate / deny`；DSH 生命周期动作委托 restart-guard
+    （带 `originLight`），凭据访问是唯一硬拒绝。
+  - **审计**：一次 `decideAction` 落一条 `umbrella-decision`；插件评分沿用 scorer 的 `score`，不双写。
+- kernel 词汇：`SERVICE.umbrella`、`ROW.umbrella`、`LIGHT`（四色）、`LIGHT_RANK`、
+  `AUDIT.UMBRELLA_DECISION`、`MATRIX.umbrella: ['mother','fork']`。
+- 依赖注入：`fang-umbrella` 在 `bufferRoot` 未配置时读 `buffer-keeper` 的实时 `dir`，
+  策略以函数形式传入，buffer root 变化不需要重建保护伞（缓存不受影响）。
+
+### 文档
+- 新增 `docs/UMBRELLA.md`：三层结构、两张下限表的取舍、15 条规则表与顺序、
+  决策矩阵、服务面、缓存策略、与 Router/Approver/RestartGuard/HotReloader 的**接线现状**
+  （含「没有工具拦截钩子，保护伞是决策库不是强制闸门」这一边界）、审计形态、校准三问、差异表。
+- `docs/CONTRACTS-V2.md §5.9`：`fangUmbrella` 服务契约（输入/输出/失败语义）。
+
+### 测试
+- `test/umbrella.test.mjs` 35 项：灯色词汇、两张下限表、4×6 单调性属性、15 条规则与优先级、
+  决策矩阵七行、缓存命中/失效/逐出/失效接口、失败往坏里判、等级耦合、审计、实时策略、延迟预算、插件形态。
+- `test/role-extensions.test.mjs`、`test/plugins-shape.test.mjs`、`test/kernel.test.mjs`、
+  `tools/e2e.mjs` 同步版本号与矩阵行数（15 → 16）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 6 个补丁位。
+
 ## v2.7.5（2026-11-01）
 
 **主题：端口生命周期文档化 —— Adapter 复用 DSH 端口，不存在第二个 Adapter 端口。**

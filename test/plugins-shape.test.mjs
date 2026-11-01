@@ -22,6 +22,7 @@ const PLUGINS = [
   { file: 'hot-reloader', name: 'fang-hot-reloader', key: 'hotReloader', roles: ['fork'] },
   { file: 'adapter', name: 'fang-adapter', key: 'adapter', roles: ['fork'] },
   { file: 'scorer', name: 'fang-scorer', key: 'scorer', roles: ['mother', 'fork'] },
+  { file: 'umbrella', name: 'fang-umbrella', key: 'umbrella', roles: ['mother', 'fork'] },
   { file: 'router', name: 'fang-router', key: 'router', roles: ['mother', 'fork'] },
   { file: 'approver', name: 'fang-approver', key: 'approver', roles: ['mother', 'fork'] },
   { file: 'buffer-keeper', name: 'fang-buffer-keeper', key: 'buffer', roles: ['fork'] },
@@ -122,7 +123,7 @@ test('compose mode mounts every plugin of the current role through one row', asy
 test('package exports + bundle patch reference every row (install preflight)', async () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.name, '@local/dsh-fang')
-  assert.equal(pkg.version, '2.7.5')
+  assert.equal(pkg.version, '2.7.6')
   assert.ok(pkg.dsh?.bundle?.patch, 'dsh.bundle.patch is required to be a bundle')
   assert.ok(fs.existsSync(path.join(ROOT, pkg.dsh.bundle.patch)), 'bundle patch file exists')
   assert.ok(pkg.dsh?.client?.platform, 'client half platform declared')
