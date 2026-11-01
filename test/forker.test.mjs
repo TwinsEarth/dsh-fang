@@ -1234,3 +1234,28 @@ test('v3: onTokenRefresh 广播每次 spawn 的 token；getToken 是 adapterToke
     ctx.dispose()
   }
 })
+
+test('v2.7.3: supervise 放弃重启时 emit fang/fork-restart-failed (terminal=true)', async () => {
+  const root = tmp()
+  const template = makeTemplate(root)
+  const homeDir = path.join(root, 'fork-home-giveup')
+  const dataRoot = path.join(root, 'data-giveup')
+  const { ctx, service } = newForkContext({ dataRoot, supervise: true, maxRestarts: 0 })
+  const events = []
+  const off = bus.on('fang/fork-restart-failed', (payload) => events.push(payload))
+  try {
+    assert.equal(service.provision({ forkId: 'f-giveup', homeDir, profile: 'web', profileTemplate: template }).ok, true)
+    const res = await service.spawn({
+      forkId: 'f-giveup', homeDir, profile: 'web', cliPath: FAKE_CLI,
+      env: { FAKE_DSH_MODE: 'crash' }, timeoutMs: 8000,
+    })
+    assert.equal(res.ok, false)
+    assert.equal(await waitFor(() => events.length > 0), true, 'give-up must emit restart-failed')
+    assert.equal(events[0].forkId, 'f-giveup')
+    assert.equal(events[0].terminal, true)
+    assert.match(String(events[0].error), /restart-given-up|crash/i)
+  } finally {
+    off()
+    ctx.dispose()
+  }
+})

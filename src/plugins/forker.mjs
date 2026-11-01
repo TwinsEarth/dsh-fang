@@ -66,6 +66,8 @@ const EVENTS = {
   started: 'fang/fork-started',
   crashed: 'fang/fork-crashed',
   reaped: 'fang/fork-reaped',
+  /** v2.7.3：自动重启失败 / 放弃重启（terminal=true 表示不会再有自动重试）。 */
+  restartFailed: 'fang/fork-restart-failed',
 }
 
 /** v2 deterministic port pool (CONTRACTS-V2.md §5.5). */
@@ -1049,6 +1051,8 @@ export function apply(ctx, config) {
             rec.lastError = `restart-given-up:${plan.reason}`
             writeForkMetaOf(rec)
             audit(AUDIT.FORK_CRASHED, { forkId, restartGivenUp: plan.reason })
+            // 放弃重启 = 终态：不会再有自动重试，订阅者据此 fail-fast。
+            emit(EVENTS.restartFailed, { forkId, error: rec.lastError, terminal: true })
           }
         }
         finish({ ok: false, error: 'exited', code: exitInfo.code, signal, kind: exitInfo.kind, log: collector.tail(20) })
@@ -1165,7 +1169,12 @@ export function apply(ctx, config) {
   /** Re-spawn a crashed-but-ready fork after the backoff timer fires. */
   const restartFork = async (rec) => {
     if (disposed || rec.intentionalStop || records.get(rec.forkId) !== rec) return
-    if (!rec.cliPath) { rec.lastError = 'restart-no-cli'; writeForkMetaOf(rec); return }
+    if (!rec.cliPath) {
+      rec.lastError = 'restart-no-cli'
+      writeForkMetaOf(rec)
+      emit(EVENTS.restartFailed, { forkId: rec.forkId, error: 'restart-no-cli', terminal: true })
+      return
+    }
     rec.ready = false
     const out = await spawn({
       forkId: rec.forkId, homeDir: rec.homeDir, profile: rec.profile,
@@ -1174,6 +1183,12 @@ export function apply(ctx, config) {
     if (!out.ok && !disposed && records.get(rec.forkId) === rec) {
       rec.lastError = `restart-failed:${out.error}`
       writeForkMetaOf(rec)
+      // 自动重启尝试失败：Forker 可能还会按 supervise 计划再试，因此 terminal=false。
+      emit(EVENTS.restartFailed, {
+        forkId: rec.forkId,
+        error: String(out.error ?? 'restart-failed'),
+        terminal: false,
+      })
     }
   }
 

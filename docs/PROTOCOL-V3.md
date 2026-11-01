@@ -474,13 +474,13 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 | `test/sse-directed.test.mjs`（8，v2.6.9） | 9 分支 61 条定向用例完整性、smoke（一次性+分块）、expectedFrames 覆盖、mutation 检出（裁掉所有尾部 CR）、混合策略确定性、均匀抽样、fuzz 全定向 900 次分支全覆盖、全随机/可复现 |
 | `test/sse-client-fuzz.test.mjs`（3，v2.7.0） | 性质（401 致命/409、410 reset/心跳无害/断连无重复且 since 正确）、120 次随机分块+断连 0 failures 且四类策略覆盖、同 seed 可复现 |
 | `test/orchestrator.test.mjs`（21，v2.7.1 新增 3） | 归档停进程且保留 home、stop-failed 不假装成功、还原重新 spawn、删除存档 reap 并移除记录 |
-| `test/forker.test.mjs`（26，v2.7.2 新增 1） | token 生命周期（spawn 重生成/stop 作废/env 注入/不落盘）+ onTokenRefresh 广播/getToken 别名/异常隔离/disposer |
+| `test/forker.test.mjs`（27，v2.7.3 新增 1） | token 生命周期 + onTokenRefresh 广播/getToken 别名 + supervise give-up 时 emit fork-restart-failed(terminal=true) |
 | `test/sse-parser-fuzz.test.mjs`（7，v2.6.5） | 帧边界/多行 data/CRLF/flush/超长行/UTF-8 字节切分、固定种子分块等价、随机 seed smoke、RNG 可复现、参考实现一致、roundtrip、flush 后可用 |
 | `test/remote.test.mjs`（+2，共 14） | v3 路径 + Bearer 头、eventsUrl 的 since/session/token |
 | `test/forker.test.mjs`（+1，共 25） | token 每次 spawn 重新生成、进 env、stop 作废、不落 forks.json/fang-meta.json/status |
 | `test/orchestrator.test.mjs`（18） | 版本号改从 `FANG_VERSION` 读取；握手/任务生命周期回归 |
 
-全量：**404 项（403 pass / 1 skip）**。
+全量：**408 项（407 pass / 1 skip）**。
 
 ---
 
@@ -503,6 +503,8 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
   还原 = 原 home 重新 spawn，删除 = reap；契约见 `docs/ARCHIVE.md`；
 - Forker token 公开面（v2.7.2）：getToken 别名 + onTokenRefresh 广播（每次 spawn 生成/刷新），
   token 生命周期仍为内存 only + stop 作废；契约见 `docs/FORKER-TOKEN.md`；
+- 重启结果事件化（v2.7.3）：`fang/fork-restart-failed {terminal}` 让 TaskHandle 终态 fail-fast、
+  非终态继续等待；成功信号仍为 `fang/fork-started` + 轮询兜底；
 - 共享协议库 + ForkClient（SSE 解析、cursor 续传、409/410 处理、指数退避、幂等重试）；
 - Forker 每次 spawn 生成 token 并经 env 注入；`adapterToken(forkId)` 只读内存；
 - Orchestrator 在握手后做 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer。
