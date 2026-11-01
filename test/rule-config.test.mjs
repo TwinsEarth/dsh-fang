@@ -210,17 +210,20 @@ test('Registry：默认 15 条按 DEFAULT_RULE_PRIORITIES 排序，unknown-tool 
 })
 
 test('Registry：enabled:false 禁用内置规则；light/reason/tags 覆盖', () => {
+  // 注意：credential-access / dsh-lifecycle / destructive-command 带 hard-deny 标签 = 不可协商，
+  // 关闭它们会被拒绝（见「硬规则锁定」用例）。这里用可调规则做演示。
   const { registry } = registryWith(`${CONFIG_HEADER}rules:
-  - id: credential-access
+  - id: dynamic-import
     enabled: false
   - id: write-outside-buffer
     light: red
     reason: CI 环境全部越界写需审批
     tags: ["ci-strict"]
 `)
-  assert.equal(registry.ids().includes('credential-access'), false)
-  const ss = baseLight({ tool: 'read', target: { kind: 'path', value: path.resolve('C:/home/u/.ssh/id_rsa') } }, policy, registry)
-  assert.notEqual(ss.matchedRule, 'credential-access')
+  assert.equal(registry.ids().includes('dynamic-import'), false)
+  const imp = baseLight({ tool: 'import', args: { specifier: './x.mjs' } }, policy, registry)
+  assert.notEqual(imp.matchedRule, 'dynamic-import')
+  assert.equal(imp.matchedRule, 'unknown-tool')
   const write = baseLight({ tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/a') } }, policy, registry)
   assert.equal(write.matchedRule, 'write-outside-buffer')
   assert.equal(write.light, 'red')
@@ -306,7 +309,7 @@ rules:
 
 test('Registry：resetToBuiltin 恢复 15 条并回到 builtin 来源', () => {
   const { registry } = registryWith(`${CONFIG_HEADER}rules:
-  - id: credential-access
+  - id: dynamic-import
     enabled: false
 `)
   assert.equal(registry.ids().length, 14)
@@ -350,27 +353,27 @@ test('热加载管线：重读文件 → 应用；坏文件 → 保留旧规则'
   const dir = tmpDir('fang-rules-watch-')
   try {
     const file = path.join(dir, 'rules.yaml')
-    writeRules(file, `${CONFIG_HEADER}rules:\n  - id: credential-access\n    enabled: false\n`)
+    writeRules(file, `${CONFIG_HEADER}rules:\n  - id: dynamic-import\n    enabled: false\n`)
     const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
     const results = []
     const watcher = watchRuleConfigFile(file, registry, (r) => results.push(r), { debounceMs: 10 })
     try {
       watcher.reload()
       assert.equal(results.at(-1).applied, true)
-      assert.equal(registry.ids().includes('credential-access'), false)
+      assert.equal(registry.ids().includes('dynamic-import'), false)
 
       // 坏 YAML：保留旧规则
       writeRules(file, 'version: 1\nrules: [\n')
       watcher.reload()
       assert.equal(results.at(-1).applied, false)
-      assert.equal(registry.ids().includes('credential-access'), false, '失败必须保留上一次有效规则')
+      assert.equal(registry.ids().includes('dynamic-import'), false, '失败必须保留上一次有效规则')
 
       // 再次有效：恢复
-      writeRules(file, `${CONFIG_HEADER}rules:\n  - id: destructive-command\n    enabled: false\n`)
+      writeRules(file, `${CONFIG_HEADER}rules:\n  - id: exec-read-only\n    enabled: false\n`)
       watcher.reload()
       assert.equal(results.at(-1).applied, true)
-      assert.equal(registry.ids().includes('destructive-command'), false)
-      assert.equal(registry.ids().includes('credential-access'), true, '重新应用整份配置（不是增量）')
+      assert.equal(registry.ids().includes('exec-read-only'), false)
+      assert.equal(registry.ids().includes('dynamic-import'), true, '重新应用整份配置（不是增量）')
     } finally {
       watcher.stop()
     }
@@ -386,27 +389,26 @@ test('插件：rulesFile 生效、reloadRules 重读、ruleConfigStatus 报告�
   const previous = process.env.DSH_FANG_ROLE
   process.env.DSH_FANG_ROLE = 'mother'
   const file = path.join(dir, 'rules.yaml')
-  writeRules(file, `${CONFIG_HEADER}rules:\n  - id: credential-access\n    enabled: false\n`)
+  writeRules(file, `${CONFIG_HEADER}rules:\n  - id: dynamic-import\n    enabled: false\n`)
   try {
     const ctx = makeCtx()
     try {
-      umbrellaPlugin.apply(ctx, { rulesFile: file, rulesWatch: false })
+      umbrellaPlugin.apply(ctx, { rulesFile: file, rulesWatch: false, baselineFile: '' })
       const svc = ctx.get(SERVICE.umbrella)
       assert.ok(svc)
       const status = svc.ruleConfigStatus()
-      assert.equal(status.source, 'yaml')
       assert.equal(status.applied, true)
-      assert.equal(status.rules.includes('credential-access'), false)
+      assert.equal(status.rules.includes('dynamic-import'), false)
 
-      // 规则真的生效：凭据路径不再命中 credential-access
-      const decision = svc.decideAction({ tool: 'read', target: { kind: 'path', value: path.resolve('C:/home/u/.ssh/id_rsa') } }, { grade: 'A' })
-      assert.notEqual(decision.matchedRule, 'credential-access')
+      // 规则真的生效：import 工具不再命中 dynamic-import
+      const decision = svc.decideAction({ tool: 'import', args: { specifier: './x.mjs' } }, { grade: 'A' })
+      assert.notEqual(decision.matchedRule, 'dynamic-import')
 
       // 改文件 → reloadRules
-      writeRules(file, `${CONFIG_HEADER}rules:\n  - id: destructive-command\n    enabled: false\n`)
+      writeRules(file, `${CONFIG_HEADER}rules:\n  - id: exec-read-only\n    enabled: false\n`)
       const reloaded = svc.reloadRules()
       assert.equal(reloaded.applied, true)
-      assert.equal(svc.ruleConfigStatus().rules.includes('destructive-command'), false)
+      assert.equal(svc.ruleConfigStatus().rules.includes('exec-read-only'), false)
     } finally {
       ctx.dispose()
     }
@@ -426,7 +428,7 @@ test('插件：坏 rulesFile 不崩、回退纯内置并报告错误', () => {
   try {
     const ctx = makeCtx()
     try {
-      umbrellaPlugin.apply(ctx, { rulesFile: file, rulesWatch: false })
+      umbrellaPlugin.apply(ctx, { rulesFile: file, rulesWatch: false, baselineFile: ':none:' })
       const svc = ctx.get(SERVICE.umbrella)
       assert.ok(svc)
       const status = svc.ruleConfigStatus()
@@ -472,4 +474,182 @@ test('MATCHER_KINDS 覆盖文档声明的 9 种声明式 matcher', () => {
   ])
   // LIGHT_RANK 与 matcher 无关但确认灯色词汇可用（防止 schema 使用未知灯色）
   assert.equal(LIGHT_RANK.red, 4)
+})
+
+// ── 推荐基线 + 分层 + 硬规则锁定（v2.8.1）────────────────────────────────────
+
+const BASELINE_PATH = path.resolve(import.meta.dirname ?? process.cwd(), '..', 'defaults', 'umbrella-rules.yaml')
+
+test('基线文件：随包默认值可解析、硬规则带 non-negotiable 标签', () => {
+  const loaded = loadRuleConfigFile(BASELINE_PATH)
+  assert.deepEqual(loaded.errors, [])
+  assert.ok(loaded.config)
+  const ids = loaded.config.rules.map((r) => r.id)
+  for (const id of ['dsh-lifecycle', 'destructive-command', 'credential-access', 'unknown-tool']) {
+    assert.ok(ids.includes(id), `baseline must lock ${id}`)
+  }
+  const hard = loaded.config.rules.find((r) => r.id === 'credential-access')
+  assert.ok(hard.tags.includes('non-negotiable'))
+  assert.equal(hard.enabled, true)
+  // 基线设置：正则错误整层拒绝
+  assert.equal(loaded.config.settings.failOnInvalidPattern, true)
+})
+
+test('分层：基线 → 项目 → 环境，后层按 id 覆盖；锁定规则不可关闭/不可降级', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const base = validateRuleConfig(parseYamlSubset(`version: 1
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: credential-access
+    enabled: true
+    light: red
+    tags: [hard-deny, non-negotiable]
+  - id: write-outside-buffer
+    light: red
+    reason: baseline strict
+`).value)
+  assert.deepEqual(base.errors, [])
+  const first = registry.applyLayer(base.config)
+  assert.equal(first.applied, true)
+  assert.equal(registry.status().source, 'layered')
+
+  const project = validateRuleConfig(parseYamlSubset(`version: 1
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: write-outside-buffer
+    light: yellow
+    reason: project relaxed
+  - id: credential-access
+    enabled: false
+`).value)
+  assert.deepEqual(project.errors, [])
+  const second = registry.applyLayer(project.config)
+  // 锁定规则被尝试关闭 → 该层 fatal（failOnInvalidPattern: true）→ 保留上一次有效规则
+  assert.equal(second.applied, false)
+  assert.ok(second.errors.some((e) => e.includes('cannot be disabled')))
+  const write = baseLight({ tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/x') } }, policy, registry)
+  assert.equal(write.light, 'red', '失败的层不得生效（保留基线值）')
+  assert.equal(write.reason, 'baseline strict')
+
+  // 下一层：只覆盖可调规则 → 生效
+  const env = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: write-outside-buffer
+    light: yellow
+    reason: env relaxed
+`).value)
+  const third = registry.applyLayer(env.config)
+  assert.equal(third.applied, true)
+  const after = baseLight({ tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/x') } }, policy, registry)
+  assert.equal(after.light, 'yellow')
+  assert.equal(after.reason, 'env relaxed')
+  // 被拒绝的项目层已从层栈弹出（只保留 baseline + env 两层）
+  assert.equal(registry.layerCount(), 2)
+})
+
+test('锁定：允许追加 pattern / 提升灯色，拒绝降级与关闭', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const baseline = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: credential-access
+    enabled: true
+    light: red
+    tags: [hard-deny, non-negotiable]
+`).value)
+  assert.equal(registry.applyLayer(baseline.config).applied, true)
+
+  const downgrade = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: credential-access
+    light: yellow
+`).value)
+  const rejected = registry.applyLayer(downgrade.config)
+  assert.equal(rejected.applied, false)
+  assert.ok(rejected.errors.some((e) => e.includes('cannot be lowered')))
+
+  // 追加 pattern 允许（硬规则扩面）
+  const extend = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: credential-access
+    pathPatterns:
+      - re: "\\\\.dsh[\\\\\\\\/]secrets"
+`).value)
+  assert.deepEqual(extend.errors, [])
+  const ok = registry.applyLayer(extend.config)
+  assert.equal(ok.applied, true)
+  const hit = baseLight({ tool: 'read', target: { kind: 'path', value: path.resolve('C:/home/u/.dsh/secrets/k') } }, policy, registry)
+  assert.equal(hit.matchedRule, 'credential-access')
+})
+
+test('插件：默认自动加载随包基线；项目层尝试关闭硬规则被拒绝并保留基线', () => {
+  const dir = tmpDir('fang-rules-layers-')
+  const previousRole = process.env.DSH_FANG_ROLE
+  const previousEnv = process.env.UMBRELLA_RULES_PATH
+  process.env.DSH_FANG_ROLE = 'mother'
+  delete process.env.UMBRELLA_RULES_PATH
+  const projectFile = path.join(dir, 'project.yaml')
+  fs.writeFileSync(projectFile, `version: 1
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: credential-access
+    enabled: false
+`, 'utf8')
+  try {
+    const ctx = makeCtx()
+    try {
+      umbrellaPlugin.apply(ctx, { rulesFile: projectFile, rulesWatch: false })
+      const svc = ctx.get(SERVICE.umbrella)
+      const status = svc.ruleConfigStatus()
+      const baselineLayer = status.layers.find((l) => l.name === 'baseline')
+      const projectLayer = status.layers.find((l) => l.name === 'project')
+      assert.ok(baselineLayer, 'baseline layer must be loaded by default')
+      assert.equal(baselineLayer.applied, true)
+      assert.equal(projectLayer.applied, false, 'project layer must be rejected (hard rule lock)')
+      assert.ok(status.rules.includes('credential-access'), 'baseline hard rule still active')
+    } finally {
+      ctx.dispose()
+    }
+  } finally {
+    if (previousRole === undefined) delete process.env.DSH_FANG_ROLE
+    else process.env.DSH_FANG_ROLE = previousRole
+    if (previousEnv === undefined) delete process.env.UMBRELLA_RULES_PATH
+    else process.env.UMBRELLA_RULES_PATH = previousEnv
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('插件：环境层 UMBRELLA_RULES_PATH 叠加在基线与项目之后', () => {
+  const dir = tmpDir('fang-rules-env-')
+  const previousRole = process.env.DSH_FANG_ROLE
+  const previousEnv = process.env.UMBRELLA_RULES_PATH
+  process.env.DSH_FANG_ROLE = 'mother'
+  const envFile = path.join(dir, 'env.yaml')
+  fs.writeFileSync(envFile, `version: 1
+rules:
+  - id: write-outside-buffer
+    light: yellow
+    reason: env layer
+`, 'utf8')
+  process.env.UMBRELLA_RULES_PATH = envFile
+  try {
+    const ctx = makeCtx()
+    try {
+      umbrellaPlugin.apply(ctx, { baselineFile: ':none:', rulesWatch: false })
+      const svc = ctx.get(SERVICE.umbrella)
+      const status = svc.ruleConfigStatus()
+      const envLayer = status.layers.find((l) => l.name === 'env')
+      assert.ok(envLayer)
+      assert.equal(envLayer.applied, true)
+      const decision = svc.decideAction({ tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/z') } }, { grade: 'A' })
+      assert.equal(decision.reason, 'env layer')
+    } finally {
+      ctx.dispose()
+    }
+  } finally {
+    if (previousRole === undefined) delete process.env.DSH_FANG_ROLE
+    else process.env.DSH_FANG_ROLE = previousRole
+    if (previousEnv === undefined) delete process.env.UMBRELLA_RULES_PATH
+    else process.env.UMBRELLA_RULES_PATH = previousEnv
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

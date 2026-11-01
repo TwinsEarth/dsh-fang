@@ -598,124 +598,168 @@ export function compileDeclarativeRule(entry, { rejectUnsafeRegex = true } = {})
  * @param {object[]} builtinRules 默认 DEFAULT_ACTION_RULES
  * @param {{priorities?: Record<string, number>}} [options]
  */
+/** 不可协商标签：带这些标签的规则不可被关闭、不可被降低灯色。 */
+export const NON_NEGOTIABLE_TAGS = Object.freeze(['hard-deny', 'non-negotiable'])
+
+export function isLockedRule(rule) {
+  return Array.isArray(rule?.tags) && rule.tags.some((tag) => NON_NEGOTIABLE_TAGS.includes(tag))
+}
+
+/**
+ * 分层规则注册表：内置规则 → YAML 层（基线 → 项目 → 环境，后层按 id 覆盖前层）。
+ * 事务化：任何一层被判定 fatal 时整次 rebuild 被拒绝，effective 保持上一次有效值。
+ *
+ * @param {object[]} builtinRules
+ * @param {{priorities?: Record<string, number>}} [options]
+ */
 export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options = {}) {
   const builtin = [...builtinRules]
   const defaultPriorities = { ...DEFAULT_RULE_PRIORITIES, ...(options.priorities ?? {}) }
   let effective = []
-  let status = { source: 'builtin', appliedAt: null, warnings: [], errors: [], configVersion: null }
+  let layers = []
+  let status = { source: 'builtin', appliedAt: null, warnings: [], errors: [], configVersion: null, layers: 0 }
 
-  const priorityOf = (rule, priorities) => {
+  const priorityBase = (rule, priorities) => {
     const explicit = priorities[rule.id]
     if (Number.isFinite(explicit)) return explicit
-    const base = builtin.findIndex((r) => r.id === rule.id)
-    return base >= 0 ? base * 10 : 5000
+    const index = builtin.findIndex((r) => r.id === rule.id)
+    return index >= 0 ? index * 10 : 5000
   }
 
   const sortRules = (rules, priorities) => rules
     .map((rule, index) => ({ rule, index }))
     .sort((a, b) => {
-      const pa = priorityOf(a.rule, priorities)
-      const pb = priorityOf(b.rule, priorities)
+      const pa = priorityBase(a.rule, priorities)
+      const pb = priorityBase(b.rule, priorities)
       if (pa !== pb) return pa - pb
       return a.index - b.index
     })
     .map(({ rule }) => rule)
 
   const resetToBuiltin = () => {
+    layers = []
     effective = sortRules(builtin, defaultPriorities)
-    status = { source: 'builtin', appliedAt: Date.now(), warnings: [], errors: [], configVersion: null }
+    status = { source: 'builtin', appliedAt: Date.now(), warnings: [], errors: [], configVersion: null, layers: 0 }
     return effective
   }
   resetToBuiltin()
 
-  /** 把内置规则与 YAML 覆盖合并成一份新数组（不修改当前 effective）。 */
-  const merge = (config) => {
+  /** 从内置 + 全部层重建一份新数组（不触碰 effective，直到确认可应用）。 */
+  const rebuild = () => {
     const warnings = []
     const errors = []
+    const layerRecords = []
     const priorities = { ...defaultPriorities }
-    const byId = new Map()
-    const order = []
-    for (const rule of builtin) {
-      byId.set(rule.id, rule)
-      order.push(rule.id)
-    }
+    const byId = new Map(builtin.map((rule) => [rule.id, rule]))
+    const order = builtin.map((rule) => rule.id)
+    const locked = new Set()
+    let fatal = false
+    let lockViolation = false
 
-    for (const entry of config.rules) {
-      const isDeclarative = entry.match !== undefined
-      if (isDeclarative) {
-        if (byId.has(entry.id)) warnings.push(`declarative rule "${entry.id}" shadows a builtin rule with the same id`)
-        const compiled = compileDeclarativeRule(entry, { rejectUnsafeRegex: config.settings.rejectUnsafeRegex })
-        errors.push(...compiled.errors)
-        if (compiled.rule !== null) {
-          try {
-            assertActionRule(compiled.rule)
-            byId.set(compiled.rule.id, compiled.rule)
-            if (!order.includes(compiled.rule.id)) order.push(compiled.rule.id)
-            if (entry.priority !== undefined) priorities[compiled.rule.id] = entry.priority
-          } catch (e) {
-            errors.push(`rules.${entry.id}: ${e.message}`)
+    for (const layer of layers) {
+      const layerErrors = []
+      for (const entry of layer.rules) {
+        const isDeclarative = entry.match !== undefined
+        if (isDeclarative) {
+          if (byId.has(entry.id)) warnings.push(`declarative rule "${entry.id}" shadows an existing rule`)
+          const compiled = compileDeclarativeRule(entry, { rejectUnsafeRegex: layer.settings.rejectUnsafeRegex })
+          layerErrors.push(...compiled.errors)
+          if (compiled.rule !== null) {
+            try {
+              assertActionRule(compiled.rule)
+              byId.set(compiled.rule.id, compiled.rule)
+              if (!order.includes(compiled.rule.id)) order.push(compiled.rule.id)
+              if (entry.priority !== undefined) priorities[compiled.rule.id] = entry.priority
+              if (isLockedRule(compiled.rule)) locked.add(compiled.rule.id)
+            } catch (e) {
+              layerErrors.push(`rules.${entry.id}: ${e.message}`)
+            }
+          }
+          continue
+        }
+
+        const base = byId.get(entry.id)
+        if (base === undefined) {
+          const message = `unknown rule id "${entry.id}"`
+          if (layer.settings.failOnUnknownRule) layerErrors.push(message)
+          else warnings.push(message)
+          continue
+        }
+
+        // 硬规则锁定：不可关闭、不可降低灯色（允许提升灯色 / 追加 pattern / 改 reason）
+        if (isLockedRule(base) || locked.has(base.id)) {
+          if (entry.enabled === false) {
+            layerErrors.push(`rule "${entry.id}" is non-negotiable and cannot be disabled`)
+            lockViolation = true
+            continue
+          }
+          if (entry.light !== undefined && !(LIGHT_RANK[entry.light] >= LIGHT_RANK[base.light])) {
+            layerErrors.push(`rule "${entry.id}" is non-negotiable; light cannot be lowered from ${base.light} to ${entry.light}`)
+            lockViolation = true
+            continue
           }
         }
-        continue
-      }
 
-      const base = byId.get(entry.id)
-      if (base === undefined) {
-        const message = `unknown rule id "${entry.id}"`
-        if (config.settings.failOnUnknownRule) errors.push(message)
-        else warnings.push(message)
-        continue
-      }
-      if (entry.enabled === false) {
-        byId.delete(entry.id)
-        continue
-      }
-      let patched = {
-        ...base,
-        light: entry.light ?? base.light,
-        reason: entry.reason ?? base.reason,
-        tags: entry.tags ?? base.tags,
-        category: entry.category ?? base.category,
-      }
-      if (entry.pathPatterns !== undefined || entry.commandPatterns !== undefined) {
-        const extraErrors = []
-        const pathPatterns = entry.pathPatterns === undefined
-          ? []
-          : compilePatterns(entry.pathPatterns, extraErrors, `rules.${entry.id}.pathPatterns`)
-        const commandPatterns = entry.commandPatterns === undefined
-          ? []
-          : compilePatterns(entry.commandPatterns, extraErrors, `rules.${entry.id}.commandPatterns`)
-        errors.push(...extraErrors)
-        const originalMatch = base.match
-        patched = {
-          ...patched,
-          match: (ev, ctx) => {
-            if (originalMatch(ev, ctx)) return true
-            if (commandPatterns.some(({ re }) => re.test(ctx.commandText))) return true
-            const candidates = [ctx.targetPath, ...ctx.writeTargets, ...ctx.readTargets].filter((x) => typeof x === 'string')
-            return candidates.some((p) => pathPatterns.some(({ re }) => re.test(p)))
-          },
+        if (entry.enabled === false) {
+          byId.delete(entry.id)
+          locked.delete(entry.id)
+          continue
         }
+
+        let patched = {
+          ...base,
+          light: entry.light ?? base.light,
+          reason: entry.reason ?? base.reason,
+          tags: entry.tags ?? base.tags,
+          category: entry.category ?? base.category,
+        }
+        if (entry.pathPatterns !== undefined || entry.commandPatterns !== undefined) {
+          const patternErrors = []
+          const pathPatterns = entry.pathPatterns === undefined
+            ? []
+            : compilePatterns(entry.pathPatterns, patternErrors, `rules.${entry.id}.pathPatterns`)
+          const commandPatterns = entry.commandPatterns === undefined
+            ? []
+            : compilePatterns(entry.commandPatterns, patternErrors, `rules.${entry.id}.commandPatterns`)
+          layerErrors.push(...patternErrors)
+          const originalMatch = base.match
+          patched = {
+            ...patched,
+            match: (ev, ctx) => {
+              if (originalMatch(ev, ctx)) return true
+              if (commandPatterns.some(({ re }) => re.test(ctx.commandText))) return true
+              const candidates = [ctx.targetPath, ...ctx.writeTargets, ...ctx.readTargets].filter((x) => typeof x === 'string')
+              return candidates.some((p) => pathPatterns.some(({ re }) => re.test(p)))
+            },
+          }
+        }
+        if (entry.priority !== undefined) priorities[entry.id] = entry.priority
+        const merged = { ...patched, source: 'yaml' }
+        byId.set(entry.id, merged)
+        if (isLockedRule(merged)) locked.add(entry.id)
       }
-      if (entry.priority !== undefined) priorities[entry.id] = entry.priority
-      byId.set(entry.id, { ...patched, source: 'yaml' })
+      errors.push(...layerErrors)
+      if (layer.settings.failOnInvalidPattern && layerErrors.length > 0) fatal = true
+      if (layer.settings.failOnUnknownRule && layerErrors.some((e) => e.startsWith('unknown rule id'))) fatal = true
+      layerRecords.push({ version: layer.version, rules: layer.rules.length, errors: layerErrors.length })
     }
 
-    const fatal = (config.settings.failOnInvalidPattern && errors.length > 0)
-      || (config.settings.failOnUnknownRule && errors.some((e) => e.startsWith('unknown rule id')))
+    if (lockViolation) fatal = true
     const merged = order.map((id) => byId.get(id)).filter((rule) => rule !== undefined)
-    return { merged: sortRules(merged, priorities), warnings, errors, fatal }
-  }
-
-  /** 应用配置；失败（fatal / 编译全失败）时保留旧 effective。 */
-  const apply = (config) => {
-    const { merged, warnings, errors, fatal } = merge(config)
-    if (fatal || (errors.length > 0 && merged.length === 0)) {
-      return { applied: false, ruleCount: effective.length, warnings, errors, source: status.source }
+    const sorted = sortRules(merged, priorities)
+    if (fatal) {
+      return { applied: false, ruleCount: effective.length, warnings, errors, source: status.source, layers: layerRecords }
     }
-    effective = merged
-    status = { source: 'yaml', appliedAt: Date.now(), warnings, errors, configVersion: config.version }
-    return { applied: true, ruleCount: merged.length, warnings, errors, source: 'yaml' }
+    effective = sorted
+    status = {
+      source: layers.length > 0 ? 'layered' : 'builtin',
+      appliedAt: Date.now(),
+      warnings,
+      errors,
+      configVersion: layers.at(-1)?.version ?? null,
+      layers: layers.length,
+    }
+    return { applied: true, ruleCount: sorted.length, warnings, errors, source: status.source, layers: layerRecords }
   }
 
   const find = (evidence, ctx) => effective.find((rule) => rule.match(evidence, ctx)) ?? effective[effective.length - 1] ?? null
@@ -748,7 +792,6 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
     effective = [...effective.slice(0, index), ...effective.slice(index + 1)]
     return true
   }
-  const reset = () => resetToBuiltin()
 
   return {
     builtin,
@@ -758,9 +801,38 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
     register,
     override,
     remove,
-    reset,
-    applyConfig: apply,
+    reset: resetToBuiltin,
     resetToBuiltin,
+    /** 用一份配置替换所有层（向后兼容 v2.8.0 的单文件语义）。 */
+    applyConfig(config) {
+      const previous = layers
+      layers = [config]
+      const result = rebuild()
+      if (!result.applied) {
+        layers = previous
+        rebuild()
+      }
+      return result
+    },
+    /**
+     * 追加一层（基线 → 项目 → 环境）。
+     * 事务化：该层被拒绝时**从层栈中弹出**，effective 恢复到不含它的上一次有效规则；
+     * 否则一个坏层会污染后续所有层的 rebuild。
+     */
+    applyLayer(config) {
+      layers.push(config)
+      const result = rebuild()
+      if (!result.applied) {
+        layers.pop()
+        rebuild()
+      }
+      return result
+    },
+    clearLayers() {
+      layers = []
+      return rebuild()
+    },
+    layerCount: () => layers.length,
     status: () => ({ ...status, ruleCount: effective.length }),
     priorities: () => ({ ...defaultPriorities }),
   }

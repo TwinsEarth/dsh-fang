@@ -8,6 +8,7 @@
 // 这个插件自己**不扫源码**：静态证据的唯一来源是 `SERVICE.scorer`，缺它就失败往坏里判
 // （E + degraded），绝不假装安全。纯逻辑在 `src/lib/umbrella.mjs`，契约见 docs/UMBRELLA.md。
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { AUDIT, SERVICE, roleGate, z } from '../kernel/index.mjs'
 import {
   DEFAULT_ACTION_RULES,
@@ -23,6 +24,7 @@ import {
 } from '../lib/umbrella.mjs'
 import {
   createRuleRegistry,
+  isLockedRule,
   loadRuleConfigFile,
   watchRuleConfigFile,
 } from '../lib/rule-registry.mjs'
@@ -53,6 +55,10 @@ export const Config = z.object({
     .description('插件评分缓存容量（LRU，按入口文件 mtime 失效）'),
   auditDecisions: z.boolean().default(true)
     .description('每次 decideAction 落一条 umbrella-decision 审计'),
+  baselineFile: z.string().default('')
+    .description('推荐基线配置路径（空 = 随包 defaults/umbrella-rules.yaml；":none:" = 不加载基线）'),
+  envRulesFile: z.string().default('')
+    .description('环境级规则配置路径（空 = 读 UMBRELLA_RULES_PATH；CI/部署注入用）'),
   rulesFile: z.string().default('')
     .description('YAML 规则配置文件路径（空 = 只用内置规则；相对路径按本实例 cwd 解析）'),
   rulesWatch: z.boolean().default(true)
@@ -110,76 +116,96 @@ export function apply(ctx, config) {
     }
   }
 
-  // ── 规则配置层：内置规则 + YAML 叠加（fail-safe：坏配置保留旧规则/纯内置） ──
+  // ── 规则配置层（分三层叠加）：包内基线 → 项目级 rulesFile → 环境级 UMBRELLA_RULES_PATH ──
+  // fail-safe：任一层的加载/应用失败都不影响已生效的层；事务化由 registry 负责。
   const ruleRegistry = createRuleRegistry(DEFAULT_ACTION_RULES)
-  const rulesFile = String(cfg.rulesFile ?? '').trim()
-  const rulesFilePath = rulesFile.length > 0 ? path.resolve(rulesFile) : ''
+  const baselinePath = (() => {
+    const configured = String(cfg.baselineFile ?? '').trim()
+    if (configured === ':none:') return ''
+    if (configured.length > 0) return path.resolve(configured)
+    try {
+      return fileURLToPath(new URL('../../defaults/umbrella-rules.yaml', import.meta.url))
+    } catch {
+      return ''
+    }
+  })()
+  const projectPath = String(cfg.rulesFile ?? '').trim()
+  const projectFilePath = projectPath.length > 0 ? path.resolve(projectPath) : ''
+  const envPath = String(cfg.envRulesFile ?? '').trim() || String(process.env.UMBRELLA_RULES_PATH ?? '').trim()
+  const envFilePath = envPath.length > 0 ? path.resolve(envPath) : ''
+
   let ruleConfigStatus = {
     source: 'builtin',
-    file: rulesFilePath || null,
-    found: false,
-    applied: false,
+    layers: [],
     ruleCount: ruleRegistry.ids().length,
+    applied: false,
     warnings: [],
     errors: [],
     appliedAt: null,
   }
 
-  if (rulesFilePath.length > 0) {
-    const loaded = loadRuleConfigFile(rulesFilePath)
-    if (loaded.errors.length > 0) {
-      ruleConfigStatus = { ...ruleConfigStatus, found: loaded.found, errors: loaded.errors, applied: false }
-      try { ctx.logger?.warn?.(`[umbrella] rule config rejected, using builtin rules: ${loaded.errors.join('; ')}`) } catch { /* ignore */ }
-    } else if (loaded.config !== null) {
-      const applied = ruleRegistry.applyConfig(loaded.config)
-      ruleConfigStatus = {
-        ...ruleConfigStatus,
-        found: true,
+  const layerCandidates = [
+    { name: 'baseline', file: baselinePath },
+    { name: 'project', file: projectFilePath },
+    { name: 'env', file: envFilePath },
+  ].filter((layer) => layer.file.length > 0)
+
+  const applyAllLayers = () => {
+    ruleRegistry.clearLayers()
+    const layerStatus = []
+    const warnings = []
+    const errors = []
+    for (const layer of layerCandidates) {
+      const loaded = loadRuleConfigFile(layer.file)
+      if (loaded.errors.length > 0) {
+        layerStatus.push({ name: layer.name, file: layer.file, applied: false, found: loaded.found, errors: loaded.errors })
+        errors.push(...loaded.errors.map((e) => `${layer.name}: ${e}`))
+        try { ctx.logger?.warn?.(`[umbrella] ${layer.name} rule config skipped: ${loaded.errors.join('; ')}`) } catch { /* ignore */ }
+        continue
+      }
+      if (loaded.config === null) {
+        layerStatus.push({ name: layer.name, file: layer.file, applied: false, found: loaded.found, errors: [] })
+        continue
+      }
+      const applied = ruleRegistry.applyLayer(loaded.config)
+      layerStatus.push({
+        name: layer.name,
+        file: layer.file,
         applied: applied.applied,
-        source: applied.applied ? 'yaml' : 'builtin',
+        found: true,
         ruleCount: applied.ruleCount,
         warnings: applied.warnings,
         errors: applied.errors,
-        appliedAt: Date.now(),
+      })
+      warnings.push(...applied.warnings)
+      errors.push(...applied.errors)
+      if (!applied.applied) {
+        try { ctx.logger?.warn?.(`[umbrella] ${layer.name} rule config rejected, keeping previous rules: ${applied.errors.join('; ')}`) } catch { /* ignore */ }
       }
-    } else {
-      ruleConfigStatus = { ...ruleConfigStatus, found: false }
     }
-  }
-
-  let ruleWatcher = null
-  const reloadRules = () => {
-    if (rulesFilePath.length === 0) return ruleConfigStatus
-    const loaded = loadRuleConfigFile(rulesFilePath)
-    if (loaded.errors.length > 0) {
-      ruleConfigStatus = { ...ruleConfigStatus, errors: loaded.errors, applied: false }
-      return ruleConfigStatus
-    }
-    if (loaded.config === null) {
-      ruleRegistry.resetToBuiltin()
-      ruleConfigStatus = { ...ruleConfigStatus, source: 'builtin', applied: false, ruleCount: ruleRegistry.ids().length, errors: [], warnings: [], appliedAt: Date.now() }
-      return ruleConfigStatus
-    }
-    const applied = ruleRegistry.applyConfig(loaded.config)
     ruleConfigStatus = {
-      ...ruleConfigStatus,
-      found: true,
-      applied: applied.applied,
-      source: applied.applied ? 'yaml' : ruleConfigStatus.source,
-      ruleCount: applied.ruleCount,
-      warnings: applied.warnings,
-      errors: applied.errors,
+      source: ruleRegistry.status().source,
+      layers: layerStatus,
+      ruleCount: ruleRegistry.ids().length,
+      applied: layerStatus.some((layer) => layer.applied === true),
+      warnings,
+      errors,
       appliedAt: Date.now(),
     }
     return ruleConfigStatus
   }
 
-  if (rulesFilePath.length > 0 && cfg.rulesWatch) {
-    ruleWatcher = watchRuleConfigFile(rulesFilePath, ruleRegistry, (result) => {
+  applyAllLayers()
+
+  let ruleWatcher = null
+  const reloadRules = () => applyAllLayers()
+
+  const watchedFile = projectFilePath || envFilePath || baselinePath
+  if (watchedFile.length > 0 && cfg.rulesWatch) {
+    ruleWatcher = watchRuleConfigFile(watchedFile, ruleRegistry, (result) => {
       ruleConfigStatus = {
         ...ruleConfigStatus,
         applied: result.applied === true,
-        source: result.applied === true ? 'yaml' : ruleConfigStatus.source,
         ruleCount: ruleRegistry.ids().length,
         warnings: result.warnings ?? ruleConfigStatus.warnings,
         errors: result.errors ?? [],

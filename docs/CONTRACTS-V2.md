@@ -281,7 +281,9 @@ Config = z.object({
   gradeFloorTable: z.string().default('umbrella'),       // umbrella | strict
   cacheSize: z.natural().default(200),
   auditDecisions: z.boolean().default(true),
-  rulesFile: z.string().default(''),      // v2.8.0：YAML 规则叠加层（空 = 纯内置）
+  baselineFile: z.string().default(''),  // v2.8.1：基线（默认随包 defaults/umbrella-rules.yaml；:none: 关闭）
+  envRulesFile: z.string().default(''),    // v2.8.1：环境层（空 = 读 UMBRELLA_RULES_PATH）
+  rulesFile: z.string().default(''),      // v2.8.0：项目层（空 = 只用基线+内置）
   rulesWatch: z.boolean().default(true),    // 热加载（失败保留上一次有效规则）
   rulesDebounceMs: z.natural().default(200),
 })
@@ -299,6 +301,7 @@ baseLight(evidence) -> { light, matchedRule, category, tags, lifecycle, credenti
 explain(evidence)   -> { light, matchedRule, category, tags, reason, evidence, target }
 rules / ruleIds() / registerRule(rule, {before|after}) / overrideRule(id, patch) / removeRule(id) / resetRules()
 ruleConfigStatus() / reloadRules() / applyRuleConfig(config) / ruleRegistry   // v2.8.0 YAML 叠加层
+// v2.8.1: registry.applyLayer(config) 分层（基线→项目→环境）；hard-deny/non-negotiable 不可关闭/降级
 gradeFloor(grade) / effectiveLight(base, grade) / cachedGrade(id) / cacheStats() / invalidate(id) / clearCache()
 ```
 不变量（有测试）：`rank(effectiveLight) >= rank(baseLight)` 且 `>= rank(gradeFloor)`；

@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v2.8.1（2026-11-02）
+
+**主题：Umbrella 推荐基线配置 + 三层叠加 + 硬规则锁定。**
+
+### 新增
+- `defaults/umbrella-rules.yaml`：随包分发的**推荐基线**。只显式锁定 4 条规则——
+  `dsh-lifecycle` / `destructive-command` / `credential-access`（red，hard-deny + non-negotiable）
+  与兜底 `unknown-tool`（yellow，priority 9999）；11 条可调规则**留空 = 用内置默认**（注释里给推荐值），
+  项目按需在自己的叠加层里覆盖。`package.json files` 新增 `defaults/**`。
+- 分层加载（`registry.applyLayer`）：**基线 → 项目 `rulesFile` → 环境 `UMBRELLA_RULES_PATH`**（`envRulesFile` 可覆盖路径）；
+  后层按 id 覆盖前层；被拒绝的层**从层栈弹出**并恢复上一次有效规则（否则坏层会污染后续 rebuild）。
+- 硬规则锁定（`NON_NEGOTIABLE_TAGS = hard-deny | non-negotiable`）：不可 `enabled: false`、不可降低灯色；
+  允许提升灯色 / 追加 `pathPatterns`·`commandPatterns` / 改 reason / 改 priority。锁定违规**一律 fatal**。
+- 插件配置新增 `baselineFile`（空 = 随包基线；`:none:` = 关闭）与 `envRulesFile`；
+  `ruleConfigStatus()` 现在返回每层 `name/file/applied/found/errors`。
+- `docs/RULES-BASELINE.md`：基线内容、分层与合并、锁定语义、部署位置与加载顺序、覆盖率边界。
+
+### 测试
+- `test/rule-config.test.mjs` 18 → **23 项**：基线文件可解析且带锁定标签、三层合并顺序、
+  锁定拒绝关闭/降级且整层回退、允许追加 pattern、插件默认加载随包基线、环境层叠加。
+- 全量测试 **482 → 487 项**（486 pass / 1 skip）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 1 个补丁位。
+
 ## v2.8.0（2026-11-02）
 
 **主题：动作规则表 YAML 化 —— 内置规则 + 叠加层，按需启用/禁用/调参而不改代码。**
