@@ -289,15 +289,24 @@ assessPlugin({pluginId?, dir?, manifest?, source?, pkg?, version?, refresh?}) ->
 }                                              // 无 scorer / 扫描异常 = grade 'E' + degraded
 assessAction(evidence, {grade?|assessment?|pluginId?}) -> {
   light, baseLight, gradeFloor, raised, pluginGrade, gradeBasis,
-  matchedRule, lifecycle, credential, reason, tool, target, path, durationMs
+  matchedRule, category, tags, lifecycle, credential, reason, evidence, tool, target, path, durationMs
 }
 decideAction(evidence, opts?) -> assessAction 结果 + { decision:'allow'|'mark'|'ask'|'delegate'|'deny', severity, decisionRecord }
-baseLight(evidence) -> { light, matchedRule, lifecycle, credential, target, path, reason }
+baseLight(evidence) -> { light, matchedRule, category, tags, lifecycle, credential, target, path, reason, evidence }
+explain(evidence)   -> { light, matchedRule, category, tags, reason, evidence, target }
+rules / ruleIds() / registerRule(rule, {before|after}) / overrideRule(id, patch) / removeRule(id) / resetRules()
 gradeFloor(grade) / effectiveLight(base, grade) / cachedGrade(id) / cacheStats() / invalidate(id) / clearCache()
 ```
 不变量（有测试）：`rank(effectiveLight) >= rank(baseLight)` 且 `>= rank(gradeFloor)`；
 等级永不降低动作风险；未知等级按 E、未知工具按黄、未知灯色按黄。
-审计：一次 `decideAction` 一条 `AUDIT.UMBRELLA_DECISION`（`kind:'umbrella-decision'`）；
+
+**动作规则表（v2.7.8）**：`ActionRule = { id, category, light, reason, tags[], match(ev, ctx), evidence(ev, ctx) }`，
+默认 15 条，数组顺序即优先级、**首个命中胜出**；`register` 必须给 `before`/`after`（追加到表尾等于永不命中），
+形状不合法在注册时抛错。`evidence` 返回结构化 `{ matchedPattern, ... }` 进审计，回答「为什么是这个灯色」；
+上下文由 `buildActionContext()` 一次解析（`mode`/`commandText`/`writeTargets`/`readTargets`/`targetPath`/`url`/`targetPid`），
+shell 重定向只静态解析字面量，动态构造交给兜底规则判黄。
+
+审计：一次 `decideAction` 一条 `AUDIT.UMBRELLA_DECISION`（`kind:'umbrella-decision'`，含 `category` 与 `evidence`）；
 插件评分不重复写（沿用 5.4 的 `AUDIT.SCORE`）。
 **边界**：本仓库没有工具执行钩子，本服务提供决策而**不强制拦截**；`delegate`/`ask` 的落点
 （restart-guard / approver）需要调用方显式投递。详见 `docs/UMBRELLA.md §7`。

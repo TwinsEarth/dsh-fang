@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## v2.7.8（2026-11-02）
+
+**主题：动作规则表声明化 —— 与 AST 规则表同粒度（`match` / `evidence` 可独立测试）。**
+
+### 新增
+- `src/lib/umbrella.mjs`：
+  - `DEFAULT_ACTION_RULES`：15 条**声明式规则**，字段统一为
+    `{ id, category, light, reason, tags[], match(evidence, context), evidence(evidence, context) }`，
+    数组顺序即优先级、**首个命中胜出**；规则 id / 灯色与 v2.7.6 完全一致（行为不变）。
+  - `buildActionContext()`：`mode` / `commandText` / `targetPath` / `url{raw,host,hostPort}` / `targetPid` /
+    `writeTargets[]` / `readTargets[]`，一次解析供 15 条规则共享。
+  - `parseShellRedirects()`：`>` `>>`、`tee`、`dd of=`、`Set-Content`/`Out-File` 的写目标，
+    `cat/less/head/tail/more/Get-Content/type` 的读目标；**只解析字面量**，`$VAR`/`$(...)`/通配等动态构造一律跳过
+    （交给兜底规则判黄，不静默放行）。
+  - `parseUrlParts()`：不依赖 `URL` 全局对象，带默认端口（http 80 / https 443）。
+  - `createActionRuleSet()` + `assertActionRule()`：`register(rule, {before|after})` / `override` / `remove` / `reset`。
+    注册**必须显式给位置**（追加到表尾等于永不命中）；重复 id、未知 `category`、未知灯色、缺 `match`/`evidence`
+    一律在注册时抛错，不会在评分路径上静默漏判。
+  - `baseLight()` 改为表驱动，返回新增 `category` / `tags` / 结构化 `evidence`（`matchedPattern` 等）；
+    `assessAction` 与 `umbrella-decision` 审计记录同步带 `category` + `evidence`。
+- 插件面 `fangUmbrella` 新增：`explain(evidence)`、`rules`、`ruleIds()`、
+  `registerRule/overrideRule/removeRule/resetRules`。
+- TypeScript 参考实现同步声明式规则表（`DEFAULT_ACTION_RULES` / `createActionRuleSet` / 上下文解析），
+  编译产物上跑 76 项行为断言。
+
+### 测试
+- `test/umbrella.test.mjs` **35 → 45 项**：规则表形状/顺序/冻结、15 条规则逐条命中与证据形状、
+  上下文解析（重定向/URL/相对路径/PID）、规则集注册/覆盖/移除/重置与错误分支、
+  自定义规则影响真实评分与决策审计、评分调用不修改规则表。
+- 全量测试 **446 → 456 项**。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 8 个补丁位。
+
 ## v2.7.7（2026-11-01）
 
 **主题：保护伞的 TypeScript 参考实现 —— 可编译、可验证、不随包发布。**

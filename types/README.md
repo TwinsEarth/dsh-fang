@@ -34,7 +34,7 @@ DSH_FANG_TSC=/abs/path/to/typescript/lib/tsc.js node tools/release/typecheck.mjs
 | `paths.ts` | 纯字符串路径归一化 / 包含判定（`isWithin`） | `normalizePolicy` 里的 `path.resolve` 部分 |
 | `cache.ts` | 通用 LRU（命中重插、`peek` 不刷新） | `createUmbrella` 里的 `Map` 缓存 |
 | `plugin-scorer.ts` | 插件评分：指纹缓存 + 失败往坏里判 | `assessPlugin` / `cacheStats` / `invalidate` |
-| `action-scorer.ts` | 动作评分：15 条规则 + 下限抬高 + 决策矩阵 | `baseLight` / `effectiveLight` / `decide` |
+| `action-scorer.ts` | 动作评分：**声明式 15 条规则**（`id/category/light/tags/match/evidence`，可独立测试）+ 上下文解析（重定向/URL/PID）+ 下限抬高 + 决策矩阵 | `baseLight` / `effectiveLight` / `decide` / `DEFAULT_ACTION_RULES` |
 | `umbrella.ts` | 门面：两个出口合流、决策 + 一条审计 | `createUmbrella()` |
 | `index.ts` | 公共出口 | 服务面 `fangUmbrella` |
 

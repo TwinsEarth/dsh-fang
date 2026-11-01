@@ -30,6 +30,18 @@ export type ActionMode = 'read' | 'write' | 'exec' | 'network' | 'import' | 'unk
 
 export type ActionScope = 'session' | 'system' | 'process'
 
+/** 动作规则类别（与 .mjs 的 ACTION_CATEGORIES 一致）。 */
+export type ActionCategory =
+  | 'lifecycle'
+  | 'destructive'
+  | 'credential'
+  | 'network'
+  | 'import'
+  | 'write'
+  | 'exec'
+  | 'read'
+  | 'fallback'
+
 export const LIGHT = {
   GREEN: 'green',
   BLUE: 'blue',
@@ -130,11 +142,63 @@ export interface ActionPolicy {
 export interface BaseLightResult {
   readonly light: Light
   readonly matchedRule: string
+  readonly category: ActionCategory
+  readonly tags: readonly string[]
   readonly lifecycle: boolean
   readonly credential: boolean
   readonly target: ActionTarget
   readonly path: string | null
   readonly reason: string
+  readonly evidence: RuleEvidence
+}
+
+/** 规则证据：结构化的「为什么匹配」，进审计。 */
+export interface RuleEvidence {
+  readonly matchedPattern?: string
+  readonly targets?: readonly string[]
+  readonly path?: string | null
+  readonly host?: string | null
+  readonly url?: string
+  readonly [key: string]: unknown
+}
+
+/** 动作解析上下文：一次解析，15 条规则共享。 */
+export interface ActionContext {
+  readonly mode: ActionMode
+  readonly target: ActionTarget
+  readonly commandText: string
+  readonly targetPath: string | null
+  readonly url: { readonly raw: string; readonly host: string; readonly hostPort: string } | null
+  readonly targetPid: number | null
+  readonly writeTargets: readonly string[]
+  readonly readTargets: readonly string[]
+  readonly policy: ActionPolicy
+}
+
+/** 声明式动作规则：id / category / light / reason / tags / match / evidence。 */
+export interface ActionRule {
+  readonly id: string
+  readonly category: ActionCategory
+  readonly light: Light
+  readonly reason: string
+  readonly tags: readonly string[]
+  readonly match: (evidence: ActionEvidence, context: ActionContext) => boolean
+  readonly evidence: (evidence: ActionEvidence, context: ActionContext) => RuleEvidence
+}
+
+export interface RulePlacement {
+  readonly before?: string
+  readonly after?: string
+}
+
+export interface ActionRuleSet {
+  readonly rules: readonly ActionRule[]
+  ids(): readonly string[]
+  register(rule: ActionRule, placement: RulePlacement): ActionRule
+  override(id: string, patch: Partial<Omit<ActionRule, 'id'>>): ActionRule
+  remove(id: string): boolean
+  reset(): void
+  find(evidence: ActionEvidence, context: ActionContext): ActionRule | null
 }
 
 export interface ActionAssessment {
@@ -145,9 +209,12 @@ export interface ActionAssessment {
   readonly pluginGrade: PluginGrade
   readonly gradeBasis: GradeBasis
   readonly matchedRule: string
+  readonly category: ActionCategory
+  readonly tags: readonly string[]
   readonly lifecycle: boolean
   readonly credential: boolean
   readonly reason: string
+  readonly evidence: RuleEvidence
   readonly tool: string
   readonly target: ActionTarget
   readonly path: string | null
@@ -181,6 +248,8 @@ export interface DecisionRecord {
   readonly baseLight: Light
   readonly light: Light
   readonly matchedRule: string
+  readonly category: ActionCategory
+  readonly evidence: RuleEvidence
   readonly decision: Decision
   readonly severity: Severity
   readonly durationMs: number

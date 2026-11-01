@@ -144,9 +144,49 @@ export function apply(ctx, config) {
       return umbrella.decideAction(evidence, opts ?? {})
     },
 
-    /** 只算基础灯色（不考虑插件等级）。 */
+    /** 只算基础灯色（不考虑插件等级），带 matchedRule / category / tags / 结构化证据。 */
     baseLight(evidence = {}) {
       return umbrella.baseLight(evidence)
+    },
+
+    /** 面向 UI/审批的解释：规则 id、类别、tags、证据（为什么是这个灯色）。 */
+    explain(evidence = {}) {
+      const base = umbrella.baseLight(evidence)
+      return {
+        light: base.light,
+        matchedRule: base.matchedRule,
+        category: base.category,
+        tags: base.tags,
+        reason: base.reason,
+        evidence: base.evidence,
+        target: base.target,
+      }
+    },
+
+    /** 规则表只读视图（数组顺序即优先级）。 */
+    get rules() {
+      return umbrella.rules
+    },
+
+    ruleIds() {
+      return umbrella.ruleIds()
+    },
+
+    /** 动态注册/覆盖：形状不合法或插入位置不存在会立刻抛错，不会被静默忽略。 */
+    registerRule(rule, opts) {
+      return umbrella.registerRule(rule, opts)
+    },
+
+    overrideRule(id, patch) {
+      return umbrella.overrideRule(id, patch)
+    },
+
+    removeRule(id) {
+      return umbrella.removeRule(id)
+    },
+
+    resetRules() {
+      return umbrella.resetRules()
     },
 
     gradeFloor(grade) {

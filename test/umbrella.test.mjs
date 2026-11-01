@@ -15,12 +15,17 @@ import path from 'node:path'
 import { makeCtx, tmpDir } from './helpers.mjs'
 import { GRADE_COLOR, LIGHT, LIGHT_RANK, SERVICE } from '../src/kernel/index.mjs'
 import {
+  ACTION_CATEGORIES,
+  DEFAULT_ACTION_RULES,
   DECISION,
   DEFAULT_CREDENTIAL_PATTERNS,
   FLOOR_TABLES,
   GRADE_FLOOR,
   GRADE_FLOOR_STRICT,
+  assertActionRule,
   baseLight,
+  buildActionContext,
+  createActionRuleSet,
   createUmbrella,
   decide,
   effectiveLight,
@@ -30,8 +35,11 @@ import {
   normalizeGrade,
   normalizeLight,
   normalizePolicy,
+  parseShellRedirects,
+  parseUrlParts,
   rankOf,
   resolveFloorTable,
+  scopeOf,
 } from '../src/lib/umbrella.mjs'
 import * as umbrellaPlugin from '../src/plugins/umbrella.mjs'
 
@@ -594,4 +602,296 @@ function pick(result) {
 test('lib re-uses the kernel light vocabulary', () => {
   assert.deepEqual(LIGHT, { GREEN: 'green', BLUE: 'blue', YELLOW: 'yellow', RED: 'red' })
   assert.equal(LIGHT_RANK.green < LIGHT_RANK.red, true)
+})
+
+// ── 声明式动作规则表（v2.7.8）────────────────────────────────────────────────
+
+test('DEFAULT_ACTION_RULES: 15 条规则、顺序即优先级、冻结不可变', () => {
+  assert.equal(DEFAULT_ACTION_RULES.length, 15)
+  assert.equal(Object.isFrozen(DEFAULT_ACTION_RULES), true)
+  assert.deepEqual(DEFAULT_ACTION_RULES.map((r) => r.id), [
+    'dsh-lifecycle',
+    'destructive-command',
+    'credential-access',
+    'network-allowlisted',
+    'network-egress',
+    'dynamic-import',
+    'write-in-buffer',
+    'write-in-allowlist',
+    'write-production',
+    'write-outside-buffer',
+    'exec-read-only',
+    'exec-side-effect',
+    'read-in-buffer',
+    'read-outside-buffer',
+    'unknown-tool',
+  ])
+  for (const rule of DEFAULT_ACTION_RULES) {
+    assert.ok(typeof rule.id === 'string' && rule.id.length > 0, 'rule.id')
+    assert.ok(ACTION_CATEGORIES.includes(rule.category), `rule ${rule.id} category`)
+    assert.ok(Object.prototype.hasOwnProperty.call(LIGHT_RANK, rule.light), `rule ${rule.id} light`)
+    assert.equal(typeof rule.match, 'function', `rule ${rule.id} match`)
+    assert.equal(typeof rule.evidence, 'function', `rule ${rule.id} evidence`)
+    assert.ok(Array.isArray(rule.tags), `rule ${rule.id} tags`)
+  }
+  // 兜底永远在最后：前面任何规则漏判都会落到它这里
+  assert.equal(DEFAULT_ACTION_RULES[DEFAULT_ACTION_RULES.length - 1].id, 'unknown-tool')
+})
+
+test('每条规则都能独立命中，并给出结构化证据', () => {
+  const cases = [
+    {
+      name: 'dsh-lifecycle (tool)',
+      ev: { tool: 'restart' },
+      rule: 'dsh-lifecycle', category: 'lifecycle', light: 'red', pattern: 'tool:restart',
+    },
+    {
+      name: 'dsh-lifecycle (scope)',
+      ev: { tool: 'write', scope: 'process', target: { kind: 'path', value: 'C:/x' } },
+      rule: 'dsh-lifecycle', category: 'lifecycle', light: 'red', pattern: 'scope:process',
+    },
+    {
+      name: 'destructive-command',
+      ev: { tool: 'bash', args: { command: 'rm -rf /tmp/x' } },
+      rule: 'destructive-command', category: 'destructive', light: 'red', patternPrefix: 'pattern:',
+    },
+    {
+      name: 'credential-access',
+      ev: { tool: 'read', target: { kind: 'path', value: path.resolve('C:/home/u/.ssh/id_rsa') } },
+      rule: 'credential-access', category: 'credential', light: 'red', patternPrefix: 'pattern:',
+    },
+    {
+      name: 'network-allowlisted',
+      ev: { tool: 'web_fetch', target: { kind: 'url', value: 'https://api.example.com/v1' } },
+      rule: 'network-allowlisted', category: 'network', light: 'blue', pattern: 'allowlisted-host',
+    },
+    {
+      name: 'network-egress',
+      ev: { tool: 'web_fetch', target: { kind: 'url', value: 'https://evil.test/x' } },
+      rule: 'network-egress', category: 'network', light: 'yellow', pattern: 'non-allowlisted-host',
+    },
+    {
+      name: 'dynamic-import',
+      ev: { tool: 'import', args: { specifier: './x.mjs' } },
+      rule: 'dynamic-import', category: 'import', light: 'yellow', pattern: 'import-tool',
+    },
+    {
+      name: 'write-in-buffer',
+      ev: { tool: 'write', target: { kind: 'path', value: path.join(BUF, 'a.txt') } },
+      rule: 'write-in-buffer', category: 'write', light: 'blue', pattern: 'in-buffer',
+    },
+    {
+      name: 'write-in-allowlist',
+      ev: { tool: 'write', target: { kind: 'path', value: path.join(ALLOW, 'a.txt') } },
+      rule: 'write-in-allowlist', category: 'write', light: 'blue', pattern: 'in-allowlist',
+    },
+    {
+      name: 'write-production',
+      ev: { tool: 'write', target: { kind: 'path', value: path.join(PROD, 'a.txt') } },
+      rule: 'write-production', category: 'write', light: 'yellow', pattern: 'production-root',
+    },
+    {
+      name: 'write-outside-buffer',
+      ev: { tool: 'write', target: { kind: 'path', value: path.resolve('C:/fangs/other/a.txt') } },
+      rule: 'write-outside-buffer', category: 'write', light: 'yellow', pattern: 'outside-buffer-and-allowlist',
+    },
+    {
+      name: 'exec-read-only',
+      ev: { tool: 'bash', args: { command: 'git status' } },
+      rule: 'exec-read-only', category: 'exec', light: 'blue', pattern: 'read-only-prefix',
+    },
+    {
+      name: 'exec-side-effect',
+      ev: { tool: 'bash', args: { command: 'npm install left-pad' } },
+      rule: 'exec-side-effect', category: 'exec', light: 'yellow', pattern: 'side-effect',
+    },
+    {
+      name: 'read-in-buffer',
+      ev: { tool: 'read', target: { kind: 'path', value: path.join(BUF, 'a.txt') } },
+      rule: 'read-in-buffer', category: 'read', light: 'green', pattern: 'in-buffer',
+    },
+    {
+      name: 'read-outside-buffer',
+      ev: { tool: 'read', target: { kind: 'path', value: path.resolve('C:/fangs/other/a.txt') } },
+      rule: 'read-outside-buffer', category: 'read', light: 'blue', pattern: 'outside-buffer',
+    },
+    {
+      name: 'unknown-tool (fallback)',
+      ev: { tool: 'mystery-tool' },
+      rule: 'unknown-tool', category: 'fallback', light: 'yellow', pattern: 'fallback',
+    },
+  ]
+  for (const c of cases) {
+    const out = baseLight(c.ev, policy)
+    assert.equal(out.matchedRule, c.rule, `${c.name}: rule`)
+    assert.equal(out.category, c.category, `${c.name}: category`)
+    assert.equal(out.light, c.light, `${c.name}: light`)
+    if (c.pattern !== undefined) {
+      assert.equal(out.evidence.matchedPattern, c.pattern, `${c.name}: matchedPattern`)
+    }
+    if (c.patternPrefix !== undefined) {
+      assert.ok(String(out.evidence.matchedPattern).startsWith(c.patternPrefix), `${c.name}: matchedPattern ${out.evidence.matchedPattern}`)
+    }
+    assert.ok(out.evidence && typeof out.evidence === 'object', `${c.name}: evidence object`)
+    assert.ok(Array.isArray(out.tags), `${c.name}: tags`)
+  }
+})
+
+test('credential 规则的证据带命中的具体路径', () => {
+  const ssh = path.resolve('C:/home/u/.ssh/id_rsa')
+  const out = baseLight({ tool: 'read', target: { kind: 'path', value: ssh } }, policy)
+  assert.equal(out.matchedRule, 'credential-access')
+  assert.ok(out.evidence.paths.includes(ssh), JSON.stringify(out.evidence.paths))
+  assert.ok(String(out.evidence.matchedPattern).startsWith('pattern:'))
+})
+
+test('parseShellRedirects 只取字面量目标，动态构造一律跳过', () => {
+  const { writeTargets, readTargets } = parseShellRedirects('cat in.txt | tee out.txt', policy)
+  assert.deepEqual(readTargets, [path.resolve('C:/fangs/in.txt')])
+  assert.deepEqual(writeTargets, [path.resolve('C:/fangs/out.txt')])
+
+  const redirect = parseShellRedirects('echo hi > out.txt && echo x >> second.txt', policy)
+  assert.deepEqual(redirect.writeTargets, [path.resolve('C:/fangs/out.txt'), path.resolve('C:/fangs/second.txt')])
+
+  // 动态路径（$VAR / $(...) / 通配）不静态解析 —— 由 fallback 判黄兜住
+  const dynamic = parseShellRedirects('echo hi > $TMP/out.txt', policy)
+  assert.deepEqual(dynamic.writeTargets, [])
+
+  const pwsh = parseShellRedirects("Set-Content -Path out.txt 'x'", policy)
+  assert.deepEqual(pwsh.writeTargets, [path.resolve('C:/fangs/out.txt')])
+
+  const dd = parseShellRedirects('dd if=in.img of=out.img bs=1', policy)
+  assert.deepEqual(dd.writeTargets, [path.resolve('C:/fangs/out.img')])
+})
+
+test('parseUrlParts 归一化 host / hostPort，坏 URL 返回 null', () => {
+  assert.deepEqual(parseUrlParts('https://API.example.com:8443/x'), {
+    raw: 'https://API.example.com:8443/x',
+    host: 'api.example.com',
+    hostPort: 'api.example.com:8443',
+  })
+  assert.equal(parseUrlParts('http://a.test/p').hostPort, 'a.test:80')
+  assert.equal(parseUrlParts('not a url'), null)
+  assert.equal(parseUrlParts(''), null)
+})
+
+test('buildActionContext 一次解析出 mode/target/path/url/pid/重定向', () => {
+  const ctx = buildActionContext({
+    tool: 'bash',
+    args: { command: 'cat in.txt > out.txt' },
+    target: { kind: 'command', value: 'cat in.txt > out.txt' },
+  }, policy)
+  assert.equal(ctx.mode, 'exec')
+  assert.equal(ctx.target.kind, 'command')
+  assert.deepEqual(ctx.readTargets, [path.resolve('C:/fangs/in.txt')])
+  assert.deepEqual(ctx.writeTargets, [path.resolve('C:/fangs/out.txt')])
+
+  const pathCtx = buildActionContext({ tool: 'write', target: { kind: 'path', value: 'buffer/a.txt' } }, policy)
+  assert.equal(pathCtx.targetPath, path.resolve('C:/fangs/buffer/a.txt'))
+
+  const urlCtx = buildActionContext({ tool: 'fetch', target: { kind: 'url', value: 'https://a.test/x' } }, policy)
+  assert.equal(urlCtx.url.host, 'a.test')
+
+  const pidCtx = buildActionContext({ tool: 'shell', target: { kind: 'pid', value: '4242' } }, policy)
+  assert.equal(pidCtx.targetPid, 4242)
+
+  assert.equal(scopeOf({ scope: 'system' }), 'system')
+  assert.equal(scopeOf({ args: { scope: 'process' } }), 'process')
+  assert.equal(scopeOf({ scope: 'session' }), 'session')
+  assert.equal(scopeOf({}), null)
+})
+
+test('createActionRuleSet: register 必须指定插入位置，重复 id 必须抛错', () => {
+  const set = createActionRuleSet()
+  assert.deepEqual(set.ids(), DEFAULT_ACTION_RULES.map((r) => r.id))
+
+  const custom = {
+    id: 'secret-marker',
+    category: 'write',
+    light: 'red',
+    reason: 'secret marker',
+    tags: ['custom'],
+    match: (ev, ctx) => String(ctx.targetPath ?? '').includes('secret'),
+    evidence: () => ({ matchedPattern: 'secret-marker' }),
+  }
+  set.register(custom, { before: 'unknown-tool' })
+  assert.equal(set.ids()[set.ids().length - 2], 'secret-marker')
+
+  assert.throws(() => set.register(custom, { before: 'unknown-tool' }), /already registered/)
+  assert.throws(() => set.register({ ...custom, id: 'no-position' }), /requires before\/after/)
+  assert.throws(() => assertActionRule({ id: 'bad', category: 'write', light: 'red' }), /match\(\) is required/)
+  assert.throws(() => assertActionRule({ ...custom, id: 'bad2', category: 'nope' }), /unknown category/)
+  assert.throws(() => assertActionRule({ ...custom, id: 'bad3', light: 'purple' }), /unknown light/)
+})
+
+test('createActionRuleSet: override 改灯色/理由，remove 与 reset 生效', () => {
+  const set = createActionRuleSet()
+  const original = set.rules.find((r) => r.id === 'unknown-tool')
+  set.override('unknown-tool', { light: 'blue', reason: 'overridden' })
+  const overridden = set.rules[set.rules.length - 1]
+  assert.equal(overridden.light, 'blue')
+  assert.equal(overridden.reason, 'overridden')
+  assert.equal(typeof overridden.match, 'function', 'override 保留未覆盖字段')
+  assert.equal(typeof overridden.evidence, 'function')
+
+  assert.throws(() => set.override('missing-rule', {}), /not found/)
+  assert.equal(set.remove('unknown-tool'), true)
+  assert.equal(set.ids().length, 14)
+  assert.equal(set.remove('unknown-tool'), false)
+
+  set.reset()
+  assert.deepEqual(set.ids(), DEFAULT_ACTION_RULES.map((r) => r.id))
+  assert.equal(set.rules[set.rules.length - 1], original, 'reset 恢复默认表')
+})
+
+test('umbrella 使用自定义规则集：注册、覆盖都影响真实评分与决策', () => {
+  const set = createActionRuleSet()
+  const umbrella = createUmbrella({ scorer: null, policy: { bufferRoot: BUF }, rules: set })
+  assert.equal(umbrella.ruleIds().length, 15)
+
+  umbrella.registerRule({
+    id: 'no-secret-dir',
+    category: 'write',
+    light: 'red',
+    reason: '禁止触碰 secret 目录',
+    tags: ['custom'],
+    match: (ev, ctx) => String(ctx.targetPath ?? '').includes('secret'),
+    evidence: () => ({ matchedPattern: 'secret-dir' }),
+  }, { before: 'unknown-tool' })
+
+  const mystery = { tool: 'mystery', target: { kind: 'path', value: path.resolve('C:/x/secret/a.bin') } }
+  const assessment = umbrella.assessAction(mystery, { grade: 'A' })
+  assert.equal(assessment.baseLight, 'red')
+  assert.equal(assessment.light, 'red')
+  assert.equal(assessment.matchedRule, 'no-secret-dir')
+  assert.equal(assessment.category, 'write')
+  assert.deepEqual(assessment.tags, ['custom'])
+  assert.equal(assessment.evidence.matchedPattern, 'secret-dir')
+
+  const decision = umbrella.decideAction(mystery, { grade: 'A' })
+  assert.equal(decision.decision, DECISION.ASK)
+  assert.equal(decision.severity, 'critical')
+  assert.equal(decision.decisionRecord.category, 'write')
+  assert.deepEqual(decision.decisionRecord.evidence, { matchedPattern: 'secret-dir' })
+
+  umbrella.overrideRule('unknown-tool', { light: 'blue', reason: 'demo override' })
+  const fallback = umbrella.assessAction({ tool: 'mystery-tool' }, { grade: 'A' })
+  assert.equal(fallback.baseLight, 'blue')
+  assert.equal(fallback.reason, 'demo override')
+
+  umbrella.resetRules()
+  assert.equal(umbrella.ruleIds().length, 15)
+  // 规则表只读视图是副本：外部 push 不影响内部
+  const view = umbrella.rules
+  view.push({ id: 'injected' })
+  assert.equal(umbrella.ruleIds().length, 15)
+})
+
+test('规则表不因评分调用被改动（纯函数语义）', () => {
+  const before = JSON.stringify(DEFAULT_ACTION_RULES.map((r) => r.id))
+  const ev = Object.freeze({ tool: 'write', target: Object.freeze({ kind: 'path', value: path.join(BUF, 'a.txt') }) })
+  const outer = baseLight(ev, policy)
+  const inner = baseLight(ev, policy)
+  assert.deepEqual(outer, inner)
+  assert.equal(JSON.stringify(DEFAULT_ACTION_RULES.map((r) => r.id)), before)
 })

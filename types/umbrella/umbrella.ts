@@ -154,6 +154,8 @@ export class Umbrella {
       baseLight: assessment.baseLight,
       light: assessment.light,
       matchedRule: assessment.matchedRule,
+      category: assessment.category,
+      evidence: assessment.evidence,
       decision: decision.decision,
       severity: decision.severity,
       durationMs: Math.max(0, this.clock.now() - started),

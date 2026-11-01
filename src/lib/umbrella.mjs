@@ -302,6 +302,13 @@ function matchesAny(patterns, text) {
   return false
 }
 
+/** 动作作用域：session | system | process（system/process 视为 DSH 生命周期）。 */
+export function scopeOf(evidence = {}) {
+  const raw = evidence?.scope ?? evidence?.args?.scope
+  const scope = String(raw ?? '').trim().toLowerCase()
+  return scope === 'session' || scope === 'system' || scope === 'process' ? scope : null
+}
+
 export function isDestructiveCommand(evidence = {}, policy = normalizePolicy()) {
   const mode = modeOf(evidence)
   if (mode !== 'exec' && mode !== 'unknown') return false
@@ -311,7 +318,7 @@ export function isDestructiveCommand(evidence = {}, policy = normalizePolicy()) 
 }
 
 export function isDshLifecycleAction(evidence = {}, policy = normalizePolicy()) {
-  const scope = String(evidence?.scope ?? evidence?.args?.scope ?? '').trim().toLowerCase()
+  const scope = scopeOf(evidence)
   if (scope === 'system' || scope === 'process') return true
   const tool = String(evidence?.tool ?? '').trim().toLowerCase()
   const lifecycleTools = asStringList(policy.lifecycleTools).map(v => v.toLowerCase())
@@ -383,98 +390,440 @@ function execLooksReadOnly(evidence, policy) {
   return matchesAny(compilePatterns(policy.readOnlyExecPatterns), text)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 动作规则上下文（每条规则共享一份解析结果，避免重复解析命令/路径/URL）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHELL_TOOLS = new Set(['bash', 'bash_pwsh', 'pwsh', 'powershell', 'shell', 'exec'])
+const WRITE_TOOL_NAMES = new Set(['write', 'edit', 'multi-edit', 'append', 'patch', 'apply_patch'])
+const READ_TOOL_NAMES = new Set(['read', 'grep', 'glob', 'ls', 'stat', 'list'])
+
+const WRITE_REDIRECT_CAPTURE_RE = /(?:^|[^>])>{1,2}\s*([^\s|;&<>]+)/g
+const TEE_CAPTURE_RE = /\btee\b(?:\s+-a)?\s+([^\s|;&<>]+)/gi
+const DD_CAPTURE_RE = /\bdd\b[^\n]*?\bof=([^\s]+)/gi
+const PS_WRITE_CAPTURE_RE = /\b(?:Set-Content|Out-File)\b(?:\s+-(?:Path|FilePath))?\s+([^\s|;&<>]+)/gi
+const READ_CMD_CAPTURE_RE = /(?:^|[|;&]\s*)(?:cat|less|head|tail|more|Get-Content|type)\s+([^\s|;&<>]+)/gi
+
+/** 动态构造（$(...)、$ENV、反引号、通配符）的路径不静态解析：交给兜底规则判黄。 */
+function isStaticToken(token) {
+  return typeof token === 'string'
+    && token.length > 0
+    && token !== '&'
+    && !/[$`*?]/.test(token)
+}
+
+function resolveMaybePath(value, policy) {
+  return resolvePathValue(value, policy.root)
+}
+
+/** 保守解析 shell 的写/读目标：只取字面量，动态构造一律跳过。 */
+export function parseShellRedirects(commandText, policyInput = {}) {
+  const policy = policyInput && policyInput.__normalized === true ? policyInput : normalizePolicy(policyInput ?? {})
+  const text = String(commandText ?? '')
+  const writeTargets = []
+  const readTargets = []
+  if (text.length === 0) return { writeTargets, readTargets }
+  const push = (list, raw) => {
+    if (!isStaticToken(raw)) return
+    const abs = resolveMaybePath(raw, policy)
+    if (abs !== null && !list.includes(abs)) list.push(abs)
+  }
+  for (const re of [WRITE_REDIRECT_CAPTURE_RE, TEE_CAPTURE_RE, DD_CAPTURE_RE, PS_WRITE_CAPTURE_RE]) {
+    re.lastIndex = 0
+    let m
+    while ((m = re.exec(text)) !== null) push(writeTargets, m[1])
+  }
+  READ_CMD_CAPTURE_RE.lastIndex = 0
+  let r
+  while ((r = READ_CMD_CAPTURE_RE.exec(text)) !== null) push(readTargets, r[1])
+  return { writeTargets, readTargets }
+}
+
+/** URL → { raw, host, hostPort }；坏 URL 返回 null（由 network-egress 判黄兜住）。 */
+export function parseUrlParts(raw) {
+  const text = String(raw ?? '').trim()
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)/i.exec(text)
+  if (m === null) return null
+  const scheme = String(m[1]).toLowerCase()
+  const authority = String(m[2])
+  const hostPart = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority
+  let host = hostPart
+  let port = ''
+  const colon = hostPart.lastIndexOf(':')
+  if (colon > 0) {
+    host = hostPart.slice(0, colon)
+    port = hostPart.slice(colon + 1)
+  }
+  if (host.length === 0) return null
+  const defaultPort = scheme === 'https' ? '443' : scheme === 'http' ? '80' : ''
+  const effectivePort = port.length > 0 ? port : defaultPort
+  return {
+    raw: text,
+    host: host.toLowerCase(),
+    hostPort: effectivePort.length > 0 ? `${host.toLowerCase()}:${effectivePort}` : host.toLowerCase(),
+  }
+}
+
 /**
- * 基础灯色：只看动作本身，不看插件等级。
- * 规则顺序 = 危险度顺序，先命中先返回；返回值带 matchedRule 供审计追溯。
+ * 规则上下文：一次解析，供 15 条规则共享。
+ * @returns {{mode:string, target:object, commandText:string, targetPath:string|null,
+ *   url:{raw:string,host:string,hostPort:string}|null, targetPid:number|null,
+ *   writeTargets:string[], readTargets:string[], policy:object}}
  */
-export function baseLight(evidence = {}, policyInput = {}) {
+export function buildActionContext(evidence = {}, policyInput = {}) {
   const policy = policyInput && policyInput.__normalized === true ? policyInput : normalizePolicy(policyInput ?? {})
   const mode = modeOf(evidence)
   const target = targetOf(evidence)
-
-  // 1) DSH 生命周期动作：先判，让宿主动作走 restart-guard 的专用路径（委托，而不是直接问用户）
-  if (isDshLifecycleAction(evidence, policy)) {
-    return result(LIGHT.RED, 'dsh-lifecycle', { target, lifecycle: true })
-  }
-  // 2) 破坏性命令
-  if (isDestructiveCommand(evidence, policy)) {
-    return result(LIGHT.RED, 'destructive-command', { target })
-  }
-  // 3) 凭据访问：唯一硬拒绝的红灯
-  if (isCredentialAccess(evidence, policy)) {
-    return result(LIGHT.RED, 'credential-access', { target, credential: true })
-  }
-  // 4) 外连
-  if (isNetworkEgress(evidence)) {
-    if (networkAllowed(target.value, policy)) return result(LIGHT.BLUE, 'network-allowlisted', { target })
-    return result(LIGHT.YELLOW, 'network-egress', { target })
-  }
-  // 5) 动态加载未评分模块
-  if (isDynamicImport(evidence)) {
-    return result(LIGHT.YELLOW, 'dynamic-import', { target })
-  }
-  // 6) 写：缓冲区内 / 允许列表内 → 蓝；生产区 / 越界 → 黄
-  if (mode === 'write') {
-    const abs = resolveEvidencePath(evidence, policy)
-    if (policy.bufferRoot && abs && withinPath(abs, policy.bufferRoot)) {
-      return result(LIGHT.BLUE, 'write-in-buffer', { target, path: abs })
-    }
-    if (inAllowList(abs, policy)) return result(LIGHT.BLUE, 'write-in-allowlist', { target, path: abs })
-    if (policy.productionRoot && abs && withinPath(abs, policy.productionRoot)) {
-      return result(LIGHT.YELLOW, 'write-production', { target, path: abs })
-    }
-    return result(LIGHT.YELLOW, 'write-outside-buffer', { target, path: abs })
-  }
-  // 7) shell：有副作用但不在只读白名单 → 黄；只读白名单 → 蓝（放行并记录）
-  if (mode === 'exec') {
-    if (execLooksReadOnly(evidence, policy)) return result(LIGHT.BLUE, 'exec-read-only', { target })
-    const abs = resolveEvidencePath(evidence, policy)
-    if (policy.bufferRoot && abs && withinPath(abs, policy.bufferRoot)) {
-      return result(LIGHT.BLUE, 'write-in-buffer', { target, path: abs })
-    }
-    return result(LIGHT.YELLOW, 'exec-side-effect', { target, path: abs })
-  }
-  // 8) 读
-  if (isReadOnly(evidence)) {
-    const abs = resolveEvidencePath(evidence, policy)
-    if (policy.bufferRoot && abs && withinPath(abs, policy.bufferRoot)) {
-      return result(LIGHT.GREEN, 'read-in-buffer', { target, path: abs })
-    }
-    return result(LIGHT.BLUE, 'read-outside-buffer', { target, path: abs })
-  }
-  // 9) 兜底：不认识的工具 = 行为不可预测 → 黄
-  return result(LIGHT.YELLOW, 'unknown-tool', { target })
-}
-
-function result(light, matchedRule, extra = {}) {
+  const commandText = target.kind === 'command' ? target.value : String(evidence?.args?.command ?? '')
+  const redirects = parseShellRedirects(commandText, policy)
+  const targetPath = target.kind === 'path' ? resolvePathValue(target.value, policy.root) : null
+  const url = target.kind === 'url' ? parseUrlParts(target.value) : null
+  const targetPid = target.kind === 'pid' ? Number(target.value) : null
   return {
-    light,
-    matchedRule,
-    lifecycle: extra.lifecycle === true,
-    credential: extra.credential === true,
-    target: extra.target ?? { kind: 'none', value: '' },
-    path: extra.path ?? null,
-    reason: REASON_TEXT[matchedRule] ?? matchedRule,
-    ...(extra.meta ? { meta: extra.meta } : {}),
+    mode,
+    target,
+    commandText,
+    targetPath,
+    url,
+    targetPid: Number.isFinite(targetPid) ? targetPid : null,
+    writeTargets: redirects.writeTargets,
+    readTargets: redirects.readTargets,
+    policy,
   }
 }
 
-const REASON_TEXT = {
-  'destructive-command': '命令命中破坏性模式（不可逆）',
-  'dsh-lifecycle': 'DSH 生命周期动作，交给 restart-guard',
-  'credential-access': '命中凭据路径，硬拒绝',
-  'network-egress': '外连未在允许列表',
-  'network-allowlisted': '外连命中允许列表',
-  'dynamic-import': '动态加载未评分模块',
-  'write-in-buffer': '写落在沙箱缓冲区内',
-  'write-in-allowlist': '写命中允许列表',
-  'write-production': '写落在生产区',
-  'write-outside-buffer': '写越出沙箱',
-  'exec-read-only': '只读 shell 命令（无重定向）',
-  'exec-side-effect': 'shell 命令有副作用，不在只读白名单',
-  'read-in-buffer': '沙箱内只读',
-  'read-outside-buffer': '沙箱外只读',
-  'unknown-tool': '未登记的工具，保守判黄',
+// ─────────────────────────────────────────────────────────────────────────────
+// 声明式动作规则表：id / category / light / reason / tags / match / evidence
+//
+// 与 AST 规则表（S1–S7 / C2–C5）同一个粒度：每条规则可独立喂证据、独立断言证据形状。
+// **首个命中胜出**（数组顺序即优先级），不是"取最高灯色"——灯色是排他性的，
+// 而且凭据访问必须无条件压过"沙箱内只读"的绿规则。
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const ACTION_CATEGORIES = [
+  'lifecycle', 'destructive', 'credential', 'network', 'import', 'write', 'exec', 'read', 'fallback',
+]
+
+function firstPattern(patterns, text) {
+  for (const source of patterns ?? []) {
+    let re
+    try {
+      re = new RegExp(String(source), 'i')
+    } catch {
+      continue
+    }
+    if (re.test(String(text ?? ''))) return String(source)
+  }
+  return null
+}
+
+function shellCommandOf(ctx) {
+  return ctx.commandText
+}
+
+/** 写动作的目标路径集合：write 工具取 target 路径，shell 取重定向目标。 */
+function writeTargetsOf(ctx) {
+  const out = []
+  if (ctx.mode === 'write' && ctx.targetPath !== null) out.push(ctx.targetPath)
+  for (const t of ctx.writeTargets) if (!out.includes(t)) out.push(t)
+  return out
+}
+
+/** 读动作的目标路径集合：read 工具取 target 路径，shell 取读命令目标。 */
+function readTargetsOf(ctx) {
+  const out = []
+  if (ctx.mode === 'read' && ctx.targetPath !== null) out.push(ctx.targetPath)
+  for (const t of ctx.readTargets) if (!out.includes(t)) out.push(t)
+  return out
+}
+
+const NO_TARGET = { kind: 'none', value: '' }
+
+/** 默认规则表（v2.7.8 起声明式；id 与 v2.7.6 的 15 条一一对应）。 */
+export const DEFAULT_ACTION_RULES = Object.freeze([
+  {
+    id: 'dsh-lifecycle',
+    category: 'lifecycle',
+    light: LIGHT.RED,
+    reason: 'DSH 生命周期动作，交给 restart-guard',
+    tags: ['hard-deny', 'delegate-to-restart-guard'],
+    match: (ev, ctx) => isDshLifecycleAction(ev, ctx.policy),
+    evidence: (ev, ctx) => {
+      const scope = scopeOf(ev)
+      const tool = String(ev?.tool ?? '').trim().toLowerCase()
+      const policy = ctx.policy
+      const lifecycleTools = policy.lifecycleTools.map((v) => v.toLowerCase())
+      let matchedPattern = 'unknown'
+      if (scope === 'system' || scope === 'process') matchedPattern = `scope:${scope}`
+      else if (lifecycleTools.includes(tool)) matchedPattern = `tool:${tool}`
+      else {
+        const hit = firstPattern(policy.lifecyclePatterns.map((p) => p.source ?? p), shellCommandOf(ctx))
+        matchedPattern = hit === null ? 'pattern' : `pattern:${hit}`
+      }
+      return { matchedPattern, tool: String(ev?.tool ?? ''), targetPid: ctx.targetPid, commandSnippet: shellCommandOf(ctx).slice(0, 200) }
+    },
+  },
+  {
+    id: 'destructive-command',
+    category: 'destructive',
+    light: LIGHT.RED,
+    reason: '命令命中破坏性模式（不可逆）',
+    tags: ['hard-deny'],
+    match: (ev, ctx) => isDestructiveCommand(ev, ctx.policy),
+    evidence: (ev, ctx) => {
+      const hit = firstPattern(ctx.policy.destructivePatterns.map((p) => p.source ?? p), shellCommandOf(ctx))
+      return { matchedPattern: hit === null ? 'unknown' : `pattern:${hit}`, commandSnippet: shellCommandOf(ctx).slice(0, 200) }
+    },
+  },
+  {
+    id: 'credential-access',
+    category: 'credential',
+    light: LIGHT.RED,
+    reason: '命中凭据路径，硬拒绝',
+    tags: ['hard-deny'],
+    match: (ev, ctx) => isCredentialAccess(ev, ctx.policy),
+    evidence: (ev, ctx) => {
+      const candidates = []
+      if (ctx.targetPath !== null) candidates.push(ctx.targetPath)
+      for (const p of [...ctx.readTargets, ...ctx.writeTargets]) candidates.push(p)
+      const text = [ctx.target.value, shellCommandOf(ctx), String(ev?.args?.path ?? '')].filter(Boolean).join('\n')
+      const hit = firstPattern(ctx.policy.credentialPatterns.map((p) => p.source ?? p), text)
+      const matchedPaths = candidates.filter((p) => firstPattern(ctx.policy.credentialPatterns.map((x) => x.source ?? x), p) !== null)
+      return { matchedPattern: hit === null ? 'unknown' : `pattern:${hit}`, paths: matchedPaths, target: ctx.target }
+    },
+  },
+  {
+    id: 'network-allowlisted',
+    category: 'network',
+    light: LIGHT.BLUE,
+    reason: '外连命中允许列表',
+    tags: ['allow-with-audit'],
+    match: (ev, ctx) => isNetworkEgress(ev) && networkAllowed(ctx.target.value, ctx.policy),
+    evidence: (ev, ctx) => ({ matchedPattern: 'allowlisted-host', url: ctx.url?.raw ?? ctx.target.value, host: ctx.url?.host ?? null, allowlist: ctx.policy.networkAllowlist }),
+  },
+  {
+    id: 'network-egress',
+    category: 'network',
+    light: LIGHT.YELLOW,
+    reason: '外连未在允许列表',
+    tags: ['needs-approval'],
+    match: (ev, ctx) => isNetworkEgress(ev) && !networkAllowed(ctx.target.value, ctx.policy),
+    evidence: (ev, ctx) => ({ matchedPattern: ctx.url === null ? 'unparsable-url' : 'non-allowlisted-host', url: ctx.target.value, host: ctx.url?.host ?? null, allowlist: ctx.policy.networkAllowlist }),
+  },
+  {
+    id: 'dynamic-import',
+    category: 'import',
+    light: LIGHT.YELLOW,
+    reason: '动态加载未评分模块',
+    tags: ['needs-approval'],
+    match: (ev) => isDynamicImport(ev),
+    evidence: (ev, ctx) => ({ matchedPattern: 'import-tool', tool: String(ev?.tool ?? ''), specifier: String(ev?.args?.specifier ?? ev?.args?.module ?? ctx.target.value ?? '') }),
+  },
+  {
+    id: 'write-in-buffer',
+    category: 'write',
+    light: LIGHT.BLUE,
+    reason: '写落在沙箱缓冲区内',
+    tags: ['allow-with-audit'],
+    match: (ev, ctx) => {
+      if (ctx.mode !== 'write' && ctx.mode !== 'exec') return false
+      const root = ctx.policy.bufferRoot
+      if (root === null) return false
+      const targets = writeTargetsOf(ctx)
+      return targets.length > 0 && targets.every((t) => withinPath(t, root))
+    },
+    evidence: (ev, ctx) => ({ matchedPattern: 'in-buffer', targets: writeTargetsOf(ctx), bufferRoot: ctx.policy.bufferRoot }),
+  },
+  {
+    id: 'write-in-allowlist',
+    category: 'write',
+    light: LIGHT.BLUE,
+    reason: '写命中允许列表',
+    tags: ['allow-with-audit'],
+    match: (ev, ctx) => {
+      if (ctx.mode !== 'write') return false
+      const targets = writeTargetsOf(ctx)
+      return targets.length > 0 && targets.every((t) => inAllowList(t, ctx.policy))
+    },
+    evidence: (ev, ctx) => ({ matchedPattern: 'in-allowlist', targets: writeTargetsOf(ctx), allowPaths: ctx.policy.allowPaths }),
+  },
+  {
+    id: 'write-production',
+    category: 'write',
+    light: LIGHT.YELLOW,
+    reason: '写落在生产区',
+    tags: ['needs-approval'],
+    match: (ev, ctx) => {
+      if (ctx.mode !== 'write') return false
+      const root = ctx.policy.productionRoot
+      if (root === null) return false
+      const targets = writeTargetsOf(ctx)
+      return targets.length > 0 && targets.every((t) => withinPath(t, root))
+    },
+    evidence: (ev, ctx) => ({ matchedPattern: 'production-root', targets: writeTargetsOf(ctx), productionRoot: ctx.policy.productionRoot }),
+  },
+  {
+    id: 'write-outside-buffer',
+    category: 'write',
+    light: LIGHT.YELLOW,
+    reason: '写越出沙箱',
+    tags: ['needs-approval'],
+    match: (ev, ctx) => {
+      if (ctx.mode !== 'write') return false
+      const targets = writeTargetsOf(ctx)
+      if (targets.length === 0) return true
+      return targets.some((t) => !withinPath(t, ctx.policy.bufferRoot) && !inAllowList(t, ctx.policy))
+    },
+    evidence: (ev, ctx) => ({
+      matchedPattern: 'outside-buffer-and-allowlist',
+      targets: writeTargetsOf(ctx),
+      bufferRoot: ctx.policy.bufferRoot,
+      allowPaths: ctx.policy.allowPaths,
+    }),
+  },
+  {
+    id: 'exec-read-only',
+    category: 'exec',
+    light: LIGHT.BLUE,
+    reason: '只读 shell 命令（无重定向）',
+    tags: ['allow-with-audit'],
+    match: (ev, ctx) => ctx.mode === 'exec' && execLooksReadOnly(ev, ctx.policy),
+    evidence: (ev, ctx) => ({ matchedPattern: 'read-only-prefix', commandSnippet: shellCommandOf(ctx).slice(0, 200) }),
+  },
+  {
+    id: 'exec-side-effect',
+    category: 'exec',
+    light: LIGHT.YELLOW,
+    reason: 'shell 命令有副作用，不在只读白名单',
+    tags: ['needs-approval'],
+    match: (ev, ctx) => ctx.mode === 'exec',
+    evidence: (ev, ctx) => ({ matchedPattern: 'side-effect', commandSnippet: shellCommandOf(ctx).slice(0, 200), writeTargets: ctx.writeTargets }),
+  },
+  {
+    id: 'read-in-buffer',
+    category: 'read',
+    light: LIGHT.GREEN,
+    reason: '沙箱内只读',
+    tags: ['auto-allow'],
+    match: (ev, ctx) => {
+      if (ctx.mode !== 'read') return false
+      const root = ctx.policy.bufferRoot
+      if (root === null) return false
+      const targets = readTargetsOf(ctx)
+      return targets.length > 0 && targets.every((t) => withinPath(t, root))
+    },
+    evidence: (ev, ctx) => ({ matchedPattern: 'in-buffer', targets: readTargetsOf(ctx), bufferRoot: ctx.policy.bufferRoot }),
+  },
+  {
+    id: 'read-outside-buffer',
+    category: 'read',
+    light: LIGHT.BLUE,
+    reason: '沙箱外只读',
+    tags: ['allow-with-audit'],
+    match: (ev, ctx) => ctx.mode === 'read',
+    evidence: (ev, ctx) => ({ matchedPattern: 'outside-buffer', targets: readTargetsOf(ctx), bufferRoot: ctx.policy.bufferRoot }),
+  },
+  {
+    id: 'unknown-tool',
+    category: 'fallback',
+    light: LIGHT.YELLOW,
+    reason: '未登记的工具，保守判黄',
+    tags: ['conservative'],
+    match: () => true,
+    evidence: (ev, ctx) => ({ matchedPattern: 'fallback', tool: String(ev?.tool ?? ''), mode: ctx.mode, hasTarget: ctx.target.kind !== 'none' }),
+  },
+])
+
+/** 规则形状校验：注册时立刻失败，而不是在评分路径上静默漏判。 */
+export function assertActionRule(rule) {
+  if (!rule || typeof rule !== 'object') throw new TypeError('action rule must be an object')
+  if (typeof rule.id !== 'string' || rule.id.length === 0) throw new TypeError('action rule.id must be a non-empty string')
+  if (!ACTION_CATEGORIES.includes(rule.category)) throw new TypeError(`action rule ${rule.id}: unknown category ${String(rule.category)}`)
+  if (!Object.prototype.hasOwnProperty.call(LIGHT_RANK, rule.light)) throw new TypeError(`action rule ${rule.id}: unknown light ${String(rule.light)}`)
+  if (typeof rule.match !== 'function') throw new TypeError(`action rule ${rule.id}: match() is required`)
+  if (typeof rule.evidence !== 'function') throw new TypeError(`action rule ${rule.id}: evidence() is required`)
+  return rule
+}
+
+/**
+ * 可注册/可覆盖的规则集。注册是**插入到正确优先级位置**，不是追加到末尾——
+ * 追加一条红灯规则到表尾等于永远不命中（前面有 fallback）。
+ */
+export function createActionRuleSet(initial = DEFAULT_ACTION_RULES) {
+  const rules = (initial ?? []).map((rule) => assertActionRule(rule))
+  const findIndex = (id) => rules.findIndex((r) => r.id === id)
+
+  function register(rule, opts = {}) {
+    assertActionRule(rule)
+    if (typeof rule.id === 'string' && findIndex(rule.id) >= 0) {
+      throw new Error(`action rule already registered: ${rule.id}（覆盖请用 override()）`)
+    }
+    const before = typeof opts.before === 'string' ? findIndex(opts.before) : -1
+    const after = typeof opts.after === 'string' ? findIndex(opts.after) : -1
+    if (before >= 0) rules.splice(before, 0, rule)
+    else if (after >= 0) rules.splice(after + 1, 0, rule)
+    else throw new Error(`action rule ${rule.id}: register() requires before/after naming an existing rule`)
+    return rule
+  }
+
+  function override(id, patch = {}) {
+    const index = findIndex(id)
+    if (index < 0) throw new Error(`action rule not found: ${id}`)
+    const merged = assertActionRule({ ...rules[index], ...patch, id })
+    rules[index] = merged
+    return merged
+  }
+
+  function remove(id) {
+    const index = findIndex(id)
+    if (index < 0) return false
+    rules.splice(index, 1)
+    return true
+  }
+
+  function reset() {
+    rules.length = 0
+    for (const rule of DEFAULT_ACTION_RULES) rules.push(rule)
+  }
+
+  return {
+    rules,
+    ids: () => rules.map((r) => r.id),
+    register,
+    override,
+    remove,
+    reset,
+    find(evidence, ctx) {
+      return rules.find((rule) => rule.match(evidence, ctx)) ?? rules[rules.length - 1] ?? null
+    },
+  }
+}
+
+/** 默认规则集实例（只读用途：baseLight 用它）。 */
+const DEFAULT_RULE_SET = createActionRuleSet(DEFAULT_ACTION_RULES)
+
+/**
+ * 基础灯色：只看动作本身，不看插件等级。
+ * 规则按数组顺序首个命中胜出；返回值带 matchedRule / category / tags / 结构化证据。
+ */
+export function baseLight(evidence = {}, policyInput = {}, ruleSet = DEFAULT_RULE_SET) {
+  const policy = policyInput && policyInput.__normalized === true ? policyInput : normalizePolicy(policyInput ?? {})
+  const ctx = buildActionContext(evidence, policy)
+  const rule = (ruleSet && typeof ruleSet.find === 'function' ? ruleSet.find(evidence, ctx) : null)
+    ?? DEFAULT_ACTION_RULES[DEFAULT_ACTION_RULES.length - 1]
+  const detail = rule.evidence(evidence, ctx) ?? {}
+  return {
+    light: rule.light,
+    matchedRule: rule.id,
+    category: rule.category,
+    tags: [...(rule.tags ?? [])],
+    lifecycle: rule.id === 'dsh-lifecycle',
+    credential: rule.id === 'credential-access',
+    target: ctx.target ?? NO_TARGET,
+    path: ctx.targetPath ?? (detail.targets?.[0] ?? null),
+    reason: rule.reason,
+    evidence: detail,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -566,7 +915,13 @@ export function createUmbrella(options = {}) {
     now = () => Date.now(),
     audit = null,
     onPluginScored = null,
+    rules: initialRules = null,
   } = options
+
+  // 规则集：可传数组（自动建集）或 createActionRuleSet() 的实例（可注册/覆盖）。
+  const ruleSet = initialRules && typeof initialRules.find === 'function' && Array.isArray(initialRules.rules)
+    ? initialRules
+    : createActionRuleSet(initialRules ?? DEFAULT_ACTION_RULES)
 
   // policy 允许是函数：插件在每次评分时都能拿到最新的 buffer root（buffer-keeper 的
   // root 是 start({dir}) 之后才知道的），而缓存仍按插件指纹失效，不因 root 变化清空。
@@ -720,7 +1075,7 @@ export function createUmbrella(options = {}) {
   /** 动作评分：基础灯色 + 等级下限，只升不降。每次调用都重算，不缓存。 */
   function assessAction(evidence = {}, opts = {}) {
     const started = now()
-    const base = baseLight(evidence, policyNow())
+    const base = baseLight(evidence, policyNow(), ruleSet)
     const { grade, basis } = gradeFor(evidence, opts)
     const eff = effectiveLight(base.light, grade, { table: floors.table })
     return {
@@ -731,9 +1086,12 @@ export function createUmbrella(options = {}) {
       pluginGrade: grade,
       gradeBasis: basis,
       matchedRule: base.matchedRule,
+      category: base.category,
+      tags: base.tags,
       lifecycle: base.lifecycle,
       credential: base.credential,
       reason: base.reason,
+      evidence: base.evidence,
       tool: String(evidence?.tool ?? ''),
       target: base.target,
       path: base.path,
@@ -758,6 +1116,8 @@ export function createUmbrella(options = {}) {
       baseLight: assessment.baseLight,
       light: assessment.light,
       matchedRule: assessment.matchedRule,
+      category: assessment.category,
+      evidence: assessment.evidence,
       decision: decision.decision,
       severity: decision.severity,
       durationMs: Math.max(0, now() - started),
@@ -802,13 +1162,22 @@ export function createUmbrella(options = {}) {
     assessPlugin,
     assessAction,
     decideAction,
-    baseLight: (evidence) => baseLight(evidence, policyNow()),
+    baseLight: (evidence) => baseLight(evidence, policyNow(), ruleSet),
     gradeFloor: (grade) => gradeFloor(grade, { table: floors.table }),
     effectiveLight: (base, grade) => effectiveLight(base, grade, { table: floors.table }),
     cachedGrade: (pluginId) => grades.get(String(pluginId)) ?? null,
     cacheStats,
     invalidate,
     clearCache,
+    // 规则表：只读视图 + 唯一的三种变更入口（都做形状校验并以 id 定位）
+    get rules() {
+      return ruleSet.rules.slice()
+    },
+    ruleIds: () => ruleSet.ids(),
+    registerRule: (rule, opts) => ruleSet.register(rule, opts),
+    overrideRule: (id, patch) => ruleSet.override(id, patch),
+    removeRule: (id) => ruleSet.remove(id),
+    resetRules: () => ruleSet.reset(),
   }
 }
 
@@ -822,9 +1191,13 @@ export const _internals = {
   pluginKeyOf,
   sha1,
   mtimeOf,
+  firstPattern,
+  writeTargetsOf,
+  readTargetsOf,
   DEFAULT_CREDENTIAL_PATTERNS,
   DEFAULT_DESTRUCTIVE_PATTERNS,
   DEFAULT_LIFECYCLE_PATTERNS,
+  DEFAULT_LIFECYCLE_TOOLS,
   READ_ONLY_EXEC_PATTERNS,
   TOOL_MODE,
 }
