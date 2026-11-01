@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v2.7.4（2026-11-01）
+
+**主题：连接三步流程可观测化 —— version 信息 / 协议区间 / session 一致性诊断。**
+
+### 说明
+- 「GET /version → GET /state → SSE」自 v2.6.1 起已是 `createAdapterClient().connect()`
+  的固定顺序（`negotiateProtocol` 先于 state，协议不兼容时不拉快照、不订阅）；
+  本版本只补**可观测性**，不改变连接行为。
+
+### 新增
+- `connect()` 结果新增 `version`（最近一次 version 响应）与 `sessionMismatch` 字段；
+- `client.lastVersionInfo`：version 原始响应（protocol / version / sessionId…）；
+- `client.protocolRange`：本次协商实际使用的 `{min,max}`；
+- `client.sessionMismatch`：version 与 state 的 `sessionId` 不一致时记录
+  `{versionSession, stateSession, at}`（Adapter 在两次请求之间重启过）；
+  此时仍以 state 为准续流，不重试三步（state 已是新进程的最新快照）。
+
+### 文档 / 测试
+- `docs/CONNECT-PREFLIGHT.md`：三步流程现状、可观测字段、版本兼容规则、错误处理与边界；
+- `test/adapter-client.test.mjs` 新增 2 项（8 项）：version 信息/协议区间可观测、
+  sessionId 不一致时记录 sessionMismatch 且 SSE 用 state 的 session。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 4 个补丁位。
+
 ## v2.7.3（2026-11-01）
 
 **主题：重启结果事件化 —— Forker 发 `fork-restart-failed`，TaskHandle 终态 fail-fast。**

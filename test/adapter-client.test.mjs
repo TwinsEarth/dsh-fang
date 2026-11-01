@@ -202,3 +202,51 @@ test('command: 非网络类失败不重试（例如 400 参数错误）', async 
   assert.equal(calls, 1)
   client.stop()
 })
+
+// ── v2.7.4：三步 connect 的可观测性（version 信息 / 协议区间 / session 一致性）──
+
+test('connect: version 信息与协议区间可观测（lastVersionInfo / protocolRange）', async () => {
+  const fetchImpl = async (url) => {
+    const target = String(url)
+    if (target.includes('/adapter/version')) {
+      return jsonRes({ ok: true, protocol: 3, sessionId: 's-1', version: '2.7.4', minProtocol: 1 })
+    }
+    if (target.includes('/adapter/state')) return jsonRes({ ok: true, sessionId: 's-1', lastCursor: '0', plugins: [] })
+    if (target.includes('/adapter/events')) return sseRes([])
+    throw new Error(`unexpected ${target}`)
+  }
+  const client = createAdapterClient({ url: 'http://x', fetchImpl, autoReconnect: false })
+  const connected = await client.connect()
+  assert.equal(connected.ok, true)
+  assert.equal(connected.version.version, '2.7.4', 'connect 结果携带 version 响应')
+  assert.equal(client.lastVersionInfo.protocol, 3)
+  assert.equal(client.lastVersionInfo.sessionId, 's-1')
+  assert.equal(client.protocolRange.min, 1)
+  assert.equal(client.protocolRange.max, 3)
+  assert.equal(connected.sessionMismatch, null)
+  client.stop()
+})
+
+test('connect: version/state 的 sessionId 不一致 → 记录 sessionMismatch，仍用 state 的 session 续流', async () => {
+  const calls = []
+  const fetchImpl = async (url) => {
+    const target = String(url)
+    calls.push(target)
+    if (target.includes('/adapter/version')) return jsonRes({ ok: true, protocol: 3, sessionId: 's-old' })
+    if (target.includes('/adapter/state')) return jsonRes({ ok: true, sessionId: 's-new', lastCursor: '4', plugins: [] })
+    if (target.includes('/adapter/events')) return sseRes([])
+    throw new Error(`unexpected ${target}`)
+  }
+  const client = createAdapterClient({ url: 'http://x', fetchImpl, autoReconnect: false })
+  const connected = await client.connect()
+  assert.equal(connected.ok, true)
+  assert.equal(connected.sessionId, 's-new', 'state 是最新真相')
+  assert.equal(client.sessionId, 's-new')
+  assert.equal(client.sessionMismatch.versionSession, 's-old')
+  assert.equal(client.sessionMismatch.stateSession, 's-new')
+  assert.ok(Number(client.sessionMismatch.at) > 0)
+  const eventsUrl = calls.find((target) => target.includes('/adapter/events'))
+  assert.ok(eventsUrl.includes('since=4'), 'SSE 用 state.lastCursor')
+  assert.ok(eventsUrl.includes('session=s-new'), 'SSE 必须用 state 的 sessionId')
+  client.stop()
+})
