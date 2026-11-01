@@ -371,6 +371,14 @@ idle ──connect()──▶ negotiating ──ok──▶ streaming
 
 失败语义：**永不抛出**；网络/超时按 `baseMs * 2^n` 无限退避（上限 `maxMs`）；401 致命、不重试。
 
+**ForkClient（v2.6.4 实现）**：`src/lib/fork-client.mjs` 在 AdapterClient 之上组合 `CommandCache`：
+
+- `inflight: Map<trackingId, {resolve,reject,timer}>` 追踪异步命令，`command-done` 按 trackingId 匹配；
+- 同步/异步命令统一走 `cache.run`；异步命令**等 command-done 拿到终态后才写缓存**（不是缓存 accepted）；
+- 同步 POST 用传输层超时（AbortController）；异步命令用 `asynchronousTimeoutMs`（默认 120s）兜底；
+- SSE 断开保留 inflight（cursor 补发），`resetCursor=true` / `disconnect()` 清空并 reject；
+- 契约与 13 项测试见 `docs/FORK-CLIENT.md`。
+
 ---
 
 ## 10. 时序
@@ -446,11 +454,12 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 | `test/command-cache.test.mjs`（16，v2.6.3） | in-flight 合并、completed 重放、失败契约、LRU/touch、get 不 touch、超限收敛、invalidate/clear/onEvict、容量边界、stats |
 | `test/adapter.test.mjs`（+6，共 32） | v3 路由注册顺序、version/health/state 形状、审批 diff 事件、SSE 回放/session-changed/cursor-invalid/410/close 清理、命令幂等+202+参数校验、并发同 commandId 只执行一次、Bearer 401/放行 |
 | `test/adapter-client.test.mjs`（6） | connect 三步、协议过新拒绝、401 致命、409 重拉快照+续流、同 commandId 网络重试、400 不重试 |
+| `test/fork-client.test.mjs`（13，v2.6.4） | 同步直通/缓存、异步 accepted→command-done 终态、异步超时、传输失败不缓存、SSE 断开保留 inflight、session 变化清空、disconnect 清空、stale command-done、重复 trackingId、事件隔离、connect 失败、参数边界、9 个 op 便捷方法 |
 | `test/remote.test.mjs`（+2，共 14） | v3 路径 + Bearer 头、eventsUrl 的 since/session/token |
 | `test/forker.test.mjs`（+1，共 25） | token 每次 spawn 重新生成、进 env、stop 作废、不落 forks.json/fang-meta.json/status |
 | `test/orchestrator.test.mjs`（18） | 版本号改从 `FANG_VERSION` 读取；握手/任务生命周期回归 |
 
-全量：**348 项（347 pass / 1 skip）**。
+全量：**361 项（360 pass / 1 skip）**。
 
 ---
 
@@ -461,6 +470,7 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 - 分身侧 10 条路由（v2 五条 + v3 五条）、Bearer 认证、事件环形缓冲、审批 diff、命令幂等缓存、异步 202、SSE 心跳/回放/410/409；
 - `CommandCache.run()` 幂等执行（v2.6.3）：in-flight 合并、completed 重放、业务失败缓存 /
   传输错误不缓存、LRU 只淘汰已完成项，契约见 `docs/COMMAND-CACHE.md`；
+- `ForkClient`（v2.6.4）：命令外观 + inflight/trackingId/超时兜底，契约见 `docs/FORK-CLIENT.md`；
 - 共享协议库 + ForkClient（SSE 解析、cursor 续传、409/410 处理、指数退避、幂等重试）；
 - Forker 每次 spawn 生成 token 并经 env 注入；`adapterToken(forkId)` 只读内存；
 - Orchestrator 在握手后做 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer。

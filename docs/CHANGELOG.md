@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## v2.6.4（2026-11-01）
+
+**主题：ForkClient 完整实现 —— inflight 追踪、command-done 匹配、超时兜底。**
+
+### 新增
+- **`src/lib/fork-client.mjs`**：`ForkClient` 组合 AdapterClient（传输 + SSE）与 `CommandCache`（幂等）。
+  - **同步命令**：POST 返回 completed → 直接返回；同 commandId 命中缓存不重复 POST；
+  - **异步命令**：202 accepted + trackingId → `inflight` Map 等待 SSE `command-done`，
+    拿到终态后才写入缓存（不缓存 accepted）；
+  - **command-done 匹配**：按 trackingId 匹配（trackingId 与 commandId 是两个键）；
+    超时/断开后迟到的 command-done 静默忽略（debug）；
+  - **超时兜底**：同步 POST 走传输层 AbortController（`synchronousTimeoutMs`）；
+    异步命令用 `asynchronousTimeoutMs`（默认 120s）timer，超时 reject → 缓存移除 → 可重试；
+  - **SSE 生命周期**：断开保留 inflight（cursor 补发）；`resetCursor=true`（分身重启）/
+    `disconnect()`（用户主动）→ 全部 inflight reject；
+  - **事件扇出**：`onEvent/onReconnect/onDisconnect`，handler 异常隔离；`state-changed` 更新快照；
+  - **fail-closed**：未 connect 或已 disconnect 时命令直接 reject（`not-connected` / `disconnected`）；
+  - dsh-Fang 的 9 个 Adapter op 便捷方法：ping/status/flush-buffer/score-plugin/read-plugin/
+    route-confirm/approvals/approval-decide/archive。
+- **文档** `docs/FORK-CLIENT.md`：TS 接口形状与 `.mjs` 映射、命令生命周期、inflight 语义、
+  超时矩阵、SSE 处置规则、错误码、测试清单、边界（无 tsc、node:http 传输待实现、尚未接线）。
+
+### 变更
+- `docs/PROTOCOL-V3.md §9/§11/§12` 同步 ForkClient 实现与测试清单。
+
+### 测试
+- 新增 `test/fork-client.test.mjs`（13 项）；全量门禁见 `docs/AUDIT-v2.6.4.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 4 个补丁位。
+
 ## v2.6.3（2026-11-01）
 
 **主题：CommandCache LRU + 幂等语义 —— in-flight 合并、失败契约、只淘汰已完成项。**
