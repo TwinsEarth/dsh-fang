@@ -501,15 +501,18 @@ export class EssenceManager {
       ? requestedId
       : `essence-${this.now()}-${sha256(`${name}:${this.now()}:${Math.random()}`).slice(0, 6)}`
     const root = this.essenceRoot(id)
+    // v3.0.5/B6：create-only —— 已存在的原身不能被 create() 覆盖/抢占
+    if (exists(path.join(root, 'meta.json'))) throw new Error(`essence already exists: ${id}`)
     ensureDir(path.join(root, 'overlay', 'settings'))
     ensureDir(path.join(root, 'overlay', 'credentials'))
     ensureDir(path.join(root, 'merged', 'profile'))
+    const officialSeed = options?.official === true
     const meta = {
       id, name, tier, parentId,
       createdAt: this.now(), updatedAt: this.now(),
       lastMergedFingerprint: null, status: ESSENCE_STATUS.READY,
-      locked: options?.locked === true,
-      official: options?.official === true,
+      locked: officialSeed && options?.locked === true,
+      official: officialSeed,
     }
     this.writeMeta(root, meta)
     const defaultEntries = Array.isArray(options?.defaultPatchEntries) ? options.defaultPatchEntries : []
@@ -529,7 +532,15 @@ export class EssenceManager {
    */
   ensureOfficialEssence(options = {}) {
     const root = this.essenceRoot(OFFICIAL_ESSENCE_ID)
-    if (exists(path.join(root, 'meta.json'))) return this.getMeta(OFFICIAL_ESSENCE_ID)
+    if (exists(path.join(root, 'meta.json'))) {
+      const meta = this.getMeta(OFFICIAL_ESSENCE_ID)
+      // v3.0.5/B6：已存在的官方原身必须是 locked+official；被篡改则修复（不删除数据）
+      if (meta.locked !== true || meta.official !== true) {
+        this.writeMeta(root, { ...meta, locked: true, official: true, updatedAt: this.now() })
+        return this.getMeta(OFFICIAL_ESSENCE_ID)
+      }
+      return meta
+    }
     return this.create({
       id: OFFICIAL_ESSENCE_ID,
       name: OFFICIAL_ESSENCE_NAME,
@@ -788,10 +799,9 @@ export class EssenceManager {
     for (const [name, value] of Object.entries(result.mergedSettings)) {
       fs.writeFileSync(path.join(settingsDir, `${name}.yaml`), `${JSON.stringify(value, null, 2)}\n`, 'utf8')
     }
-    // 凭据只属于原身：先剔除镜像可能带入的 credentials，再复制原身凭据
+    // v3.0.5/B8：凭据永不进入 merged/profile —— 派生 profile 不携带任何 credentials
     const mergedCredentials = path.join(mergedProfile, 'credentials')
     if (exists(mergedCredentials)) removeTree(mergedCredentials)
-    if (exists(overlay.credentialsPath)) copyTree(overlay.credentialsPath, mergedCredentials)
     writeJsonAtomic(path.join(mergedRoot, 'fingerprint.json'), {
       mirrorVersion: mirror.version,
       mirrorFingerprint: mirror.fingerprint,

@@ -88,6 +88,11 @@ export function importSessions(options = {}) {
   const bundleDir = path.resolve(String(options.bundleDir ?? ''))
   const targetRoot = path.resolve(String(options.targetSessionsRoot ?? ''))
   const workspaces = Array.isArray(options.workspaces) ? options.workspaces : []
+  const sessionsDir = path.join(bundleDir, 'sessions')
+  const SAFE_SEGMENT = /^[A-Za-z0-9._-]{1,128}$/
+  const MAX_FILES = Math.max(1, Math.floor(Number(options.maxFiles) || 2000))
+  const MAX_TOTAL_BYTES = Math.max(1, Math.floor(Number(options.maxTotalBytes) || 512 * 1024 * 1024))
+  const MAX_FILE_BYTES = Math.max(1, Math.floor(Number(options.maxFileBytes) || 64 * 1024 * 1024))
   let manifest
   try { manifest = JSON.parse(fs.readFileSync(path.join(bundleDir, SYNC_MANIFEST), 'utf8')) } catch {
     return { ok: false, code: 'manifest-unreadable' }
@@ -96,25 +101,38 @@ export function importSessions(options = {}) {
   const pulled = []
   const pendingMatch = []
   const skipped = []
+  let fileCount = 0
+  let totalBytes = 0
   for (const entry of Array.isArray(manifest.sessions) ? manifest.sessions : []) {
+    if (fileCount >= MAX_FILES || totalBytes >= MAX_TOTAL_BYTES) { skipped.push(String(entry?.sessionId ?? '')); continue }
+    const sessionId = String(entry?.sessionId ?? '')
+    if (!SAFE_SEGMENT.test(sessionId)) { skipped.push(sessionId || '<invalid>'); continue }
     const ws = workspaces.find((w) => w.path && entry.workspacePath && w.path === entry.workspacePath)
       ?? workspaces.find((w) => w.title && entry.workspaceTitle && w.title === entry.workspaceTitle)
-    if (!ws || !ws.path) { pendingMatch.push(entry.sessionId); continue }
+    if (!ws || !ws.path) { pendingMatch.push(sessionId); continue }
     const workspaceKey = encodeWorkspaceKey(ws.path)
-    const destDir = path.join(targetRoot, workspaceKey, entry.sessionId)
+    const destDir = path.resolve(targetRoot, workspaceKey, sessionId)
+    // v3.0.5/B3：目标必须落在 targetRoot 内（防 `../` 写出根外）
+    if (!destDir.startsWith(targetRoot + path.sep)) { skipped.push(sessionId); continue }
     const destFile = path.join(destDir, SESSION_LOG)
-    const src = path.join(bundleDir, 'sessions', entry.file)
-    if (!fs.existsSync(src)) { skipped.push(entry.sessionId); continue }
+    const src = path.resolve(bundleDir, 'sessions', String(entry.file ?? ''))
+    // v3.0.5/B3：源必须落在 bundleDir/sessions 内（防 `../../` 读取 bundle 外文件）
+    if (!src.startsWith(sessionsDir + path.sep)) { skipped.push(sessionId); continue }
+    if (!fs.existsSync(src)) { skipped.push(sessionId); continue }
+    const stat = fs.statSync(src)
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) { skipped.push(sessionId); continue }
     const buf = fs.readFileSync(src)
-    if (sha256(buf) !== entry.sha256) { skipped.push(entry.sessionId); continue }
+    totalBytes += buf.length
+    fileCount += 1
+    if (sha256(buf) !== entry.sha256) { skipped.push(sessionId); continue }
     fs.mkdirSync(destDir, { recursive: true })
     if (fs.existsSync(destFile)) {
       fs.writeFileSync(path.join(destDir, `${SESSION_LOG}.fork-${Date.now()}-${conflicts.length}.jsonl.zstd`), buf)
-      conflicts.push(entry.sessionId)
+      conflicts.push(sessionId)
       continue
     }
     fs.writeFileSync(destFile, buf)
-    pulled.push(entry.sessionId)
+    pulled.push(sessionId)
   }
   return { ok: true, pulled, conflicts, pendingMatch, skipped }
 }

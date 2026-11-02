@@ -194,6 +194,33 @@ export function buildLaunchSpec({ cliPath = '', profile = 'default', port = 0 } 
 }
 
 /**
+ * v3.0.5/B5：派生进程环境变量白名单（不再全量继承母体 env —— 防止云密钥/适配器 token 泄漏给最低信任层）。
+ * 只放行启动 DSH 必需的运行时/代理变量；DSH_*、API key、token 等一律不继承（由 overrides 显式注入）。
+ * @param {Record<string, string|undefined>} [base]
+ * @param {Record<string, string|undefined>} [overrides]
+ * @returns {Record<string, string>}
+ */
+export function buildForkChildEnv(base = process.env, overrides = {}) {
+  const KEYS = [
+    'PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec',
+    'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+    'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'OS', 'NUMBER_OF_PROCESSORS',
+    'PROCESSOR_ARCHITECTURE', 'USERNAME', 'USERDOMAIN', 'LANG', 'LC_ALL', 'TERM', 'SHELL',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  ]
+  /** @type {Record<string,string>} */
+  const env = {}
+  for (const key of KEYS) {
+    if (typeof base?.[key] === 'string') env[key] = base[key]
+  }
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (typeof value === 'string') env[key] = value
+    else delete env[key]
+  }
+  return env
+}
+
+/**
  * Pure: why did a fork exit? (CONTRACTS.md §5.1)
  *   0  = normal, 75 = the guard allowed a restart (supervisor contract), else crash.
  * @returns {{kind:'normal'|'restart-request'|'crash', code:number|null, signal:string|null, restartRequested:boolean}}
@@ -914,8 +941,7 @@ export function apply(ctx, config) {
       pendingSpawns.add(cleanup)
 
       const spec = buildLaunchSpec({ cliPath, profile, port: expectedPort })
-      const env = {
-        ...process.env,
+      const env = buildForkChildEnv(process.env, {
         DSH_HOME: homeDir,
         // Fork identity is injected by the forker (a fork must never be able to call itself mother).
         DSH_FANG_ROLE: 'fork',
@@ -923,7 +949,7 @@ export function apply(ctx, config) {
         ...(opts.env ?? {}),
         // v3：Adapter Bearer token（PROTOCOL-V3 §3）。放在 opts.env 之后，母体生成的 token 优先。
         DSH_ADAPTER_TOKEN: rec.adapterToken,
-      }
+      })
       let child = null
       try {
         child = spawnProcess(spec.command, spec.args, {

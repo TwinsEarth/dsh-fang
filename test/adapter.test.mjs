@@ -54,7 +54,7 @@ function applyWithRole(role, config = {}, services = {}, { webServer = true, env
   return { ctx, ws, service }
 }
 
-const applyAsFork = (config = {}, services = {}, opts = {}) => applyWithRole('fork', config, services, opts)
+const applyAsFork = (config = {}, services = {}, opts = {}) => applyWithRole('fork', { allowLegacyNoToken: true, ...config }, services, opts)
 
 // ── 服务桩（形状对齐 kernel SERVICE 的真实实现）──────────────────────────────
 
@@ -1047,12 +1047,20 @@ test('v3: Bearer 认证（env 注入时强制；未注入时 v2 兼容放行）'
   assert.equal(okRes.json().ok, true)
   secured.ctx.dispose()
 
-  const legacy = applyAsFork({})
-  assert.equal(legacy.service.authEnabled, false, '无 env token = v2 兼容模式')
+  const legacy = applyAsFork({ allowLegacyNoToken: false })
+  assert.equal(legacy.service.authEnabled, false, '无 env token = authEnabled false')
   const legacyRes = makeRes()
   await findHandler(legacy.ws, 'GET', ADAPTER_ROUTE.STATE)(getReq(), legacyRes)
-  assert.equal(legacyRes.statusCode, 200)
+  assert.equal(legacyRes.statusCode, 401, 'v3.0.5/B2：fork 无 token 默认 fail-closed')
+  assert.equal(legacyRes.json().code, 'unauthorized')
   legacy.ctx.dispose()
+
+  const legacyAllowed = applyAsFork({})
+  assert.equal(legacyAllowed.service.authEnabled, false)
+  const allowedRes = makeRes()
+  await findHandler(legacyAllowed.ws, 'GET', ADAPTER_ROUTE.STATE)(getReq(), allowedRes)
+  assert.equal(allowedRes.statusCode, 200, '显式 allowLegacyNoToken 时才允许 v2 兼容')
+  legacyAllowed.ctx.dispose()
 })
 
 // ── v2.6.8：外部注册命令（registerCommand）与 413 body 上限 ──────────────────

@@ -261,7 +261,7 @@ test('essence manager: fatal 冲突 → status=conflicted、保留旧物化结�
   assert.equal(fs.existsSync(path.join(manager.essenceRoot(meta.id), 'conflicts.json')), false)
 })
 
-test('essence manager: 物化剔除镜像凭据、保留原身凭据', () => {
+test('essence manager: 物化永不复制凭据（镜像与原身凭据都不进 merged/profile）', () => {
   const { manager, essencesRoot } = makeFixture()
   const meta = manager.create({ name: '原身D' })
   const credentialsDir = path.join(essencesRoot, meta.id, 'overlay', 'credentials')
@@ -269,7 +269,7 @@ test('essence manager: 物化剔除镜像凭据、保留原身凭据', () => {
   manager.recompute(meta.id)
   const mergedCredentials = path.join(manager.mergedProfileDir(meta.id), 'credentials')
   assert.equal(fs.existsSync(path.join(mergedCredentials, 'bad-token.json')), false)
-  assert.equal(fs.existsSync(path.join(mergedCredentials, 'own.json')), true)
+  assert.equal(fs.existsSync(path.join(mergedCredentials, 'own.json')), false, '凭据不得进入派生 profile')
 })
 
 test('essence manager: free 配额上限 5，第 6 个拒绝', () => {

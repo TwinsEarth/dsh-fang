@@ -108,6 +108,8 @@ export const Config = z.object({
     .description('命令幂等缓存容量（LRU，按 commandId）'),
   heartbeatMs: z.number().min(1000).max(60000).default(5000)
     .description('SSE 心跳 + 待审批 diff 周期（毫秒）'),
+  allowLegacyNoToken: z.boolean().default(false)
+    .description('v3.0.5：fork 角色无 DSH_ADAPTER_TOKEN 时是否允许 v2 兼容（默认 fail-closed）'),
 })
 
 const msgOf = (e) => String(e && e.message !== undefined ? e.message : e)
@@ -272,10 +274,16 @@ export function apply(ctx, config) {
     return fromEnv
   })()
   const expectedTokenBuf = adapterToken ? Buffer.from(adapterToken, 'utf8') : null
+  // v3.0.5/B2：fork 角色无 token 时 fail-closed（v2 兼容仅限显式 allowLegacyNoToken）
+  const isForkRole = role === 'fork'
+  const legacyAllowed = !isForkRole || cfg.allowLegacyNoToken === true
+  if (isForkRole && expectedTokenBuf === null && !legacyAllowed) {
+    ctx.logger?.warn?.('[adapter] fork 角色未配置 DSH_ADAPTER_TOKEN，已按 fail-closed 拒绝控制面请求')
+  }
 
   /** 恒定时间比较；长度不同直接 false（不泄露长度信息之外的任何东西）。 */
   const authorized = (req) => {
-    if (!expectedTokenBuf) return true
+    if (!expectedTokenBuf) return legacyAllowed
     const got = parseBearer(req?.headers?.authorization ?? req?.headers?.Authorization)
     if (!got) return false
     const actual = Buffer.from(got, 'utf8')

@@ -58,9 +58,14 @@ export function apply(ctx, config) {
     /** PC 侧：把勾选会话只读地导出到 staging bundle。 */
     exportSelected(input = {}) {
       const workspaces = workspacesOf(storagesRoot)
+      const requestedBundleId = input.bundleId === undefined ? `sync-${Date.now()}` : String(input.bundleId)
+      // v3.0.5/B3：bundleId 只允许安全段（防 `../` 写出 bundleRoot）
+      if (!/^[A-Za-z0-9._-]{1,128}$/.test(requestedBundleId) || requestedBundleId === '.' || requestedBundleId === '..') {
+        return { ok: false, code: 'invalid-bundle-id' }
+      }
       const out = exportSessions({
         sessionsRoot,
-        bundleDir: path.join(bundleRoot, String(input.bundleId ?? `sync-${Date.now()}`)),
+        bundleDir: path.join(bundleRoot, requestedBundleId),
         sessionIds: input.sessionIds,
         workspaces,
       })
@@ -73,6 +78,14 @@ export function apply(ctx, config) {
     importInto(input = {}) {
       const bundleDir = path.resolve(String(input.bundleDir ?? ''))
       const targetHome = path.resolve(String(input.targetHome ?? ''))
+      // v3.0.5/B3：bundle 必须位于 bundleRoot 内；目标 home 只允许当前 DSH_HOME 或 fork homes 根
+      const inside = (base, target) => {
+        const rel = path.relative(base, target)
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+      }
+      if (!inside(bundleRoot, bundleDir)) return { ok: false, code: 'bundle-outside-root' }
+      const allowedHomes = [resolveDshHome(), layout.forkHomesDir].filter((p) => typeof p === 'string' && p.length > 0)
+      if (!allowedHomes.some((base) => inside(base, targetHome))) return { ok: false, code: 'target-outside-allowed' }
       const targetSessions = path.join(targetHome, 'sessions')
       ensureDir(targetSessions)
       const workspaces = workspacesOf(path.join(targetHome, 'storages'))
@@ -100,7 +113,13 @@ export function apply(ctx, config) {
     }
     const readBody = async (req) => {
       const chunks = []
-      for await (const chunk of req) chunks.push(Buffer.from(chunk))
+      let size = 0
+      for await (const chunk of req) {
+        const buf = Buffer.from(chunk)
+        size += buf.length
+        if (size > 1_000_000) return { __tooLarge: true }
+        chunks.push(buf)
+      }
       const text = Buffer.concat(chunks).toString('utf8')
       if (!text) return {}
       try { return JSON.parse(text) } catch { return { __parseError: true } }
@@ -120,12 +139,14 @@ export function apply(ctx, config) {
     route('GET', `${prefix}/api/sync/status`, (req, res) => json(res, 200, service.status()))
     route('POST', `${prefix}/api/sync/export`, async (req, res) => {
       const body = await readBody(req)
+      if (body.__tooLarge) return json(res, 413, { ok: false, error: 'body-too-large' })
       if (body.__parseError) return json(res, 400, { ok: false, error: 'bad-json' })
       const out = service.exportSelected(body)
       json(res, out.ok ? 200 : 400, out)
     })
     route('POST', `${prefix}/api/sync/import`, async (req, res) => {
       const body = await readBody(req)
+      if (body.__tooLarge) return json(res, 413, { ok: false, error: 'body-too-large' })
       if (body.__parseError) return json(res, 400, { ok: false, error: 'bad-json' })
       const out = service.importInto(body)
       json(res, out.ok ? 200 : 400, out)
