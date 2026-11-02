@@ -23,6 +23,7 @@ export const SERVICE = {
   sessionSync: 'fangSessionSync',
   sessionRouter: 'fangSessionRouter',
   link: 'fangLink',
+  mirror: 'fangMirror',
 }
 
 /** Loader row ids used by cordis.patch.yml. */
@@ -124,7 +125,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.9.3'
+export const FANG_VERSION = '2.9.9'
 
 /**
  * @typedef {object} ForkInfo

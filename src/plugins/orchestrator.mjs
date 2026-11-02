@@ -21,6 +21,7 @@ import {
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
+import { MirrorManager } from '../lib/mirror.mjs'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -41,6 +42,8 @@ export const Config = z.object({
     .description('数据根目录；留空 = $DSH_HOME/fang/<profileTag>'),
   forksRoot: z.string().default('')
     .description('分身 home 根目录；留空 = <dataRoot>/forks'),
+  mirrorRoot: z.string().default('')
+    .description('母体镜像根目录；留空 = <dataRoot>/mirror（备份/恢复/升级都在这一个文件夹里）'),
   adapterTimeoutMs: z.number().min(100).max(120000).default(10000)
     .description('派生后等待分身 Adapter 就绪的上限（毫秒）；超时任务记为 running（adapter 未就绪）'),
   adapterPollMs: z.number().min(50).max(5000).default(400)
@@ -1089,6 +1092,47 @@ export function apply(ctx, config) {
   }
   ctx.effect(() => ctx.provide(SERVICE.link, linkService))
 
+  // ── v2.11.0 母体镜像：备份 / 恢复 / 升级 / 自动备份（只管理文件夹 1）──────
+  const mirrorRoot = cfg.mirrorRoot ? String(cfg.mirrorRoot) : path.join(layout.dataDir, 'mirror')
+  const mirrorManager = new MirrorManager({
+    mirrorRoot,
+    logger: ctx.logger ?? {},
+    usageProvider: () => ({
+      activeEssenceCount: 0,
+      activeSessionCount: Array.isArray(service.listForks?.())
+        ? service.listForks().filter(fork => fork.status === 'running').length
+        : 0,
+    }),
+  })
+  mirrorManager.ensureLayout()
+  const mirrorService = {
+    status: () => mirrorManager.getStatus(),
+    backup: (input = {}) => mirrorManager.backup({
+      label: input?.label, bucket: input?.bucket === 'restore' ? 'restore' : 'backup',
+    }),
+    restore: (backupId) => mirrorManager.restore(backupId),
+    deleteBackup: (backupId) => mirrorManager.deleteBackup(backupId),
+    setBackupInterval: (hours) => mirrorManager.setBackupInterval(hours),
+    checkUpdate: () => mirrorManager.checkUpdate(),
+    upgrade: (input = {}) => mirrorManager.upgrade({
+      autoBackup: input?.autoBackup !== false,
+      autoRollback: input?.autoRollback !== false,
+    }),
+  }
+  ctx.effect(() => ctx.provide(SERVICE.mirror, mirrorService))
+  const mirrorAutoTimer = setInterval(() => {
+    try {
+      const status = mirrorService.status()
+      if (status.meta?.nextBackupAt !== null && Date.now() >= status.meta.nextBackupAt) {
+        mirrorManager.maybeAutoBackup()
+      }
+    } catch (error) {
+      ctx.logger?.warn?.('[mirror] auto backup tick failed', { error: String(error?.message ?? error) })
+    }
+  }, 60_000)
+  mirrorAutoTimer.unref?.()
+  ctx.effect(() => () => clearInterval(mirrorAutoTimer))
+
   // ── 启动自检 ───────────────────────────────────────────────────────────
   const bootState = { at: nowMs(), ok: null, findings: [] }
   const bootAuditTimer = setTimeout(() => {
@@ -1239,6 +1283,48 @@ export function apply(ctx, config) {
           })
         } catch { /* 审计缺失不影响探测结果 */ }
         return json(res, 200, out)
+      })
+      // v2.11.0 母体镜像管理
+      route('GET', `${prefix}/api/mirror/status`, (req, res) => json(res, 200, mirrorService.status()))
+      route('POST', `${prefix}/api/mirror/backup`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const entry = mirrorService.backup({ label: body?.label, bucket: body?.bucket })
+          return json(res, 200, { ok: true, entry })
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/mirror/restore`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = mirrorService.restore(body?.backupId)
+          return json(res, out.ok ? 200 : 409, out)
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/mirror/backup/delete`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = mirrorService.deleteBackup(body?.backupId)
+          return json(res, out.ok ? 200 : 404, out)
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/mirror/backup-interval`, async (req, res) => {
+        const body = await readBody(req)
+        const out = mirrorService.setBackupInterval(body?.hours)
+        return json(res, out.ok ? 200 : 400, out)
+      })
+      route('POST', `${prefix}/api/mirror/upgrade`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await mirrorService.upgrade({
+          autoBackup: body?.autoBackup !== false,
+          autoRollback: body?.autoRollback !== false,
+        })
+        return json(res, out.ok ? 200 : 409, out)
       })
     })
   }

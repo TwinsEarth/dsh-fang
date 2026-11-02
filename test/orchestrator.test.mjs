@@ -387,6 +387,8 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/tasks/archive/delete', '/fang/api/tasks/promote',
     '/fang/api/forks', '/fang/api/forks/create', '/fang/api/reap', '/fang/api/promote',
     '/fang/api/mother-link', '/fang/api/mother-link/probe',
+    '/fang/api/mirror/status', '/fang/api/mirror/backup', '/fang/api/mirror/restore',
+    '/fang/api/mirror/backup/delete', '/fang/api/mirror/backup-interval', '/fang/api/mirror/upgrade',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
@@ -405,6 +407,34 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.equal(linkProbe.statusCode, 200)
   assert.equal(linkProbe.json().ok, false)
   assert.equal(linkProbe.json().error, 'target-empty')
+
+  // v2.11.0 母体镜像路由
+  const mirrorStatus = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/status').handler(makeReq(undefined, 'GET'), mirrorStatus)
+  assert.equal(mirrorStatus.statusCode, 200)
+  const mirrorBody = mirrorStatus.json()
+  assert.equal(mirrorBody.ok, true)
+  assert.equal(typeof mirrorBody.currentVersion, 'string')
+  assert.ok(Array.isArray(mirrorBody.backups))
+
+  const mirrorBackup = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/backup')
+    .handler(makeReq({ bucket: 'restore', label: '测试恢复点' }, 'POST'), mirrorBackup)
+  assert.equal(mirrorBackup.statusCode, 200)
+  assert.equal(mirrorBackup.json().ok, true)
+  assert.equal(mirrorBackup.json().entry.bucket, 'restore')
+
+  const mirrorInterval = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/backup-interval')
+    .handler(makeReq({ hours: 8 }, 'POST'), mirrorInterval)
+  assert.equal(mirrorInterval.statusCode, 400)
+  assert.equal(mirrorInterval.json().ok, false)
+
+  const mirrorUpgrade = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/upgrade').handler(makeReq({}, 'POST'), mirrorUpgrade)
+  assert.equal(mirrorUpgrade.statusCode, 409)
+  assert.equal(mirrorUpgrade.json().ok, false)
+  assert.equal(mirrorUpgrade.json().reason, 'official-source-unavailable')
 
   const panel = makeRes()
   await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)
