@@ -1,5 +1,78 @@
 # CHANGELOG
 
+## v3.0.4（2026-11-02）
+
+**主题：三层产品形态权限契约 + 官方推荐原身（fast derive 默认基底）。**
+
+### 新增
+- `src/lib/permissions.mjs`：三层权限矩阵（母体禁插件/禁会话、原身可插件/禁会话、分身禁插件/可会话），
+  `checkPermission` / `createEnvironmentGuard`（can/check/assert + `PermissionDeniedError`）/
+  `describePermissions`；未知环境或未知动作 **fail-closed**（供 UI 与 Adapter 第二道门）。
+- `EssenceManager` 官方推荐原身：
+  - `ensureOfficialEssence()` 首次启动幂等 seed（`essence-official-dev`，locked + official，
+    预装默认插件条目 `DEFAULT_OFFICIAL_PATCH_ENTRIES`）；
+  - 锁定保护：`update/remove/setTier` 对 locked 原身一律拒绝；
+  - `create()` 支持显式 id / locked / official / skipQuota / defaultPatchEntries。
+- orchestrator：启动时 seed 官方原身（失败仅 warn，不阻塞主插件）；
+  新增 `GET /fang/api/essence/list`（`{officialId, official, essences}`）。
+- 测试：`permissions` 7 项、`official-essence` 5 项 + orchestrator 路由断言。
+- compat 门禁路由契约更新为 50 条，必需路由增加 `/fang/api/essence/list`。
+
+### 边界
+- 分身派生（DerivedInstanceManager）与三种 Web 视图路由为 v3.0.5+；
+- 真正的硬隔离仍靠 profile 组合（装不装插件/会话），本版本提供第二道门与默认基底。
+
+## v3.0.3（2026-11-02）
+
+**主题：客户端升级后的兼容性门禁（compat gate）——子插件默认关闭，验证通过才启用。**
+
+### 新增
+- `src/lib/compat.mjs`：`runCompatGate`（内核入口可导入、全部子插件模块可导入且导出 `apply`（当前 16 个，后续自动纳入）、
+  路由契约数量 + 必需路径检查）；`writeCompatStatus`/`readCompatStatus`（`compat-status.json`，
+  **`subPluginsEnabled` 是唯一允许启用子插件的判据，未检查/失败时均为 false**）。
+- `MirrorManager` 新增 `compatGate` / `onCompatResult`：客户端版本升级成功后先跑 compat 门禁；
+  未通过 → 保留新版本但 `reason: 'compat-gate-failed'`、子插件保持关闭、**跳过原身重算钩子**；
+  门禁抛错按失败处理；通过 → 正常触发重算。升级返回体携带 `compat` 结果。
+- orchestrator 接线：`GET /fang/api/mirror/recompute-status`（协调器状态）、`GET /fang/api/compat`、
+  `POST /fang/api/compat/check`；启动 1.5s 后自动跑一次门禁；门禁使用真实 webServer 路由列表
+  （期望 49 条）+ 必需路由清单。
+- 测试：`compat` 10 项（模块导入/apply/路由契约/状态默认关闭/门禁与升级联动）+ orchestrator 路由断言。
+
+### 语义
+- 更新客户端版本后默认不开启子插件；门禁通过才写 `subPluginsEnabled: true`；
+- 失败时主插件继续服务（面板/路由可用），等待开发者更新插件版本后再次检查（POST compat/check）；
+- 门禁失败不回滚客户端版本（保留新版本），回滚仍可走镜像备份/还原盘。
+
+## v3.0.2（2026-11-02）
+
+**主题：升级后重算协调 + 镜像偏好 schema 化 + 空闲降级审计。**
+
+### 新增
+- `src/lib/semaphore.mjs`：计数信号量（并发上限）。
+- `EssenceManager.recomputeAll(options)` 异步增强：ensureFresh（fingerprint 匹配 → skipped）、
+  `concurrency`（默认 4）、`perEssenceTimeoutMs`（默认 60s）、`AbortSignal`、`onProgress`；
+  返回 `{recomputed, skipped, conflicted, failed, aborted, durationMs}`，单原身失败/超时不中断整批。
+- `MirrorManager.postUpgradeHook`：升级成功后 fire-and-forget 触发（`postUpgradeTriggered`），
+  失败/回滚不触发，钩子异常只 warn，不影响升级结果。
+- `src/lib/upgrade-coordinator.mjs`：`onUpgradeSuccess` 去重并发批次、`getRecomputeStatus`、
+  `waitForRecompute`，向 UI 暴露 running/startedAt/finishedAt/progress/lastResult/lastError。
+- `src/lib/preferences.mjs` 重写为 schema 驱动：6 个字段描述符（交互超时/活跃与空闲轮询间隔/
+  备份保留天数/空闲提示/严格冲突模式），默认值、min/max/step、enum options、migrate、
+  `normalizePreferences` 纯函数、未知字段丢弃、损坏文件不覆盖；新增
+  `GET /fang/api/mirror/preferences` 与 `POST /fang/api/mirror/preferences/set`。
+- `src/lib/status-store.mjs`：外部 store（每个订阅者共享状态、304 只更新 lastUpdatedAt、
+  订阅计数、`acquireActive` 引用计数 + `pokeActive` + 30s 无交互降级、`setActiveIdleTimeout`）。
+- `src/lib/idle-audit.mjs`：空闲降级事件聚合（单条审计 + 周期 summary、byTimeout 统计、
+  rapidAway/fullTimeout、样本足够时生成建议）；滚动窗口 `getRecommendations()` 输出结构化建议
+  （fieldKey/suggestedValue/text/sampleCount/confidence），快照窗口与滚动窗口分离。
+- `src/lib/interaction-poke.mjs`：DOM 交互节流 poke（框架无关）。
+- 测试：`upgrade-coordinator` 8 项、`status-store` 12 项、`idle-audit` 7 项、
+  `idle-recommendations` 7 项、`preferences` 9 项 + orchestrator preferences 路由断言。
+
+### 边界
+- coordinator / status-store / idle-audit 的 UI 接线在客户端包与后续版本完成；
+- 自动备份清理、dismissals 7 天冷却等仍待实现。
+
 ## v3.0.1（2026-11-02）
 
 **主题：母体镜像管理（文件夹 1）：备份 / 恢复 / 自动备份 / 升级 / 回退 + 小光盘面板入口。**

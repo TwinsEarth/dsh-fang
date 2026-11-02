@@ -289,7 +289,7 @@ test('essence manager: 子原身规则（两级上限、父级删除保护）', 
   assert.deepEqual(manager.remove(parent.id), { removed: true })
 })
 
-test('essence manager: recomputeAll 在镜像指纹变化后批量更新', () => {
+test('essence manager: recomputeAll 在镜像指纹变化后批量更新', async () => {
   const { manager, profileDir } = makeFixture()
   const first = manager.create({ name: '原身E' })
   const second = manager.create({ name: '原身F' })
@@ -298,9 +298,11 @@ test('essence manager: recomputeAll 在镜像指纹变化后批量更新', () =>
     name: 'mirror-profile', dependencies: { '@dsh/core': '^2.0.0', added: '^1.0.0' },
     settings: { ui: { theme: 'light', fontSize: 14 } },
   }, null, 2), 'utf8')
-  const result = manager.recomputeAll()
+  const result = await manager.recomputeAll()
   assert.deepEqual(result.conflicted, [])
   assert.deepEqual(new Set(result.recomputed), new Set([first.id, second.id]))
+  assert.deepEqual(result.failed, [])
+  assert.equal(result.aborted, false)
   const mergedPkg = JSON.parse(fs.readFileSync(path.join(manager.mergedProfileDir(first.id), 'package.json'), 'utf8'))
   assert.equal(mergedPkg.dependencies.added, '^1.0.0')
   assert.notEqual(manager.getMeta(first.id).lastMergedFingerprint, before)

@@ -389,6 +389,9 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/mother-link', '/fang/api/mother-link/probe',
     '/fang/api/mirror/status', '/fang/api/mirror/backup', '/fang/api/mirror/restore',
     '/fang/api/mirror/backup/delete', '/fang/api/mirror/backup-interval', '/fang/api/mirror/upgrade',
+    '/fang/api/mirror/preferences', '/fang/api/mirror/preferences/set',
+    '/fang/api/mirror/recompute-status', '/fang/api/compat', '/fang/api/compat/check',
+    '/fang/api/essence/list',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
@@ -451,6 +454,49 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.equal(mirrorUpgrade.statusCode, 409)
   assert.equal(mirrorUpgrade.json().ok, false)
   assert.equal(mirrorUpgrade.json().reason, 'official-source-unavailable')
+
+  // v3.0.8 镜像偏好（交互超时 15/30/60s）
+  const preferencesGet = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/preferences')
+    .handler(makeReq(undefined, 'GET'), preferencesGet)
+  assert.equal(preferencesGet.statusCode, 200)
+  assert.equal(preferencesGet.json().activeIdleTimeoutMs, 30_000)
+
+  const preferencesInvalid = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/preferences/set')
+    .handler(makeReq({ activeIdleTimeoutMs: 1_000 }, 'POST'), preferencesInvalid)
+  assert.equal(preferencesInvalid.statusCode, 400)
+
+  const preferencesOk = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/preferences/set')
+    .handler(makeReq({ activeIdleTimeoutMs: 15_000 }, 'POST'), preferencesOk)
+  assert.equal(preferencesOk.statusCode, 200)
+  assert.equal(preferencesOk.json().activeIdleTimeoutMs, 15_000)
+
+  // v3.0.3 重算状态 + compat 门禁
+  const recomputeStatus = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/recompute-status')
+    .handler(makeReq(undefined, 'GET'), recomputeStatus)
+  assert.equal(recomputeStatus.statusCode, 200)
+  assert.equal(typeof recomputeStatus.json().running, 'boolean')
+
+  const compatStatus = makeRes()
+  await webServer.find('GET', '/fang/api/compat').handler(makeReq(undefined, 'GET'), compatStatus)
+  assert.equal(compatStatus.statusCode, 200)
+  assert.equal(typeof compatStatus.json().subPluginsEnabled, 'boolean')
+
+  const compatCheck = makeRes()
+  await webServer.find('POST', '/fang/api/compat/check').handler(makeReq({}, 'POST'), compatCheck)
+  assert.ok(compatCheck.statusCode === 200 || compatCheck.statusCode === 409)
+  assert.equal(typeof compatCheck.json().ok, 'boolean')
+
+  // v3.0.4 原身列表 + 官方推荐原身 ID
+  const essenceList = makeRes()
+  await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), essenceList)
+  assert.equal(essenceList.statusCode, 200)
+  const essenceBody = essenceList.json()
+  assert.equal(essenceBody.officialId, 'essence-official-dev')
+  assert.ok(Array.isArray(essenceBody.essences))
 
   const panel = makeRes()
   await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)
