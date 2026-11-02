@@ -156,7 +156,7 @@ async function main() {
     check('mother boots with v2 bundle', true, `port=${booted.port}`)
     const token = (() => { try { return new URL(booted.url).searchParams.get('token') ?? '' } catch { return '' } })()
     check('mother URL carries a token', token.length > 0)
-    // v3.0.5/B1：fang 安装级 token（0600 文件）；e2e 作为本机客户端按真实方式带上 header
+    // v3.0.6/B1：fang 安装级 token（0600 文件）；e2e 作为本机客户端按真实方式带上 header
     let fangToken = ''
     try {
       fangToken = JSON.parse(fs.readFileSync(path.join(homeRoot, 'fang', 'e2e', 'fang-auth.json'), 'utf8')).token ?? ''
@@ -181,7 +181,7 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 3.0.5', status.body?.version === '3.0.5')
+    check('status reports version 3.0.6', status.body?.version === '3.0.6')
     check('status reports role=mother', status.body?.role === 'mother')
     check('mother has forker service', status.body?.services?.forker === true)
 

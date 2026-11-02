@@ -394,6 +394,10 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/mirror/preferences', '/fang/api/mirror/preferences/set',
     '/fang/api/mirror/recompute-status', '/fang/api/compat', '/fang/api/compat/check',
     '/fang/api/essence/list', '/fang/api/auth-token', '/fang/api/tasks/open-url',
+    '/fang/api/essence/create', '/fang/api/essence/rename', '/fang/api/essence/archive',
+    '/fang/api/essence/delete', '/fang/api/essence/copy', '/fang/api/essence/default',
+    '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
+    '/fang/api/tasks/download',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
@@ -499,6 +503,29 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const essenceBody = essenceList.json()
   assert.equal(essenceBody.officialId, 'essence-official-dev')
   assert.ok(Array.isArray(essenceBody.essences))
+  assert.equal(essenceBody.capacity.slots, 7)
+  assert.equal(typeof essenceBody.defaultId, 'string')
+
+  // v3.0.6：create → rename → list 契约
+  const createdEssence = makeRes()
+  await webServer.find('POST', '/fang/api/essence/create')
+    .handler(makeReq({ name: '契约元主', tier: 'vip100' }, 'POST'), createdEssence)
+  assert.equal(createdEssence.statusCode, 200)
+  const createdId = createdEssence.json().essence.id
+  assert.ok(createdId)
+
+  const renamedEssence = makeRes()
+  await webServer.find('POST', '/fang/api/essence/rename')
+    .handler(makeReq({ essenceId: createdId, name: '契约元主改名' }, 'POST'), renamedEssence)
+  assert.equal(renamedEssence.statusCode, 200)
+  assert.equal(renamedEssence.json().essence.name, '契约元主改名')
+
+  const essenceList2 = makeRes()
+  await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), essenceList2)
+  const listed = essenceList2.json().essences.find(item => item.id === createdId)
+  assert.ok(listed)
+  assert.equal(typeof listed.pluginCount, 'number')
+  assert.equal(listed.locked, false)
 
   const panel = makeRes()
   await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)
