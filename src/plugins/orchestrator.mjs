@@ -24,7 +24,7 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
-import { EssenceManager } from '../lib/essence.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { fileURLToPath } from 'node:url'
@@ -1136,11 +1136,23 @@ export function apply(ctx, config) {
     mirrorRoot,
     logger: ctx.logger ?? {},
   })
+  // v3.0.4：首次启动 seed 官方推荐原身（锁定、预装默认插件）；失败不阻塞主插件
+  let officialEssence = null
+  try {
+    officialEssence = essenceManager.ensureOfficialEssence()
+  } catch (error) {
+    ctx.logger?.warn?.('[essence] official essence seed failed', { error: String(error?.message ?? error) })
+  }
   upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
   const mirrorService = {
     status: () => mirrorManager.getStatus(),
     getPreferences: () => preferencesStore.get(),
     setPreferences: (patch = {}) => preferencesStore.update(patch),
+    listEssences: () => ({
+      officialId: OFFICIAL_ESSENCE_ID,
+      official: officialEssence,
+      essences: essenceManager.list(),
+    }),
     backup: (input = {}) => mirrorManager.backup({
       label: input?.label, bucket: input?.bucket === 'restore' ? 'restore' : 'backup',
     }),
@@ -1379,6 +1391,7 @@ export function apply(ctx, config) {
       })
       // v3.0.3 compat 门禁：客户端升级后子插件默认关闭，门禁通过才允许启用
       route('GET', `${prefix}/api/mirror/recompute-status`, (req, res) => json(res, 200, mirrorService.recomputeStatus()))
+      route('GET', `${prefix}/api/essence/list`, (req, res) => json(res, 200, mirrorService.listEssences()))
       route('GET', `${prefix}/api/compat`, (req, res) => json(res, 200, mirrorService.compatStatus()))
       route('POST', `${prefix}/api/compat/check`, async (req, res) => {
         const status = await mirrorService.runCompatCheck()

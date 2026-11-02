@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v3.0.4（2026-11-02）
+
+**主题：三层产品形态权限契约 + 官方推荐原身（fast derive 默认基底）。**
+
+### 新增
+- `src/lib/permissions.mjs`：三层权限矩阵（母体禁插件/禁会话、原身可插件/禁会话、分身禁插件/可会话），
+  `checkPermission` / `createEnvironmentGuard`（can/check/assert + `PermissionDeniedError`）/
+  `describePermissions`；未知环境或未知动作 **fail-closed**（供 UI 与 Adapter 第二道门）。
+- `EssenceManager` 官方推荐原身：
+  - `ensureOfficialEssence()` 首次启动幂等 seed（`essence-official-dev`，locked + official，
+    预装默认插件条目 `DEFAULT_OFFICIAL_PATCH_ENTRIES`）；
+  - 锁定保护：`update/remove/setTier` 对 locked 原身一律拒绝；
+  - `create()` 支持显式 id / locked / official / skipQuota / defaultPatchEntries。
+- orchestrator：启动时 seed 官方原身（失败仅 warn，不阻塞主插件）；
+  新增 `GET /fang/api/essence/list`（`{officialId, official, essences}`）。
+- 测试：`permissions` 7 项、`official-essence` 5 项 + orchestrator 路由断言。
+- compat 门禁路由契约更新为 50 条，必需路由增加 `/fang/api/essence/list`。
+
+### 边界
+- 分身派生（DerivedInstanceManager）与三种 Web 视图路由为 v3.0.5+；
+- 真正的硬隔离仍靠 profile 组合（装不装插件/会话），本版本提供第二道门与默认基底。
+
 ## v3.0.3（2026-11-02）
 
 **主题：客户端升级后的兼容性门禁（compat gate）——子插件默认关闭，验证通过才启用。**

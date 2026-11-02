@@ -32,6 +32,16 @@ import { Semaphore } from './semaphore.mjs'
 
 export const ESSENCE_VERSION = '1.0.0'
 
+/** v3.0.4 官方推荐原身（内置、锁定、快速派生默认基底）。 */
+export const OFFICIAL_ESSENCE_ID = 'essence-official-dev'
+export const OFFICIAL_ESSENCE_NAME = '开发者推荐（官方）'
+export const OFFICIAL_ESSENCE_MIN_TIER = 'vip100'
+/** 官方推荐原身预装的默认插件条目（第三方白名单示例，可由镜像侧覆盖）。 */
+export const DEFAULT_OFFICIAL_PATCH_ENTRIES = Object.freeze([
+  Object.freeze({ id: 'official-dev-toolkit', name: '@dsh/plugin-toolkit', disabled: false }),
+  Object.freeze({ id: 'official-dev-git', name: '@dsh/plugin-git', disabled: false }),
+])
+
 /** VIP 配额表：原身数 / 子原身数 / 活跃会话数。归档会话不限。 */
 export const VIP_QUOTAS = Object.freeze({
   free: Object.freeze({ maxEssences: 5, maxSubEssences: 5, maxActiveSessions: 10 }),
@@ -479,12 +489,17 @@ export class EssenceManager {
       const parent = this.getMeta(parentId)
       if (parent.parentId !== null) throw new Error('只允许两级原身：子原身不能再有自己的子原身')
     }
-    const quota = parentId === null
-      ? checkEssenceQuota(tier, this.list().filter(meta => meta.parentId === null).length)
-      : checkSubEssenceQuota(tier, this.listChildren(parentId).length)
-    if (!quota.ok) throw new Error(String(quota.reason))
+    if (options?.skipQuota !== true) {
+      const quota = parentId === null
+        ? checkEssenceQuota(tier, this.list().filter(meta => meta.parentId === null).length)
+        : checkSubEssenceQuota(tier, this.listChildren(parentId).length)
+      if (!quota.ok) throw new Error(String(quota.reason))
+    }
 
-    const id = `essence-${this.now()}-${sha256(`${name}:${this.now()}:${Math.random()}`).slice(0, 6)}`
+    const requestedId = options?.id === undefined ? '' : String(options.id)
+    const id = requestedId.length > 0
+      ? requestedId
+      : `essence-${this.now()}-${sha256(`${name}:${this.now()}:${Math.random()}`).slice(0, 6)}`
     const root = this.essenceRoot(id)
     ensureDir(path.join(root, 'overlay', 'settings'))
     ensureDir(path.join(root, 'overlay', 'credentials'))
@@ -493,10 +508,37 @@ export class EssenceManager {
       id, name, tier, parentId,
       createdAt: this.now(), updatedAt: this.now(),
       lastMergedFingerprint: null, status: ESSENCE_STATUS.READY,
+      locked: options?.locked === true,
+      official: options?.official === true,
     }
     this.writeMeta(root, meta)
+    const defaultEntries = Array.isArray(options?.defaultPatchEntries) ? options.defaultPatchEntries : []
+    if (defaultEntries.length > 0) {
+      const overlay = this.loadOverlay(root)
+      overlay.patchEntries = [...defaultEntries.map(entry => ({ ...entry })), ...overlay.patchEntries]
+      this.saveOverlay(root, overlay)
+    }
     this.recompute(id)
     return this.getMeta(id)
+  }
+
+  /**
+   * 确保“官方推荐原身”存在（首次启动 seed，幂等；锁定不可删改）。
+   * @param {{defaultPatchEntries?: Array<Record<string, unknown>>}} [options]
+   * @returns {any} meta
+   */
+  ensureOfficialEssence(options = {}) {
+    const root = this.essenceRoot(OFFICIAL_ESSENCE_ID)
+    if (exists(path.join(root, 'meta.json'))) return this.getMeta(OFFICIAL_ESSENCE_ID)
+    return this.create({
+      id: OFFICIAL_ESSENCE_ID,
+      name: OFFICIAL_ESSENCE_NAME,
+      tier: OFFICIAL_ESSENCE_MIN_TIER,
+      locked: true,
+      official: true,
+      skipQuota: true,
+      defaultPatchEntries: options?.defaultPatchEntries ?? DEFAULT_OFFICIAL_PATCH_ENTRIES,
+    })
   }
 
   /**
@@ -507,6 +549,8 @@ export class EssenceManager {
    */
   async update(essenceId, mutator) {
     const root = this.essenceRoot(essenceId)
+    const meta = this.readMeta(root)
+    if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不支持修改设置）`)
     const overlay = this.loadOverlay(root)
     await mutator(overlay)
     this.saveOverlay(root, overlay)
@@ -521,6 +565,7 @@ export class EssenceManager {
    */
   remove(essenceId) {
     const meta = this.getMeta(essenceId)
+    if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不可删除）`)
     if (meta.parentId === null) {
       const children = this.listChildren(essenceId)
       if (children.length > 0) throw new Error(`essence ${essenceId} has ${children.length} sub-essences; remove them first`)
@@ -533,6 +578,7 @@ export class EssenceManager {
   setTier(essenceId, tier) {
     const root = this.essenceRoot(essenceId)
     const meta = this.readMeta(root)
+    if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身等级不可修改）`)
     const next = { ...meta, tier: normalizeTier(tier), updatedAt: this.now() }
     this.writeMeta(root, next)
     return this.getMeta(essenceId)

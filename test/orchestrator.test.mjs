@@ -391,6 +391,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/mirror/backup/delete', '/fang/api/mirror/backup-interval', '/fang/api/mirror/upgrade',
     '/fang/api/mirror/preferences', '/fang/api/mirror/preferences/set',
     '/fang/api/mirror/recompute-status', '/fang/api/compat', '/fang/api/compat/check',
+    '/fang/api/essence/list',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
@@ -488,6 +489,14 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   await webServer.find('POST', '/fang/api/compat/check').handler(makeReq({}, 'POST'), compatCheck)
   assert.ok(compatCheck.statusCode === 200 || compatCheck.statusCode === 409)
   assert.equal(typeof compatCheck.json().ok, 'boolean')
+
+  // v3.0.4 原身列表 + 官方推荐原身 ID
+  const essenceList = makeRes()
+  await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), essenceList)
+  assert.equal(essenceList.statusCode, 200)
+  const essenceBody = essenceList.json()
+  assert.equal(essenceBody.officialId, 'essence-official-dev')
+  assert.ok(Array.isArray(essenceBody.essences))
 
   const panel = makeRes()
   await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)
