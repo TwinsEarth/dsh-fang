@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v2.9.3（2026-11-02）
+
+**主题：Essence 原身覆盖层合并库（镜像 × 原身，零依赖实现）。**
+
+### 新增
+- `src/lib/essence.mjs`（v2.9.3）：
+  - 纯合并 `mergeProfiles(mirror, overlay)`：patch 条目按 id（覆盖/禁用/新增，config 深合并）、
+    package.json 依赖并集与主版本兼容判定、settings 深合并、锁定项 fatal 保护、重复 id warning；
+  - 冲突模型：`missing-plugin` / `locked-plugin-overridden` / `locked-plugin-disabled` /
+    `version-incompatible` / `duplicate-id`，分 `fatal` 与 `warning`；
+  - `EssenceManager`：`create/update/remove/list/listChildren/setTier/recompute/recomputeAll/getConflicts`，
+    磁盘布局 `overlay/ + merged/profile/ + meta.json (+ conflicts.json)`；fatal 时保留上一次物化结果并标记
+    `status: conflicted`；物化时剔除镜像凭据、只复制原身 `credentials/`；
+  - 配额：`VIP_QUOTAS`（free 5 / vip10…vip100 100）+ `checkEssenceQuota` / `checkSubEssenceQuota` /
+    `checkActiveSessionQuota`；两级原身、父原身删除保护；
+  - YAML 复用 `rule-registry` 的 `parseYamlSubset`（无新增依赖）；写出 JSON（JSON 是合法 YAML）。
+- `test/essence.test.mjs` 23 项：合并语义 / 冲突分级 / 配额 / 物化 / 凭据边界 / 配额上限 / 两级原身 / recomputeAll。
+- `docs/ESSENCE.md`：三层数据边界、合并语义、配额表、冲突状态机、未交付项。
+
+### 未交付（明确边界）
+- 本版本不接 HTTP 路由、不接面板 UI、不创建分身进程；`merged/profile` 已可作为 `--profile` 供后续 P3 派生使用。
+
+> 版本策略：`x.y.z`；新增能力进 minor 位（v2.9.x → v2.9.3）。
+
 ## v2.9.2（2026-11-02）
 
 **主题：顶栏新增「母体打开」按钮（蓝色地球图标）。**
