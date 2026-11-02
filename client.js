@@ -510,6 +510,20 @@ window.__ModuleLoader__.load({
       h('path', { d: 'M2.75 20h18.5', stroke: 'currentColor', strokeWidth: 1.75, opacity: 0.55 })))
     }
 
+    // ── 蓝色小地球：打开母体门户（v2.9.2）─────────────────────────────────
+    function IconGlobe({ size = 13, color = INFO }) {
+      const s = Math.max(10, Math.min(20, Number(size) || 13))
+      return h('svg', {
+        width: s, height: s, viewBox: '0 0 24 24', fill: 'none',
+        stroke: color, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round',
+        'aria-hidden': true, focusable: 'false',
+        style: { flexShrink: 0 },
+      },
+      h('circle', { cx: 12, cy: 12, r: 9 }),
+      h('path', { d: 'M3 12h18' }),
+      h('path', { d: 'M12 3c2.5 2.4 4 5.6 4 9s-1.5 6.6-4 9c-2.5-2.4-4-5.6-4-9s1.5-6.6 4-9z' }))
+    }
+
     // ── 基础组件 ──────────────────────────────────────────────────────────
     function Pill({ tone = 'neutral', dot = false, mono = false, title, children, style }) {
       const palette = TONE[tone] || TONE.neutral
@@ -1401,8 +1415,18 @@ window.__ModuleLoader__.load({
       const [showTemporary, setShowTemporary] = useState(() => readPanelBoolPref(PANEL_TEMP_PREF_KEY, true))
       // v2.7.1 读档：顶栏切换存档 UI；存档 = 进程已停止、home 保留的已归档任务。
       const [showArchive, setShowArchive] = useState(false)
-      // v2.9.0 母体连接卡片（顶栏开关；只读描述 + 连通性探测）。
+      // v2.9.1 母体连接卡片（顶栏开关；只读描述 + 连通性探测）。
       const [showLink, setShowLink] = useState(false)
+      // v2.9.2「母体打开」：新窗口打开母体瓮城独立门户；桌面壳用注入的真实 HTTP 源拼绝对地址。
+      const openMotherPortal = () => {
+        const origin = resolveMotherOrigin()
+        const url = origin ? `${origin}/fang/panel` : '/fang/panel'
+        try {
+          const win = window.open(url, '_blank', 'noopener')
+          if (win) return
+        } catch { /* fall through to same-tab */ }
+        try { window.location.assign(url) } catch { /* ignore */ }
+      }
       const toggleTemporary = () => {
         setShowTemporary((value) => {
           const next = !value
@@ -1950,6 +1974,12 @@ window.__ModuleLoader__.load({
             onClick: () => setShowLink((value) => !value),
             title: '母体连接：查看母体地址、接入说明与共享配置摘要，并测试连通性（只读，不写配置）',
           }, showLink ? '收起连接' : '母体连接'),
+          h(Btn, {
+            variant: 'quiet',
+            size: 'sm',
+            onClick: openMotherPortal,
+            title: '在新窗口打开母体瓮城的独立门户（/fang/panel）；桌面端使用宿主的真实 HTTP 地址',
+          }, h(IconGlobe, { size: 13 }), '母体打开'),
           h(Btn, {
             variant: 'primary',
             size: 'lg',
