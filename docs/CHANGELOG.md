@@ -1,11 +1,38 @@
 # CHANGELOG
 
-## v2.9.3（2026-11-02）
+## v2.9.9（2026-11-02）
+
+**主题：母体镜像管理（文件夹 1）：备份 / 恢复 / 自动备份 / 升级 / 回退 + 小光盘面板入口。**
+
+### 新增
+- `src/lib/mirror.mjs`（零依赖）：
+  - 目录布局 `active/ + backup/ + restore/ + backups.json + meta.json`；
+  - `backup()`（自动/手动分桶）、`restore()`（先自动备份当前 active 再替换）、`deleteBackup()`、
+    `setBackupInterval()`（仅 6/12/24）、`maybeAutoBackup()`（到期检查）、`checkUpdate()`；
+  - `upgrade({autoBackup, autoRollback, onProgress})`：检查 → 备份 → 下载 staging → 原子替换 → 失败自动回滚；
+    未配置官方源时显式返回 `official-source-unavailable`（不假装成功）；
+  - `getStatus()`：版本/官方最新/更新可用/备份列表/磁盘占用/活跃分身数；`backupId` 正则防路径穿越。
+- 服务 `SERVICE.mirror = 'fangMirror'`（由 `fang-orchestrator` 提供）+ 6 条路由：
+  `GET /fang/api/mirror/status`、`POST /fang/api/mirror/{backup,restore,backup/delete,backup-interval,upgrade}`。
+- orchestrator 每 60s 检查自动备份到期；新增 `Config.mirrorRoot`（空 = `<dataRoot>/mirror`）。
+- `client.js`：顶栏「镜像」按钮（蓝色小光盘 `IconDisc`）+ 「母体镜像」卡片：状态轮询（8s）、
+  6/12/24 小时间隔、立即备份、备份列表恢复/删除（二次确认）、升级（indeterminate + 已用时间）。
+- `test/mirror.test.mjs` 16 项 + `test/orchestrator.test.mjs` 路由/处理器断言；
+  `docs/MIRROR.md`（布局/路由/升级语义/边界/未交付）。
+
+### 未交付（明确边界）
+- 官方源未接入：`checkUpdate/upgrade` 显式降级，升级按钮在无更新/无源时禁用；
+- 原身（文件夹 2）与会话（文件夹 3）的派生与隔离（P2/P3）；
+- 升级进度的 SSE 推送（当前为 indeterminate + 已用时间）。
+
+> 版本策略：`x.y.z`；新增能力进 minor 位（v2.10.0 → v2.9.9）。
+
+## v2.10.0（2026-11-02）
 
 **主题：Essence 原身覆盖层合并库（镜像 × 原身，零依赖实现）。**
 
 ### 新增
-- `src/lib/essence.mjs`（v2.9.3）：
+- `src/lib/essence.mjs`（v2.10.0）：
   - 纯合并 `mergeProfiles(mirror, overlay)`：patch 条目按 id（覆盖/禁用/新增，config 深合并）、
     package.json 依赖并集与主版本兼容判定、settings 深合并、锁定项 fatal 保护、重复 id warning；
   - 冲突模型：`missing-plugin` / `locked-plugin-overridden` / `locked-plugin-disabled` /
@@ -22,7 +49,7 @@
 ### 未交付（明确边界）
 - 本版本不接 HTTP 路由、不接面板 UI、不创建分身进程；`merged/profile` 已可作为 `--profile` 供后续 P3 派生使用。
 
-> 版本策略：`x.y.z`；新增能力进 minor 位（v2.9.x → v2.9.3）。
+> 版本策略：`x.y.z`；新增能力进 minor 位（v2.9.x → v2.10.0）。
 
 ## v2.9.2（2026-11-02）
 

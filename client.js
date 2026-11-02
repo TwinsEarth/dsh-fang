@@ -524,6 +524,21 @@ window.__ModuleLoader__.load({
       h('path', { d: 'M12 3c2.5 2.4 4 5.6 4 9s-1.5 6.6-4 9c-2.5-2.4-4-5.6-4-9s1.5-6.6 4-9z' }))
     }
 
+    // ── 蓝色小光盘：母体镜像设置（v2.9.9）───────────────────────────────
+    function IconDisc({ size = 13, color = INFO }) {
+      const s = Math.max(10, Math.min(20, Number(size) || 13))
+      return h('svg', {
+        width: s, height: s, viewBox: '0 0 24 24', fill: 'none',
+        stroke: color, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round',
+        'aria-hidden': true, focusable: 'false',
+        style: { flexShrink: 0 },
+      },
+      h('circle', { cx: 12, cy: 12, r: 9 }),
+      h('circle', { cx: 12, cy: 12, r: 2.4 }),
+      h('path', { d: 'M12 3v6.6' }),
+      h('path', { d: 'M12 14.4V21' }))
+    }
+
     // ── 基础组件 ──────────────────────────────────────────────────────────
     function Pill({ tone = 'neutral', dot = false, mono = false, title, children, style }) {
       const palette = TONE[tone] || TONE.neutral
@@ -742,6 +757,189 @@ window.__ModuleLoader__.load({
       mode === 'fork'
         ? h('span', { style: { fontSize: 11, lineHeight: '17px', color: TEXT2 } }, '分身不保存插件设置：地址只保留在本次会话内存里；跨源读取失败通常是因为母体宿主未开放 CORS，可直接回到母体窗口的瓮城面板查看。')
         : null)
+    }
+
+    /** 母体镜像设置卡片（v2.9.9）：状态轮询 + 备份/恢复/间隔/升级；镜像只在本机文件夹 1。 */
+    function MirrorSettingsCard({ onClose }) {
+      const [view, setView] = useState({ state: 'loading', status: null, error: '' })
+      const [busy, setBusy] = useState('')
+      const [actionError, setActionError] = useState('')
+      const [upgrading, setUpgrading] = useState(false)
+      const [upgradeStartedAt, setUpgradeStartedAt] = useState(0)
+      const [elapsed, setElapsed] = useState(0)
+
+      const loadStatus = async () => {
+        try {
+          const result = await api('/fang/api/mirror/status')
+          if (result.status === 200 && result.body && result.body.ok !== false) {
+            setView({ state: 'ready', status: result.body, error: '' })
+          } else {
+            setView({ state: 'error', status: null, error: String(result.body?.error ?? ('http-' + result.status)) })
+          }
+        } catch (e) {
+          setView({ state: 'error', status: null, error: String(e?.message ?? e) })
+        }
+      }
+
+      useEffect(() => {
+        let alive = true
+        const tick = async () => {
+          if (!alive) return
+          await loadStatus()
+        }
+        tick()
+        const timer = setInterval(tick, 8000)
+        return () => { alive = false; clearInterval(timer) }
+      }, [])
+
+      useEffect(() => {
+        if (!upgrading) return undefined
+        const timer = setInterval(() => setElapsed(Math.floor((Date.now() - upgradeStartedAt) / 1000)), 1000)
+        return () => clearInterval(timer)
+      }, [upgrading, upgradeStartedAt])
+
+      const act = async (label, operation) => {
+        setBusy(label)
+        setActionError('')
+        try {
+          const out = await operation()
+          if (out && out.ok === false) setActionError(String(out.error ?? out.reason ?? '操作失败'))
+          await loadStatus()
+        } catch (e) {
+          setActionError(String(e?.message ?? e))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const status = view.status
+      const meta = status?.meta ?? {}
+      const backups = Array.isArray(status?.backups) ? status.backups : []
+      const intervalHours = Number(meta.backupIntervalHours) || 24
+      const updateAvailable = status?.updateAvailable === true
+      const officialLatest = status?.officialLatest ?? null
+
+      const backupNow = () => act('backup', async () => {
+        const result = await api('/fang/api/mirror/backup', { method: 'POST', body: JSON.stringify({ bucket: 'restore', label: '手动备份' }) })
+        return result.body
+      })
+      const setIntervalHours = (hours) => act('interval:' + hours, async () => {
+        const result = await api('/fang/api/mirror/backup-interval', { method: 'POST', body: JSON.stringify({ hours }) })
+        return result.body
+      })
+      const restoreBackup = (entry) => {
+        if (typeof window !== 'undefined' && !window.confirm(`恢复到 ${fmtMirrorTime(entry.createdAt)} 的备份（v${entry.version}）？\n当前镜像会先自动备份一份。`)) return
+        void act('restore:' + entry.id, async () => {
+          const result = await api('/fang/api/mirror/restore', { method: 'POST', body: JSON.stringify({ backupId: entry.id }) })
+          return result.body
+        })
+      }
+      const deleteBackup = (entry) => {
+        if (typeof window !== 'undefined' && !window.confirm(`删除 ${fmtMirrorTime(entry.createdAt)} 的备份（${fmtMirrorBytes(entry.sizeBytes)}）？此操作不可恢复。`)) return
+        void act('delete:' + entry.id, async () => {
+          const result = await api('/fang/api/mirror/backup/delete', { method: 'POST', body: JSON.stringify({ backupId: entry.id }) })
+          return result.body
+        })
+      }
+      const upgradeNow = () => {
+        if (typeof window !== 'undefined' && !window.confirm(`升级母体镜像 ${status?.currentVersion} → ${officialLatest}？\n升级前自动备份，失败自动回滚；不会中断运行中的分身。`)) return
+        setUpgrading(true)
+        setUpgradeStartedAt(Date.now())
+        setElapsed(0)
+        void act('upgrade', async () => {
+          const result = await api('/fang/api/mirror/upgrade', { method: 'POST', body: JSON.stringify({ autoBackup: true, autoRollback: true }) })
+          return result.body
+        }).finally(() => setUpgrading(false))
+      }
+
+      const row = (label, value) => h('div', {
+        style: { display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 11.5, lineHeight: '18px' },
+      },
+      h('span', { style: { color: TEXT3, minWidth: 76 } }, label),
+      h('span', { style: { color: TEXT } }, value))
+
+      return h('section', {
+        role: 'region',
+        'aria-label': '母体镜像设置',
+        style: {
+          flexShrink: 0, border: `1px solid ${ACCENT_LINE}`, borderRadius: 10,
+          background: SURFACE_SOLID, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8,
+        },
+      },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+        h('span', { style: { fontSize: 12.5, fontWeight: 600, color: TEXT } }, '母体镜像'),
+        h(Tag, { tone: 'info' }, '只读管理'),
+        h('span', { style: { flex: 1 } }),
+        h(Btn, { size: 'sm', variant: 'quiet', onClick: onClose, title: '关闭母体镜像设置' }, '收起')),
+
+      view.state === 'loading' ? h('span', { style: { fontSize: 11.5, color: TEXT2 } }, '读取 /fang/api/mirror/status…') : null,
+      view.state === 'error' ? h('span', { style: { fontSize: 11.5, color: DANGER } }, `读取失败：${view.error}`) : null,
+      actionError ? h('span', { style: { fontSize: 11.5, color: DANGER } }, `操作失败：${actionError}`) : null,
+
+      status
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+          row('当前版本', String(status.currentVersion || '—')),
+          row('官方最新', officialLatest === null ? '未配置官方源（无法检查更新）' : String(officialLatest)),
+          row('上次备份', meta.lastBackupAt ? fmtMirrorTime(meta.lastBackupAt) : '从未'),
+          row('下次备份', meta.nextBackupAt ? fmtMirrorTime(meta.nextBackupAt) : '未安排'),
+          row('磁盘占用', fmtMirrorBytes(Number(status.diskUsageBytes) || 0)))
+        : null,
+
+      h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+        h('span', { style: { fontSize: 11.5, color: TEXT2 } }, '自动备份间隔'),
+        ...([6, 12, 24].map(hours => h(Btn, {
+          key: 'interval-' + hours,
+          size: 'sm',
+          variant: intervalHours === hours ? 'primary' : 'quiet',
+          disabled: busy !== '' || upgrading,
+          onClick: () => void setIntervalHours(hours),
+          title: `每 ${hours} 小时自动备份一次母体镜像`,
+        }, hours + 'h'))),
+        h(Btn, {
+          size: 'sm', variant: 'ghost', disabled: busy !== '' || upgrading,
+          onClick: () => void backupNow(), title: '立即创建手动恢复点（restore/）',
+        }, busy === 'backup' ? '备份中…' : '立即备份'),
+        h(Btn, {
+          size: 'sm', variant: 'primary', disabled: !updateAvailable || busy !== '' || upgrading,
+          onClick: upgradeNow,
+          title: updateAvailable ? '备份 → 下载 → 替换 → 失败自动回滚' : '没有可用更新（或未配置官方源）',
+        }, upgrading ? '升级中…' : updateAvailable ? '立即升级' : '无可用更新')),
+
+      upgrading
+        ? h('span', { style: { fontSize: 11.5, color: INFO } }, `升级中… 已用 ${elapsed}s。请勿关闭 DSH。`)
+        : null,
+
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+        h('span', { style: { fontSize: 11.5, color: TEXT3 } }, `备份（${backups.length}）`),
+        backups.length === 0
+          ? h('span', { style: { fontSize: 11.5, color: TEXT3 } }, '暂无备份')
+          : backups.slice(0, 8).map(entry => h('div', {
+            key: 'backup-' + entry.id,
+            style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 11.5, lineHeight: '18px' },
+          },
+          h(Tag, { tone: entry.bucket === 'restore' ? 'info' : 'neutral' }, entry.bucket === 'restore' ? '恢复点' : '滚动'),
+          h('span', { style: { color: TEXT2 } }, `${entry.label || (entry.kind === 'manual' ? '手动备份' : '自动备份')} · ${fmtMirrorTime(entry.createdAt)} · v${entry.version} · ${fmtMirrorBytes(entry.sizeBytes)}`),
+          h('span', { style: { flex: 1 } }),
+          h(Btn, { size: 'sm', variant: 'quiet', disabled: busy !== '' || upgrading, onClick: () => restoreBackup(entry) }, '恢复'),
+          h(Btn, { size: 'sm', variant: 'ghost', disabled: busy !== '' || upgrading, onClick: () => deleteBackup(entry), style: { color: DANGER } }, '删除')))))
+    }
+
+    function fmtMirrorBytes(bytes) {
+      const value = Number(bytes) || 0
+      if (value < 1024) return value + ' B'
+      if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB'
+      if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + ' MB'
+      return (value / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
+    }
+
+    function fmtMirrorTime(ms) {
+      try {
+        const date = new Date(Number(ms))
+        const pad = (n) => String(n).padStart(2, '0')
+        return `${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+      } catch {
+        return '—'
+      }
     }
 
     function Tag({ children, tone = 'neutral', mono = false, title }) {
@@ -1417,6 +1615,8 @@ window.__ModuleLoader__.load({
       const [showArchive, setShowArchive] = useState(false)
       // v2.9.1 母体连接卡片（顶栏开关；只读描述 + 连通性探测）。
       const [showLink, setShowLink] = useState(false)
+      // v2.9.9 母体镜像设置卡片（小光盘按钮；版本/备份/恢复/升级）。
+      const [showMirror, setShowMirror] = useState(false)
       // v2.9.2「母体打开」：新窗口打开母体瓮城独立门户；桌面壳用注入的真实 HTTP 源拼绝对地址。
       const openMotherPortal = () => {
         const origin = resolveMotherOrigin()
@@ -1969,6 +2169,12 @@ window.__ModuleLoader__.load({
             style: isNarrow ? { flex: '1 1 auto' } : undefined,
           }, h(IconRefresh, { size: 13 }), refreshing ? '刷新中…' : '刷新'),
           h(Btn, {
+            variant: showMirror ? 'primary' : 'quiet',
+            size: 'sm',
+            onClick: () => setShowMirror((value) => !value),
+            title: '母体镜像设置：版本、备份/恢复、6/12/24 小时自动备份、升级与回退（只管理本机镜像文件夹）',
+          }, h(IconDisc, { size: 13 }), '镜像'),
+          h(Btn, {
             variant: showLink ? 'primary' : 'quiet',
             size: 'sm',
             onClick: () => setShowLink((value) => !value),
@@ -2469,6 +2675,7 @@ window.__ModuleLoader__.load({
         return h('div', { role: 'region', 'aria-label': '瓮城读档', style: rootStyle },
           header,
           showLink ? h(MotherLinkCard, { mode: 'mother', onClose: () => setShowLink(false) }) : null,
+          showMirror ? h(MirrorSettingsCard, { onClose: () => setShowMirror(false) }) : null,
           noticeView,
           h('div', { style: { flex: 1, minHeight: 0, display: 'flex' } }, archiveView))
       }
@@ -2479,6 +2686,7 @@ window.__ModuleLoader__.load({
       return h('div', { role: 'region', 'aria-label': '瓮城控制台', style: rootStyle },
         header,
         showLink ? h(MotherLinkCard, { mode: 'mother', onClose: () => setShowLink(false) }) : null,
+        showMirror ? h(MirrorSettingsCard, { onClose: () => setShowMirror(false) }) : null,
         statusBanner,
         deriveBar,
         noticeView,
