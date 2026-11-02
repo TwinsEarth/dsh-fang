@@ -92,6 +92,8 @@ export class MirrorManager {
     this.logger = options.logger ?? {}
     this.now = typeof options.now === 'function' ? options.now : () => Date.now()
     this.usageProvider = typeof options.usageProvider === 'function' ? options.usageProvider : null
+    // v3.0.9：升级成功后的副作用钩子（由协调器注入；异步触发，不阻塞 upgrade 返回）
+    this.postUpgradeHook = typeof options.postUpgradeHook === 'function' ? options.postUpgradeHook : null
   }
 
   activeDir() { return path.join(this.mirrorRoot, 'active') }
@@ -377,7 +379,12 @@ export class MirrorManager {
       writeJsonAtomic(path.join(this.activeDir(), 'version.json'), { version: latest })
       stage(UPGRADE_STAGE.DONE)
       this.logger?.info?.(`[mirror] upgraded ${from} → ${latest}`)
-      return { ok: true, from, to: latest, backupId, rolledBack: false }
+      const result = { ok: true, from, to: latest, backupId, rolledBack: false }
+      if (this.postUpgradeHook !== null) {
+        result.postUpgradeTriggered = true
+        void this.runPostUpgrade({ from, to: latest, backupId })
+      }
+      return result
     } catch (error) {
       const reason = String(error instanceof Error ? error.message : error)
       this.logger?.warn?.(`[mirror] upgrade failed: ${reason}`)
@@ -393,6 +400,22 @@ export class MirrorManager {
       return { ok: false, from, to: from, backupId, rolledBack: false, reason }
     } finally {
       if (exists(staging)) removeTree(staging)
+    }
+  }
+
+  /**
+   * 触发升级后副作用（fire-and-forget）：钩子失败只记 warn，不影响升级结果。
+   * @param {{from: string, to: string, backupId: string|null}} input
+   */
+  async runPostUpgrade(input) {
+    try {
+      this.logger?.info?.('[mirror] triggering post-upgrade hook', input)
+      await this.postUpgradeHook(input)
+      this.logger?.info?.('[mirror] post-upgrade hook completed', input)
+    } catch (error) {
+      this.logger?.warn?.('[mirror] post-upgrade hook failed', {
+        error: String(error instanceof Error ? error.message : error), ...input,
+      })
     }
   }
 

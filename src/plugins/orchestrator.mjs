@@ -23,6 +23,7 @@ import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
+import { PreferencesStore } from '../lib/preferences.mjs'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -1106,8 +1107,12 @@ export function apply(ctx, config) {
     }),
   })
   mirrorManager.ensureLayout()
+  const preferencesStore = new PreferencesStore({ mirrorRoot, logger: ctx.logger ?? {} })
+  preferencesStore.load()
   const mirrorService = {
     status: () => mirrorManager.getStatus(),
+    getPreferences: () => preferencesStore.get(),
+    setPreferences: (patch = {}) => preferencesStore.update(patch),
     backup: (input = {}) => mirrorManager.backup({
       label: input?.label, bucket: input?.bucket === 'restore' ? 'restore' : 'backup',
     }),
@@ -1324,6 +1329,17 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         const out = mirrorService.setBackupInterval(body?.hours)
         return json(res, out.ok ? 200 : 400, out)
+      })
+      // v3.0.8 镜像偏好：对话框交互超时 15/30/60s（宿主侧持久化）
+      route('GET', `${prefix}/api/mirror/preferences`, (req, res) => json(res, 200, mirrorService.getPreferences()))
+      route('POST', `${prefix}/api/mirror/preferences/set`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const preferences = mirrorService.setPreferences({ activeIdleTimeoutMs: body?.activeIdleTimeoutMs })
+          return json(res, 200, preferences)
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
       })
       route('POST', `${prefix}/api/mirror/upgrade`, async (req, res) => {
         const body = await readBody(req)

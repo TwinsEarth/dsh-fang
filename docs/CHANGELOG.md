@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## v3.0.2（2026-11-02）
+
+**主题：升级后重算协调 + 镜像偏好 schema 化 + 空闲降级审计。**
+
+### 新增
+- `src/lib/semaphore.mjs`：计数信号量（并发上限）。
+- `EssenceManager.recomputeAll(options)` 异步增强：ensureFresh（fingerprint 匹配 → skipped）、
+  `concurrency`（默认 4）、`perEssenceTimeoutMs`（默认 60s）、`AbortSignal`、`onProgress`；
+  返回 `{recomputed, skipped, conflicted, failed, aborted, durationMs}`，单原身失败/超时不中断整批。
+- `MirrorManager.postUpgradeHook`：升级成功后 fire-and-forget 触发（`postUpgradeTriggered`），
+  失败/回滚不触发，钩子异常只 warn，不影响升级结果。
+- `src/lib/upgrade-coordinator.mjs`：`onUpgradeSuccess` 去重并发批次、`getRecomputeStatus`、
+  `waitForRecompute`，向 UI 暴露 running/startedAt/finishedAt/progress/lastResult/lastError。
+- `src/lib/preferences.mjs` 重写为 schema 驱动：6 个字段描述符（交互超时/活跃与空闲轮询间隔/
+  备份保留天数/空闲提示/严格冲突模式），默认值、min/max/step、enum options、migrate、
+  `normalizePreferences` 纯函数、未知字段丢弃、损坏文件不覆盖；新增
+  `GET /fang/api/mirror/preferences` 与 `POST /fang/api/mirror/preferences/set`。
+- `src/lib/status-store.mjs`：外部 store（每个订阅者共享状态、304 只更新 lastUpdatedAt、
+  订阅计数、`acquireActive` 引用计数 + `pokeActive` + 30s 无交互降级、`setActiveIdleTimeout`）。
+- `src/lib/idle-audit.mjs`：空闲降级事件聚合（单条审计 + 周期 summary、byTimeout 统计、
+  rapidAway/fullTimeout、样本足够时生成建议）；滚动窗口 `getRecommendations()` 输出结构化建议
+  （fieldKey/suggestedValue/text/sampleCount/confidence），快照窗口与滚动窗口分离。
+- `src/lib/interaction-poke.mjs`：DOM 交互节流 poke（框架无关）。
+- 测试：`upgrade-coordinator` 8 项、`status-store` 12 项、`idle-audit` 7 项、
+  `idle-recommendations` 7 项、`preferences` 9 项 + orchestrator preferences 路由断言。
+
+### 边界
+- coordinator / status-store / idle-audit 的 UI 接线在客户端包与后续版本完成；
+- 自动备份清理、dismissals 7 天冷却等仍待实现。
+
 ## v3.0.1（2026-11-02）
 
 **主题：母体镜像管理（文件夹 1）：备份 / 恢复 / 自动备份 / 升级 / 回退 + 小光盘面板入口。**

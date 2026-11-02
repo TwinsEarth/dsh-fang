@@ -27,6 +27,8 @@ import {
   removeTree,
 } from '../kernel/index.mjs'
 import { parseYamlSubset } from './rule-registry.mjs'
+import { KeyedMutex } from './mutex.mjs'
+import { Semaphore } from './semaphore.mjs'
 
 export const ESSENCE_VERSION = '1.0.0'
 
@@ -399,6 +401,7 @@ export class EssenceManager {
     this.mirrorLockedIds = new Set(options.mirrorLockedIds ?? [])
     this.logger = options.logger ?? {}
     this.now = typeof options.now === 'function' ? options.now : () => Date.now()
+    this.mutex = new KeyedMutex()
   }
 
   // ── 读取 ────────────────────────────────────────────────────────────────
@@ -429,6 +432,25 @@ export class EssenceManager {
   /** @param {string} essenceId @returns {string} 物化后的 profile 目录（供派生实例 --profile 使用） */
   mergedProfileDir(essenceId) {
     return path.join(this.essenceRoot(essenceId), 'merged', 'profile')
+  }
+
+  /**
+   * 幂等确保 merged/profile 最新：镜像指纹未变且状态 ready 时跳过重算。
+   * 同一原身的并发调用按 key 串行，只有第一个真正重算（后续看到指纹已匹配直接返回）。
+   * @param {string} essenceId
+   * @returns {Promise<{meta: Record<string, unknown>, recomputed: boolean}>}
+   */
+  async ensureFresh(essenceId) {
+    return this.mutex.run(essenceId, async () => {
+      const root = this.essenceRoot(essenceId)
+      const meta = this.readMeta(root)
+      const mirror = this.loadMirror()
+      if (meta.status === ESSENCE_STATUS.READY && meta.lastMergedFingerprint === mirror.fingerprint) {
+        return { meta, recomputed: false }
+      }
+      this.recompute(essenceId)
+      return { meta: this.readMeta(root), recomputed: true }
+    })
   }
 
   /** @param {string} essenceId */
@@ -613,16 +635,53 @@ export class EssenceManager {
     return { ...result, status: ESSENCE_STATUS.READY, fingerprint: mirror.fingerprint }
   }
 
-  /** 镜像升级后批量重算。 @returns {{recomputed:string[], conflicted:string[]}} */
-  recomputeAll() {
-    const recomputed = []
-    const conflicted = []
-    for (const meta of this.list()) {
-      const result = this.recompute(meta.id)
-      if (result.status === ESSENCE_STATUS.CONFLICTED) conflicted.push(meta.id)
-      else recomputed.push(meta.id)
+  /**
+   * 镜像升级后批量重算：只重算 fingerprint 不匹配的原身（ensureFresh），
+   * 并发上限 + 单个超时 + 失败隔离 + 进度回调 + AbortSignal。
+   * @param {{concurrency?: number, perEssenceTimeoutMs?: number, signal?: AbortSignal, onProgress?: Function}} [options]
+   * @returns {Promise<{recomputed: string[], skipped: string[], conflicted: string[], failed: Array<{id: string, error: string}>, aborted: boolean, durationMs: number}>}
+   */
+  async recomputeAll(options = {}) {
+    const startedAt = this.now()
+    const concurrency = Math.max(1, Math.floor(Number(options.concurrency) || 4))
+    const timeoutMs = Math.max(1, Math.floor(Number(options.perEssenceTimeoutMs) || 60_000))
+    const ids = this.list().map(meta => String(meta.id))
+    const result = { recomputed: [], skipped: [], conflicted: [], failed: [], aborted: false, durationMs: 0 }
+    if (ids.length === 0) {
+      result.durationMs = this.now() - startedAt
+      return result
     }
-    return { recomputed, conflicted }
+    const semaphore = new Semaphore(concurrency)
+    let done = 0
+    const report = (currentId) => {
+      try {
+        options.onProgress?.({
+          done, total: ids.length, currentId,
+          recomputed: result.recomputed.length,
+          skipped: result.skipped.length,
+          conflicted: result.conflicted.length,
+          failed: result.failed.length,
+        })
+      } catch { /* 观察者异常不影响重算 */ }
+    }
+    await Promise.all(ids.map(async (id) => {
+      await semaphore.acquire()
+      try {
+        if (options.signal?.aborted) { result.aborted = true; return }
+        const fresh = await withTimeout(this.ensureFresh(id), timeoutMs, `recompute timeout for ${id}`)
+        if (fresh.meta?.status === ESSENCE_STATUS.CONFLICTED) result.conflicted.push(id)
+        else if (fresh.recomputed === true) result.recomputed.push(id)
+        else result.skipped.push(id)
+      } catch (error) {
+        result.failed.push({ id, error: String(error instanceof Error ? error.message : error) })
+      } finally {
+        done += 1
+        report(id)
+        semaphore.release()
+      }
+    }))
+    result.durationMs = this.now() - startedAt
+    return result
   }
 
   // ── 内部 ────────────────────────────────────────────────────────────────
@@ -696,7 +755,19 @@ export class EssenceManager {
   }
 }
 
+/** Promise 超时包装（v3.0.9：recomputeAll 单原身超时）。 */
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+    timer.unref?.()
+    promise.then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
 export const _internals = Object.freeze({
   mergePatchEntries, mergePackageJson, deepMerge, hasConfigDiff, areVersionsCompatible,
-  extractPatchEntries, normalizeTier,
+  extractPatchEntries, normalizeTier, withTimeout,
 })
