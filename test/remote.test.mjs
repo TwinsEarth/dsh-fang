@@ -85,7 +85,7 @@ test('hello(): GET /fang/adapter/hello with token; ok envelope', async () => {
   const { url, init } = fetchImpl.calls[0]
   assert.equal(init.method, 'GET')
   assert.equal(parsed(url).pathname, '/fang/adapter/hello')
-  assert.equal(parsed(url).searchParams.get('token'), 'tok')
+  assert.equal(parsed(url).searchParams.get('token'), null, 'v3.0.5/B4：token 不进 URL')
   assert.equal(init.body, undefined)
   assert.ok(init.signal, 'timeout must pass an AbortSignal')
 })
@@ -114,7 +114,7 @@ test('status/approvals/audit: paths, methods and limit query', async () => {
   const auditUrl = parsed(fetchImpl.calls[2].url)
   assert.equal(auditUrl.pathname, '/fang/adapter/audit')
   assert.equal(auditUrl.searchParams.get('limit'), '7')
-  assert.equal(auditUrl.searchParams.get('token'), 'tok', 'token preserved on query requests')
+  assert.equal(auditUrl.searchParams.get('token'), null, 'v3.0.5/B4：query 请求也不带 token')
 
   await remote.audit()
   assert.equal(parsed(fetchImpl.calls[3].url).searchParams.get('limit'), '100', 'audit default limit is 100')
@@ -146,17 +146,16 @@ test('command()/ping(): POST JSON {op,payload}', async () => {
 test('createRemote: token precedence (option > URL) and custom prefix', async () => {
   const fetchImpl = makeFetch(() => fakeResponse({ body: { ok: true } }))
 
-  // token 省略 → 从 URL 提取；URL 里原有 token 不会被丢弃
+  // v3.0.5/B4：URL 里的 token 只用于提取，不再被重新拼进请求 URL
   const fromUrl = createRemote({ url: `${BASE}/?token=url-token`, fetchImpl })
   await fromUrl.hello()
-  assert.equal(parsed(fetchImpl.calls[0].url).searchParams.get('token'), 'url-token')
+  assert.equal(parsed(fetchImpl.calls[0].url).searchParams.get('token'), null)
 
-  // 显式 token → 替换 URL 里的旧 token（不出现两个 token 参数）
   const replaced = createRemote({ url: `${BASE}/?token=old`, token: 'new-token', fetchImpl })
   await replaced.hello()
   const replacedUrl = fetchImpl.calls[1].url
-  assert.equal(parsed(replacedUrl).searchParams.get('token'), 'new-token')
-  assert.equal(parsed(replacedUrl).searchParams.getAll('token').length, 1)
+  assert.equal(parsed(replacedUrl).searchParams.get('token'), null)
+  assert.equal(parsed(replacedUrl).searchParams.getAll('token').length, 0)
 
   const custom = createRemote({ url: `${BASE}/`, token: 't', prefix: 'x/', fetchImpl })
   await custom.status()
@@ -309,7 +308,7 @@ test('v3: version/health/state/commands 路径与 Bearer 头', async () => {
   )
   for (const call of fetch.calls) {
     assert.equal(call.init.headers.authorization, 'Bearer a-tok', '每个请求都带 v3 Bearer')
-    assert.equal(new URL(call.url).searchParams.get('token'), 't', 'DSH web token 仍走 ?token=')
+    assert.equal(new URL(call.url).searchParams.get('token'), null, 'v3.0.5/B4：token 不再进 URL')
   }
   assert.deepEqual(JSON.parse(fetch.calls[3].init.body), { commandId: 'cmd_1', op: 'ping' })
 })

@@ -105,9 +105,16 @@ export function makeRes() {
 }
 
 /** A fake http request with an optional JSON body. */
+export const TEST_AUTH_TOKEN = 'test-auth-token-0123456789abcdef0123456789abcdef'
+
 export function makeReq(body = undefined, method = 'GET') {
   const req = new EventEmitter()
   req.method = method
+  req.headers = {
+    host: '127.0.0.1:1',
+    'x-fang-auth': TEST_AUTH_TOKEN,
+    'content-type': 'application/json',
+  }
   req.destroy = () => {}
   process.nextTick(() => {
     if (body !== undefined && method !== 'GET') req.emit('data', Buffer.from(JSON.stringify(body)))

@@ -156,12 +156,21 @@ async function main() {
     check('mother boots with v2 bundle', true, `port=${booted.port}`)
     const token = (() => { try { return new URL(booted.url).searchParams.get('token') ?? '' } catch { return '' } })()
     check('mother URL carries a token', token.length > 0)
+    // v3.0.5/B1：fang 安装级 token（0600 文件）；e2e 作为本机客户端按真实方式带上 header
+    let fangToken = ''
+    try {
+      fangToken = JSON.parse(fs.readFileSync(path.join(homeRoot, 'fang', 'e2e', 'fang-auth.json'), 'utf8')).token ?? ''
+    } catch { /* 无 token 文件 = 旧版本；后续断言会暴露 401 */ }
 
     const api = async (p, opts = {}) => {
       const url = `${booted.url.replace(/\/\?.*$/, '')}${p}${p.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
       const res = await fetch(url, {
         ...opts,
-        headers: { 'content-type': 'application/json', ...(opts.headers ?? {}) },
+        headers: {
+          'content-type': 'application/json',
+          ...(fangToken ? { 'x-fang-auth': fangToken } : {}),
+          ...(opts.headers ?? {}),
+        },
       })
       const text = await res.text()
       let body = null
@@ -216,7 +225,9 @@ async function main() {
       return 1
     }
 
-    check('fork returned a tokenized url', String(created.body?.url ?? '').includes('token='))
+    check('create returned tokenless url', !String(created.body?.url ?? '').includes('token='))
+    const openUrl = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+    check('open-url returns tokenized url (memory only)', openUrl.status === 200 && String(openUrl.body?.url ?? '').includes('token='), JSON.stringify({ status: openUrl.status, hasUrl: !!openUrl.body?.url }))
     check('adapter handshake succeeded', created.body?.adapter?.ok === true, JSON.stringify(created.body?.adapter))
 
     const taskStatus = await api(`/fang/api/tasks/status?taskId=${encodeURIComponent(taskId)}`)

@@ -84,7 +84,7 @@ test('connect: 版本协商 → 快照 → SSE，cursor 推进、事件/状态�
   assert.equal(states.length, 1)
 
   assert.equal(calls[0].headers.authorization, 'Bearer adapter-token', 'v3 请求带 Bearer')
-  assert.ok(calls[0].url.includes('token=web-token'), 'DSH web token 仍走 ?token=')
+  assert.equal(calls[0].url.includes('token='), false, 'v3.0.5/B4：JSON 请求不再把 token 拼进 URL')
   assert.ok(calls[2].url.includes('since=5'), '续流带 since=cursor')
   assert.ok(calls[2].url.includes('session=s-1'), '续流带 session')
   client.stop()
