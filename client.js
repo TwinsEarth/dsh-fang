@@ -529,6 +529,44 @@ window.__ModuleLoader__.load({
       children)
     }
 
+    /**
+     * 母体 HTTP 源解析：桌面壳里 window.location.origin 是 `dsh-app://app`（自定义协议，
+     * 不能作为跨进程探测目标）；desktop 宿主通过 `__DSH_TRANSPORT__.streamBaseUrl` 注入真实
+     * HTTP 源（如 http://127.0.0.1:52648）。普通 Web 下就是 location.origin。
+     * 都解析不到时返回空串，让用户手动填写，而不是塞一个必然失败的地址。
+     */
+    function resolveMotherOrigin() {
+      try {
+        const transport = typeof globalThis !== 'undefined' ? globalThis.__DSH_TRANSPORT__ : undefined
+        const streamBaseUrl = transport && typeof transport.streamBaseUrl === 'string' ? transport.streamBaseUrl : ''
+        if (/^https?:\/\//i.test(streamBaseUrl)) return streamBaseUrl.replace(/\/+$/, '')
+      } catch { /* ignore */ }
+      try {
+        const origin = typeof window !== 'undefined' && window.location ? String(window.location.origin ?? '') : ''
+        if (/^https?:\/\//i.test(origin)) return origin
+      } catch { /* ignore */ }
+      return ''
+    }
+
+    /** 把探测错误码翻译成可操作的中文原因（不把原始码直接丢给用户）。 */
+    function describeProbeError(error) {
+      const code = String(error || 'unknown')
+      const hints = {
+        'target-empty': '请填写母体地址（如 http://127.0.0.1:52648）',
+        'target-scheme': '地址需为 http(s)://…；桌面壳地址 dsh-app://app 不是可探测的 HTTP 源',
+        'target-credentials': '地址不能包含用户名或密码',
+        'target-query': '地址不能带查询串或锚点',
+        'target-invalid-url': '地址格式不合法',
+        'target-too-long': '地址过长',
+        timeout: '探测超时：母体未响应或端口不正确',
+        'network-error': '网络错误：母体未启动或端口不通',
+        'status-http-error': '母体 HTTP 状态异常（非 2xx）',
+        'fetch-unavailable': '当前运行环境没有 fetch',
+        'no-notifier': '通知服务不可用',
+      }
+      return hints[code] || code
+    }
+
     /** 分身 Web UI 的「瓮城」说明页（v2.6.6）：母体 API 不在分身里，别把 404 当故障。 */
     function ForkHostNotice({ role }) {
       // v2.9.0：分身旁路「母体连接」——地址与令牌只本次会话内存态，不落盘（分身不保存插件设置）。
@@ -569,7 +607,7 @@ window.__ModuleLoader__.load({
      */
     function MotherLinkCard({ mode, onClose }) {
       const [described, setDescribed] = useState({ state: 'loading', data: null, error: '' })
-      const [target, setTarget] = useState(() => (mode === 'mother' && typeof window !== 'undefined' ? window.location.origin : ''))
+      const [target, setTarget] = useState(() => (mode === 'mother' ? resolveMotherOrigin() : ''))
       const [probe, setProbe] = useState(null)
       const [probeBusy, setProbeBusy] = useState(false)
       const [copied, setCopied] = useState('')
@@ -645,7 +683,7 @@ window.__ModuleLoader__.load({
         ? h('span', { style: { fontSize: 11.5, color: TEXT2 } }, '读取 /fang/api/mother-link…')
         : null,
       mode === 'mother' && described.state === 'error'
-        ? h('span', { style: { fontSize: 11.5, color: DANGER } }, `读取失败：${described.error}（宿主可能未安装 v2.9.0 路由）`)
+        ? h('span', { style: { fontSize: 11.5, color: DANGER } }, `读取失败：${described.error}（宿主可能未安装该路由或插件版本过旧）`)
         : null,
       data
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
@@ -685,7 +723,7 @@ window.__ModuleLoader__.load({
         h(Tag, { tone: probeTone }, probe.ok ? '连通' : '不可达'),
         h('span', null, probe.ok
           ? `${probe.target || target} · ${probe.latencyMs ?? 0}ms${probe.version ? ` · 版本 ${probe.version}` : ''}`
-          : `原因：${probe.error || 'unknown'}${probe.message ? ` · ${probe.message}` : ''}`))
+          : `原因：${describeProbeError(probe.error)}${probe.message ? ` · ${probe.message}` : ''}`))
         : null,
       mode === 'fork'
         ? h('span', { style: { fontSize: 11, lineHeight: '17px', color: TEXT2 } }, '分身不保存插件设置：地址只保留在本次会话内存里；跨源读取失败通常是因为母体宿主未开放 CORS，可直接回到母体窗口的瓮城面板查看。')
