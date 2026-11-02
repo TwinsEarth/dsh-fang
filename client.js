@@ -356,6 +356,9 @@ window.__ModuleLoader__.load({
       } catch (e) {
         return { status: 0, body: null, diagnostic: { url, message: String(e?.message ?? e) } }
       }
+      const etag = (res.headers && typeof res.headers.get === 'function' && res.headers.get('etag')) || ''
+      // v3.0.1 条件 GET：304 没有 body，直接交给调用方判定“未变化”
+      if (res.status === 304) return { status: 304, body: null, notModified: true, etag }
       const contentType = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || ''
       let text = ''
       try { text = await res.text() } catch (e) {
@@ -376,7 +379,7 @@ window.__ModuleLoader__.load({
           diagnostic: { url, status: res.status, contentType, snippet: clampText(text, 200), parseError },
         }
       }
-      return { status: res.status, body, diagnostic: { url, status: res.status, contentType } }
+      return { status: res.status, body, etag, diagnostic: { url, status: res.status, contentType } }
     }
 
     // ── 宿主角色探测（v2.6.6）：母体 host 有 /fang/api/status；分身 host 只有 /fang/adapter/* ──
@@ -524,7 +527,7 @@ window.__ModuleLoader__.load({
       h('path', { d: 'M12 3c2.5 2.4 4 5.6 4 9s-1.5 6.6-4 9c-2.5-2.4-4-5.6-4-9s1.5-6.6 4-9z' }))
     }
 
-    // ── 蓝色小光盘：母体镜像设置（v2.9.9）───────────────────────────────
+    // ── 蓝色小光盘：母体镜像设置（v3.0.1）───────────────────────────────
     function IconDisc({ size = 13, color = INFO }) {
       const s = Math.max(10, Math.min(20, Number(size) || 13))
       return h('svg', {
@@ -759,7 +762,7 @@ window.__ModuleLoader__.load({
         : null)
     }
 
-    /** 母体镜像设置卡片（v2.9.9）：状态轮询 + 备份/恢复/间隔/升级；镜像只在本机文件夹 1。 */
+    /** 母体镜像设置卡片（v3.0.1）：状态轮询 + 备份/恢复/间隔/升级；镜像只在本机文件夹 1。 */
     function MirrorSettingsCard({ onClose }) {
       const [view, setView] = useState({ state: 'loading', status: null, error: '' })
       const [busy, setBusy] = useState('')
@@ -767,11 +770,20 @@ window.__ModuleLoader__.load({
       const [upgrading, setUpgrading] = useState(false)
       const [upgradeStartedAt, setUpgradeStartedAt] = useState(0)
       const [elapsed, setElapsed] = useState(0)
+      const etagRef = useRef('')
 
-      const loadStatus = async () => {
+      // v3.0.1：轮询走 ETag/If-None-Match（304 不更新），force=true 用于「刷新」与操作后取最新值
+      const loadStatus = async (force = false) => {
         try {
-          const result = await api('/fang/api/mirror/status')
+          const headers = { accept: 'application/json' }
+          if (!force && etagRef.current) headers['if-none-match'] = etagRef.current
+          const result = await api('/fang/api/mirror/status', { headers })
+          if (result.status === 304) {
+            setView((previous) => (previous.state === 'ready' ? { ...previous, error: '' } : previous))
+            return
+          }
           if (result.status === 200 && result.body && result.body.ok !== false) {
+            if (result.etag) etagRef.current = result.etag
             setView({ state: 'ready', status: result.body, error: '' })
           } else {
             setView({ state: 'error', status: null, error: String(result.body?.error ?? ('http-' + result.status)) })
@@ -804,7 +816,7 @@ window.__ModuleLoader__.load({
         try {
           const out = await operation()
           if (out && out.ok === false) setActionError(String(out.error ?? out.reason ?? '操作失败'))
-          await loadStatus()
+          await loadStatus(true)
         } catch (e) {
           setActionError(String(e?.message ?? e))
         } finally {
@@ -870,6 +882,7 @@ window.__ModuleLoader__.load({
         h('span', { style: { fontSize: 12.5, fontWeight: 600, color: TEXT } }, '母体镜像'),
         h(Tag, { tone: 'info' }, '只读管理'),
         h('span', { style: { flex: 1 } }),
+        h(Btn, { size: 'sm', variant: 'quiet', onClick: () => void loadStatus(true), title: '强制刷新（跳过 ETag 缓存，取最新磁盘占用）' }, '刷新'),
         h(Btn, { size: 'sm', variant: 'quiet', onClick: onClose, title: '关闭母体镜像设置' }, '收起')),
 
       view.state === 'loading' ? h('span', { style: { fontSize: 11.5, color: TEXT2 } }, '读取 /fang/api/mirror/status…') : null,
@@ -1615,7 +1628,7 @@ window.__ModuleLoader__.load({
       const [showArchive, setShowArchive] = useState(false)
       // v2.9.1 母体连接卡片（顶栏开关；只读描述 + 连通性探测）。
       const [showLink, setShowLink] = useState(false)
-      // v2.9.9 母体镜像设置卡片（小光盘按钮；版本/备份/恢复/升级）。
+      // v3.0.1 母体镜像设置卡片（小光盘按钮；版本/备份/恢复/升级）。
       const [showMirror, setShowMirror] = useState(false)
       // v2.9.2「母体打开」：新窗口打开母体瓮城独立门户；桌面壳用注入的真实 HTTP 源拼绝对地址。
       const openMotherPortal = () => {

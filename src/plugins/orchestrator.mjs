@@ -22,6 +22,7 @@ import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSession
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
 import { MirrorManager } from '../lib/mirror.mjs'
+import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -1285,7 +1286,13 @@ export function apply(ctx, config) {
         return json(res, 200, out)
       })
       // v2.11.0 母体镜像管理
-      route('GET', `${prefix}/api/mirror/status`, (req, res) => json(res, 200, mirrorService.status()))
+      route('GET', `${prefix}/api/mirror/status`, (req, res) => {
+        const payload = mirrorService.status()
+        const ifNoneMatch = req && req.headers ? req.headers['if-none-match'] : undefined
+        const out = buildMirrorStatusResponse(payload, ifNoneMatch)
+        res.writeHead(out.statusCode, out.headers)
+        res.end(out.notModified ? '' : out.body)
+      })
       route('POST', `${prefix}/api/mirror/backup`, async (req, res) => {
         const body = await readBody(req)
         try {
