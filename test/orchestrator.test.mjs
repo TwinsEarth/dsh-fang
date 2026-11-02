@@ -416,6 +416,22 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.equal(mirrorBody.ok, true)
   assert.equal(typeof mirrorBody.currentVersion, 'string')
   assert.ok(Array.isArray(mirrorBody.backups))
+  // v3.0.1 条件 GET：ETag → 304 无 body
+  assert.match(String(mirrorStatus.headers.ETag ?? ''), /^"[0-9a-f]{24}"$/)
+  assert.equal(mirrorStatus.headers['Cache-Control'], 'no-cache, must-revalidate')
+
+  const condReq = makeReq(undefined, 'GET')
+  condReq.headers = { 'if-none-match': mirrorStatus.headers.ETag }
+  const notModified = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/status').handler(condReq, notModified)
+  assert.equal(notModified.statusCode, 304)
+  assert.equal(notModified.body, '')
+  assert.equal(notModified.headers.ETag, mirrorStatus.headers.ETag)
+
+  const forced = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/status')
+    .handler(makeReq(undefined, 'GET'), forced)
+  assert.equal(forced.statusCode, 200)
 
   const mirrorBackup = makeRes()
   await webServer.find('POST', '/fang/api/mirror/backup')
