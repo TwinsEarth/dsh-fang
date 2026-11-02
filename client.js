@@ -510,6 +510,20 @@ window.__ModuleLoader__.load({
       h('path', { d: 'M2.75 20h18.5', stroke: 'currentColor', strokeWidth: 1.75, opacity: 0.55 })))
     }
 
+    // ── 蓝色小地球：打开母体门户（v2.9.2）─────────────────────────────────
+    function IconGlobe({ size = 13, color = INFO }) {
+      const s = Math.max(10, Math.min(20, Number(size) || 13))
+      return h('svg', {
+        width: s, height: s, viewBox: '0 0 24 24', fill: 'none',
+        stroke: color, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round',
+        'aria-hidden': true, focusable: 'false',
+        style: { flexShrink: 0 },
+      },
+      h('circle', { cx: 12, cy: 12, r: 9 }),
+      h('path', { d: 'M3 12h18' }),
+      h('path', { d: 'M12 3c2.5 2.4 4 5.6 4 9s-1.5 6.6-4 9c-2.5-2.4-4-5.6-4-9s1.5-6.6 4-9z' }))
+    }
+
     // ── 基础组件 ──────────────────────────────────────────────────────────
     function Pill({ tone = 'neutral', dot = false, mono = false, title, children, style }) {
       const palette = TONE[tone] || TONE.neutral
@@ -527,6 +541,44 @@ window.__ModuleLoader__.load({
       },
       dot ? h('span', { 'aria-hidden': 'true', style: { width: 6, height: 6, borderRadius: 999, background: palette.dot, flexShrink: 0 } }) : null,
       children)
+    }
+
+    /**
+     * 母体 HTTP 源解析：桌面壳里 window.location.origin 是 `dsh-app://app`（自定义协议，
+     * 不能作为跨进程探测目标）；desktop 宿主通过 `__DSH_TRANSPORT__.streamBaseUrl` 注入真实
+     * HTTP 源（如 http://127.0.0.1:52648）。普通 Web 下就是 location.origin。
+     * 都解析不到时返回空串，让用户手动填写，而不是塞一个必然失败的地址。
+     */
+    function resolveMotherOrigin() {
+      try {
+        const transport = typeof globalThis !== 'undefined' ? globalThis.__DSH_TRANSPORT__ : undefined
+        const streamBaseUrl = transport && typeof transport.streamBaseUrl === 'string' ? transport.streamBaseUrl : ''
+        if (/^https?:\/\//i.test(streamBaseUrl)) return streamBaseUrl.replace(/\/+$/, '')
+      } catch { /* ignore */ }
+      try {
+        const origin = typeof window !== 'undefined' && window.location ? String(window.location.origin ?? '') : ''
+        if (/^https?:\/\//i.test(origin)) return origin
+      } catch { /* ignore */ }
+      return ''
+    }
+
+    /** 把探测错误码翻译成可操作的中文原因（不把原始码直接丢给用户）。 */
+    function describeProbeError(error) {
+      const code = String(error || 'unknown')
+      const hints = {
+        'target-empty': '请填写母体地址（如 http://127.0.0.1:52648）',
+        'target-scheme': '地址需为 http(s)://…；桌面壳地址 dsh-app://app 不是可探测的 HTTP 源',
+        'target-credentials': '地址不能包含用户名或密码',
+        'target-query': '地址不能带查询串或锚点',
+        'target-invalid-url': '地址格式不合法',
+        'target-too-long': '地址过长',
+        timeout: '探测超时：母体未响应或端口不正确',
+        'network-error': '网络错误：母体未启动或端口不通',
+        'status-http-error': '母体 HTTP 状态异常（非 2xx）',
+        'fetch-unavailable': '当前运行环境没有 fetch',
+        'no-notifier': '通知服务不可用',
+      }
+      return hints[code] || code
     }
 
     /** 分身 Web UI 的「瓮城」说明页（v2.6.6）：母体 API 不在分身里，别把 404 当故障。 */
@@ -569,7 +621,7 @@ window.__ModuleLoader__.load({
      */
     function MotherLinkCard({ mode, onClose }) {
       const [described, setDescribed] = useState({ state: 'loading', data: null, error: '' })
-      const [target, setTarget] = useState(() => (mode === 'mother' && typeof window !== 'undefined' ? window.location.origin : ''))
+      const [target, setTarget] = useState(() => (mode === 'mother' ? resolveMotherOrigin() : ''))
       const [probe, setProbe] = useState(null)
       const [probeBusy, setProbeBusy] = useState(false)
       const [copied, setCopied] = useState('')
@@ -645,7 +697,7 @@ window.__ModuleLoader__.load({
         ? h('span', { style: { fontSize: 11.5, color: TEXT2 } }, '读取 /fang/api/mother-link…')
         : null,
       mode === 'mother' && described.state === 'error'
-        ? h('span', { style: { fontSize: 11.5, color: DANGER } }, `读取失败：${described.error}（宿主可能未安装 v2.9.0 路由）`)
+        ? h('span', { style: { fontSize: 11.5, color: DANGER } }, `读取失败：${described.error}（宿主可能未安装该路由或插件版本过旧）`)
         : null,
       data
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
@@ -685,7 +737,7 @@ window.__ModuleLoader__.load({
         h(Tag, { tone: probeTone }, probe.ok ? '连通' : '不可达'),
         h('span', null, probe.ok
           ? `${probe.target || target} · ${probe.latencyMs ?? 0}ms${probe.version ? ` · 版本 ${probe.version}` : ''}`
-          : `原因：${probe.error || 'unknown'}${probe.message ? ` · ${probe.message}` : ''}`))
+          : `原因：${describeProbeError(probe.error)}${probe.message ? ` · ${probe.message}` : ''}`))
         : null,
       mode === 'fork'
         ? h('span', { style: { fontSize: 11, lineHeight: '17px', color: TEXT2 } }, '分身不保存插件设置：地址只保留在本次会话内存里；跨源读取失败通常是因为母体宿主未开放 CORS，可直接回到母体窗口的瓮城面板查看。')
@@ -1363,8 +1415,18 @@ window.__ModuleLoader__.load({
       const [showTemporary, setShowTemporary] = useState(() => readPanelBoolPref(PANEL_TEMP_PREF_KEY, true))
       // v2.7.1 读档：顶栏切换存档 UI；存档 = 进程已停止、home 保留的已归档任务。
       const [showArchive, setShowArchive] = useState(false)
-      // v2.9.0 母体连接卡片（顶栏开关；只读描述 + 连通性探测）。
+      // v2.9.1 母体连接卡片（顶栏开关；只读描述 + 连通性探测）。
       const [showLink, setShowLink] = useState(false)
+      // v2.9.2「母体打开」：新窗口打开母体瓮城独立门户；桌面壳用注入的真实 HTTP 源拼绝对地址。
+      const openMotherPortal = () => {
+        const origin = resolveMotherOrigin()
+        const url = origin ? `${origin}/fang/panel` : '/fang/panel'
+        try {
+          const win = window.open(url, '_blank', 'noopener')
+          if (win) return
+        } catch { /* fall through to same-tab */ }
+        try { window.location.assign(url) } catch { /* ignore */ }
+      }
       const toggleTemporary = () => {
         setShowTemporary((value) => {
           const next = !value
@@ -1912,6 +1974,12 @@ window.__ModuleLoader__.load({
             onClick: () => setShowLink((value) => !value),
             title: '母体连接：查看母体地址、接入说明与共享配置摘要，并测试连通性（只读，不写配置）',
           }, showLink ? '收起连接' : '母体连接'),
+          h(Btn, {
+            variant: 'quiet',
+            size: 'sm',
+            onClick: openMotherPortal,
+            title: '在新窗口打开母体瓮城的独立门户（/fang/panel）；桌面端使用宿主的真实 HTTP 地址',
+          }, h(IconGlobe, { size: 13 }), '母体打开'),
           h(Btn, {
             variant: 'primary',
             size: 'lg',

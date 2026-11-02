@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## v2.9.2（2026-11-02）
+
+**主题：顶栏新增「母体打开」按钮（蓝色地球图标）。**
+
+### 新增
+- `client.js`：顶栏在「母体连接」与「派生新分身」之间新增「母体打开」按钮（`IconGlobe`，
+  INFO 蓝色地球图标）；点击在新窗口打开母体瓮城独立门户 `/fang/panel`。
+- 桌面壳下用 v2.9.1 的 `resolveMotherOrigin()` 拼绝对地址（如
+  `http://127.0.0.1:52648/fang/panel`），避免 `dsh-app://app/fang/panel` 这类自定义协议
+  在新窗口里打不开；普通 Web 下回退相对路径 `/fang/panel`。
+- `window.open` 被拦截时回退到同标签页跳转，不静默失败。
+
+> 版本策略：`x.y.z`；这是 v2.9 的补丁位。
+
+## v2.9.1（2026-11-02）
+
+**主题：修复桌面端「母体连接」默认地址不可探测（`dsh-app://app` → target-scheme）。**
+
+### 修复
+- `client.js`：新增 `resolveMotherOrigin()`——桌面壳里 `window.location.origin` 是
+  `dsh-app://app`（自定义协议，不是可探测的 HTTP 源），改为优先读取宿主注入的
+  `__DSH_TRANSPORT__.streamBaseUrl`（desktop `main.ts` 注入的 Host 真实 HTTP 源，
+  如 `http://127.0.0.1:52648`）；普通 Web 下回退 `location.origin`；两者都不可用时
+  返回空串让用户手动填写，而不是预填一个必然失败的地址。
+- `client.js`：探测错误码翻译为可操作原因（`target-scheme` → “桌面壳地址不是可探测的
+  HTTP 源”，`timeout`/`network-error`/`target-empty` 等各有提示），不再把原始码直接丢给用户。
+- 服务端无改动：`probeLink` 继续只接受 http(s) origin（拒绝 `dsh-app://` 是正确行为，
+  分身无法跨进程访问该协议）。
+
+> 版本策略：`x.y.z`；这是 v2.9 的补丁位。
+
 ## v2.9.0（2026-11-02）
 
 **主题：瓮城面板「母体连接」——只描述、只读探测，不持有连接状态。**
