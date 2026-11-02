@@ -2,15 +2,23 @@
 
 ## v3.0.5（2026-11-03）
 
-**主题：安全止血（第一批）：B2 Adapter fail-closed / B3 路径穿越与大小上限 / B5 派生 env 白名单 / B6 官方原身 create-only / B8 凭据不复制。**
+**主题：安全止血（完整包）：B1 路由鉴权/CSRF/Host + B2 Adapter fail-closed + B3 路径穿越/大小上限 + B4 token 去 URL/不落盘 + B5 派生 env 白名单 + B6 官方原身 create-only + B8 凭据不复制。**
 
 ### 安全修复
+- **B1** 新增 `src/lib/http-auth.mjs`：安装级 token（`<dataDir>/fang-auth.json`，0600，env/显式配置可覆盖）；
+  所有 `/fang/api/*` 默认要求 `x-fang-auth`（或 Bearer）；loopback Host 校验、Origin/`Sec-Fetch-Site` CSRF 校验、
+  写请求 JSON content-type；面板通过同源 `GET /fang/api/auth-token` bootstrap（仍受 Host/Origin 校验）；
+  `client.js` 统一缓存并携带 header。e2e 作为本机客户端按真实方式读取 token 文件。
 - **B2** `adapter.mjs`：fork 角色未拿到 `DSH_ADAPTER_TOKEN` 时默认 **fail-closed**（控制面 401），
   v2 兼容必须显式 `allowLegacyNoToken: true`；启动时记录 warn。
 - **B3** `session-bundle.mjs`：导入时校验 `file/sessionId` 必须落在 bundle/sessions 与 targetRoot 内，
   拒绝 `../` 穿越；新增单文件/总大小/文件数上限（默认 64MB/512MB/2000）。
   `session-sync.mjs`：bundleId 只允许安全段；bundleDir 必须位于 bundleRoot 内；
   targetHome 只允许当前 DSH_HOME 或 fork homes 根；请求体上限 1MB（413）。
+- **B4** `remote.mjs`：token 只走 `Authorization` header，不再拼进请求 URL；
+  `forker.mjs`：`publicFork`/`forks.json` 的 URL 去 token、不再持久化 token；
+  `orchestrator`：`tasks.json` 不落 token、列表 URL 去 token；新增 `GET /fang/api/tasks/open-url`
+  在内存中临时下发带 token 的 URL（client.js 打开分身改走该接口）。
 - **B5** `forker.mjs`：新增 `buildForkChildEnv` 环境变量白名单，不再 `...process.env` 全量继承；
   云密钥/自定义 token 不进入派生子进程（Adapter token 仍由 forker 显式注入）。
 - **B6** `essence.mjs`：`create()` 改为 **create-only**（已存在 id 直接拒绝，不能抢占官方原身）；
@@ -20,11 +28,13 @@
 
 ### 测试
 - 新增 `test/security-hardening.test.mjs`（5 项：create-only、seed 修复、env 白名单、bundle 穿越、大小上限）；
-- 更新 `essence` 凭据断言、`adapter` legacy auth 断言；相关套件 91 项全绿。
+  新增 `test/http-auth.test.mjs`（7 项：token 文件 0600、Host/Origin/CSRF、415、bootstrap 校验）；
+- 更新 `essence` 凭据断言、`adapter` legacy auth 断言、`remote`/`adapter-client`/`orchestrator`/`e2e` 的 token 断言；
+- 门禁：**636 tests / 0 fail / 1 skip**、**e2e 59/59**、**52 路由**。
 
-### 未完成（同版本后续提交，tag 前置）
-- **B1** 路由鉴权/CSRF/Host 与 **B4** token 去 URL/不落盘仍需独立提交；
-- 本提交先止住已复现的越权/数据丢失路径。
+### 说明
+- B1/B4 已包含在本版本内，v3.0.5 达到“安全止血包”退出条件（可进入 tag 流程，但仍需按 v3.0.0 起的严格序列补发）。
+- 已知例外：SSE `eventsUrl` 仍以查询参数携带 token（EventSource 无法设 header），后续改为 fetch streaming 时消除。
 
 ## v3.0.4（2026-11-02）
 

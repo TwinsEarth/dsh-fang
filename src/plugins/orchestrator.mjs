@@ -27,6 +27,7 @@ import { PreferencesStore } from '../lib/preferences.mjs'
 import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
+import { checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -73,11 +74,29 @@ export const Config = z.object({
     enabled: z.boolean().default(true).description('是否注册 /fang 路由'),
     prefix: z.string().default('/fang').description('路由前缀'),
   }).default({}),
+  authToken: z.string().default('')
+    .description('v3.0.5/B1：安装级鉴权 token；留空 = 读 DSH_FANG_AUTH_TOKEN 或 <dataDir>/fang-auth.json（0600，自动生成）'),
+  authEnabled: z.boolean().default(true)
+    .description('v3.0.5/B1：是否要求 /fang/api 携带鉴权 token（默认开启；仅测试/本地调试可关）'),
 })
 
 const HTML_ESCAPE = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ))
+
+/** v3.0.5/B4：对外的任务 URL 一律去掉 ?token=（token 只在内存/打开时临时下发）。 */
+export function stripUrlToken(url) {
+  const raw = String(url ?? '')
+  if (!raw) return raw || null
+  try {
+    const parsed = new URL(raw)
+    if (!parsed.searchParams.has('token')) return raw
+    parsed.searchParams.delete('token')
+    return parsed.toString()
+  } catch {
+    return raw.replace(/([?&])token=[^&#]*&?/i, (_, sep) => (sep === '?' ? '?' : '')).replace(/[?&]$/, '')
+  }
+}
 
 /** Find a runnable dsh launcher. `.cmd` wrappers are spawned through a shell by the forker. */
 export function resolveCliPath(explicit = '', env = process.env) {
@@ -131,6 +150,10 @@ export function apply(ctx, config) {
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot })
+  // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
+  const authToken = cfg.authEnabled === false
+    ? ''
+    : loadAuthToken(layout.dataDir, cfg.authToken || process.env.DSH_FANG_AUTH_TOKEN)
   const motherProfile = cfg.motherProfile || layout.profileTag
   ensureDir(layout.dataDir)
   ensureDir(layout.forkHomesDir)
@@ -153,7 +176,12 @@ export function apply(ctx, config) {
     try { bus.emit('fang/audit', { kind, data }) } catch { /* ignore */ }
   }
   const persist = () => {
-    try { saveRegistry(layout.tasksFile, [...tasks.values()]) } catch { /* best effort */ }
+    try {
+      // v3.0.5/B4：tasks.json 不落 token，URL 也不带 ?token=（打开时走 open-url 临时下发）
+      saveRegistry(layout.tasksFile, [...tasks.values()].map(task => ({
+        ...task, token: '', url: stripUrlToken(task.url),
+      })))
+    } catch { /* best effort */ }
   }
   const forker = () => safeGet(SERVICE.forker)
   const cliPath = () => (cfg.cliPath ? cfg.cliPath : resolveCliPath('', process.env))
@@ -312,7 +340,7 @@ export function apply(ctx, config) {
       status,
       pid: live?.pid ?? t.pid ?? null,
       port: t.port ?? null,
-      url: t.url ?? null,
+      url: stripUrlToken(t.url),
       homeDir: t.homeDir,
       profile: t.profile,
       createdAt: t.createdAt,
@@ -518,7 +546,7 @@ export function apply(ctx, config) {
           taskId,
           forkId: taskId,
           title,
-          url: task.url,
+          url: stripUrlToken(task.url),
           port: task.port,
           homeDir,
           profile,
@@ -1250,21 +1278,32 @@ export function apply(ctx, config) {
         })
         req.on('error', () => resolve({}))
       })
-      const route = (method, pathname, handler) => webServer.register({
+      const route = (method, pathname, handler, routeOptions) => webServer.register({
         kind: 'exact',
         path: pathname,
         handler: async (req, res) => {
           if (req.method !== method) return json(res, 405, { ok: false, error: 'method-not-allowed' })
+          // v3.0.5/B1：loopback Host + Origin/CSRF + 安装 token（fail-closed）
+          const decision = checkRequestAuth(req, {
+            token: authToken,
+            publicRoute: authToken.length === 0 || routeOptions?.public === true,
+          })
+          if (!decision.ok) return json(res, decision.status, { ok: false, error: decision.code })
           try { return await handler(req, res) } catch (e) {
             return json(res, 500, { ok: false, error: 'handler-threw', detail: String(e?.message ?? e) })
           }
         },
       })
 
+      // 浏览器面板 bootstrap：同源读取 token（Host/Origin 已校验；不跨站）
+      route('GET', `${prefix}/api/auth-token`, (req, res) => json(res, 200, {
+        ok: true, token: authToken,
+      }), { public: true })
+
       route('GET', `${prefix}/panel`, (req, res) => {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
         res.end(renderPanelHtml(prefix))
-      })
+      }, { public: true })
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
@@ -1276,6 +1315,14 @@ export function apply(ctx, config) {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         const out = await service.getTaskStatus(query.get('taskId') ?? '')
         return json(res, out.ok === false ? 404 : 200, out)
+      })
+      // v3.0.5/B4：打开分身时才在内存中取带 token 的 URL（不落盘、不进列表）
+      route('GET', `${prefix}/api/tasks/open-url`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const taskId = String(query.get('taskId') ?? '').trim()
+        const out = taskId ? forker()?.openUrl?.(taskId) : null
+        if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running' })
+        return json(res, 200, out)
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
         const body = await readBody(req)

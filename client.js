@@ -345,12 +345,30 @@ window.__ModuleLoader__.load({
      * 统一的 API 读取：不再把「非 JSON / 空响应」统一压成 bad-json。
      * 保留 status / content-type / 响应片段，供 UI 给出可操作的原因和「查看诊断」。
      */
+    let fangAuthToken = ''
+    async function ensureFangAuthToken() {
+      if (fangAuthToken) return fangAuthToken
+      try {
+        const res = await fetch('/fang/api/auth-token', { headers: { accept: 'application/json' } })
+        if (res.ok) {
+          const body = await res.json()
+          if (body && typeof body.token === 'string') fangAuthToken = body.token
+        }
+      } catch { /* 旧版本无 auth-token 路由：保持空 token，服务端未强制时仍可用 */ }
+      return fangAuthToken
+    }
+
     async function api(path, options) {
       const url = String(path)
+      const token = await ensureFangAuthToken()
       let res
       try {
         res = await fetch(url, {
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            ...(token ? { 'x-fang-auth': token } : {}),
+          },
           ...(options ?? {}),
         })
       } catch (e) {
@@ -1939,7 +1957,18 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const openTask = (task) => {
+      const openTask = async (task) => {
+        const taskId = String(task?.taskId ?? task?.forkId ?? '')
+        // v3.0.5/B4：URL 不再落盘/进列表，打开时向宿主换取内存中的带 token URL
+        if (taskId) {
+          try {
+            const result = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+            if (result.status === 200 && result.body?.url) {
+              try { window.open(result.body.url, '_blank', 'noopener') } catch { /* popup blocked */ }
+              return
+            }
+          } catch { /* fall through */ }
+        }
         if (!task?.url) {
           setNotice({ tone: 'warning', title: '无法打开分身', message: '该分身没有可打开的 URL（可能已停止）。不再需要时可归档回收。' })
           return

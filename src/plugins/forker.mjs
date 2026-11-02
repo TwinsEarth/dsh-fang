@@ -434,19 +434,32 @@ export function apply(ctx, config) {
   let disposed = false
   const starting = () => [...records.values()].filter((r) => r.running || r.child || r.starting).length
 
+  /** v3.0.5/B4：持久化/列表用的 URL 一律去掉 ?token=（token 只在内存）。 */
+  const stripUrlToken = (url) => {
+    const raw = String(url ?? '')
+    if (!raw) return raw || null
+    try {
+      const parsed = new URL(raw)
+      if (!parsed.searchParams.has('token')) return raw
+      parsed.searchParams.delete('token')
+      return parsed.toString()
+    } catch {
+      return raw.replace(/([?&])token=[^&#]*&?/i, (_, sep) => (sep === '?' ? '?' : '')).replace(/[?&]$/, '')
+    }
+  }
+
   const publicFork = (rec) => ({
     forkId: rec.forkId,
     taskTitle: rec.taskTitle ?? '',
     status: rec.status ?? FORK_STATUS.STOPPED,
     pid: rec.pid ?? null,
     port: rec.port ?? null,
-    url: rec.url ?? null,
+    url: stripUrlToken(rec.url),
     homeDir: rec.homeDir ?? '',
     profile: rec.profile ?? '',
     profileDir: rec.profileDir ?? '',
     template: rec.template ?? '',
     bufferDir: rec.bufferDir ?? '',
-    token: rec.token ?? null,
     running: !!rec.running,
     createdAt: rec.createdAt ?? null,
     startedAt: rec.startedAt ?? null,
@@ -1192,6 +1205,17 @@ export function apply(ctx, config) {
     return typeof rec?.adapterToken === 'string' ? rec.adapterToken : ''
   }
 
+  /**
+   * v3.0.5/B4：只在内存中返回带 token 的 Web URL，用于“打开分身”。
+   * 该值绝不落盘、不进入 publicFork/list/status。
+   */
+  const openUrl = (forkId) => {
+    ensureRegistry()
+    const rec = records.get(String(forkId ?? '').trim())
+    if (!rec || !rec.running || !rec.url) return { ok: false, error: 'not-running' }
+    return { ok: true, forkId: rec.forkId, url: rec.url, port: rec.port ?? null }
+  }
+
   /** Re-spawn a crashed-but-ready fork after the backoff timer fires. */
   const restartFork = async (rec) => {
     if (disposed || rec.intentionalStop || records.get(rec.forkId) !== rec) return
@@ -1278,6 +1302,7 @@ export function apply(ctx, config) {
     logs,
     adapterToken,
     getToken: adapterToken,
+    openUrl,
     onTokenRefresh(handler) {
       if (typeof handler !== 'function') return () => {}
       tokenRefreshHandlers.add(handler)

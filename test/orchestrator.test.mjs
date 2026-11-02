@@ -10,7 +10,7 @@ import os from 'node:os'
 import http from 'node:http'
 import zlib from 'node:zlib'
 
-import { makeCtx, makeWebServerStub, makeReq, makeRes } from './helpers.mjs'
+import { makeCtx, makeWebServerStub, makeReq, makeRes, TEST_AUTH_TOKEN } from './helpers.mjs'
 import { SERVICE, FANG_VERSION } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
@@ -125,6 +125,7 @@ async function boot({ forker = makeFakeForker(), extraServices = {}, config = {}
     adapterTimeoutMs: 400,
     adapterPollMs: 40,
     routes: { enabled: false },
+    authToken: TEST_AUTH_TOKEN,
     ...config,
   })
   const svc = ctx.get(SERVICE.orchestrator)
@@ -173,7 +174,7 @@ test('orchestrator: createTask degrades honestly when the adapter never answers'
   assert.equal(out.ok, true)
   assert.ok(out.taskId.startsWith('task_'))
   assert.equal(out.adapter.ok, false, 'no adapter server → adapter not ready')
-  assert.equal(out.url.includes('?token='), true)
+  assert.equal(out.url.includes('token='), false, 'v3.0.5/B4：createTask 返回/持久化 URL 不含 token')
   const list = svc.listTasks()
   assert.equal(list.length, 1)
   assert.equal(list[0].title, '开发 dsh-foo')
@@ -280,7 +281,7 @@ test('orchestrator: restoreTask re-spawns the archived home and updates url/toke
     assert.ok(task)
     assert.notEqual(task.status, 'archived')
     assert.equal(task.archivedAt, null)
-    assert.match(task.url, /token=/)
+    assert.equal(task.url.includes('token='), false, 'v3.0.5/B4：列表 URL 不含 token')
     cleanup(ctx, dataRoot)
   } finally { await adapter.close() }
 })
@@ -379,6 +380,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   orchestrator.apply(ctx, {
     dataRoot, forksRoot: path.join(dataRoot, 'forks'),
     adapterTimeoutMs: 100, routes: { enabled: true, prefix: '/fang' },
+    authToken: TEST_AUTH_TOKEN,
   })
   const paths = webServer.paths()
   for (const p of [
@@ -391,7 +393,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/mirror/backup/delete', '/fang/api/mirror/backup-interval', '/fang/api/mirror/upgrade',
     '/fang/api/mirror/preferences', '/fang/api/mirror/preferences/set',
     '/fang/api/mirror/recompute-status', '/fang/api/compat', '/fang/api/compat/check',
-    '/fang/api/essence/list',
+    '/fang/api/essence/list', '/fang/api/auth-token', '/fang/api/tasks/open-url',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
@@ -424,7 +426,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.equal(mirrorStatus.headers['Cache-Control'], 'no-cache, must-revalidate')
 
   const condReq = makeReq(undefined, 'GET')
-  condReq.headers = { 'if-none-match': mirrorStatus.headers.ETag }
+  condReq.headers = { ...condReq.headers, 'if-none-match': mirrorStatus.headers.ETag }
   const notModified = makeRes()
   await webServer.find('GET', '/fang/api/mirror/status').handler(condReq, notModified)
   assert.equal(notModified.statusCode, 304)
