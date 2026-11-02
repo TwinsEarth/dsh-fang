@@ -390,6 +390,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/mirror/status', '/fang/api/mirror/backup', '/fang/api/mirror/restore',
     '/fang/api/mirror/backup/delete', '/fang/api/mirror/backup-interval', '/fang/api/mirror/upgrade',
     '/fang/api/mirror/preferences', '/fang/api/mirror/preferences/set',
+    '/fang/api/mirror/recompute-status', '/fang/api/compat', '/fang/api/compat/check',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
@@ -470,6 +471,23 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     .handler(makeReq({ activeIdleTimeoutMs: 15_000 }, 'POST'), preferencesOk)
   assert.equal(preferencesOk.statusCode, 200)
   assert.equal(preferencesOk.json().activeIdleTimeoutMs, 15_000)
+
+  // v3.0.3 重算状态 + compat 门禁
+  const recomputeStatus = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/recompute-status')
+    .handler(makeReq(undefined, 'GET'), recomputeStatus)
+  assert.equal(recomputeStatus.statusCode, 200)
+  assert.equal(typeof recomputeStatus.json().running, 'boolean')
+
+  const compatStatus = makeRes()
+  await webServer.find('GET', '/fang/api/compat').handler(makeReq(undefined, 'GET'), compatStatus)
+  assert.equal(compatStatus.statusCode, 200)
+  assert.equal(typeof compatStatus.json().subPluginsEnabled, 'boolean')
+
+  const compatCheck = makeRes()
+  await webServer.find('POST', '/fang/api/compat/check').handler(makeReq({}, 'POST'), compatCheck)
+  assert.ok(compatCheck.statusCode === 200 || compatCheck.statusCode === 409)
+  assert.equal(typeof compatCheck.json().ok, 'boolean')
 
   const panel = makeRes()
   await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)

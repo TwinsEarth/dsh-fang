@@ -24,6 +24,10 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
+import { EssenceManager } from '../lib/essence.mjs'
+import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
+import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
+import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -1096,6 +1100,21 @@ export function apply(ctx, config) {
 
   // ── v2.11.0 母体镜像：备份 / 恢复 / 升级 / 自动备份（只管理文件夹 1）──────
   const mirrorRoot = cfg.mirrorRoot ? String(cfg.mirrorRoot) : path.join(layout.dataDir, 'mirror')
+  // v3.0.3：客户端升级后的兼容性门禁（模块导入 + 路由契约；失败保持子插件关闭）
+  const compatRoot = fileURLToPath(new URL('../../', import.meta.url))
+  let compatWebServer = null
+  const runCompatCheck = async () => {
+    const status = await runCompatGate({
+      rootDir: compatRoot,
+      expectedRouteCount: DEFAULT_EXPECTED_ROUTE_COUNT,
+      routePaths: compatWebServer !== null && typeof compatWebServer.paths === 'function'
+        ? compatWebServer.paths()
+        : null,
+    })
+    writeCompatStatus(layout.dataDir, status)
+    return status
+  }
+  let upgradeCoordinator = null
   const mirrorManager = new MirrorManager({
     mirrorRoot,
     logger: ctx.logger ?? {},
@@ -1105,10 +1124,19 @@ export function apply(ctx, config) {
         ? service.listForks().filter(fork => fork.status === 'running').length
         : 0,
     }),
+    compatGate: () => runCompatCheck(),
+    onCompatResult: (compat) => { writeCompatStatus(layout.dataDir, compat) },
+    postUpgradeHook: () => { if (upgradeCoordinator !== null) void upgradeCoordinator.onUpgradeSuccess() },
   })
   mirrorManager.ensureLayout()
   const preferencesStore = new PreferencesStore({ mirrorRoot, logger: ctx.logger ?? {} })
   preferencesStore.load()
+  const essenceManager = new EssenceManager({
+    essencesRoot: path.join(layout.dataDir, 'essences'),
+    mirrorRoot,
+    logger: ctx.logger ?? {},
+  })
+  upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
   const mirrorService = {
     status: () => mirrorManager.getStatus(),
     getPreferences: () => preferencesStore.get(),
@@ -1120,12 +1148,19 @@ export function apply(ctx, config) {
     deleteBackup: (backupId) => mirrorManager.deleteBackup(backupId),
     setBackupInterval: (hours) => mirrorManager.setBackupInterval(hours),
     checkUpdate: () => mirrorManager.checkUpdate(),
+    recomputeStatus: () => upgradeCoordinator.getRecomputeStatus(),
+    compatStatus: () => readCompatStatus(layout.dataDir),
+    runCompatCheck,
     upgrade: (input = {}) => mirrorManager.upgrade({
       autoBackup: input?.autoBackup !== false,
       autoRollback: input?.autoRollback !== false,
     }),
   }
   ctx.effect(() => ctx.provide(SERVICE.mirror, mirrorService))
+  // 启动后自检一次；兼容状态默认 subPluginsEnabled=false，直到门禁通过
+  const compatBootTimer = setTimeout(() => { void runCompatCheck() }, 1500)
+  compatBootTimer.unref?.()
+  ctx.effect(() => () => clearTimeout(compatBootTimer))
   const mirrorAutoTimer = setInterval(() => {
     try {
       const status = mirrorService.status()
@@ -1188,6 +1223,7 @@ export function apply(ctx, config) {
     ctx.inject(['webServer'], (child) => {
       const webServer = child.get('webServer') ?? child.webServer
       if (!webServer || typeof webServer.register !== 'function') return
+      compatWebServer = webServer
       const prefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
 
       const json = (res, code, obj) => {
@@ -1340,6 +1376,13 @@ export function apply(ctx, config) {
         } catch (error) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) })
         }
+      })
+      // v3.0.3 compat 门禁：客户端升级后子插件默认关闭，门禁通过才允许启用
+      route('GET', `${prefix}/api/mirror/recompute-status`, (req, res) => json(res, 200, mirrorService.recomputeStatus()))
+      route('GET', `${prefix}/api/compat`, (req, res) => json(res, 200, mirrorService.compatStatus()))
+      route('POST', `${prefix}/api/compat/check`, async (req, res) => {
+        const status = await mirrorService.runCompatCheck()
+        return json(res, status.ok ? 200 : 409, status)
       })
       route('POST', `${prefix}/api/mirror/upgrade`, async (req, res) => {
         const body = await readBody(req)

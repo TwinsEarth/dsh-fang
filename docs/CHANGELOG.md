@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## v3.0.3（2026-11-02）
+
+**主题：客户端升级后的兼容性门禁（compat gate）——子插件默认关闭，验证通过才启用。**
+
+### 新增
+- `src/lib/compat.mjs`：`runCompatGate`（内核入口可导入、全部子插件模块可导入且导出 `apply`（当前 16 个，后续自动纳入）、
+  路由契约数量 + 必需路径检查）；`writeCompatStatus`/`readCompatStatus`（`compat-status.json`，
+  **`subPluginsEnabled` 是唯一允许启用子插件的判据，未检查/失败时均为 false**）。
+- `MirrorManager` 新增 `compatGate` / `onCompatResult`：客户端版本升级成功后先跑 compat 门禁；
+  未通过 → 保留新版本但 `reason: 'compat-gate-failed'`、子插件保持关闭、**跳过原身重算钩子**；
+  门禁抛错按失败处理；通过 → 正常触发重算。升级返回体携带 `compat` 结果。
+- orchestrator 接线：`GET /fang/api/mirror/recompute-status`（协调器状态）、`GET /fang/api/compat`、
+  `POST /fang/api/compat/check`；启动 1.5s 后自动跑一次门禁；门禁使用真实 webServer 路由列表
+  （期望 49 条）+ 必需路由清单。
+- 测试：`compat` 10 项（模块导入/apply/路由契约/状态默认关闭/门禁与升级联动）+ orchestrator 路由断言。
+
+### 语义
+- 更新客户端版本后默认不开启子插件；门禁通过才写 `subPluginsEnabled: true`；
+- 失败时主插件继续服务（面板/路由可用），等待开发者更新插件版本后再次检查（POST compat/check）；
+- 门禁失败不回滚客户端版本（保留新版本），回滚仍可走镜像备份/还原盘。
+
 ## v3.0.2（2026-11-02）
 
 **主题：升级后重算协调 + 镜像偏好 schema 化 + 空闲降级审计。**
