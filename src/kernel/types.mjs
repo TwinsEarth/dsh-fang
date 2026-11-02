@@ -22,6 +22,7 @@ export const SERVICE = {
   sessionBridge: 'fangSessionBridge',
   sessionSync: 'fangSessionSync',
   sessionRouter: 'fangSessionRouter',
+  link: 'fangLink',
 }
 
 /** Loader row ids used by cordis.patch.yml. */
@@ -119,10 +120,11 @@ export const AUDIT = {
   TASK_RESTORED: 'task-restored',
   ADAPTER_HANDSHAKE: 'adapter-handshake',
   ROUTE_CONFIRMED: 'route-confirmed',
+  LINK_PROBE: 'link-probe',
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.8.4'
+export const FANG_VERSION = '2.9.0'
 
 /**
  * @typedef {object} ForkInfo

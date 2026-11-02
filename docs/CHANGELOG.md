@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## v2.9.0（2026-11-02）
+
+**主题：瓮城面板「母体连接」——只描述、只读探测，不持有连接状态。**
+
+### 新增
+- 服务 `SERVICE.link = 'fangLink'`（由 `fang-orchestrator` 提供）：
+  - `describe()`：`{ ok, role, version, at, prefix, motherApiBase, adapterBase, probe, tokenPolicy, sharedConfig, forkInstructions }`；
+  - `probe({ target, timeoutMs? })`：只读 GET `<target>/fang/api/status`，失败结构化、绝不抛异常。
+- 母体路由：`GET /fang/api/mother-link`、`POST /fang/api/mother-link/probe`（prefix 默认 `/fang`）。
+- `src/lib/mother-link.mjs`：地址归一化（只接受 http(s) origin，拒绝凭据/查询串/非 http）、
+  profile 共享配置摘要（读 `dsh.profile.bundles`，失败降级 null）、探测超时夹在 [200, 10000]ms。
+- 客户端：顶栏「母体连接」卡片（母体版本 / 母体 API / 分身 Adapter / 共享配置 / 令牌策略 +
+  地址输入 + 复制地址 + 测试连通 + 收起）；分身 Web UI 的说明页增加分身旁路模式，地址与结果
+  仅本次会话内存态（分身不保存插件设置）。
+- 审计：`AUDIT.LINK_PROBE='link-probe'`（target / ok / latencyMs / error）。
+
+### 语义与边界
+- 令牌由 Forker 在 spawn 时注入 `DSH_ADAPTER_TOKEN`；fang 不落盘、不回显（描述里不含 token 值，有测试断言）。
+- 共享配置 = 母体 profile 层（分身只读继承）；本版本不提供写入入口。
+- 分身跨源直读母体受浏览器 CORS 约束：失败显示 `cross-origin-or-network`，不伪造成连通。
+- 探测不写任何配置，不改变副本状态。
+
+### 文档与测试
+- `docs/CONTRACTS-V2.md §5.10`、`docs/UI-瓮城入口.md §9`、`docs/AUDIT-v2.9.0.md`。
+- `test/mother-link.test.mjs` 7 项；`orchestrator.test.mjs` 增路由与处理器断言。
+
+> 版本策略：`x.y.z` 每一位 0–9；v2.8 的补丁位已满（2.8.4），本次进位到 v2.9.0。
+
 ## v2.8.4（2026-11-02）
 
 **主题：公共仓 / 私有镜像仓 发布管理 —— 可重复的 REST 同步 + 内容树/资产双重校验。**

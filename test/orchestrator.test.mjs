@@ -386,9 +386,25 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/tasks/status', '/fang/api/tasks/archive', '/fang/api/tasks/restore',
     '/fang/api/tasks/archive/delete', '/fang/api/tasks/promote',
     '/fang/api/forks', '/fang/api/forks/create', '/fang/api/reap', '/fang/api/promote',
+    '/fang/api/mother-link', '/fang/api/mother-link/probe',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
+
+  const linkDescribe = makeRes()
+  await webServer.find('GET', '/fang/api/mother-link').handler(makeReq(undefined, 'GET'), linkDescribe)
+  assert.equal(linkDescribe.statusCode, 200)
+  const described = linkDescribe.json()
+  assert.equal(described.role, 'mother')
+  assert.equal(described.motherApiBase, '/fang/api')
+  assert.match(described.probe.path, /mother-link\/probe$/)
+  assert.ok(described.sharedConfig && typeof described.sharedConfig === 'object')
+
+  const linkProbe = makeRes()
+  await webServer.find('POST', '/fang/api/mother-link/probe').handler(makeReq({ target: '' }, 'POST'), linkProbe)
+  assert.equal(linkProbe.statusCode, 200)
+  assert.equal(linkProbe.json().ok, false)
+  assert.equal(linkProbe.json().error, 'target-empty')
 
   const panel = makeRes()
   await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)

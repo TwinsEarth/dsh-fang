@@ -319,6 +319,30 @@ shell 重定向由 AST-lite 词法器解析（v2.7.9）：操作符语义、fd �
 插件评分不重复写（沿用 5.4 的 `AUDIT.SCORE`）。
 **边界**：本仓库没有工具执行钩子，本服务提供决策而**不强制拦截**；`delegate`/`ask` 的落点
 （restart-guard / approver）需要调用方显式投递。详见 `docs/UMBRELLA.md §7`。
+
+### 5.10 母体连接 / fang-link（v2.9.0）
+
+只描述与只读探测：不持有连接状态、不回显或落盘任何令牌；配置只来自母体 profile（分身只读继承）。
+
+路由（母体侧，`prefix` 默认 `/fang`）：
+
+```
+GET  /fang/api/mother-link
+  -> { ok, role, version, at, prefix, motherApiBase, adapterBase,
+       probe: { method:'POST', path, body:{target,timeoutMs} },
+       tokenPolicy, sharedConfig:{ layer:'profile', profile, bundles, name? },
+       forkInstructions: string[] }
+POST /fang/api/mother-link/probe   { target, timeoutMs? }
+  -> { ok, target, httpStatus?, latencyMs, version?, error?, message?, checkedAt }
+```
+
+服务 `SERVICE.link = 'fangLink'`：`describe()` / `probe({ target, timeoutMs? })`。
+探测**不抛异常**，失败返回结构化错误码：
+`target-empty` / `target-invalid-url` / `target-scheme` / `target-credentials` / `target-query` /
+`target-too-long` / `status-http-error` / `timeout` / `network-error` / `fetch-unavailable`。
+目标只接受 http(s) origin（拒绝凭据、查询串、非 http）；`timeoutMs` 夹在 `[200, 10000]`。
+审计：每次探测一条 `AUDIT.LINK_PROBE`（`target` / `ok` / `latencyMs` / `error`）。
+
 ---
 
 

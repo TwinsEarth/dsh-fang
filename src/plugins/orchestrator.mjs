@@ -20,6 +20,7 @@ import {
 } from '../kernel/index.mjs'
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
+import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -1062,6 +1063,32 @@ export function apply(ctx, config) {
 
   ctx.effect(() => ctx.provide(SERVICE.orchestrator, service))
 
+  // ── v2.9.0 母体连接：只描述 + 只读探测，不持有连接状态 ──────────────────
+  const linkProfileDir = () => {
+    try {
+      const dir = resolveProfileDir?.()
+      return typeof dir === 'string' ? dir : ''
+    } catch {
+      return ''
+    }
+  }
+  const linkService = {
+    /** 母体连接描述：前缀/门户/接入说明/共享配置摘要（不包含任何 token）。 */
+    describe: () => describeMotherLink({
+      role: 'mother',
+      version: FANG_VERSION,
+      prefix: cfg.routes?.prefix ?? '/fang',
+      sharedConfig: readSharedProfileSummary({ profileDir: linkProfileDir() }),
+    }),
+    /** 只读探测一个 http(s) 母体地址的 /api/status；失败以结构化错误返回。 */
+    probe: (input = {}) => probeLink({
+      target: input?.target,
+      prefix: cfg.routes?.prefix ?? '/fang',
+      timeoutMs: input?.timeoutMs,
+    }),
+  }
+  ctx.effect(() => ctx.provide(SERVICE.link, linkService))
+
   // ── 启动自检 ───────────────────────────────────────────────────────────
   const bootState = { at: nowMs(), ok: null, findings: [] }
   const bootAuditTimer = setTimeout(() => {
@@ -1199,6 +1226,19 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         const out = await service.promote(String(body?.forkId ?? ''), String(body?.pluginId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
+      })
+      // v2.9.0 母体连接
+      route('GET', `${prefix}/api/mother-link`, (req, res) => json(res, 200, linkService.describe()))
+      route('POST', `${prefix}/api/mother-link/probe`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await linkService.probe(body && typeof body === 'object' ? body : {})
+        try {
+          ctx.get(SERVICE.auditor)?.append?.(AUDIT.LINK_PROBE, {
+            target: out.target ?? null, ok: out.ok === true,
+            latencyMs: out.latencyMs ?? null, error: out.error ?? null,
+          })
+        } catch { /* 审计缺失不影响探测结果 */ }
+        return json(res, 200, out)
       })
     })
   }
