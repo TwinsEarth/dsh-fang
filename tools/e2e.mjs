@@ -206,33 +206,6 @@ async function main() {
     check('session titleSource is session/title', titled?.titleSource === 'session/title', String(titled?.titleSource))
     check('session preview carries the first user message', String(titled?.preview ?? '').includes('e2e 首条用户消息'), JSON.stringify(titled?.preview ?? null))
 
-    const panel = await fetch(`${booted.url.replace(/\?.*$/, '')}?token=${encodeURIComponent(token)}`).catch(() => null)
-    const panelRes = await api('/fang/panel')
-    check('GET /fang/panel 200', panelRes.status === 200)
-    check('panel is v2', String(panelRes.body?.raw ?? '').includes('dsh-Fang v2') || String(panelRes.body?.raw ?? '').includes('派生新任务'))
-    check('panel carries auth bootstrap', String(panelRes.body?.raw ?? '').includes('name="fang-auth"'))
-
-    // ── v3.0.7 门禁：client half 必须能注册并被 factory 物化成插件对象 ─────
-    let clientRegistration = null
-    let clientLoadError = ''
-    try {
-      vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'), {
-        window: { __ModuleLoader__: { load(payload) { clientRegistration = payload } } },
-        console, setTimeout, clearTimeout, URL, URLSearchParams, TextEncoder, TextDecoder,
-      }, { filename: 'client.js' })
-    } catch (e) { clientLoadError = String(e?.message ?? e) }
-    check('client half registers @local/dsh-fang', clientRegistration?.id === '@local/dsh-fang', clientLoadError || String(clientRegistration?.id))
-
-    let clientPlugin = null
-    let clientFactoryError = ''
-    try {
-      clientPlugin = clientRegistration.factory((name) => {
-        if (name === 'react') return { createElement: (...args) => ({ type: args[0], props: args[1] }) }
-        return {}
-      })
-    } catch (e) { clientFactoryError = String(e?.message ?? e) }
-    check('client half materializes apply()', typeof clientPlugin?.apply === 'function' && Array.isArray(clientPlugin?.inject), clientFactoryError || String(typeof clientPlugin?.apply))
-
     // ── v3.0.7 门禁：组合配置必须包含 16 个 fang-* 行 ────────────────────
     let dumpText = ''
     try {
@@ -243,7 +216,7 @@ async function main() {
     // v3.0.7：client half 由宿主 Loader 对「bare 包名行」的 dsh.client 扫描发现，
     // 不能新增 `<pkg>/client` 行（子路径不是包根，会被当成坏插件）。
     const pkgDsh = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).dsh ?? {}
-    check('package declares dsh.client', pkgDsh.client?.platform === 'web' && Array.isArray(pkgDsh.client?.inject))
+    check('browser client half disabled (no dsh.client)', !pkgDsh.client)
     check('no inactive plugin entries', !/entry did not activate/.test(`${stdout}\n${stderr}`))
 
     // ── create a real task/fork ─────────────────────────────────────────

@@ -23,7 +23,6 @@ export const COMPAT_PLUGIN_DIR = 'src/plugins'
 export const COMPAT_EXCLUDED_PLUGINS = Object.freeze(['imports.mjs'])
 /** 路由契约：客户端升级后仍必须存在的核心路由（诊断/升级/镜像）。 */
 export const REQUIRED_ROUTE_PATHS = Object.freeze([
-  '/fang/panel',
   '/fang/api/status',
   '/fang/api/mirror/status',
   '/fang/api/mirror/upgrade',
@@ -31,7 +30,7 @@ export const REQUIRED_ROUTE_PATHS = Object.freeze([
   '/fang/api/compat',
   '/fang/api/essence/list',
 ])
-export const DEFAULT_EXPECTED_ROUTE_COUNT = 62
+export const DEFAULT_EXPECTED_ROUTE_COUNT = 61
 
 /**
  * 列出需要做导入检查的插件模块文件（排序稳定）。

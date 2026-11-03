@@ -1386,10 +1386,6 @@ export function apply(ctx, config) {
         ok: true, token: authToken,
       }), { public: true })
 
-      route('GET', `${prefix}/panel`, (req, res) => {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(renderPanelHtml(prefix, authToken))
-      }, { public: true })
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {

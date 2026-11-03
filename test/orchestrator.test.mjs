@@ -389,7 +389,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   })
   const paths = webServer.paths()
   for (const p of [
-    '/fang/panel', '/fang/api/status', '/fang/api/tasks', '/fang/api/tasks/create',
+    '/fang/api/status', '/fang/api/tasks', '/fang/api/tasks/create',
     '/fang/api/tasks/status', '/fang/api/tasks/archive', '/fang/api/tasks/restore',
     '/fang/api/tasks/archive/delete', '/fang/api/tasks/promote',
     '/fang/api/forks', '/fang/api/forks/create', '/fang/api/reap', '/fang/api/promote',
@@ -531,16 +531,6 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.ok(listed)
   assert.equal(typeof listed.pluginCount, 'number')
   assert.equal(listed.locked, false)
-
-  const panel = makeRes()
-  await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)
-  assert.equal(panel.statusCode, 200)
-  assert.match(panel.body, /dsh-Fang v2/)
-  assert.match(panel.body, /派生新任务/)
-  // v3.0.5/B1：fallback 面板必须自带 token bootstrap，否则「派生新任务」401
-  assert.match(panel.body, /name="fang-auth"/)
-  assert.match(panel.body, /x-fang-auth/)
-  assert.ok(panel.body.includes(TEST_AUTH_TOKEN), '面板应注入安装 token')
 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)

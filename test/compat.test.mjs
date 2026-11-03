@@ -52,7 +52,7 @@ test('compat: listCompatModules 排除 imports.mjs 并排序', () => {
 test('compat: 全部模块可导入且路由契约满足 → ok', async () => {
   const root = makeFakeRoot()
   const routePaths = [
-    '/fang/panel', '/fang/api/status', '/fang/api/mirror/status',
+    '/fang/api/status', '/fang/api/mirror/status',
     '/fang/api/mirror/upgrade', '/fang/api/mirror/recompute-status',
     '/fang/api/compat', '/fang/api/essence/list', '/fang/api/auth-token',
     '/fang/api/tasks/open-url', '/fang/api/essence/create', '/fang/api/tasks/rename', '/other',
@@ -87,7 +87,7 @@ test('compat: 路由数量不匹配 / 必需路由缺失 → 失败', async () =
   const result = await runCompatGate({
     rootDir: root,
     expectedRouteCount: 99,
-    routePaths: ['/fang/panel'],
+    routePaths: ['/fang/other'],
     requiredRoutes: ['/fang/api/mirror/status'],
     importModule: fakeImporter(),
   })
