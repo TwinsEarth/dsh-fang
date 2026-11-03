@@ -92,7 +92,7 @@
 
 | ID | 优先级 | 用例 | 期望 | 状态 |
 |---|---|---|---|---|
-| PKG-01 | P0 | 干净 profile 安装 3.0.7 tarball | 启动成功；16 `fang-*` + 1 `ui-fang` active | ⬜ |
+| PKG-01 | P0 | tarball 可安装性冒烟（解包导入） | 16 行、client 声明/归一一致、插件 apply、sha256 | ✅ |
 | PKG-02 | P0 | 页面加载 client half | 无 `invalid plugin`；面板/徽章可见 | 🔒（需重启） |
 | PKG-03 | P0 | `preflight` 不带 `--e2e` | RED：`e2e: required` | ✅ |
 | PKG-04 | P0 | `preflight --e2e` | GREEN；e2e 非 null | ✅ |
@@ -277,7 +277,7 @@
 ## 9. 现有缺口（按优先级）
 
 1. UI 用例 UI-01…UI-12 尚未自动化（`data-btn-id`/`data-reason` 需先落 S1）；
-2. 干净 profile 安装（PKG-01）未进 e2e；
+2. 干净 profile 真实启动安装（PKG-01 的 tarball 解包冒烟已补；真实 profile boot 仍手动）；
 3. 分支/回流/MCP 全部未实现（v3.0.8）；
 4. session-sync 路由鉴权（SEC-12）仍是缺口；
 5. 崩溃注入/配额账本/备份 SEAL（MIR-07/08、ESS-12）未做；

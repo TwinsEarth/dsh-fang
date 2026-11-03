@@ -91,6 +91,14 @@ fs.writeFileSync(path.join(ROOT, 'dist', 'manifest.json'), JSON.stringify(manife
 const checksumFile = `${tarball}.sha256`
 fs.writeFileSync(checksumFile, `${manifest.sha256}  ${path.basename(tarball)}\n`, 'utf8')
 
+// v3.0.7 门禁：tarball 可安装性冒烟（解包、入口/插件导出、client 归一、行数、sha256）
+const smoke = run(process.execPath, ['tools/release/package-smoke.mjs', tarball], { timeoutMs: 120000 })
+if (smoke.status !== 0) {
+  console.error('FAIL package smoke:\n' + (smoke.stderr || smoke.stdout).slice(-2000))
+  process.exit(smoke.status ?? 1)
+}
+console.log('PASS  package smoke (tarball installability)')
+
 const allow = run(process.execPath, ['tools/release/allowlist.mjs', '--with-manifest', '--json'], { timeoutMs: 120000 })
 if (allow.status !== 0) {
   console.error('FAIL allow-list (package):\n' + (allow.stderr || allow.stdout).slice(-1500))

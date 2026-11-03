@@ -264,6 +264,15 @@ async function main() {
     check('create returned tokenless url', !String(created.body?.url ?? '').includes('token='))
     const openUrl = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
     check('open-url returns tokenized url (memory only)', openUrl.status === 200 && String(openUrl.body?.url ?? '').includes('token='), JSON.stringify({ status: openUrl.status, hasUrl: !!openUrl.body?.url }))
+
+    // v3.0.7/SEC-07：token 不得落盘到 tasks.json / forks.json
+    const readMaybe = (p) => { try { return fs.readFileSync(p, 'utf8') } catch { return '' } }
+    const fangDir = path.join(homeRoot, 'fang', 'e2e')
+    const tasksPersist = readMaybe(path.join(fangDir, 'tasks.json'))
+    const forksPersist = readMaybe(path.join(fangDir, 'forks.json'))
+    const tokenValueLeak = /"token"\s*:\s*"[^"]+"/.test(tasksPersist) || /"token"\s*:\s*"[^"]+"/.test(forksPersist)
+    const tokenUrlLeak = tasksPersist.includes('token=') || forksPersist.includes('token=')
+    check('no token persisted in tasks/forks json', !tokenValueLeak && !tokenUrlLeak, JSON.stringify({ tasks: tasksPersist.length, forks: forksPersist.length }))
     check('adapter handshake succeeded', created.body?.adapter?.ok === true, JSON.stringify(created.body?.adapter))
 
     const taskStatus = await api(`/fang/api/tasks/status?taskId=${encodeURIComponent(taskId)}`)

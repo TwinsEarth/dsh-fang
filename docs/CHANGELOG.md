@@ -18,11 +18,14 @@
 - **client half 发现机制纠正**：验证后确认 client half 由宿主 Loader 对**bare 包名行** `@local/dsh-fang`
   的 `dsh.client` 扫描发现；**不新增** `ui-fang → @local/dsh-fang/client` 行（子路径不是包根，会被当作坏插件：
   `failed to import`）。e2e 改为断言 `package declares dsh.client` 与 `no inactive plugin entries`。
+- **测试计划**：新增 `docs/TEST-PLAN-v3.0.7.md`（87 条用例，PKG/SEC/ESS/DRV/UI/MIR/CMP/BR/MCP/REL）。
+- **PKG-01**：新增 `tools/release/package-smoke.mjs` 并接入 build：解包 tarball、校验入口/16 行/插件 `apply`/
+  client 归一一致/`.sha256`；**SEC-07** 增加 e2e 磁盘断言（tasks.json/forks.json 无 token）。
 
 ### 验证（本机）
 - 无 `--e2e`：**RED**（e2e required + sidecar missing）；
-- `--e2e`：**GREEN 3.0.7**（641 tests、e2e **65/65**、62 路由、sha256 match）；
-- `node tools/release/build.mjs`：preflight GREEN、tarball **334,809+ B**、sidecar 一致。
+- `--e2e`：**GREEN 3.0.7**（641 tests、e2e **66/66**、62 路由、sha256 match）；
+- build：preflight GREEN → package smoke PASS → tarball **334,858 B**、sha256 `2403d482…`、sidecar 一致。
 
 ## v3.0.6（2026-11-03）
 
