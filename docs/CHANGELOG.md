@@ -21,11 +21,14 @@
 - **测试计划**：新增 `docs/TEST-PLAN-v3.0.7.md`（87 条用例，PKG/SEC/ESS/DRV/UI/MIR/CMP/BR/MCP/REL）。
 - **PKG-01**：新增 `tools/release/package-smoke.mjs` 并接入 build：解包 tarball、校验入口/16 行/插件 `apply`/
   client 归一一致/`.sha256`；**SEC-07** 增加 e2e 磁盘断言（tasks.json/forks.json 无 token）。
+- **S1 UI 动作语义**：新增 `src/lib/ui-actions.mjs`（稳定 action id：分身 6 项 / 元主 7 项；
+  每项 `{enabled, code, reason, confirm}`；任务/元主接口统一返回 `actions + blocks`），
+  UI-10/UI-11 转为真实断言，剩余 UI 用例以 todo 追踪。
 
 ### 验证（本机）
 - 无 `--e2e`：**RED**（e2e required + sidecar missing）；
-- `--e2e`：**GREEN 3.0.7**（641 tests、e2e **66/66**、62 路由、sha256 match）；
-- build：preflight GREEN → package smoke PASS → tarball **334,858 B**、sha256 `2403d482…`、sidecar 一致。
+- `--e2e`：**GREEN 3.0.7**（**648 tests**、e2e **66/66**、62 路由、sha256 match）；
+- build：preflight GREEN → package smoke PASS → tarball 生成 + `.sha256` 一致。
 
 ## v3.0.6（2026-11-03）
 
