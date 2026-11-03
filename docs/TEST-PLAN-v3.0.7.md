@@ -29,9 +29,10 @@
 
 ### 2.2 退出准则（P0 全绿才可发布）
 1. `preflight --e2e` **GREEN**，且 `e2e` 字段非 null（当前已强制）；
-2. 641+ 单测全绿、e2e 63/63（v3.0.7 基线）；
+2. **648+ 单测全绿、e2e 66/66**（v3.0.7 基线）；
 3. `dist/*.tgz.sha256` 与 tarball 一致，`preflight` 校验 `match`；
-4. 干净 profile 安装后：16 个 `fang-*` 行 + 1 个 `ui-fang` 行全部 active，页面无 `invalid plugin`；
+4. 干净 profile 安装后：**16 个 `fang-*` 行全部 active**，且 client half 由 **`dsh.client` 扫描物化**；
+   **禁止添加 `ui-fang` loader 行**（`<pkg>/client` 不是包根，会触发 `failed to import`）；页面无 `invalid plugin`；
 5. P0 安全用例（AUTH/路径/凭据）全部通过；
 6. 无 P0/P1 未关闭缺陷；P1 允许带规避方案发布但需记录。
 
@@ -98,8 +99,8 @@
 | PKG-04 | P0 | `preflight --e2e` | GREEN；e2e 非 null | ✅ |
 | PKG-05 | P0 | tarball 与 `.sha256` | 哈希一致；缺失/不匹配 → RED | ✅ |
 | PKG-06 | P0 | `release.yml` 无自托管 runner | release job 失败而非跳过 e2e | ✅（配置级） |
-| PKG-07 | P1 | 重复注册检查 | `ui-fang` 行唯一；无双面板 | 🔒 |
-| PKG-08 | P1 | 回滚 `ui-fang` 行 | 移除后启动正常（客户端功能降级但服务端健康） | 🔒 |
+| PKG-07 | P1 | client half 发现方式 | 由 `dsh.client` 扫描物化；**不添加 `ui-fang` 行**；无 inactive 条目 | ✅ |
+| PKG-08 | P1 | 误加 `ui-fang` 行的回滚 | 启动出现 `failed to import`；移除行后恢复、服务端健康 | ✅ |
 | PKG-09 | P2 | 安装包内容 | 104 entries；含 client.js/cordis.patch.yml；无 dist 污染 | ✅ |
 
 ### 6.2 鉴权与安全（SEC）
@@ -276,7 +277,7 @@
 
 ## 9. 现有缺口（按优先级）
 
-1. UI 用例 UI-01…UI-12 尚未自动化（`data-btn-id`/`data-reason` 需先落 S1）；
+1. UI 用例：S1 actions/blocks 已就绪，UI-10/11 已真断言；其余 10 条待 data 钩子 + 富面板 harness（见 [PLAN-v3.0.7-S1-UI-ASSERTIONS.md](PLAN-v3.0.7-S1-UI-ASSERTIONS.md)）；
 2. 干净 profile 真实启动安装（PKG-01 的 tarball 解包冒烟已补；真实 profile boot 仍手动）；
 3. 分支/回流/MCP 全部未实现（v3.0.8）；
 4. session-sync 路由鉴权（SEC-12）仍是缺口；
