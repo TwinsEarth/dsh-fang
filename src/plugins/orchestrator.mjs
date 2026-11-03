@@ -28,6 +28,7 @@ import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
+import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -344,15 +345,10 @@ export function apply(ctx, config) {
       phase,
       health: { adapter: t.adapter?.ok ? 'ok' : 'pending', error: t.adapter?.error ?? '' },
       // v3.0.7/S1：动作可用性由服务端给出，UI 不再自行推断
-      actions: {
-        open: { enabled: running, code: running ? 'ok' : 'not-running' },
-        rename: { enabled: t.status !== TASK_STATUS.ARCHIVED, code: t.status === TASK_STATUS.ARCHIVED ? 'archived' : 'ok' },
-        archive: { enabled: running, code: running ? 'ok' : 'not-running' },
-        copy: { enabled: true, code: 'ok' },
-        download: { enabled: true, code: 'ok' },
-        delete: { enabled: t.status === TASK_STATUS.ARCHIVED, code: t.status === TASK_STATUS.ARCHIVED ? 'ok' : 'archived-required' },
-      },
-      blocks: running ? [] : [{ code: 'not-running', reason: '分身未运行，先打开/复原后再操作' }],
+      ...(() => {
+        const ui = buildTaskActions({ running, archived: t.status === TASK_STATUS.ARCHIVED })
+        return { actions: ui.actions, blocks: ui.blocks }
+      })(),
       sessionTitle: t.importedSession?.title ?? t.seed?.title ?? '',
       startedAt: t.startedAt ?? live?.startedAt ?? null,
       updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
@@ -1241,23 +1237,18 @@ export function apply(ctx, config) {
     setPreferences: (patch = {}) => preferencesStore.update(patch),
     listEssences: () => {
       const defaultEssence = essenceManager.getDefault()
-      const essences = essenceManager.list().map((meta) => ({
-        ...meta,
-        locked: meta.locked === true,
-        official: meta.official === true,
-        archived: meta.archived === true,
-        pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
-        actions: {
-          derive: { enabled: meta.archived !== true, code: meta.archived === true ? 'archived' : 'ok' },
-          configure: { enabled: meta.locked !== true && meta.archived !== true, code: meta.locked === true ? 'locked' : (meta.archived === true ? 'archived' : 'ok') },
-          rename: { enabled: meta.locked !== true, code: meta.locked === true ? 'locked' : 'ok' },
-          archive: { enabled: meta.locked !== true, code: meta.locked === true ? 'locked' : 'ok' },
-          copy: { enabled: true, code: 'ok' },
-          download: { enabled: true, code: 'ok' },
-          delete: { enabled: meta.locked !== true, code: meta.locked === true ? 'locked' : 'ok' },
-        },
-        blocks: meta.locked === true ? [{ code: 'locked', reason: '官方推荐元主不支持修改设置' }] : [],
-      }))
+      const essences = essenceManager.list().map((meta) => {
+        const ui = buildEssenceActions({ locked: meta.locked === true, archived: meta.archived === true })
+        return {
+          ...meta,
+          locked: meta.locked === true,
+          official: meta.official === true,
+          archived: meta.archived === true,
+          pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
+          actions: ui.actions,
+          blocks: ui.blocks,
+        }
+      })
       return {
         officialId: OFFICIAL_ESSENCE_ID,
         official: officialEssence,
