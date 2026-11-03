@@ -595,6 +595,108 @@ export class EssenceManager {
     return this.getMeta(essenceId)
   }
 
+  // ── v3.0.6 元主 CRUD / 默认元主 / 导出 ────────────────────────────────
+  /** 重命名（locked 拒绝；1–80 字符）。 */
+  rename(essenceId, name) {
+    const trimmed = String(name ?? '').trim()
+    if (trimmed.length === 0 || trimmed.length > 80) throw new Error('essence name must be 1..80 chars')
+    const root = this.essenceRoot(essenceId)
+    const meta = this.readMeta(root)
+    if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不可重命名）`)
+    const next = { ...meta, name: trimmed, updatedAt: this.now() }
+    this.writeMeta(root, next)
+    return this.getMeta(essenceId)
+  }
+
+  /** 归档/取消归档（locked 拒绝；归档只改元数据，不删目录）。 */
+  archive(essenceId, archived = true) {
+    const root = this.essenceRoot(essenceId)
+    const meta = this.readMeta(root)
+    if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不可归档）`)
+    const next = {
+      ...meta,
+      archived: archived === true,
+      archivedAt: archived === true ? this.now() : null,
+      updatedAt: this.now(),
+    }
+    this.writeMeta(root, next)
+    return this.getMeta(essenceId)
+  }
+
+  /** 设置默认派生元主（快速派生使用）。 */
+  setDefault(essenceId) {
+    const meta = this.getMeta(essenceId)
+    ensureDir(this.essencesRoot)
+    writeJsonAtomic(path.join(this.essencesRoot, 'default.json'), { essenceId: meta.id, updatedAt: this.now() })
+    return { essenceId: meta.id, name: meta.name }
+  }
+
+  getDefault() {
+    const doc = readJson(path.join(this.essencesRoot, 'default.json'), null)
+    const id = typeof doc?.essenceId === 'string' ? doc.essenceId : OFFICIAL_ESSENCE_ID
+    try {
+      const meta = this.getMeta(id)
+      return { essenceId: meta.id, name: meta.name, official: meta.official === true }
+    } catch {
+      return { essenceId: OFFICIAL_ESSENCE_ID, name: OFFICIAL_ESSENCE_NAME, official: true }
+    }
+  }
+
+  /**
+   * 复制元主（overlay 配置 + 设置；**不复制 credentials**，B8）。
+   * @param {string} essenceId
+   * @param {{name?: string}} [options]
+   */
+  copy(essenceId, options = {}) {
+    const source = this.getMeta(essenceId)
+    const sourceRoot = this.essenceRoot(essenceId)
+    const name = String(options?.name ?? `${source.name} 副本`).trim()
+    const created = this.create({
+      name,
+      tier: source.tier,
+      parentId: source.parentId ?? null,
+    })
+    const nextRoot = this.essenceRoot(created.id)
+    const overlay = this.loadOverlay(sourceRoot)
+    overlay.credentialsPath = ''
+    this.saveOverlay(nextRoot, overlay)
+    this.recompute(created.id)
+    return this.getMeta(created.id)
+  }
+
+  /** 元主当前插件条目数（用于面板卡片）。 */
+  pluginCount(essenceId) {
+    return this.loadOverlay(this.essenceRoot(essenceId)).patchEntries.length
+  }
+
+  /**
+   * 导出元主配置（overlay：patch/package/settings；**不含凭据**）。
+   * 供 `GET /api/essence/download` 返回 JSON 文件；超过 maxBytes 拒绝。
+   */
+  downloadBundle(essenceId, options = {}) {
+    const maxBytes = Math.max(1024, Math.floor(Number(options.maxBytes) || 32 * 1024 * 1024))
+    const root = this.essenceRoot(essenceId)
+    const meta = this.getMeta(essenceId)
+    const overlayRoot = path.join(root, 'overlay')
+    const files = []
+    let total = 0
+    const walk = (dir, relative) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'credentials') continue
+        const full = path.join(dir, entry.name)
+        const rel = relative ? `${relative}/${entry.name}` : entry.name
+        if (entry.isDirectory()) { walk(full, rel); continue }
+        if (!entry.isFile()) continue
+        const bytes = fs.readFileSync(full)
+        total += bytes.length
+        if (total > maxBytes) throw new Error('essence bundle too large')
+        files.push({ path: `overlay/${rel}`, base64: bytes.toString('base64') })
+      }
+    }
+    if (exists(overlayRoot)) walk(overlayRoot, '')
+    return { ok: true, essenceId, meta, files, bytes: total, createdAt: this.now() }
+  }
+
   // ── 合并与物化 ──────────────────────────────────────────────────────────
 
   /** 读取镜像基础快照（patch/package/json/locked/fingerprint）。 */

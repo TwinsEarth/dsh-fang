@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## v3.0.6（2026-11-03）
+
+**主题：元主 CRUD + 默认元主 + 分身列表契约字段（后端契约 B，先行；UI 移植随后）。**
+
+### 新增
+- `EssenceManager`：`rename/archive/setDefault/getDefault/copy/pluginCount/downloadBundle`；
+  - 复制只带 overlay/settings，**不复制 credentials**；导出 JSON 附件同样排除凭据；
+  - locked 官方原身拒绝 rename/archive；默认元主持久化到 `essences/default.json`，官方兜底。
+- orchestrator 路由（10 条）：`essence/create|rename|archive|delete|copy|default|download`、
+  `tasks/rename|copy|download`；`essence/list` 增加 `defaultId/defaultEssence/capacity{slots:7,defaultLimit:5,used}` 与
+  `locked/official/archived/pluginCount`。
+- 分身列表字段：`phase`、`health{adapter,error}`、`sessionTitle`、`startedAt/updatedAt`、`projectBytes`、`essenceId`。
+- 契约文档：`docs/API-v3.0.6.md`。
+
+### 测试
+- 新增 `test/essence-crud.test.mjs` 5 项（rename/archive/default/copy 无凭据/导出无凭据）；
+- orchestrator 路由断言更新（62 路由），create→rename→list 契约链路。
+
+### 未交付（明确）
+- 配额准入执行（reserve/commit/tombstone）、元主 pause/restart、分身完整项目归档、分支/单会话租约（v3.0.7+）。
+
 ## v3.0.5（2026-11-03）
 
 **主题：安全止血（完整包）：B1 路由鉴权/CSRF/Host + B2 Adapter fail-closed + B3 路径穿越/大小上限 + B4 token 去 URL/不落盘 + B5 派生 env 白名单 + B6 官方原身 create-only + B8 凭据不复制。**

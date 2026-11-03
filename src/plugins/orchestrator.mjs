@@ -332,12 +332,22 @@ export function apply(ctx, config) {
     const running = live ? !!live.running : t.status === TASK_STATUS.RUNNING || t.status === TASK_STATUS.READY
     const status = !running ? (t.status === TASK_STATUS.ARCHIVED ? TASK_STATUS.ARCHIVED : TASK_STATUS.FAILED)
       : (t.adapter?.ok ? TASK_STATUS.READY : TASK_STATUS.RUNNING)
+    const phase = !running
+      ? (t.status === TASK_STATUS.ARCHIVED ? 'archived' : (t.status === TASK_STATUS.FAILED ? 'failed' : 'stopped'))
+      : (t.adapter?.ok ? 'running' : 'starting')
     return {
       taskId: t.taskId,
       forkId: t.taskId,
       title: t.title,
       taskTitle: t.title,
       status,
+      phase,
+      health: { adapter: t.adapter?.ok ? 'ok' : 'pending', error: t.adapter?.error ?? '' },
+      sessionTitle: t.importedSession?.title ?? t.seed?.title ?? '',
+      startedAt: t.startedAt ?? live?.startedAt ?? null,
+      updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
+      projectBytes: t.projectBytes ?? 0,
+      essenceId: t.essenceId ?? null,
       pid: live?.pid ?? t.pid ?? null,
       port: t.port ?? null,
       url: stripUrlToken(t.url),
@@ -570,6 +580,49 @@ export function apply(ctx, config) {
 
     listTasks() {
       return [...tasks.values()].map(taskView).sort((a, b) => a.createdAt - b.createdAt)
+    },
+
+    /** v3.0.6：任务重命名（archived 拒绝；1–80 字符）。 */
+    renameTask(taskId, title) {
+      const id = String(taskId ?? '').trim()
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status === TASK_STATUS.ARCHIVED) return { ok: false, error: 'task-archived' }
+      const clean = String(title ?? '').trim()
+      if (clean.length === 0 || clean.length > 80) return { ok: false, error: 'invalid-title' }
+      task.title = clean
+      task.updatedAt = nowMs()
+      persist()
+      audit(AUDIT.FORK_CREATED + '-rename', { taskId: id, title: clean })
+      return { ok: true, task: taskView(task) }
+    },
+
+    /** v3.0.6：复制分身访问信息（不克隆实例；token 不返回，打开走 open-url）。 */
+    copyTaskInfo(taskId) {
+      const task = tasks.get(String(taskId ?? '').trim())
+      if (!task) return { ok: false, error: 'unknown-task' }
+      return { ok: true, taskId: task.taskId, title: task.title, url: stripUrlToken(task.url), port: task.port ?? null }
+    },
+
+    /** v3.0.6：导出分身元数据清单（完整项目/会话打包留给后续版本）。 */
+    downloadTaskManifest(taskId) {
+      const task = tasks.get(String(taskId ?? '').trim())
+      if (!task) return { ok: false, error: 'unknown-task' }
+      return {
+        ok: true,
+        manifest: {
+          version: 1,
+          taskId: task.taskId,
+          title: task.title,
+          createdAt: task.createdAt,
+          status: taskView(task).phase,
+          port: task.port ?? null,
+          importedSession: task.importedSession ?? null,
+          seed: task.seed ?? null,
+          files: [],
+          note: 'v3.0.6 metadata-only; full project/session archive is planned for v3.0.7',
+        },
+      }
     },
 
     listForks() {
@@ -1176,11 +1229,33 @@ export function apply(ctx, config) {
     status: () => mirrorManager.getStatus(),
     getPreferences: () => preferencesStore.get(),
     setPreferences: (patch = {}) => preferencesStore.update(patch),
-    listEssences: () => ({
-      officialId: OFFICIAL_ESSENCE_ID,
-      official: officialEssence,
-      essences: essenceManager.list(),
+    listEssences: () => {
+      const defaultEssence = essenceManager.getDefault()
+      const essences = essenceManager.list().map((meta) => ({
+        ...meta,
+        locked: meta.locked === true,
+        official: meta.official === true,
+        archived: meta.archived === true,
+        pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
+      }))
+      return {
+        officialId: OFFICIAL_ESSENCE_ID,
+        official: officialEssence,
+        defaultId: defaultEssence.essenceId,
+        defaultEssence,
+        essences,
+        capacity: { slots: 7, defaultLimit: 5, used: essences.filter(item => item.archived !== true).length },
+      }
+    },
+    createEssence: (input = {}) => essenceManager.create({
+      name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
     }),
+    renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
+    archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
+    deleteEssence: (essenceId) => essenceManager.remove(essenceId),
+    copyEssence: (essenceId, name) => essenceManager.copy(essenceId, { name }),
+    setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
+    downloadEssence: (essenceId) => essenceManager.downloadBundle(essenceId),
     backup: (input = {}) => mirrorManager.backup({
       label: input?.label, bucket: input?.bucket === 'restore' ? 'restore' : 'backup',
     }),
@@ -1439,6 +1514,73 @@ export function apply(ctx, config) {
       // v3.0.3 compat 门禁：客户端升级后子插件默认关闭，门禁通过才允许启用
       route('GET', `${prefix}/api/mirror/recompute-status`, (req, res) => json(res, 200, mirrorService.recomputeStatus()))
       route('GET', `${prefix}/api/essence/list`, (req, res) => json(res, 200, mirrorService.listEssences()))
+      // v3.0.6 元主 CRUD / 默认元主 / 导出
+      route('POST', `${prefix}/api/essence/create`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.createEssence(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.renameEssence(String(body?.essenceId ?? ''), body?.name) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/archive`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.archiveEssence(String(body?.essenceId ?? ''), body?.archived !== false) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/delete`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.deleteEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/copy`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.copyEssence(String(body?.essenceId ?? ''), body?.name) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/default`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, default: mirrorService.setDefaultEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('GET', `${prefix}/api/essence/download`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        try {
+          const bundle = mirrorService.downloadEssence(String(query.get('essenceId') ?? ''))
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': `attachment; filename="essence-${bundle.essenceId}.json"`,
+            'cache-control': 'no-store',
+          })
+          return res.end(JSON.stringify(bundle))
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.6 分身 rename/copy/download（copy=访问信息；download=元数据清单）
+      route('POST', `${prefix}/api/tasks/rename`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.renameTask(String(body?.taskId ?? ''), body?.title)
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('POST', `${prefix}/api/tasks/copy`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.copyTaskInfo(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 404, out)
+      })
+      route('GET', `${prefix}/api/tasks/download`, async (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const out = await Promise.resolve(service.downloadTaskManifest(String(query.get('taskId') ?? '')))
+        return json(res, out.ok ? 200 : 404, out)
+      })
       route('GET', `${prefix}/api/compat`, (req, res) => json(res, 200, mirrorService.compatStatus()))
       route('POST', `${prefix}/api/compat/check`, async (req, res) => {
         const status = await mirrorService.runCompatCheck()
