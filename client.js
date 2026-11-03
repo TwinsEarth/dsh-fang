@@ -1704,6 +1704,8 @@ window.__ModuleLoader__.load({
       return h('div', { class: 'fh-stats', role: 'group', 'aria-label': '母体与配额状态' },
         item('neutral', '母体', data?.role === 'fork' ? '分身' : '只读', '母体只读：控制台只读会话元数据，不写入、不改写母体会话。'),
         h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
+        item('neutral', '元主', String(S.essenceList?.data?.essences?.length ?? '—'), '元主数量（来自 /fang/api/essence/list）'),
+        h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
         item(ready > 0 ? 'ok' : 'neutral', '就绪', data ? `${ready}/${max}` : '—', `适配器已握手的分身 ${ready} 个 / 上限 ${max} 个。`),
         h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
         item(running > 0 ? 'bad' : 'neutral', '未握手', data ? String(running) : '—', `进程在跑但适配器未握手的分身 ${running} 个；大于 0 时按三色模型标红。`),

@@ -83,7 +83,7 @@ const send = (method, params = {}) => new Promise((res, rej) => { const id = ++s
 
 await send('Page.enable')
 await send('Runtime.enable')
-await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__uiSmoke={errors:[],opens:[]};window.addEventListener('error',e=>window.__uiSmoke.errors.push(String(e.message)));window.open=u=>{window.__uiSmoke.opens.push(String(u));return null};` })
+await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__uiSmoke={errors:[],opens:[]};window.addEventListener('error',e=>window.__uiSmoke.errors.push(String(e.message)));window.open=u=>{window.__uiSmoke.opens.push(String(u));return null};document.addEventListener('click',e=>{const a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a){e.preventDefault();e.stopPropagation();window.__uiSmoke.opens.push(a.href)}},true);` })
 await send('Page.navigate', { url: pageUrl })
 for (let i = 0; i < 80; i += 1) {
   const r = await send('Runtime.evaluate', { expression: 'document.body.dataset.mounted || document.body.dataset.mountError || ""', returnByValue: true })
@@ -101,15 +101,35 @@ const state = await evalr(`JSON.stringify({
   slots: [...document.querySelectorAll('[data-slot]')].map(el => el.getAttribute('data-slot')),
 })`)
 const s = JSON.parse(state)
-for (const b of s.buttons) await evalr(`document.querySelector('[data-btn-id="${b.id}"]')?.click()`)
-await sleep(500)
+// 注意：批量点击所有按钮会在部分面板实现中触发导航/重建，先做静态与交互断言，
+// 不再无条件点击全部按钮（点击由各用例显式指定选择器）。
 const api = requests.filter((r) => r.path.startsWith('/fang/api/'))
 const endpoints = [...new Set(api.map((r) => `${r.method} ${r.path}`))]
+const ui = await evalr(`(async () => {
+  const q = (s) => document.querySelector(s);
+  const mother = q('[data-btn-id="mother"]');
+  mother?.click();
+  const paletteOpen = !!q('[data-zone="palette"]');
+  mother?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+  const opensAfter = (window.__uiSmoke?.opens || []).length;
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  const paletteAfterEsc = !!q('[data-zone="palette"]');
+  const slots = [...document.querySelectorAll('[data-slot]')].map((el) => ({
+    slot: el.getAttribute('data-slot'), enabled: el.getAttribute('data-enabled'), reason: el.getAttribute('data-reason') || '',
+  }));
+  const header = document.body.textContent || '';
+  return JSON.stringify({ paletteOpen, opensAfter, paletteAfterEsc, slots, header });
+})()`)
+const u = JSON.parse(ui)
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
-  { id: 'UI-01', ok: s.zones.includes('header'), evidence: `header=${s.zones.includes('header')}` },
+  { id: 'UI-01', ok: /母体/.test(u.header) && /元主/.test(u.header) && /分身/.test(u.header), evidence: u.header.slice(0, 80).replace(/\n/g, ' ') },
   { id: 'UI-mounted', ok: s.mounted === '1' && !s.mountError, evidence: `mounted=${s.mounted} error=${s.mountError}` },
+  { id: 'UI-02', ok: u.paletteOpen, evidence: `palette=${u.paletteOpen}` },
+  { id: 'UI-03', ok: u.opensAfter > 0, evidence: `opens=${u.opensAfter}` },
+  { id: 'UI-04', ok: !u.paletteAfterEsc, evidence: `afterEsc=${u.paletteAfterEsc}` },
+  { id: 'UI-05', ok: u.slots.length === 7 && u.slots.filter((x) => x.enabled === 'false').every((x) => x.reason), evidence: `slots=${u.slots.length}` },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })
