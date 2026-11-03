@@ -9,9 +9,13 @@ const args = process.argv.slice(2)
 const skipPreflight = args.includes('--skip-preflight')
 const version = versionOf()
 const pkg = readJson('package.json')
+// 构建前清掉同版本旧产物与校验和，避免 preflight 校验到过期 sidecar
+const tarballPath = path.join(ROOT, 'dist', `${PUBLISH_BASENAME}-${version}.tgz`)
+fs.rmSync(tarballPath, { force: true })
+fs.rmSync(`${tarballPath}.sha256`, { force: true })
 
 if (!skipPreflight) {
-  const pre = run(process.execPath, ['tools/release/preflight.mjs', '--json'], { timeoutMs: 900000 })
+  const pre = run(process.execPath, ['tools/release/preflight.mjs', '--json', '--e2e'], { timeoutMs: 900000 })
   if (pre.status !== 0) {
     console.error('FAIL preflight is not GREEN:\n' + (pre.stderr || pre.stdout).slice(-2000))
     process.exit(pre.status ?? 1)
@@ -56,7 +60,7 @@ const stagedPkg = {
 }
 fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(stagedPkg, null, 2) + '\n', 'utf8')
 
-const tarball = path.join(ROOT, 'dist', `${PUBLISH_BASENAME}-${version}.tgz`)
+const tarball = tarballPath
 fs.rmSync(tarball, { force: true })
 const tgz = run('tar', ['-czf', tarball, '-C', stage, 'package'])
 if (tgz.status !== 0) { console.error('FAIL tar: ' + (tgz.stderr || tgz.stdout)); process.exit(1) }
@@ -83,6 +87,9 @@ const manifest = {
   preflight: fs.existsSync(path.join(ROOT, 'dist', 'preflight.json')) ? readJson('dist/preflight.json') : null,
 }
 fs.writeFileSync(path.join(ROOT, 'dist', 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
+// 发布物校验和：与 tarball 同目录、内容 `<sha256>  <basename>`
+const checksumFile = `${tarball}.sha256`
+fs.writeFileSync(checksumFile, `${manifest.sha256}  ${path.basename(tarball)}\n`, 'utf8')
 
 const allow = run(process.execPath, ['tools/release/allowlist.mjs', '--with-manifest', '--json'], { timeoutMs: 120000 })
 if (allow.status !== 0) {
@@ -94,4 +101,5 @@ console.log('PASS  allow-list (package)')
 console.log(`PASS  build ${PUBLISH_NAME}@${version}`)
 console.log(`      tarball : dist/${path.basename(tarball)} (${manifest.size} bytes, ${manifest.entries} entries)`)
 console.log(`      sha256  : ${manifest.sha256}`)
+console.log(`      checksum: dist/${path.basename(checksumFile)}`)
 console.log('      manifest: dist/manifest.json')
