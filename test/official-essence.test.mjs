@@ -54,11 +54,11 @@ test('official essence: 默认插件条目写入 overlay 并出现在 merged pro
   const mergedPatch = fs.readFileSync(path.join(manager.mergedProfileDir(OFFICIAL_ESSENCE_ID), 'cordis.patch.yml'), 'utf8')
   const merged = parsePatchEntries(mergedPatch)
   assert.ok(merged.entries.some(entry => entry.name === 'dshmarket' && entry.disabled !== true))
-  assert.ok(merged.entries.some(entry => entry.name === '@twinsearth/dsh-fang' && entry.disabled !== true))
+  assert.equal(merged.entries.some(entry => entry.name === '@twinsearth/dsh-fang'), false, '官方元主不再激活 dsh-fang 自身')
   assert.ok(merged.entries.some(entry => entry.name === '@twinsearth/dsh-2xray' && entry.disabled === true))
   assert.ok(merged.entries.some(entry => entry.name === '@liustack/modsearch' && entry.disabled === true))
   assert.equal(merged.entries.filter(entry => entry.disabled === true).length, 6)
-  assert.equal(merged.entries.filter(entry => entry.disabled !== true).length, 5)
+  assert.equal(merged.entries.filter(entry => entry.disabled !== true).length, 4)
 })
 
 test('official essence: 锁定后 update/remove/setTier 都被拒绝', async () => {

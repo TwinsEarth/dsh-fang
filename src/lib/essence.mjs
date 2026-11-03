@@ -47,7 +47,6 @@ export const DEFAULT_OFFICIAL_PATCH_ENTRIES = Object.freeze([
   Object.freeze({ id: 'official-modsearch', name: '@liustack/modsearch', disabled: true }),
   // 安装并激活
   Object.freeze({ id: 'official-dshmarket', name: 'dshmarket', disabled: false }),
-  Object.freeze({ id: 'official-dsh-fang', name: '@twinsearth/dsh-fang', disabled: false }),
   Object.freeze({ id: 'official-im2a', name: '@twinsearth/dsh-im2a-plugin', disabled: false }),
   Object.freeze({ id: 'official-openviking-memory', name: '@openviking/dsh-memory-plugin', disabled: false }),
   Object.freeze({ id: 'official-w2m', name: '@twinsearth/w2m-dsh-plugin', disabled: false }),
