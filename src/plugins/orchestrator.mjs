@@ -1377,7 +1377,7 @@ export function apply(ctx, config) {
 
       route('GET', `${prefix}/panel`, (req, res) => {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(renderPanelHtml(prefix))
+        res.end(renderPanelHtml(prefix, authToken))
       }, { public: true })
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
@@ -1610,10 +1610,12 @@ export function resolveInside(base, rel) {
 }
 
 /** Server-rendered portal (v2): task table + adapter state + four actions. */
-export function renderPanelHtml(prefix = '/fang') {
+export function renderPanelHtml(prefix = '/fang', authToken = '') {
   const p = HTML_ESCAPE(prefix)
+  const token = HTML_ESCAPE(authToken)
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="fang-auth" content="${token}">
 <title>dsh-Fang v2 · 瓮城</title>
 <style>
   :root { color-scheme: light dark; }
@@ -1653,10 +1655,14 @@ export function renderPanelHtml(prefix = '/fang') {
 <script>
 const P = ${JSON.stringify(p)};
 const $ = (id) => document.getElementById(id);
+// v3.0.5/B1：面板同源读取安装 token，所有 /api 请求必须携带 header（否则 401 unauthorized）
+const AUTH = (document.querySelector('meta[name="fang-auth"]')?.content || '');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function msg(t, bad) { $('msg').textContent = t || ''; $('msg').style.color = bad ? '#dc2626' : '#16a34a'; }
 async function api(path, opts) {
-  const res = await fetch(P + path, Object.assign({ headers: { 'content-type': 'application/json' } }, opts));
+  const res = await fetch(P + path, Object.assign({
+    headers: Object.assign({ 'content-type': 'application/json' }, AUTH ? { 'x-fang-auth': AUTH } : {}),
+  }, opts));
   const body = await res.json().catch(() => ({}));
   return { status: res.status, body };
 }

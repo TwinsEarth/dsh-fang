@@ -532,6 +532,10 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.equal(panel.statusCode, 200)
   assert.match(panel.body, /dsh-Fang v2/)
   assert.match(panel.body, /派生新任务/)
+  // v3.0.5/B1：fallback 面板必须自带 token bootstrap，否则「派生新任务」401
+  assert.match(panel.body, /name="fang-auth"/)
+  assert.match(panel.body, /x-fang-auth/)
+  assert.ok(panel.body.includes(TEST_AUTH_TOKEN), '面板应注入安装 token')
 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)

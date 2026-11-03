@@ -210,6 +210,7 @@ async function main() {
     const panelRes = await api('/fang/panel')
     check('GET /fang/panel 200', panelRes.status === 200)
     check('panel is v2', String(panelRes.body?.raw ?? '').includes('dsh-Fang v2') || String(panelRes.body?.raw ?? '').includes('派生新任务'))
+    check('panel carries auth bootstrap', String(panelRes.body?.raw ?? '').includes('name="fang-auth"'))
 
     // ── v3.0.7 门禁：client half 必须能注册并被 factory 物化成插件对象 ─────
     let clientRegistration = null
@@ -239,8 +240,11 @@ async function main() {
     } catch (e) { dumpText = String(e?.stdout ?? '') }
     const fangRowIds = [...new Set([...dumpText.matchAll(/\bid:\s*['"]?(fang-[a-z0-9-]+)/g)].map((m) => m[1]))]
     check('16 fang plugin rows composed', fangRowIds.length >= 16, `rows=${fangRowIds.length} ${fangRowIds.slice(0, 3).join(',')}`)
-    const hasClientRow = /^\s*-\s*id:\s*['"]?ui-fang['"]?\s*$/m.test(dumpText)
-    check('ui-fang client row composed', hasClientRow, hasClientRow ? 'present' : 'missing')
+    // v3.0.7：client half 由宿主 Loader 对「bare 包名行」的 dsh.client 扫描发现，
+    // 不能新增 `<pkg>/client` 行（子路径不是包根，会被当成坏插件）。
+    const pkgDsh = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).dsh ?? {}
+    check('package declares dsh.client', pkgDsh.client?.platform === 'web' && Array.isArray(pkgDsh.client?.inject))
+    check('no inactive plugin entries', !/entry did not activate/.test(`${stdout}\n${stderr}`))
 
     // ── create a real task/fork ─────────────────────────────────────────
     const created = await api('/fang/api/tasks/create', {

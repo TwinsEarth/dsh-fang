@@ -13,15 +13,16 @@
   - `16 fang plugin rows composed`：`dsh --profile e2e --dump-config` 统计 `fang-*` 行 ≥16。
 - **build**：默认调用 `preflight --e2e`；构建前清理同版本旧产物；生成 `dist/dsh-fang-<ver>.tgz.sha256`。
 - **release workflow**：build job 改为 self-hosted Windows 且执行带 e2e 的构建；artifact 与 GitHub Release 均上传 `.sha256`。
-- **cordis.patch.yml**：新增显式 client loader row `ui-fang → @local/dsh-fang/client`
-  （不再依赖裸包名扫描器；修复页面 `invalid plugin ... received undefined`）。
-  e2e 新增 `ui-fang client row composed` 断言（63/63）。
+- **fallback 面板鉴权**：`/fang/panel` 注入 `<meta name="fang-auth">`，内联 `api()` 自动携带 `x-fang-auth`
+  （修复页面「派生失败: unauthorized」）。
+- **client half 发现机制纠正**：验证后确认 client half 由宿主 Loader 对**bare 包名行** `@local/dsh-fang`
+  的 `dsh.client` 扫描发现；**不新增** `ui-fang → @local/dsh-fang/client` 行（子路径不是包根，会被当作坏插件：
+  `failed to import`）。e2e 改为断言 `package declares dsh.client` 与 `no inactive plugin entries`。
 
 ### 验证（本机）
 - 无 `--e2e`：**RED**（e2e required + sidecar missing）；
-- `--e2e`：**GREEN 3.0.7**（641 tests、e2e **63/63**、62 路由、sha256 match）；
-- `node tools/release/build.mjs`：preflight GREEN、tarball **334,809 B**、
-  sha256 `2f1d1d414fc1930f563e6b9caae632458cfc094163d7ea328a7ce01876dd9d4c`、sidecar 一致。
+- `--e2e`：**GREEN 3.0.7**（641 tests、e2e **65/65**、62 路由、sha256 match）；
+- `node tools/release/build.mjs`：preflight GREEN、tarball **334,809+ B**、sidecar 一致。
 
 ## v3.0.6（2026-11-03）
 

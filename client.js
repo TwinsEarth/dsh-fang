@@ -30,6 +30,7 @@
 //     进行中 / 临时 / 已归档分组，卡片左侧 4px 色条 + 状态胶囊；
 //   * 不写死宿主主题色：颜色只来自本文件的 --fang-* token（见 injectStyle）。
 
+if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 window.__ModuleLoader__.load({
   id: '@local/dsh-fang',
   factory(require) {
@@ -2805,5 +2806,6 @@ window.__ModuleLoader__.load({
       },
     }
   },
-})
+    })
+}
 

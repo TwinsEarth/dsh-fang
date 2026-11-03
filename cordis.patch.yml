@@ -133,8 +133,3 @@
         routes:
           enabled: true
           prefix: /fang
-
-    # v3.0.7 · client half 显式 loader row：
-    # 不再依赖裸包名扫描器；防止页面报 "invalid plugin ... received undefined"。
-    - id: ui-fang
-      name: '@local/dsh-fang/client'
