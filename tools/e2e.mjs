@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import net from 'node:net'
 import { spawn, execFileSync } from 'node:child_process'
+import vm from 'node:vm'
 import zlib from 'node:zlib'
 
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
@@ -156,7 +157,7 @@ async function main() {
     check('mother boots with v2 bundle', true, `port=${booted.port}`)
     const token = (() => { try { return new URL(booted.url).searchParams.get('token') ?? '' } catch { return '' } })()
     check('mother URL carries a token', token.length > 0)
-    // v3.0.6/B1：fang 安装级 token（0600 文件）；e2e 作为本机客户端按真实方式带上 header
+    // v3.0.7/B1：fang 安装级 token（0600 文件）；e2e 作为本机客户端按真实方式带上 header
     let fangToken = ''
     try {
       fangToken = JSON.parse(fs.readFileSync(path.join(homeRoot, 'fang', 'e2e', 'fang-auth.json'), 'utf8')).token ?? ''
@@ -181,7 +182,7 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 3.0.6', status.body?.version === '3.0.6')
+    check('status reports version 3.0.7', status.body?.version === '3.0.7')
     check('status reports role=mother', status.body?.role === 'mother')
     check('mother has forker service', status.body?.services?.forker === true)
 
@@ -209,6 +210,35 @@ async function main() {
     const panelRes = await api('/fang/panel')
     check('GET /fang/panel 200', panelRes.status === 200)
     check('panel is v2', String(panelRes.body?.raw ?? '').includes('dsh-Fang v2') || String(panelRes.body?.raw ?? '').includes('派生新任务'))
+
+    // ── v3.0.7 门禁：client half 必须能注册并被 factory 物化成插件对象 ─────
+    let clientRegistration = null
+    let clientLoadError = ''
+    try {
+      vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'), {
+        window: { __ModuleLoader__: { load(payload) { clientRegistration = payload } } },
+        console, setTimeout, clearTimeout, URL, URLSearchParams, TextEncoder, TextDecoder,
+      }, { filename: 'client.js' })
+    } catch (e) { clientLoadError = String(e?.message ?? e) }
+    check('client half registers @local/dsh-fang', clientRegistration?.id === '@local/dsh-fang', clientLoadError || String(clientRegistration?.id))
+
+    let clientPlugin = null
+    let clientFactoryError = ''
+    try {
+      clientPlugin = clientRegistration.factory((name) => {
+        if (name === 'react') return { createElement: (...args) => ({ type: args[0], props: args[1] }) }
+        return {}
+      })
+    } catch (e) { clientFactoryError = String(e?.message ?? e) }
+    check('client half materializes apply()', typeof clientPlugin?.apply === 'function' && Array.isArray(clientPlugin?.inject), clientFactoryError || String(typeof clientPlugin?.apply))
+
+    // ── v3.0.7 门禁：组合配置必须包含 16 个 fang-* 行 ────────────────────
+    let dumpText = ''
+    try {
+      dumpText = execFileSync(CLI, ['--profile', 'e2e', '--dump-config'], { env, encoding: 'utf8', timeout: 120000, shell: true, maxBuffer: 8 * 1024 * 1024 })
+    } catch (e) { dumpText = String(e?.stdout ?? '') }
+    const fangRowIds = [...new Set([...dumpText.matchAll(/\bid:\s*['"]?(fang-[a-z0-9-]+)/g)].map((m) => m[1]))]
+    check('16 fang plugin rows composed', fangRowIds.length >= 16, `rows=${fangRowIds.length} ${fangRowIds.slice(0, 3).join(',')}`)
 
     // ── create a real task/fork ─────────────────────────────────────────
     const created = await api('/fang/api/tasks/create', {

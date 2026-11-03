@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## v3.0.7（2026-11-03）
+
+**主题：发布门禁加固——e2e 不可跳过、client half 物化断言、16 行完整性、.sha256 伴随产物。**
+
+### 门禁修复
+- **preflight**：未传 `--e2e` 时新增失败项 `e2e: required for release green`，不再可能 `e2e:null` 仍发绿灯；
+  已存在 tarball 时校验同目录 `.sha256`（缺失/不匹配均失败）。
+- **e2e**：新增两条免疫本次线上故障的断言：
+  - `client half registers @local/dsh-fang`：vm 执行 client.js，确认 `window.__ModuleLoader__.load` 注册；
+  - `client half materializes apply()`：调用 factory（stub React）后确认导出 `{inject, apply}`；
+  - `16 fang plugin rows composed`：`dsh --profile e2e --dump-config` 统计 `fang-*` 行 ≥16。
+- **build**：默认调用 `preflight --e2e`；构建前清理同版本旧产物；生成 `dist/dsh-fang-<ver>.tgz.sha256`。
+- **release workflow**：build job 改为 self-hosted Windows 且执行带 e2e 的构建；artifact 与 GitHub Release 均上传 `.sha256`。
+
+### 验证（本机）
+- 无 `--e2e`：**RED**（e2e required + sidecar missing）；
+- `--e2e`：**GREEN 3.0.6**（641 tests、e2e 62/62、62 路由、sha256 match）；
+- `node tools/release/build.mjs`：preflight GREEN、tarball 334,697 B、sidecar 生成。
+
 ## v3.0.6（2026-11-03）
 
 **主题：元主 CRUD + 默认元主 + 分身列表契约字段（后端契约 B，先行；UI 移植随后）。**

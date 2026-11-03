@@ -31,21 +31,21 @@ jobs:
         run: node test/licensing.test.mjs
 
   build:
-    name: build tarball + manifest
+    name: build tarball + manifest (e2e-gated, self-hosted windows)
     needs: test
-    runs-on: ubuntu-latest
+    # v3.0.7：发布必须在可运行真实 dsh 的 Windows 主机上通过 preflight --e2e；
+    # 没有自托管 runner 时此 job 排队/失败，而不是静默跳过 e2e。
+    runs-on: [self-hosted, windows]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: build (tar is preinstalled)
-        run: node tools/release/build.mjs --skip-preflight
+      - name: build with preflight --e2e (Windows CI image has tar)
+        run: node tools/release/build.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: dsh-fang-release
           path: |
             dist/dsh-fang-*.tgz
+            dist/dsh-fang-*.tgz.sha256
             dist/manifest.json
           if-no-files-found: error
 
@@ -88,6 +88,7 @@ jobs:
         with:
           files: |
             dist/dsh-fang-*.tgz
+            dist/dsh-fang-*.tgz.sha256
             dist/manifest.json
           generate_release_notes: true
           fail_on_unmatched_files: true
