@@ -34,3 +34,9 @@ DSH Web「内置插件」页报 `@local/dsh-fang: invalid plugin, ... received u
 - 浏览器级截图回归仍未引入（当前为 vm 物化 + dump-config + DOM e2e 断言）。
 - GitHub Actions 的 release build 现要求 self-hosted Windows runner；未配置时发布 job 会失败（fail-closed，符合设计）。
 - v3.0.0/v3.0.1 的 tag/Release 仍待按严格序列补发。
+
+## 5. 发布豁免（人工批准）
+
+- v3.0.0–v3.0.6 **永不发布**；首个 Release = **v3.0.7**；
+- 后续不得覆盖“不跳号”规则；跳版本必须单独申请并经人工手动豁免、书面记录。
+- 记录文件：docs/RELEASE-WAIVER-v3.0.7.md。

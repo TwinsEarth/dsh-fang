@@ -36,10 +36,21 @@ export const ESSENCE_VERSION = '1.0.0'
 export const OFFICIAL_ESSENCE_ID = 'essence-official-dev'
 export const OFFICIAL_ESSENCE_NAME = '开发者推荐（官方）'
 export const OFFICIAL_ESSENCE_MIN_TIER = 'vip100'
-/** 官方推荐原身预装的默认插件条目（第三方白名单示例，可由镜像侧覆盖）。 */
+/** 官方推荐原身预装的默认插件条目（v3.0.7：自定义清单，安装≠激活）。 */
 export const DEFAULT_OFFICIAL_PATCH_ENTRIES = Object.freeze([
-  Object.freeze({ id: 'official-dev-toolkit', name: '@dsh/plugin-toolkit', disabled: false }),
-  Object.freeze({ id: 'official-dev-git', name: '@dsh/plugin-git', disabled: false }),
+  // 安装但不激活
+  Object.freeze({ id: 'official-2xray', name: '@twinsearth/dsh-2xray', disabled: true }),
+  Object.freeze({ id: 'official-agency-agents', name: '@michengai/dsh-agency-agents', disabled: true }),
+  Object.freeze({ id: 'official-better-sidebar', name: 'dsh-better-sidebar', disabled: true }),
+  Object.freeze({ id: 'official-context', name: 'dsh-context', disabled: true }),
+  Object.freeze({ id: 'official-modlens', name: '@liustack/modlens', disabled: true }),
+  Object.freeze({ id: 'official-modsearch', name: '@liustack/modsearch', disabled: true }),
+  // 安装并激活
+  Object.freeze({ id: 'official-dshmarket', name: 'dshmarket', disabled: false }),
+  Object.freeze({ id: 'official-dsh-fang', name: '@twinsearth/dsh-fang', disabled: false }),
+  Object.freeze({ id: 'official-im2a', name: '@twinsearth/dsh-im2a-plugin', disabled: false }),
+  Object.freeze({ id: 'official-openviking-memory', name: '@openviking/dsh-memory-plugin', disabled: false }),
+  Object.freeze({ id: 'official-w2m', name: '@twinsearth/w2m-dsh-plugin', disabled: false }),
 ])
 
 /** VIP 配额表：原身数 / 子原身数 / 活跃会话数。归档会话不限。 */
