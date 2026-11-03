@@ -2789,6 +2789,7 @@ window.__ModuleLoader__.load({
 
     // ── 插件入口 ──────────────────────────────────────────────────────────
     return {
+      mountPanel,
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
