@@ -28,6 +28,7 @@ import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
+import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -343,6 +344,11 @@ export function apply(ctx, config) {
       status,
       phase,
       health: { adapter: t.adapter?.ok ? 'ok' : 'pending', error: t.adapter?.error ?? '' },
+      // v3.0.7/S1：动作可用性由服务端给出，UI 不再自行推断
+      ...(() => {
+        const ui = buildTaskActions({ running, archived: t.status === TASK_STATUS.ARCHIVED })
+        return { actions: ui.actions, blocks: ui.blocks }
+      })(),
       sessionTitle: t.importedSession?.title ?? t.seed?.title ?? '',
       startedAt: t.startedAt ?? live?.startedAt ?? null,
       updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
@@ -1231,13 +1237,18 @@ export function apply(ctx, config) {
     setPreferences: (patch = {}) => preferencesStore.update(patch),
     listEssences: () => {
       const defaultEssence = essenceManager.getDefault()
-      const essences = essenceManager.list().map((meta) => ({
-        ...meta,
-        locked: meta.locked === true,
-        official: meta.official === true,
-        archived: meta.archived === true,
-        pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
-      }))
+      const essences = essenceManager.list().map((meta) => {
+        const ui = buildEssenceActions({ locked: meta.locked === true, archived: meta.archived === true })
+        return {
+          ...meta,
+          locked: meta.locked === true,
+          official: meta.official === true,
+          archived: meta.archived === true,
+          pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
+          actions: ui.actions,
+          blocks: ui.blocks,
+        }
+      })
       return {
         officialId: OFFICIAL_ESSENCE_ID,
         official: officialEssence,
@@ -1377,7 +1388,7 @@ export function apply(ctx, config) {
 
       route('GET', `${prefix}/panel`, (req, res) => {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(renderPanelHtml(prefix))
+        res.end(renderPanelHtml(prefix, authToken))
       }, { public: true })
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
@@ -1610,10 +1621,12 @@ export function resolveInside(base, rel) {
 }
 
 /** Server-rendered portal (v2): task table + adapter state + four actions. */
-export function renderPanelHtml(prefix = '/fang') {
+export function renderPanelHtml(prefix = '/fang', authToken = '') {
   const p = HTML_ESCAPE(prefix)
+  const token = HTML_ESCAPE(authToken)
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="fang-auth" content="${token}">
 <title>dsh-Fang v2 · 瓮城</title>
 <style>
   :root { color-scheme: light dark; }
@@ -1653,10 +1666,26 @@ export function renderPanelHtml(prefix = '/fang') {
 <script>
 const P = ${JSON.stringify(p)};
 const $ = (id) => document.getElementById(id);
+// v3.0.5/B1：面板同源读取安装 token，所有 /api 请求必须携带 header（否则 401 unauthorized）
+const AUTH = (document.querySelector('meta[name="fang-auth"]')?.content || '');
+// UI 分析日志：所有按钮/链接点击都记录（可被自动冒烟读取）
+window.__fangUiLog = [];
+document.addEventListener('click', (ev) => {
+  const el = ev.target && ev.target.closest ? ev.target.closest('button, a[href]') : null;
+  if (!el) return;
+  window.__fangUiLog.push({
+    at: Date.now(),
+    text: String(el.textContent || '').trim().slice(0, 80),
+    act: el.getAttribute('data-act') || null,
+    href: el.href || null,
+  });
+}, true);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function msg(t, bad) { $('msg').textContent = t || ''; $('msg').style.color = bad ? '#dc2626' : '#16a34a'; }
 async function api(path, opts) {
-  const res = await fetch(P + path, Object.assign({ headers: { 'content-type': 'application/json' } }, opts));
+  const res = await fetch(P + path, Object.assign({
+    headers: Object.assign({ 'content-type': 'application/json' }, AUTH ? { 'x-fang-auth': AUTH } : {}),
+  }, opts));
   const body = await res.json().catch(() => ({}));
   return { status: res.status, body };
 }

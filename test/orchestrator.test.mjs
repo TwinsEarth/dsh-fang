@@ -179,6 +179,11 @@ test('orchestrator: createTask degrades honestly when the adapter never answers'
   assert.equal(list.length, 1)
   assert.equal(list[0].title, '开发 dsh-foo')
   assert.equal(list[0].status, 'running', 'reachable-but-adapter-down → running, not ready')
+  // v3.0.7/S1：动作可用性与 blocks 由服务端给出
+  assert.equal(typeof list[0].actions?.open?.enabled, 'boolean')
+  assert.equal(typeof list[0].actions?.rename?.enabled, 'boolean')
+  assert.equal(typeof list[0].actions?.delete?.enabled, 'boolean')
+  assert.ok(Array.isArray(list[0].blocks))
   assert.equal(forker.calls.spawn.length, 1)
   assert.equal(forker.calls.spawn[0].env.DSH_FANG_ROLE, 'fork')
   assert.equal(forker.calls.spawn[0].env.DSH_FANG_TASK_ID, out.taskId)
@@ -532,6 +537,10 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.equal(panel.statusCode, 200)
   assert.match(panel.body, /dsh-Fang v2/)
   assert.match(panel.body, /派生新任务/)
+  // v3.0.5/B1：fallback 面板必须自带 token bootstrap，否则「派生新任务」401
+  assert.match(panel.body, /name="fang-auth"/)
+  assert.match(panel.body, /x-fang-auth/)
+  assert.ok(panel.body.includes(TEST_AUTH_TOKEN), '面板应注入安装 token')
 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)

@@ -17,12 +17,16 @@ DSH Web「内置插件」页报 `@local/dsh-fang: invalid plugin, ... received u
 | 行完整性 | e2e 调 `dsh --dump-config` 统计 `fang-*` 行 ≥16 | e2e 62/62 |
 | 产物校验和 | build 生成 `dist/dsh-fang-<ver>.tgz.sha256`；preflight 校验 match | sidecar=85 B，match |
 | 发布流程 | release build 改为 self-hosted Windows + 默认 `preflight --e2e`；artifact/Release 上传 `.sha256` | 配置已改（CI 需自托管 runner） |
+| fallback 面板 | `/fang/panel` 注入 `fang-auth` meta，内联 API 带 `x-fang-auth` | 修复「派生失败: unauthorized」 |
+| client 发现机制 | 验证 `dsh.client` 由 bare 包名行扫描；**拒绝** `<pkg>/client` loader 行（会 `failed to import`）；e2e 断言 package 声明 + 无 inactive 条目 | e2e 66/66 |
+| PKG-01 | `tools/release/package-smoke.mjs` 接入 build：解包校验入口/16 行/插件 apply/client 归一/sha256 | build PASS |
+| SEC-07 | e2e 断言 tasks.json/forks.json 不落 token | e2e PASS |
 
 ## 3. 门禁结果（本机）
 
 - 无 e2e：**RED**（`e2e: required for release green`、`artifact: sha256 sidecar missing`）；
-- 有 e2e：**GREEN**（641 tests / 0 fail / 1 skip、e2e **62/62**、62 路由、`artifact: sha256 sidecar match`）；
-- build：preflight GREEN → tarball 334,697 B → `.sha256` 生成。
+- 有 e2e：**GREEN 3.0.7**（641 tests / 0 fail / 1 skip、e2e **66/66**、62 路由、`artifact: sha256 sidecar match`）；
+- build：preflight GREEN → package smoke PASS → tarball 334,858 B → sha256 `2403d482…` sidecar 一致。
 
 ## 4. 未完成 / 已知边界
 

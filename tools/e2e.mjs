@@ -210,6 +210,7 @@ async function main() {
     const panelRes = await api('/fang/panel')
     check('GET /fang/panel 200', panelRes.status === 200)
     check('panel is v2', String(panelRes.body?.raw ?? '').includes('dsh-Fang v2') || String(panelRes.body?.raw ?? '').includes('派生新任务'))
+    check('panel carries auth bootstrap', String(panelRes.body?.raw ?? '').includes('name="fang-auth"'))
 
     // ── v3.0.7 门禁：client half 必须能注册并被 factory 物化成插件对象 ─────
     let clientRegistration = null
@@ -239,6 +240,11 @@ async function main() {
     } catch (e) { dumpText = String(e?.stdout ?? '') }
     const fangRowIds = [...new Set([...dumpText.matchAll(/\bid:\s*['"]?(fang-[a-z0-9-]+)/g)].map((m) => m[1]))]
     check('16 fang plugin rows composed', fangRowIds.length >= 16, `rows=${fangRowIds.length} ${fangRowIds.slice(0, 3).join(',')}`)
+    // v3.0.7：client half 由宿主 Loader 对「bare 包名行」的 dsh.client 扫描发现，
+    // 不能新增 `<pkg>/client` 行（子路径不是包根，会被当成坏插件）。
+    const pkgDsh = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).dsh ?? {}
+    check('package declares dsh.client', pkgDsh.client?.platform === 'web' && Array.isArray(pkgDsh.client?.inject))
+    check('no inactive plugin entries', !/entry did not activate/.test(`${stdout}\n${stderr}`))
 
     // ── create a real task/fork ─────────────────────────────────────────
     const created = await api('/fang/api/tasks/create', {
@@ -258,6 +264,15 @@ async function main() {
     check('create returned tokenless url', !String(created.body?.url ?? '').includes('token='))
     const openUrl = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
     check('open-url returns tokenized url (memory only)', openUrl.status === 200 && String(openUrl.body?.url ?? '').includes('token='), JSON.stringify({ status: openUrl.status, hasUrl: !!openUrl.body?.url }))
+
+    // v3.0.7/SEC-07：token 不得落盘到 tasks.json / forks.json
+    const readMaybe = (p) => { try { return fs.readFileSync(p, 'utf8') } catch { return '' } }
+    const fangDir = path.join(homeRoot, 'fang', 'e2e')
+    const tasksPersist = readMaybe(path.join(fangDir, 'tasks.json'))
+    const forksPersist = readMaybe(path.join(fangDir, 'forks.json'))
+    const tokenValueLeak = /"token"\s*:\s*"[^"]+"/.test(tasksPersist) || /"token"\s*:\s*"[^"]+"/.test(forksPersist)
+    const tokenUrlLeak = tasksPersist.includes('token=') || forksPersist.includes('token=')
+    check('no token persisted in tasks/forks json', !tokenValueLeak && !tokenUrlLeak, JSON.stringify({ tasks: tasksPersist.length, forks: forksPersist.length }))
     check('adapter handshake succeeded', created.body?.adapter?.ok === true, JSON.stringify(created.body?.adapter))
 
     const taskStatus = await api(`/fang/api/tasks/status?taskId=${encodeURIComponent(taskId)}`)
