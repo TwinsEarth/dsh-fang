@@ -13,11 +13,15 @@
   - `16 fang plugin rows composed`：`dsh --profile e2e --dump-config` 统计 `fang-*` 行 ≥16。
 - **build**：默认调用 `preflight --e2e`；构建前清理同版本旧产物；生成 `dist/dsh-fang-<ver>.tgz.sha256`。
 - **release workflow**：build job 改为 self-hosted Windows 且执行带 e2e 的构建；artifact 与 GitHub Release 均上传 `.sha256`。
+- **cordis.patch.yml**：新增显式 client loader row `ui-fang → @local/dsh-fang/client`
+  （不再依赖裸包名扫描器；修复页面 `invalid plugin ... received undefined`）。
+  e2e 新增 `ui-fang client row composed` 断言（63/63）。
 
 ### 验证（本机）
 - 无 `--e2e`：**RED**（e2e required + sidecar missing）；
-- `--e2e`：**GREEN 3.0.6**（641 tests、e2e 62/62、62 路由、sha256 match）；
-- `node tools/release/build.mjs`：preflight GREEN、tarball 334,697 B、sidecar 生成。
+- `--e2e`：**GREEN 3.0.7**（641 tests、e2e **63/63**、62 路由、sha256 match）；
+- `node tools/release/build.mjs`：preflight GREEN、tarball **334,809 B**、
+  sha256 `2f1d1d414fc1930f563e6b9caae632458cfc094163d7ea328a7ce01876dd9d4c`、sidecar 一致。
 
 ## v3.0.6（2026-11-03）
 

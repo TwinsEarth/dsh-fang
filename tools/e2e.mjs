@@ -239,6 +239,8 @@ async function main() {
     } catch (e) { dumpText = String(e?.stdout ?? '') }
     const fangRowIds = [...new Set([...dumpText.matchAll(/\bid:\s*['"]?(fang-[a-z0-9-]+)/g)].map((m) => m[1]))]
     check('16 fang plugin rows composed', fangRowIds.length >= 16, `rows=${fangRowIds.length} ${fangRowIds.slice(0, 3).join(',')}`)
+    const hasClientRow = /^\s*-\s*id:\s*['"]?ui-fang['"]?\s*$/m.test(dumpText)
+    check('ui-fang client row composed', hasClientRow, hasClientRow ? 'present' : 'missing')
 
     // ── create a real task/fork ─────────────────────────────────────────
     const created = await api('/fang/api/tasks/create', {
