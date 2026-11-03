@@ -343,6 +343,16 @@ export function apply(ctx, config) {
       status,
       phase,
       health: { adapter: t.adapter?.ok ? 'ok' : 'pending', error: t.adapter?.error ?? '' },
+      // v3.0.7/S1：动作可用性由服务端给出，UI 不再自行推断
+      actions: {
+        open: { enabled: running, code: running ? 'ok' : 'not-running' },
+        rename: { enabled: t.status !== TASK_STATUS.ARCHIVED, code: t.status === TASK_STATUS.ARCHIVED ? 'archived' : 'ok' },
+        archive: { enabled: running, code: running ? 'ok' : 'not-running' },
+        copy: { enabled: true, code: 'ok' },
+        download: { enabled: true, code: 'ok' },
+        delete: { enabled: t.status === TASK_STATUS.ARCHIVED, code: t.status === TASK_STATUS.ARCHIVED ? 'ok' : 'archived-required' },
+      },
+      blocks: running ? [] : [{ code: 'not-running', reason: '分身未运行，先打开/复原后再操作' }],
       sessionTitle: t.importedSession?.title ?? t.seed?.title ?? '',
       startedAt: t.startedAt ?? live?.startedAt ?? null,
       updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
@@ -1237,6 +1247,16 @@ export function apply(ctx, config) {
         official: meta.official === true,
         archived: meta.archived === true,
         pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
+        actions: {
+          derive: { enabled: meta.archived !== true, code: meta.archived === true ? 'archived' : 'ok' },
+          configure: { enabled: meta.locked !== true && meta.archived !== true, code: meta.locked === true ? 'locked' : (meta.archived === true ? 'archived' : 'ok') },
+          rename: { enabled: meta.locked !== true, code: meta.locked === true ? 'locked' : 'ok' },
+          archive: { enabled: meta.locked !== true, code: meta.locked === true ? 'locked' : 'ok' },
+          copy: { enabled: true, code: 'ok' },
+          download: { enabled: true, code: 'ok' },
+          delete: { enabled: meta.locked !== true, code: meta.locked === true ? 'locked' : 'ok' },
+        },
+        blocks: meta.locked === true ? [{ code: 'locked', reason: '官方推荐元主不支持修改设置' }] : [],
       }))
       return {
         officialId: OFFICIAL_ESSENCE_ID,
@@ -1657,6 +1677,18 @@ const P = ${JSON.stringify(p)};
 const $ = (id) => document.getElementById(id);
 // v3.0.5/B1：面板同源读取安装 token，所有 /api 请求必须携带 header（否则 401 unauthorized）
 const AUTH = (document.querySelector('meta[name="fang-auth"]')?.content || '');
+// UI 分析日志：所有按钮/链接点击都记录（可被自动冒烟读取）
+window.__fangUiLog = [];
+document.addEventListener('click', (ev) => {
+  const el = ev.target && ev.target.closest ? ev.target.closest('button, a[href]') : null;
+  if (!el) return;
+  window.__fangUiLog.push({
+    at: Date.now(),
+    text: String(el.textContent || '').trim().slice(0, 80),
+    act: el.getAttribute('data-act') || null,
+    href: el.href || null,
+  });
+}, true);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function msg(t, bad) { $('msg').textContent = t || ''; $('msg').style.color = bad ? '#dc2626' : '#16a34a'; }
 async function api(path, opts) {

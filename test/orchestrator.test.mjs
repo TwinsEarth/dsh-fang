@@ -179,6 +179,11 @@ test('orchestrator: createTask degrades honestly when the adapter never answers'
   assert.equal(list.length, 1)
   assert.equal(list[0].title, '开发 dsh-foo')
   assert.equal(list[0].status, 'running', 'reachable-but-adapter-down → running, not ready')
+  // v3.0.7/S1：动作可用性与 blocks 由服务端给出
+  assert.equal(typeof list[0].actions?.open?.enabled, 'boolean')
+  assert.equal(typeof list[0].actions?.rename?.enabled, 'boolean')
+  assert.equal(typeof list[0].actions?.delete?.enabled, 'boolean')
+  assert.ok(Array.isArray(list[0].blocks))
   assert.equal(forker.calls.spawn.length, 1)
   assert.equal(forker.calls.spawn[0].env.DSH_FANG_ROLE, 'fork')
   assert.equal(forker.calls.spawn[0].env.DSH_FANG_TASK_ID, out.taskId)

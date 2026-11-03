@@ -2653,6 +2653,25 @@ window.__ModuleLoader__.load({
     }
 
     function mountPanel(host) {
+      // v3.0.7 UI 分析日志：记录面板挂载与所有按钮/链接点击，供自动冒烟/诊断读取
+      try {
+        const doc = host?.ownerDocument ?? document
+        window.__fangUiLog = window.__fangUiLog || []
+        if (window.__fangUiLog.__bound !== true) {
+          doc.addEventListener('click', (ev) => {
+            const el = ev.target && ev.target.closest ? ev.target.closest('button, [data-btn-id], a[href]') : null
+            if (!el) return
+            window.__fangUiLog.push({
+              at: Date.now(),
+              btnId: el.getAttribute?.('data-btn-id') || null,
+              text: String(el.textContent || '').trim().slice(0, 80),
+              href: el.getAttribute?.('href') || null,
+            })
+          }, true)
+          window.__fangUiLog.__bound = true
+        }
+        window.__fangUiLog.push({ at: Date.now(), kind: 'panel-mount' })
+      } catch { /* 宿主无 window 时忽略 */ }
       const app = createConsole(host)
       return () => app.destroy()
     }
