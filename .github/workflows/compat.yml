@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Compatibility: pure-module import + engine checks on both supported Node lines (Linux CI).
+# 独立于 ci.yml 的理由：compat 只验证“模块能否被 import”，跑在 ubuntu 上约 1 分钟；
+# 让它独立成 workflow，CI 的 windows 矩阵抖动不会连坐，也便于单独重跑。
 name: compat
 
 on:
   push:
     branches: [main]
   pull_request:
+
+concurrency:
+  group: compat-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -14,12 +20,15 @@ jobs:
   compat:
     name: compat (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         node: [22, 24]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}

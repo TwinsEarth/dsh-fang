@@ -1,53 +1,168 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI: 零第三方依赖 —— 直接跑 node:test；Windows 是产品目标平台（AppContainer/junction/taskkill），
-# 因此功能测试跑 windows-latest；许可分层回归与源码扫描这类跨平台检查跑 ubuntu。
+# CI：PR 门禁的唯一聚合入口。规则见 docs/RELEASE-FLOW-v3.0.8-v3.3.3.md。
+#
+# 设计要点（为什么长这样）：
+#   * 单一必过检查 `gate`：分支保护只需要盯一个 check，避免“矩阵里漏了一个 job”。
+#   * concurrency + cancel-in-progress：同一 PR 连续推 5 次只跑最后一版，省 runner、降排队。
+#   * 每个 job 都有 timeout-minutes：v3.0.7 之前出现过 windows runner 卡死排队、整条流水线挂 6 小时。
+#   * e2e 默认不跑（需要真实 DSH），打 `run-e2e` 标签或设置仓库变量 FORCE_E2E=1 才跑；
+#     一旦要求它就是硬门禁——skipped 也算失败（v3.0.7 的 e2e 静默跳过教训）。
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+# 同一个 PR/分支只保留最新一次运行；main 的 push 不取消（要留下发布证据）。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # ── 1. 结构门禁：版本阶梯、线性历史、禁止路径、提交信息、SPDX ────────────────
+  hygiene:
+    name: hygiene (pr-gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # pr-gate 需要 merge-base、tag 历史
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: fetch base branch
+        run: git fetch --no-tags origin main:refs/remotes/origin/main --force
+      - name: pr gate
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          mkdir -p dist
+          node tools/git/pr-gate.mjs --json > dist/pr-gate.json || { cat dist/pr-gate.json; exit 1; }
+          node -e "const r=require('./dist/pr-gate.json');console.log('pr-gate GREEN v'+r.version)"
+      - name: 未授权直推 main 的告警（push 事件）
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "::notice::main 收到 push：请确认这是 PR squash 合并，而不是本地直推。"
+          node tools/git/guard-main.mjs audit || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr-gate
+          path: dist/pr-gate.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── 2. 全量测试（产品目标平台是 Windows：AppContainer/junction/taskkill）─────
   test:
     name: test (node ${{ matrix.node }})
     runs-on: windows-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         node: [22, 24]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
       - name: full unit + integration suite
         run: node --test --test-concurrency=1 "test/*.test.mjs"
       - name: offline status (informational, clean runner has no profile)
+        continue-on-error: true
         run: node tools/fangctl.mjs status
 
+  # ── 3. 许可分层（跨平台检查放 ubuntu）────────────────────────────────────
   license:
-    name: license layering guard (ubuntu)
+    name: license layering guard
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: license layering guard
-        run: node test/licensing.test.mjs
+      - run: node test/licensing.test.mjs
 
+  # ── 4. 实机 e2e（可选触发；一旦触发即硬门禁）──────────────────────────────
   e2e:
-    name: real dsh e2e (optional, self-hosted windows)
-    runs-on: [self-hosted, windows]
-    if: ${{ vars.RUN_E2E == '1' }}
+    name: e2e (self-hosted windows)
+    runs-on: [self-hosted, windows, fang-e2e]
+    timeout-minutes: 45
+    if: >-
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-e2e'))
+      || vars.FORCE_E2E == '1'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          persist-credentials: false
+      - name: runner 自检（失败信息要能直接指向修复动作）
+        shell: pwsh
+        run: |
+          Write-Host "node: $(node -v)"
+          if (-not (Get-Command dsh -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::runner 上没有 dsh CLI；e2e 需要真实 DSH 客户端。安装后重新排队。"
+            exit 1
+          }
+          $free = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free / 1GB
+          Write-Host ("free disk: {0:N1} GB" -f $free)
+          if ($free -lt 10) { Write-Host "::error::磁盘不足 10GB"; exit 1 }
+      - name: 清理上一轮残留（快照/临时 DSH_HOME，避免跨版本污染）
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:TEMP\fang-e2e") { Remove-Item "$env:TEMP\fang-e2e" -Recurse -Force }
+          git clean -ffdx -e dist
       - name: boot a disposable mother and run a real fork
         run: node tools/e2e.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-log
+          path: |
+            dist/e2e*.json
+            dist/e2e*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── 5. 唯一聚合门禁：分支保护只需要它 ──────────────────────────────────────
+  gate:
+    name: gate (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [hygiene, test, license, e2e]
+    if: always()
+    env:
+      HYGIENE: ${{ needs.hygiene.result }}
+      TEST: ${{ needs.test.result }}
+      LICENSE: ${{ needs.license.result }}
+      E2E: ${{ needs.e2e.result }}
+      E2E_REQUIRED: ${{ (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-e2e')) || vars.FORCE_E2E == '1' }}
+    steps:
+      - name: aggregate
+        shell: bash
+        run: |
+          set -u
+          fail=0
+          for pair in "hygiene=$HYGIENE" "test=$TEST" "license=$LICENSE"; do
+            name=${pair%%=*}; result=${pair#*=}
+            echo "$name = $result"
+            if [ "$result" != "success" ]; then echo "::error::$name 未通过（$result）"; fail=1; fi
+          done
+          echo "e2e = $E2E（required=$E2E_REQUIRED）"
+          if [ "$E2E" = "failure" ] || [ "$E2E" = "cancelled" ]; then fail=1; fi
+          if [ "$E2E_REQUIRED" = "true" ] && [ "$E2E" != "success" ]; then
+            echo "::error::e2e 被要求但结果为 $E2E —— 不允许以 skip 换绿灯"
+            fail=1
+          fi
+          exit $fail

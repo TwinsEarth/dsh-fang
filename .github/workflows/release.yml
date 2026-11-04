@@ -1,45 +1,126 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Release pipeline: tag v* (or manual dispatch on a tag) → test → build (tarball + manifest)
-# → npm / GitHub Release / Docker / healthz. Secrets are checked at step level (job-level `if` cannot read secrets).
+# 发布流水线：tag v* → 守卫（tag 必须在 main 尖端）→ 测试 → 真实 e2e 构建 → npm / GitHub Release /
+# Docker / healthz / 私有镜像复核 → 终检。任一环节红，发布即停（fail-closed）。
+#
+# 与旧版的三个关键差别：
+#   1) 新增 guard job：tag 不在 main 的 first-parent 上就直接失败（v3.0.7 的标签打在特性分支上）。
+#   2) npm 发布**复用 Windows 上构建的产物**（dist/npm + tarball），不在 ubuntu 上重新打包，
+#      否则 npm 上的 sha256 与 GitHub Release 的附件不是同一份字节。
+#   3) 私有镜像 verify 默认必过（MIRROR_REQUIRED=0 才允许跳过），对应 RELEASE-WAIVER 的第 3 条。
 name: release
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '已存在的 tag（vX.Y.Z，必须已在 main 尖端）'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false # 发布不可取消：中途取消会留下半发布状态
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  PUBLISH_NAME: '@twinsearth/dsh-fang'
 
 jobs:
+  # ── 0. 守卫：发布闸门的第一道，纯元数据检查，几十秒内出结果 ──────────────────
+  guard:
+    name: guard (tag on main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: fetch main
+        run: git fetch --no-tags origin main:refs/remotes/origin/main --force
+      - name: tag 必须正好是 main 尖端
+        run: |
+          set -euo pipefail
+          ahead=$(git rev-list --count "${RELEASE_TAG}..origin/main")
+          behind=$(git rev-list --count "origin/main..${RELEASE_TAG}")
+          echo "main 超前 tag: $ahead ；tag 超前 main: $behind"
+          if [ "$ahead" != "0" ]; then
+            echo "::error::origin/main 已超前 ${RELEASE_TAG} ${ahead} 个提交：发布必须打在 main 尖端（先合并再打 tag）"
+            exit 1
+          fi
+      - name: verify-release（无产物模式：此时还没构建）
+        id: check
+        run: |
+          node tools/git/verify-release.mjs --tag "$RELEASE_TAG" --base origin/main --no-artifact --no-write --json | tee dist-release-verify.json
+          version=$(node -e "console.log(require('./dist-release-verify.json').version)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-guard
+          path: dist-release-verify.json
+          retention-days: 30
+
+  # ── 1. 测试（与 PR 相同的矩阵，防止“合并后才发现红”）────────────────────────
   test:
     name: test (node ${{ matrix.node }})
+    needs: guard
     runs-on: windows-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         node: [22, 24]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: full unit + integration suite
-        run: node --test --test-concurrency=1 "test/*.test.mjs"
-      - name: license layering guard
-        run: node test/licensing.test.mjs
+      - run: node --test --test-concurrency=1 "test/*.test.mjs"
+      - run: node test/licensing.test.mjs
 
+  # ── 2. 真实 e2e 构建（自托管 Windows：需要真 DSH；没有 runner 就红，不静默降级）──
   build:
-    name: build tarball + manifest (e2e-gated, self-hosted windows)
+    name: build tarball + manifest (e2e)
     needs: test
-    # v3.0.7：发布必须在可运行真实 dsh 的 Windows 主机上通过 preflight --e2e；
-    # 没有自托管 runner 时此 job 排队/失败，而不是静默跳过 e2e。
-    runs-on: [self-hosted, windows]
+    runs-on: [self-hosted, windows, fang-e2e]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: build with preflight --e2e (Windows CI image has tar)
+        with:
+          persist-credentials: false
+      - name: runner 自检
+        shell: pwsh
+        run: |
+          Write-Host "node: $(node -v)"
+          if (-not (Get-Command dsh -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::runner 缺少 dsh CLI，e2e 无法执行。修复 runner 而不是跳过 e2e。"
+            exit 1
+          }
+          $free = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free / 1GB
+          Write-Host ("free disk: {0:N1} GB" -f $free)
+          if ($free -lt 10) { Write-Host "::error::磁盘不足 10GB，构建可能中途失败"; exit 1 }
+      - name: 清理上一轮残留
+        shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item dist -Recurse -Force }
+      - name: build（内置 preflight --e2e）
         run: node tools/release/build.mjs
+      - name: 记录门禁证据
+        run: node -e "const p=require('./dist/preflight.json');console.log('tests',p.tests,'e2e',p.e2e,'green',p.green)"
       - uses: actions/upload-artifact@v4
         with:
           name: dsh-fang-release
@@ -47,21 +128,37 @@ jobs:
             dist/dsh-fang-*.tgz
             dist/dsh-fang-*.tgz.sha256
             dist/manifest.json
+            dist/preflight.json
+            dist/npm/**
           if-no-files-found: error
+          retention-days: 30
 
+  # ── 3. npm：用 Windows 上构建的同一份 payload 发布 ───────────────────────────
   npm:
-    name: npm publish (dsh-fang)
-    needs: build
+    name: npm publish
+    needs: [guard, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       published: ${{ steps.publish.outputs.published }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: build payload
-        run: node tools/release/build.mjs --skip-preflight
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-fang-release
+          path: dist
+      - name: tarball 指纹复核（发布前最后一道字节校验）
+        run: |
+          set -euo pipefail
+          expected=$(node -e "console.log(require('./dist/manifest.json').sha256)")
+          actual=$(sha256sum "dist/dsh-fang-${RELEASE_TAG#v}.tgz" | cut -d' ' -f1)
+          [ "$expected" = "$actual" ] || { echo "::error::tarball 与 manifest 不一致（$expected vs $actual）"; exit 1; }
+          echo "sha256 ok: $actual"
       - name: publish when NPM_TOKEN is configured
         id: publish
         env:
@@ -69,16 +166,20 @@ jobs:
         run: |
           if [ -z "$NPM_TOKEN" ]; then
             echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "no NPM_TOKEN secret configured — npm publish skipped"
+            echo "::warning::未配置 NPM_TOKEN —— npm 发布跳过（GitHub Release 仍继续）"
             exit 0
           fi
           node tools/release/publish-npm.mjs
           echo "published=true" >> "$GITHUB_OUTPUT"
 
+  # ── 4. GitHub Release（附 tarball + sha256 + manifest + preflight 证据）──────
   github-release:
-    name: GitHub Release (assets)
-    needs: build
+    name: GitHub Release
+    needs: [guard, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -86,22 +187,29 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
           files: |
             dist/dsh-fang-*.tgz
             dist/dsh-fang-*.tgz.sha256
             dist/manifest.json
+            dist/preflight.json
           generate_release_notes: true
           fail_on_unmatched_files: true
 
+  # ── 5. Docker（仅 healthz 服务，不是完整运行环境）───────────────────────────
   docker:
     name: docker image (healthz)
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: docker/login-action@v3
         if: env.DOCKERHUB_USERNAME != ''
         with:
@@ -114,16 +222,20 @@ jobs:
           file: docker/Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKERHUB_USERNAME }}/dsh-fang:${{ github.ref_name }}
+            ${{ env.DOCKERHUB_USERNAME }}/dsh-fang:${{ env.RELEASE_TAG }}
             ${{ env.DOCKERHUB_USERNAME }}/dsh-fang:latest
 
+  # ── 6. healthz 远端复核（npm + GitHub 都必须能取到这一版）──────────────────
   healthz:
-    name: healthz (npm + GitHub)
+    name: healthz (remote)
     needs: [npm, github-release]
     if: needs.npm.outputs.published == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -132,3 +244,59 @@ jobs:
           name: dsh-fang-release
           path: dist
       - run: node tools/release/healthz.mjs --remote
+
+  # ── 7. 私有镜像 verify（默认必过；RELEASE-WAIVER 规则 3）────────────────────
+  mirror:
+    name: private mirror verify
+    needs: [guard, github-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: verify
+        run: |
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            if [ "${{ vars.MIRROR_REQUIRED }}" = "0" ]; then
+              echo "::warning::MIRROR_REQUIRED=0 且无 MIRROR_TOKEN —— 私有镜像 verify 跳过（需在发布记录中声明）"
+              exit 0
+            fi
+            echo "::error::缺少 MIRROR_TOKEN：私有镜像 verify 是发布条件；配置 token 或显式设置 MIRROR_REQUIRED=0"
+            exit 1
+          fi
+          node tools/release/sync-private.mjs verify --tag "$RELEASE_TAG" --json
+
+  # ── 8. 终检：把“已发布”这件事再断言一次（含远端）──────────────────────────
+  verify:
+    name: final verify
+    needs: [guard, github-release, mirror, healthz]
+    if: always() && needs.github-release.result == 'success' && needs.mirror.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-fang-release
+          path: dist
+      - name: fetch main
+        run: git fetch --no-tags origin main:refs/remotes/origin/main --force
+      - name: verify-release（本地证据 + 远端）
+        run: node tools/git/verify-release.mjs --tag "$RELEASE_TAG" --base origin/main --remote
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-verify
+          path: dist/release-verify.json
+          retention-days: 90
