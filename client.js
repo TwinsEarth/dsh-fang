@@ -2244,6 +2244,14 @@ window.__ModuleLoader__.load({
       return group
     }
 
+    function formatBytes(value) {
+      const bytes = Number(value)
+      if (!Number.isFinite(bytes) || bytes <= 0) return '—'
+      if (bytes < 1024) return `${bytes} B`
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+      return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    }
+
     function renderForkCard(S, app, task, options = {}) {
       const health = taskHealth(task)
       const taskId = String(task.taskId ?? '')
@@ -2327,6 +2335,11 @@ window.__ModuleLoader__.load({
         health.adapter === 'error' ? h('span', { style: { color: 'var(--f-red)' }, 'data-danger': '1' }, '适配器失联') : null)
 
       const bodyWrap = h('div', { id: 'task-body-' + taskId, hidden: folded })
+      bodyWrap.append(h('div', { class: 'fork-info', 'data-zone': 'task-info', style: { display: 'flex', gap: '10px', flexWrap: 'wrap', fontSize: '12px', opacity: '.85' } },
+        h('span', null, '对话 ' + (task.sessionTitle || '—')),
+        h('span', null, '创建 ' + fmtShortClock(task.createdAt ?? task.startedAt)),
+        h('span', null, '更新 ' + fmtShortClock(task.updatedAt)),
+        h('span', null, '体积 ' + formatBytes(task.projectBytes))))
       bodyWrap.append(meta)
       card.append(head, bodyWrap)
 

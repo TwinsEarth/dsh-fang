@@ -207,6 +207,8 @@ const foldState = JSON.parse(await evalr(`(async () => {
   const body3 = document.getElementById(id);
   return JSON.stringify({ folded, afterRefresh: { expanded: b3?.getAttribute('aria-expanded'), hidden: body3?.hidden } });
 })()`))
+await reload()
+const infoText = await evalr(`document.querySelector('[data-zone="task-info"]')?.textContent || ''`)
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
@@ -222,6 +224,7 @@ const cases = [
   { id: 'UI-07-500', ok: /UI 冒烟分身/.test(rollbackText), evidence: `title=${rollbackText}` },
   { id: 'UI-07-409', ok: conflictDraft === '冲突草稿', evidence: `draft=${conflictDraft}` },
   { id: 'UI-08', ok: foldState.afterRefresh.expanded === 'false' && foldState.afterRefresh.hidden === true, evidence: JSON.stringify(foldState) },
+  { id: 'UI-09', ok: /对话/.test(infoText) && /创建/.test(infoText) && /更新/.test(infoText) && /体积/.test(infoText) && /冒烟会话/.test(infoText) && /1\.0 KB/.test(infoText), evidence: infoText.replace(/\s+/g, ' ').slice(0, 120) },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })
