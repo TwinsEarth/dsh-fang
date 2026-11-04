@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // v3.0.8 branch runtime spike: same process, one session, N branch logs, single writer per branch.
 import fs from 'node:fs'
 import os from 'node:os'

@@ -1,4 +1,5 @@
-// v3.0.9 三根目录访问矩阵（纯逻辑，无 IO）。尚未接入运行时。
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 export const ROOTS = Object.freeze({ MIRROR: 'mirror', ESSENCE: 'essence', SESSIONS: 'sessions' })
 export const ROLES = Object.freeze({ COORDINATOR: 'coordinator', MOTHER: 'mother', ESSENCE: 'essence', FORK: 'fork' })
 

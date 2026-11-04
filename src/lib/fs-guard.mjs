@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// v3.0.9 fail-closed path guard: canonicalize and keep every path inside its root.
+import fs from 'node:fs'
+import path from 'node:path'
+
+export function safeJoin(root, ...parts) {
+  const base = path.resolve(root)
+  const target = path.resolve(base, ...parts)
+  if (target !== base && !target.startsWith(base + path.sep)) throw new Error('path-escape')
+  if (String(target).includes('\0')) throw new Error('path-escape')
+  return target
+}
+
+export function assertInside(root, target, { followSymlink = true } = {}) {
+  const base = path.resolve(root)
+  let resolved = path.resolve(target)
+  if (followSymlink) {
+    try { resolved = fs.realpathSync.native(resolved) } catch {
+      try { resolved = path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved)) } catch { /* keep lexical */ }
+    }
+    try {
+      const realBase = fs.realpathSync.native(base)
+      if (resolved !== realBase && !resolved.startsWith(realBase + path.sep)) throw new Error('path-escape')
+    } catch (error) {
+      if (error?.message === 'path-escape') throw error
+    }
+  }
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) throw new Error('path-escape')
+  return resolved
+}
