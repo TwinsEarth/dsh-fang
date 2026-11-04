@@ -54,6 +54,19 @@ export function createServer({ callTool } = {}) {
   }
 }
 
+const SENSITIVE_KEYS = new Set(['token', 'authtoken', 'datadir', 'clipath', 'template', 'password', 'secret', 'cookie'])
+
+function sanitize(value) {
+  if (Array.isArray(value)) return value.map(sanitize)
+  if (!value || typeof value !== 'object') return value
+  const out = {}
+  for (const [key, child] of Object.entries(value)) {
+    if (SENSITIVE_KEYS.has(String(key).toLowerCase())) continue
+    out[key] = sanitize(child)
+  }
+  return out
+}
+
 export function createHttpCallTool({ baseUrl, token, fetchImpl = fetch }) {
   const base = String(baseUrl || '').replace(/\/+$/, '')
   const route = {
@@ -81,7 +94,7 @@ export function createHttpCallTool({ baseUrl, token, fetchImpl = fetch }) {
     }
     const response = await fetchImpl(url, init)
     const body = await response.json().catch(() => ({}))
-    return { ok: response.ok && body.ok !== false, status: response.status, body }
+    return { ok: response.ok && body.ok !== false, status: response.status, body: sanitize(body) }
   }
 }
 
