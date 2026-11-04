@@ -36,13 +36,17 @@ node tools/e2e.mjs                                       # 真实母体 + 真分
 - 跨插件只通过 `ctx.get(SERVICE.*)` 可选服务或公开 HTTP API 交互；缺失服务必须显式降级。
 - 每个插件 `apply()` 首行是 `roleGate(...)`（部署矩阵见 `src/kernel/role.mjs`）。
 
-## 4. PR 流程
+## 4. PR 流程（main 受保护，PR-only）
 
-1. Fork / 分支：`feat/<short-name>` 或 `fix/<short-name>`；
-2. 在 PR 描述中写：`I have read the CLA and I sign it.`（附 GitHub 用户名与真实姓名/主体）；
-3. 确保 CI 绿（测试 + licensing 检查）；
-4. 维护者 review 后合并；提交信息用中文/英文均可，建议 `feat: …` / `fix: …` / `docs: …`。
+`main` 已开启分支保护：**禁止直接 push**，必须走 PR；PR 需要 CI/compat 检查全绿，并由维护者**手动审核合并**。
 
+1. 从 `main` 切分支：`feat/<short-name>`、`fix/<short-name>`、`docs/<short-name>`；
+2. push 分支并开 PR（可用 Draft PR 先对齐方向）；
+3. PR 描述写：`I have read the CLA and I sign it.`（附 GitHub 用户名与真实姓名/主体）；
+4. 等 required checks 全绿（`test (node 22|24)`、`license layering guard (ubuntu)`、`compat (node 22|24)`）；
+5. **维护者在 GitHub 上 review 并手动合并**；提交信息建议 `feat: …` / `fix: …` / `docs: …`。
+
+自动化代理（agent）的约束：**只允许 push 分支/开 PR，不得直接写 `main`，不得自行合并**。
 ## 5. 安全问题
 
 请**不要**在公开 issue 里披露漏洞，按 [SECURITY.md](SECURITY.md) 的渠道私信维护者。
