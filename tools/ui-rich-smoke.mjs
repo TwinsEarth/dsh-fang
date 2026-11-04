@@ -209,6 +209,26 @@ const foldState = JSON.parse(await evalr(`(async () => {
 })()`))
 await reload()
 const infoText = await evalr(`document.querySelector('[data-zone="task-info"]')?.textContent || ''`)
+await reload()
+const f2Input = await evalr(`(async () => {
+  const t = document.querySelector('[data-fk^="alias:task:"]');
+  t?.focus();
+  t?.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true, cancelable: true }));
+  await new Promise((r) => setTimeout(r, 250));
+  return !!document.querySelector('[data-edit-input]');
+})()`)
+await evalr(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+const sizes = JSON.parse(await evalr(`JSON.stringify([...document.querySelectorAll('.btn--sm, .expand-btn, .section-title')].slice(0, 40).map((el) => {
+  const r = el.getBoundingClientRect();
+  return { cls: String(el.className).slice(0, 24), w: Math.round(r.width), h: Math.round(r.height) };
+}))`))
+const tooSmall = sizes.filter((s) => s.h < 34 || (s.cls.includes('expand-btn') && s.w < 34))
+await send('Emulation.setEmulatedMedia', { features: [{ name: 'hover', value: 'none' }] })
+const hoverState = JSON.parse(await evalr(`JSON.stringify([...document.querySelectorAll('.fork-actions .btn, .fork-actions .text-action')].map((el) => {
+  const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+  return { display: s.display, w: Math.round(r.width), h: Math.round(r.height) };
+}))`))
+await send('Emulation.setEmulatedMedia', { features: [] })
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
@@ -225,6 +245,9 @@ const cases = [
   { id: 'UI-07-409', ok: conflictDraft === '冲突草稿', evidence: `draft=${conflictDraft}` },
   { id: 'UI-08', ok: foldState.afterRefresh.expanded === 'false' && foldState.afterRefresh.hidden === true, evidence: JSON.stringify(foldState) },
   { id: 'UI-09', ok: /对话/.test(infoText) && /创建/.test(infoText) && /更新/.test(infoText) && /体积/.test(infoText) && /冒烟会话/.test(infoText) && /1\.0 KB/.test(infoText), evidence: infoText.replace(/\s+/g, ' ').slice(0, 120) },
+  { id: 'UI-12-f2', ok: f2Input === true, evidence: `input=${f2Input}` },
+  { id: 'UI-12-size', ok: tooSmall.length === 0, evidence: tooSmall.length ? JSON.stringify(tooSmall.slice(0, 4)) : `${sizes.length} targets ≥34px` },
+  { id: 'UI-12-hover', ok: hoverState.length > 0 && hoverState.every((s) => s.display !== 'none' && s.h >= 34), evidence: JSON.stringify(hoverState.slice(0, 4)) },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })

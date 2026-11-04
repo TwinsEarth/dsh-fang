@@ -857,7 +857,7 @@ window.__ModuleLoader__.load({
 }
 @media (hover:none){
   .mother-actions .text-action{display:inline-block}
-  .text-action,.task-actions .text-action{display:inline-block}
+  .text-action,.task-actions .text-action,.fork-actions .text-action{display:inline-block}
   .fork-card:hover{transform:none}
   .btn:hover{background:transparent}
   .btn--ghost:hover{background:var(--f-surface);border-color:var(--f-border)}
@@ -867,6 +867,8 @@ window.__ModuleLoader__.load({
   .section-title{min-height:34px}
 }
 .btn--sm{min-height:34px}
+.section-title{min-height:34px}
+.fork-actions .btn,.fork-actions .text-action{min-height:34px}
 @media (prefers-reduced-motion:reduce){
   .fang-console *,.fang-console *::before,.fang-console *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
