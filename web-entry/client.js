@@ -8,9 +8,24 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     function WengchengEntry() {
+      const openPanel = (event) => {
+        event.preventDefault()
+        const url = 'dsh-fang://open'
+        try {
+          // Hidden iframe avoids page navigation being swallowed by the host shell.
+          const frame = document.createElement('iframe')
+          frame.style.display = 'none'
+          frame.src = url
+          document.body.appendChild(frame)
+          setTimeout(() => frame.remove(), 1500)
+        } catch {
+          try { window.location.href = url } catch { /* host blocked custom protocol */ }
+        }
+      }
       return h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
         h('a', {
           href: 'dsh-fang://open',
+          onClick: openPanel,
           'data-fang-entry': 'open-pc-panel',
           style: {
             display: 'inline-flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px',
