@@ -1018,6 +1018,7 @@ window.__ModuleLoader__.load({
         selectedSessionId: '',
         expanded: new Set(),
         collapsed: new Set(['temporary']),
+        collapsedTasks: new Set(),
         showTemporary: readPref('fang.panel.showTemporary', true),
         view: 'console',
         busy: '',
@@ -2254,6 +2255,12 @@ window.__ModuleLoader__.load({
       const busyDelete = S.busy === 'delete:' + taskId
       const busyPromote = S.busy === 'promote:' + taskId
       const barTone = health.tone
+      const folded = S.collapsedTasks?.has(taskId) ?? false
+      const toggleFold = () => {
+        if (S.collapsedTasks.has(taskId)) S.collapsedTasks.delete(taskId)
+        else S.collapsedTasks.add(taskId)
+        render(true)
+      }
 
       const card = h('article', {
         class: 'fork-card' + (health.anomaly ? ' is-anomaly' : ''),
@@ -2266,6 +2273,13 @@ window.__ModuleLoader__.load({
       })
 
       const head = h('div', { class: 'fork-head' },
+        h('button', {
+          type: 'button', class: 'expand-btn', 'data-fk': 'task-fold:' + taskId,
+          'aria-expanded': folded ? 'false' : 'true',
+          'aria-controls': 'task-body-' + taskId,
+          title: folded ? '展开分身' : '折叠分身',
+          onClick: toggleFold,
+        }, icon('chevron', !folded, 14)),
         h('div', { class: 'fork-head-main' },
           h('div', { class: 'fork-title' }, editableText(S, app, {
             key: 'task:' + taskId,
@@ -2312,10 +2326,12 @@ window.__ModuleLoader__.load({
         h('span', null, '创建 ' + fmtShortClock(task.createdAt)),
         health.adapter === 'error' ? h('span', { style: { color: 'var(--f-red)' }, 'data-danger': '1' }, '适配器失联') : null)
 
-      card.append(head, meta)
+      const bodyWrap = h('div', { id: 'task-body-' + taskId, hidden: folded })
+      bodyWrap.append(meta)
+      card.append(head, bodyWrap)
 
       if (health.anomaly) {
-        card.append(h('div', { class: 'fork-warn', role: 'note' },
+        bodyWrap.append(h('div', { class: 'fork-warn', role: 'note' },
           icon('alert', 14),
           h('span', null, '进程在跑但适配器失联（已证实异常）：可打开诊断，或归档回收。')))
       }
@@ -2345,7 +2361,7 @@ window.__ModuleLoader__.load({
         if (expanded) {
           sub.append(renderForkSessions(S, app, task, sessionsState))
         }
-        card.append(sub)
+        bodyWrap.append(sub)
       }
       return card
     }

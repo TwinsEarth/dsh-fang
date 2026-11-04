@@ -188,6 +188,25 @@ await submitEdit('冲突草稿')
 await sleep(600)
 const conflictDraft = await evalr(`(() => { const i=document.querySelector('[data-edit-input]'); return i ? i.value : '' })()`)
 renameMode = 'ok'
+await reload()
+const foldState = JSON.parse(await evalr(`(async () => {
+  const b = document.querySelector('[data-fk^="task-fold:"]');
+  const id = b?.getAttribute('aria-controls');
+  b?.click();
+  let b2 = null;
+  for (let i = 0; i < 30; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    b2 = document.querySelector('[data-fk^="task-fold:"]');
+    if (b2?.getAttribute('aria-expanded') === 'false') break;
+  }
+  const body = document.getElementById(id);
+  const folded = { expanded: b2?.getAttribute('aria-expanded'), hidden: body?.hidden };
+  document.querySelector('[data-btn-id="M-03"]')?.click();
+  await new Promise((r) => setTimeout(r, 1200));
+  const b3 = document.querySelector('[data-fk^="task-fold:"]');
+  const body3 = document.getElementById(id);
+  return JSON.stringify({ folded, afterRefresh: { expanded: b3?.getAttribute('aria-expanded'), hidden: body3?.hidden } });
+})()`))
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
@@ -202,6 +221,7 @@ const cases = [
   { id: 'UI-07-esc', ok: escZero === true, evidence: `zeroRequests=${escZero}` },
   { id: 'UI-07-500', ok: /UI 冒烟分身/.test(rollbackText), evidence: `title=${rollbackText}` },
   { id: 'UI-07-409', ok: conflictDraft === '冲突草稿', evidence: `draft=${conflictDraft}` },
+  { id: 'UI-08', ok: foldState.afterRefresh.expanded === 'false' && foldState.afterRefresh.hidden === true, evidence: JSON.stringify(foldState) },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })
