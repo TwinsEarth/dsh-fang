@@ -34,6 +34,7 @@
     "src/**/*.mjs",
     "src/**/*.js",
     "client.js",
+    "tools/mcp/**/*.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -60,6 +61,7 @@
     "build": "node tools/release/build.mjs",
     "healthz": "node tools/release/healthz.mjs",
     "compat": "node tools/release/compat.mjs",
+    "mcp": "node tools/mcp/server.mjs",
     "publish:npm": "node tools/release/publish-npm.mjs",
     "typecheck": "node tools/release/typecheck.mjs"
   },
