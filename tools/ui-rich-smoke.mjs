@@ -121,10 +121,15 @@ const ui = await evalr(`(async () => {
   return JSON.stringify({ paletteOpen, opensAfter, paletteAfterEsc, slots, header });
 })()`)
 const u = JSON.parse(ui)
+const counts = {
+  mother: Number(/母体\s*(\d+)/.exec(u.header)?.[1]),
+  essence: Number(/元主\s*(\d+)/.exec(u.header)?.[1]),
+  derived: Number(/分身\s*(\d+)/.exec(u.header)?.[1]),
+}
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
-  { id: 'UI-01', ok: /母体/.test(u.header) && /元主/.test(u.header) && /分身/.test(u.header), evidence: u.header.slice(0, 80).replace(/\n/g, ' ') },
+  { id: 'UI-01', ok: counts.mother === 1 && counts.essence === 2 && counts.derived === 1, evidence: `mother=${counts.mother} essence=${counts.essence} derived=${counts.derived}` },
   { id: 'UI-mounted', ok: s.mounted === '1' && !s.mountError, evidence: `mounted=${s.mounted} error=${s.mountError}` },
   { id: 'UI-02', ok: u.paletteOpen, evidence: `palette=${u.paletteOpen}` },
   { id: 'UI-03', ok: u.opensAfter > 0, evidence: `opens=${u.opensAfter}` },

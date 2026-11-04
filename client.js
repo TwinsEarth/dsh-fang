@@ -1136,12 +1136,19 @@ window.__ModuleLoader__.load({
         const seq = ++refreshSeq
         if (options.manual) { S.refreshing = true; schedule() }
         try {
-          const [statusRes, tasksRes, sessionsRes] = await Promise.all([
+          const [statusRes, tasksRes, sessionsRes, essenceRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/sessions').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api('/fang/api/essence/list').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
           ])
           if (!alive || seq !== refreshSeq) return
+
+          if (essenceRes.status === 200 && essenceRes.body && Array.isArray(essenceRes.body.essences)) {
+            S.essenceList = { data: essenceRes.body, error: '', at: Date.now() }
+          } else {
+            S.essenceList = { data: null, error: essenceRes.body?.error || (essenceRes.status ? 'http-' + essenceRes.status : 'network'), at: Date.now() }
+          }
 
           if (statusRes.status === 200 && statusRes.body && typeof statusRes.body === 'object' && !statusRes.body.error) {
             S.status = { state: 'ready', data: statusRes.body, error: '', diagnostic: null, at: Date.now() }
@@ -1705,9 +1712,11 @@ window.__ModuleLoader__.load({
       }),
       label + ' ', h('b', null, value))
       return h('div', { class: 'fh-stats', role: 'group', 'aria-label': '母体与配额状态' },
-        item('neutral', '母体', data?.role === 'fork' ? '分身' : '只读', '母体只读：控制台只读会话元数据，不写入、不改写母体会话。'),
+        item('neutral', '母体', '1', '母体只读：控制台只读会话元数据，不写入、不改写母体会话。'),
         h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
         item('neutral', '元主', String(S.essenceList?.data?.essences?.length ?? '—'), '元主数量（来自 /fang/api/essence/list）'),
+        h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
+        item('neutral', '分身', String(S.tasks.items.filter((task) => String(task.status) !== 'archived').length), '当前未归档分身数量（来自 /fang/api/tasks）'),
         h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
         item(ready > 0 ? 'ok' : 'neutral', '就绪', data ? `${ready}/${max}` : '—', `适配器已握手的分身 ${ready} 个 / 上限 ${max} 个。`),
         h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
