@@ -909,8 +909,39 @@ window.__ModuleLoader__.load({
      * 旧宿主没有该路由时（404/405）退化为本地别名并如实告知；网络错误不回退，避免“假成功”。
      * 409 = 其他客户端已改：抛 conflict，由调用方回滚并提示当前值。
      */
+    /**
+     * 重命名写通道（v3.0.7）：
+     * - task:<taskId>    → POST /fang/api/tasks/rename
+     * - essence:<id>     → POST /fang/api/essence/rename
+     * - 其他             → PATCH /fang/api/workspaces/:key（旧宿主）或本地别名
+     * 404/405 退化为本地别名；409 = 其他客户端已改；网络错误不回退。
+     */
     async function saveAlias(key, value, baseAliasRev) {
-      const result = await api('/fang/api/workspaces/' + encodeURIComponent(key), {
+      const rawKey = String(key ?? '')
+      const post = (route, payload) => api(route, { method: 'POST', body: JSON.stringify(payload) })
+      if (rawKey.startsWith('task:')) {
+        const result = await post('/fang/api/tasks/rename', { taskId: rawKey.slice(5), title: value })
+        if (result.status === 200 && result.body?.ok !== false) return { scope: 'host' }
+        if (result.status === 409) {
+          const error = new Error('conflict')
+          error.conflict = String(result.body?.conflict ?? result.body?.title ?? '')
+          throw error
+        }
+        if (result.status === 404 || result.status === 405) { await saveAliasLocal(rawKey, value); return { scope: 'local' } }
+        throw new Error(result.body?.error || (result.status ? 'http-' + result.status : 'network'))
+      }
+      if (rawKey.startsWith('essence:')) {
+        const result = await post('/fang/api/essence/rename', { essenceId: rawKey.slice(8), name: value })
+        if (result.status === 200 && result.body?.ok !== false) return { scope: 'host' }
+        if (result.status === 409) {
+          const error = new Error('conflict')
+          error.conflict = String(result.body?.conflict ?? result.body?.name ?? '')
+          throw error
+        }
+        if (result.status === 404 || result.status === 405) { await saveAliasLocal(rawKey, value); return { scope: 'local' } }
+        throw new Error(result.body?.error || (result.status ? 'http-' + result.status : 'network'))
+      }
+      const result = await api('/fang/api/workspaces/' + encodeURIComponent(rawKey), {
         method: 'PATCH',
         body: JSON.stringify({ alias: value, baseAliasRev: Number(baseAliasRev) || 0 }),
       })
@@ -2225,7 +2256,11 @@ window.__ModuleLoader__.load({
 
       const head = h('div', { class: 'fork-head' },
         h('div', { class: 'fork-head-main' },
-          h('div', { class: 'fork-title' }, clampText(task.title) || `分身 ${short(taskId, 8)}`),
+          h('div', { class: 'fork-title' }, editableText(S, app, {
+            key: 'task:' + taskId,
+            label: '分身',
+            value: S.aliases['task:' + taskId] || clampText(task.title) || `分身 ${short(taskId, 8)}`,
+          })),
           h('div', { class: 'fork-chips' },
             chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
