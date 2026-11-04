@@ -1713,6 +1713,59 @@ window.__ModuleLoader__.load({
         total > 0 ? item('neutral', '项目', String(total), `当前分身项目总数 ${total}（含临时与存档）。`) : null)
     }
 
+    function renderSlotStrip(cap) {
+      const limit = Math.max(0, Math.min(7, Number(cap?.limit ?? 5)))
+      const slots = []
+      for (let index = 0; index < 7; index += 1) {
+        const enabled = index < limit
+        slots.push(h('span', {
+          class: 'slot', role: 'listitem', 'data-slot': String(index),
+          'data-enabled': enabled ? 'true' : 'false',
+          ...(enabled ? {} : { 'data-reason': '超出当前配额（锁定）' }),
+          title: enabled ? `槽位 ${index + 1}` : `槽位 ${index + 1}：超出当前配额，锁定`,
+          style: {
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            width: '18px', height: '18px', marginRight: '2px', borderRadius: '5px',
+            fontSize: '10px', border: '1px solid var(--f-border)',
+            opacity: enabled ? '1' : '.45',
+          },
+        }, String(index + 1)))
+      }
+      return h('div', {
+        class: 'slot-strip', 'data-zone': 'slots', role: 'list', 'aria-label': '分身槽位',
+        style: { display: 'inline-flex', alignItems: 'center', marginLeft: '4px' },
+      }, ...slots)
+    }
+
+    function toggleMotherPalette(anchor) {
+      const host = anchor?.parentElement
+      if (!host) return
+      const existing = host.querySelector('[data-zone="palette"]')
+      if (existing) { existing.remove(); return }
+      const palette = h('div', {
+        class: 'mother-palette', 'data-zone': 'palette', role: 'menu',
+        style: {
+          position: 'absolute', right: '0', top: 'calc(100% + 6px)', zIndex: '40',
+          display: 'flex', flexDirection: 'column', gap: '2px', padding: '6px',
+          minWidth: '190px', background: 'var(--f-surface)', border: '1px solid var(--f-border)',
+          borderRadius: '12px', boxShadow: '0 12px 32px rgba(0,0,0,.18)',
+        },
+      },
+      h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-btn-id': 'mother-clone', onClick: () => app.notify('warn', '克隆母体尚未接线') }, '克隆（PC 客户端）'),
+      h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-btn-id': 'mother-open', onClick: () => openMotherPortal() }, '打开母体 Web'),
+      h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-btn-id': 'mother-backup', onClick: () => app.notify('warn', '备份入口尚未接线') }, '备份当前母体'))
+      host.style.position = 'relative'
+      host.appendChild(palette)
+      if (!window.__fangPaletteEsc) {
+        window.__fangPaletteEsc = true
+        document.addEventListener('keydown', (event) => {
+          if (event.key !== 'Escape') return
+          document.querySelectorAll('[data-zone="palette"]').forEach((node) => node.remove())
+        })
+      }
+      palette.querySelector('button')?.focus()
+    }
+
     function renderHeader(S, app) {
       const data = S.status.data
       const cap = projectCapacity(data, S.tasks.items)
@@ -1728,6 +1781,7 @@ window.__ModuleLoader__.load({
             h('h1', { class: 'fh-title' }, '瓮城'),
             h('span', { class: 'fh-sub' }, '母体 × 分身 · 三区控制台'))),
         renderStats(S),
+        renderSlotStrip(cap),
         h('div', { class: 'fh-actions' },
           quotaFull ? h('span', { class: 'quota-reason', id: reasonId, tabindex: -1, 'data-reason': 'M-05', 'data-reason-code': 'quota-exceeded' }, `配额已满（${cap.used}/${cap.limit}）：先归档旧分身。`) : null,
           button(`${S.view === 'archive' ? '返回面板' : `读档 (${archivedCount})`}`, {
@@ -1745,11 +1799,19 @@ window.__ModuleLoader__.load({
             variant: 'ghost', size: 'sm', icon: icon('refresh', 14), busy: S.refreshing,
             title: '重新读取母体状态、分身任务与母体会话', onClick: () => void app.refresh({ manual: true }), fk: 'refresh', dataBtnId: 'M-03',
           }),
-          button('Mother', {
-            variant: 'ghost', size: 'sm', icon: icon('globe', 14),
-            title: '母体浮窗：版本、备份、升级与连接自检（只读优先，写操作均二次确认）',
-            onClick: () => app.openMother(), fk: 'mother', dataBtnId: 'M-04',
-          }),
+          (() => {
+            const motherButton = button('Mother', {
+              variant: 'ghost', size: 'sm', icon: icon('globe', 14),
+              title: '母体浮窗：版本、备份、升级与连接自检（只读优先，写操作均二次确认）',
+              onClick: (event) => toggleMotherPalette(event?.currentTarget),
+              fk: 'mother', dataBtnId: 'M-04',
+            })
+            motherButton.addEventListener('dblclick', (event) => {
+              event.preventDefault()
+              openMotherPortal()
+            })
+            return motherButton
+          })(),
           button(quotaFull ? '配额已满' : '派生新分身', {
             variant: 'primary', size: 'lg', icon: icon('plus', 14),
             dataBtnId: 'M-05', confirmLevel: 'none',

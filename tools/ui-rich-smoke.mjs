@@ -107,7 +107,7 @@ const api = requests.filter((r) => r.path.startsWith('/fang/api/'))
 const endpoints = [...new Set(api.map((r) => `${r.method} ${r.path}`))]
 const ui = await evalr(`(async () => {
   const q = (s) => document.querySelector(s);
-  const mother = q('[data-btn-id="mother"]');
+  const mother = q('[data-fk="mother"]') || q('[data-btn-id="M-04"]');
   mother?.click();
   const paletteOpen = !!q('[data-zone="palette"]');
   mother?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
