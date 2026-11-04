@@ -31,7 +31,9 @@ try {
 
   check('package.json present', !!pkg.name && !!pkg.version, `${pkg.name}@${pkg.version}`)
   check('exports client subpath', pkg.exports?.['./client']?.browser === './client.js' || pkg.exports?.['./client'] === './client.js')
-  check('declares dsh.client', pkg.dsh?.client?.platform === 'web' && Array.isArray(pkg.dsh?.client?.inject))
+  // A2：浏览器 client half 必须禁用；client 入口保留给桌面壳
+  check('browser client half disabled', pkg.dsh?.client === undefined)
+  check('client entry kept for desktop shell', Boolean(pkg.exports?.['./client']))
 
   const clientInPkg = path.join(pkgDir, 'client.js')
   check('client.js shipped', fs.existsSync(clientInPkg))
