@@ -867,6 +867,7 @@ window.__ModuleLoader__.load({
   .section-title{min-height:34px}
 }
 .btn--sm{min-height:34px}
+.expand-btn{width:34px;height:34px}
 .section-title{min-height:34px}
 .fork-actions .btn,.fork-actions .text-action{min-height:34px}
 @media (prefers-reduced-motion:reduce){
@@ -2031,9 +2032,20 @@ window.__ModuleLoader__.load({
           '工作区由 DSH 宿主创建与管理；本面板只读，只有显示名可改（双击名称）。'))
       }
 
+      const essences = Array.isArray(S.essenceList?.data?.essences) ? S.essenceList.data.essences : []
+      const essenceList = essences.length
+        ? h('div', { class: 'essence-list', 'data-zone': 'essence-list', style: { display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 8px' } },
+          ...essences.map((essence) => h('div', { class: 'essence-row', 'data-essence-id': essence.id, style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+            essence.locked
+              ? h('span', { class: 'hint' }, essence.name || essence.id)
+              : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: essence.name || essence.id }),
+            essence.locked ? h('span', { class: 'chip' }, '锁定') : null)))
+        : null
+
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,
         h('div', { class: 'mother-slots' }, renderSlotStrip(projectCapacity(S.status.data, S.tasks.items))),
+        essenceList,
         scroll)
     }
 

@@ -189,6 +189,20 @@ await sleep(600)
 const conflictDraft = await evalr(`(() => { const i=document.querySelector('[data-edit-input]'); return i ? i.value : '' })()`)
 renameMode = 'ok'
 await reload()
+let essInput = false
+for (let i = 0; i < 30 && !essInput; i += 1) {
+  essInput = await evalr(`(() => {
+    const t = document.querySelector('[data-fk="alias:essence:essence-demo"]');
+    t?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    return !!document.querySelector('[data-edit-input]');
+  })()`)
+  if (!essInput) await sleep(100)
+}
+await submitEdit('新元主名')
+await sleep(500)
+const essReq = requests.filter((r) => r.method === 'POST' && r.path === '/fang/api/essence/rename').at(-1)
+const essBody = essReq ? JSON.parse(essReq.body || '{}') : {}
+await reload()
 const foldState = JSON.parse(await evalr(`(async () => {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const b = document.querySelector('[data-fk^="task-fold:"]');
@@ -243,6 +257,7 @@ const cases = [
   { id: 'UI-07-esc', ok: escZero === true, evidence: `zeroRequests=${escZero}` },
   { id: 'UI-07-500', ok: /UI 冒烟分身/.test(rollbackText), evidence: `title=${rollbackText}` },
   { id: 'UI-07-409', ok: conflictDraft === '冲突草稿', evidence: `draft=${conflictDraft}` },
+  { id: 'UI-07-essence', ok: essInput === true && essBody.essenceId === 'essence-demo' && essBody.name === '新元主名', evidence: JSON.stringify(essBody) },
   { id: 'UI-08', ok: foldState.folded.expanded === 'false' && foldState.folded.hidden === true && foldState.restored.expanded === 'true' && foldState.restored.hidden === false && foldState.afterRefresh.expanded === 'false' && foldState.afterRefresh.hidden === true, evidence: JSON.stringify(foldState) },
   { id: 'UI-09', ok: /对话/.test(infoText) && /创建/.test(infoText) && /更新/.test(infoText) && /体积/.test(infoText) && /冒烟会话/.test(infoText) && /1\.0 KB/.test(infoText), evidence: infoText.replace(/\s+/g, ' ').slice(0, 120) },
   { id: 'UI-12-f2', ok: f2Input === true, evidence: `input=${f2Input}` },
