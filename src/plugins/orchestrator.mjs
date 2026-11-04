@@ -27,6 +27,7 @@ import { PreferencesStore } from '../lib/preferences.mjs'
 import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
+import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { fileURLToPath } from 'node:url'
@@ -1387,6 +1388,13 @@ export function apply(ctx, config) {
       }), { public: true })
 
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
+      route('GET', `${prefix}/api/upgrade/status`, (req, res) => {
+        let mirror = null
+        let essences = []
+        try { mirror = service.status()?.mirror ?? null } catch { /* empty */ }
+        try { essences = service.listEssences?.() ?? [] } catch { /* empty */ }
+        return json(res, 200, buildUpgradeStatus({ version: FANG_VERSION, mirror, essences }))
+      })
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)

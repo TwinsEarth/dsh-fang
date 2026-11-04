@@ -184,6 +184,14 @@ async function main() {
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
     check('status reports version 3.0.7', status.body?.version === '3.0.7')
     check('status reports role=mother', status.body?.role === 'mother')
+    const upgradeStatus = await api('/fang/api/upgrade/status')
+    check('GET /fang/api/upgrade/status 200 + read-only shape',
+      upgradeStatus.status === 200 && upgradeStatus.body?.ok === true &&
+      upgradeStatus.body?.mother !== undefined && Array.isArray(upgradeStatus.body?.essences) &&
+      upgradeStatus.body?.operation === null,
+      JSON.stringify({ status: upgradeStatus.status, ok: upgradeStatus.body?.ok }))
+    const unauthUpgrade = await fetch(`http://127.0.0.1:${booted.port}/fang/api/upgrade/status`).catch(() => null)
+    check('upgrade/status rejects missing token (401)', unauthUpgrade?.status === 401, `status=${unauthUpgrade?.status ?? 'n/a'}`)
     check('mother has forker service', status.body?.services?.forker === true)
 
     const route = await api('/fang/api/route?realtime=1')
