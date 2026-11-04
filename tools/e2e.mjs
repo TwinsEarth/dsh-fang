@@ -232,7 +232,7 @@ async function main() {
       method: 'POST',
       body: JSON.stringify({ title: 'e2e 验收任务' }),
     })
-    check('POST /fang/api/tasks/create accepted', created.body?.ok === true, JSON.stringify(created.body?.error ?? ''))
+    check('POST /fang/api/tasks/create accepted', created.body?.ok === true, `status=${created.status} ${JSON.stringify(created.body).slice(0, 200)}`)
     const taskId = created.body?.taskId
     check('task id returned', typeof taskId === 'string' && taskId.startsWith('task_'), taskId ?? '')
 
