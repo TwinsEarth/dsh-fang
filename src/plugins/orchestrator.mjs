@@ -30,6 +30,7 @@ import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCom
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
+import { BranchStore } from '../lib/branch-store.mjs'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -152,6 +153,7 @@ export function apply(ctx, config) {
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot })
+  const branchStore = new BranchStore(layout.dataDir)
   // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
   const authToken = cfg.authEnabled === false
     ? ''
@@ -1398,8 +1400,12 @@ export function apply(ctx, config) {
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
-        const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators })
-        return json(res, out.ok ? 200 : 409, out)
+        try {
+          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators })
+          return json(res, out.ok ? 200 : 409, out)
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
       })
       route('GET', `${prefix}/api/tasks/status`, async (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
