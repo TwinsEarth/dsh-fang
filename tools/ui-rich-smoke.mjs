@@ -222,7 +222,7 @@ const sizes = JSON.parse(await evalr(`JSON.stringify([...document.querySelectorA
   const r = el.getBoundingClientRect();
   return { cls: String(el.className).slice(0, 24), w: Math.round(r.width), h: Math.round(r.height) };
 }))`))
-const tooSmall = sizes.filter((s) => s.h < 34 || (s.cls.includes('expand-btn') && s.w < 34))
+const tooSmall = sizes.filter((s) => s.h < 34 || s.w < 34)
 await send('Emulation.setEmulatedMedia', { features: [{ name: 'hover', value: 'none' }] })
 const hoverState = JSON.parse(await evalr(`JSON.stringify([...document.querySelectorAll('.fork-actions .btn, .fork-actions .text-action')].map((el) => {
   const s = getComputedStyle(el); const r = el.getBoundingClientRect();
@@ -247,7 +247,7 @@ const cases = [
   { id: 'UI-09', ok: /对话/.test(infoText) && /创建/.test(infoText) && /更新/.test(infoText) && /体积/.test(infoText) && /冒烟会话/.test(infoText) && /1\.0 KB/.test(infoText), evidence: infoText.replace(/\s+/g, ' ').slice(0, 120) },
   { id: 'UI-12-f2', ok: f2Input === true, evidence: `input=${f2Input}` },
   { id: 'UI-12-size', ok: tooSmall.length === 0, evidence: tooSmall.length ? JSON.stringify(tooSmall.slice(0, 4)) : `${sizes.length} targets ≥34px` },
-  { id: 'UI-12-hover', ok: hoverState.length > 0 && hoverState.every((s) => s.display !== 'none' && s.h >= 34), evidence: JSON.stringify(hoverState.slice(0, 4)) },
+  { id: 'UI-12-hover', ok: hoverState.length > 0 && hoverState.every((s) => s.display !== 'none' && s.h >= 34 && s.w >= 34), evidence: JSON.stringify(hoverState.slice(0, 4)) },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })
