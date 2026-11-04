@@ -20,6 +20,7 @@ const EDGE = [
 if (!EDGE) { console.error('SKIP ui-rich-smoke: no Edge/Chrome'); process.exit(2) }
 
 const requests = []
+let renameMode = 'ok'
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')
   if (url.pathname === '/favicon.ico') { res.writeHead(204); res.end(); return }
@@ -38,6 +39,19 @@ const server = http.createServer(async (req, res) => {
       res.end(fs.readFileSync(file))
     } catch { res.writeHead(404); res.end('not found') }
     return
+  }
+  if (url.pathname === '/fang/api/tasks/rename') {
+    if (renameMode === '500') {
+      res.writeHead(500, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'mock-500' }))
+      return
+    }
+    if (renameMode === '409') {
+      res.writeHead(409, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, conflict: '另一个名字' }))
+      return
+    }
+    return json({ ok: true })
   }
   if (url.pathname === '/fang/api/status') return json({ ok: true, version: '3.0.7', role: 'mother', profileTag: 'smoke', tasks: { ready: 1, total: 1, max: 5, list: [], capacity: { slots: 7, limit: 5, used: 1 } } })
   if (url.pathname === '/fang/api/tasks') return json({ ok: true, tasks: [{
@@ -126,6 +140,54 @@ const counts = {
   essence: Number(/元主\s*(\d+)/.exec(u.header)?.[1]),
   derived: Number(/分身\s*(\d+)/.exec(u.header)?.[1]),
 }
+const renameReqs = () => requests.filter((r) => r.method === 'POST' && r.path === '/fang/api/tasks/rename')
+const openEdit = () => evalr(`(() => {
+  const t = document.querySelector('[data-fk^="alias:task:"]');
+  t?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+  return !!document.querySelector('[data-edit-input]');
+})()`)
+const submitEdit = (value) => evalr(`(() => {
+  const i = document.querySelector('[data-edit-input]');
+  if (!i) return 'no-input';
+  i.value = ${JSON.stringify(value)};
+  i.dispatchEvent(new Event('input', { bubbles: true }));
+  i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  return 'sent';
+})()`)
+const reload = async () => {
+  await send('Page.navigate', { url: pageUrl })
+  for (let i = 0; i < 80; i += 1) {
+    if ((await evalr('document.body.dataset.mounted || ""')) === '1') break
+    await sleep(100)
+  }
+  await sleep(300)
+}
+const before = renameReqs().length
+await reload()
+const ui07Input = await openEdit()
+await submitEdit('冒烟改名')
+await sleep(400)
+const okReq = renameReqs().slice(before).at(-1)
+const okBody = okReq ? JSON.parse(okReq.body || '{}') : {}
+await reload()
+const beforeEsc = renameReqs().length
+await openEdit()
+await evalr(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+await sleep(300)
+const escZero = renameReqs().length === beforeEsc
+renameMode = '500'
+await reload()
+await openEdit()
+await submitEdit('将会失败')
+await sleep(600)
+const rollbackText = await evalr(`document.querySelector('[data-fk^="alias:task:"]')?.textContent || ''`)
+renameMode = '409'
+await reload()
+await openEdit()
+await submitEdit('冲突草稿')
+await sleep(600)
+const conflictDraft = await evalr(`(() => { const i=document.querySelector('[data-edit-input]'); return i ? i.value : '' })()`)
+renameMode = 'ok'
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
@@ -135,6 +197,11 @@ const cases = [
   { id: 'UI-03', ok: u.opensAfter > 0, evidence: `opens=${u.opensAfter}` },
   { id: 'UI-04', ok: !u.paletteAfterEsc, evidence: `afterEsc=${u.paletteAfterEsc}` },
   { id: 'UI-05', ok: u.slots.length === 7 && u.slots.filter((x) => x.enabled === 'false').every((x) => x.reason), evidence: `slots=${u.slots.length}` },
+  { id: 'UI-07-input', ok: ui07Input === true, evidence: `input=${ui07Input}` },
+  { id: 'UI-07-enter', ok: okBody.taskId === 'task_smoke' && okBody.title === '冒烟改名', evidence: JSON.stringify(okBody) },
+  { id: 'UI-07-esc', ok: escZero === true, evidence: `zeroRequests=${escZero}` },
+  { id: 'UI-07-500', ok: /UI 冒烟分身/.test(rollbackText), evidence: `title=${rollbackText}` },
+  { id: 'UI-07-409', ok: conflictDraft === '冲突草稿', evidence: `draft=${conflictDraft}` },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })

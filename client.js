@@ -1442,11 +1442,22 @@ window.__ModuleLoader__.load({
           const node = view.querySelector(`[data-fk="alias:${escapeSelector(editing.key)}"]`)
           if (node) node.focus({ preventScroll: true })
         } catch (error) {
-          S.editing = null
           const conflict = error?.conflict ? String(error.conflict) : ''
-          notify('bad', conflict
-            ? `名称已被其他客户端改为「${conflict}」，已恢复「${editing.original}」`
-            : `重命名失败，已恢复「${editing.original}」`)
+          if (conflict) {
+            // 409：保留 draft，允许用户改名后重试，不静默丢弃输入
+            S.editing = { ...editing, value, busy: false }
+            notify('bad', `名称已被其他客户端改为「${conflict}」；可修改后重试`)
+            announce('名称冲突，已保留草稿', 'assertive')
+            S.lastAliasError = String(error?.conflict ?? 'conflict')
+            render(true)
+            window.requestAnimationFrame(() => {
+              const input = view.querySelector('[data-edit-input]')
+              if (input) { input.focus(); input.select() }
+            })
+            return
+          }
+          S.editing = null
+          notify('bad', `重命名失败，已恢复「${editing.original}」`)
           announce('重命名失败，已恢复原名', 'assertive')
           S.lastAliasError = String(error?.message ?? error)
           render(true)
