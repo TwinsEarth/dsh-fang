@@ -96,19 +96,21 @@ try {
 
   if (!NO_POPUP) {
     const choiceFile = path.join(home, 'choice.txt')
-    const ps = `Add-Type -AssemblyName System.Windows.Forms; $r=[System.Windows.Forms.MessageBox]::Show('干净 profile 已启动。请点击「打开母体」验证页面，然后回来点「完成」。','dsh-Fang drill',[System.Windows.Forms.MessageBoxButtons]::YesNoCancel); Set-Content -Path '${choiceFile.replace(/'/g, "''")}' -Value $r`
-    spawn('powershell.exe', ['-NoProfile', '-Command', ps], { detached: true, stdio: 'ignore' }).unref()
-    console.log('popup: 打开母体=Yes（默认）/ 完成=No / 中止=Cancel；请到桌面点击')
+    let popupChoice = ''
+    const ps = `$c = Read-Host '瓮城 drill：1=打开母体 2=完成 3=中止'; Set-Content -Path '${choiceFile.replace(/'/g, "''")}' -Value $c`
+    spawn('powershell.exe', ['-NoProfile', '-NoExit', '-Command', ps], { detached: true, stdio: 'ignore' }).unref()
+    console.log('popup: 请到新开的 PowerShell 窗口输入 1（打开母体）/ 2（完成）/ 3（中止）')
     for (let i = 0; i < 300; i += 1) {
       if (fs.existsSync(choiceFile)) {
-        const choice = fs.readFileSync(choiceFile, 'utf8').trim()
-        check('popup choice recorded', choice.length > 0, choice)
-        if (/Cancel/i.test(choice)) throw new Error('aborted by user')
-        if (/Yes/i.test(choice)) { try { execFileSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' }) } catch { /* ignore */ } }
+        popupChoice = fs.readFileSync(choiceFile, 'utf8').trim()
+        if (popupChoice === '3' || /Cancel|中止/i.test(popupChoice)) throw new Error('aborted by user')
+        if (popupChoice === '1' || /Yes|是|打开/i.test(popupChoice)) { try { execFileSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' }) } catch { /* ignore */ } }
         break
       }
       await sleep(200)
     }
+    check('popup choice recorded', popupChoice.length > 0, popupChoice || 'timeout')
+    if (!popupChoice) throw new Error('popup timeout: no choice entered')
   } else {
     console.log('popup skipped (--no-popup)')
   }
