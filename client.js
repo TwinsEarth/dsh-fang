@@ -346,6 +346,21 @@ window.__ModuleLoader__.load({
       } catch { /* 旧宿主没有 auth-token 路由：保持空 token */ }
       return fangAuthToken
     }
+    // v3.0.8 诊断日志：面板内所有错误集中展示，供开发/调试查看。
+    const diagLog = []
+    function diag(level, message, detail = '') {
+      const entry = {
+        at: Date.now(),
+        level: String(level || 'bad'),
+        message: String(message ?? ''),
+        detail: String(detail ?? '').slice(0, 2000),
+      }
+      diagLog.push(entry)
+      if (diagLog.length > 300) diagLog.shift()
+      try { window.__fangUiLog?.push?.({ kind: 'diag', level: entry.level, message: entry.message }) } catch { /* ignore */ }
+      try { window.dispatchEvent(new CustomEvent('fang:diag')) } catch { /* ignore */ }
+    }
+
     async function api(path, options) {
       const url = String(path)
       const token = await ensureFangAuthToken()
@@ -360,7 +375,9 @@ window.__ModuleLoader__.load({
           ...(options ?? {}),
         })
       } catch (error) {
-        return { status: 0, body: null, diagnostic: { url, message: String(error?.message ?? error) } }
+        const message = String(error?.message ?? error)
+        diag('bad', '网络请求失败：' + url, message)
+        return { status: 0, body: null, diagnostic: { url, message } }
       }
       const etag = (res.headers && typeof res.headers.get === 'function' && res.headers.get('etag')) || ''
       if (res.status === 304) return { status: 304, body: null, notModified: true, etag }
@@ -1076,6 +1093,7 @@ window.__ModuleLoader__.load({
       }
       const notify = (tone, text, options = {}) => {
         S.toast = { tone, text, id: Date.now() + Math.random() }
+        if (tone === 'bad' || tone === 'warn') diag(tone, text)
         if (toastTimer) window.clearTimeout(toastTimer)
         toastTimer = window.setTimeout(() => { if (alive) { S.toast = null; render() } }, options.sticky ? 8000 : 4200)
         if (tone === 'bad') announce(text, 'assertive')
@@ -1584,6 +1602,11 @@ window.__ModuleLoader__.load({
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
+        diagnostics: {
+          list: () => diagLog.slice(-200),
+          push: (level, message, detail) => diag(level, message, detail),
+          clear: () => { diagLog.length = 0; try { window.dispatchEvent(new CustomEvent('fang:diag')) } catch { /* ignore */ } },
+        },
         setEditingValue: (value) => { if (S.editing) S.editing.value = value },
         getEditing: () => S.editing,
         setModalError: (message) => { if (S.modal) { S.modal.error = message; render(true) } },
@@ -1888,7 +1911,12 @@ window.__ModuleLoader__.load({
             },
             fk: 'derive',
           })),
-        version ? h('span', { class: 'fh-version', title: '母体版本' }, version) : null)
+        version ? h('span', { class: 'fh-version', title: '母体版本' }, version) : null,
+        h('span', {
+          class: 'fh-slogan', 'data-zone': 'slogan',
+          title: 'DeepSeekHarness 的第一台虚拟机',
+          style: { marginLeft: '8px', fontSize: '12px', opacity: '.65', whiteSpace: 'nowrap' },
+        }, 'DeepSeekHarness的第一台虚拟机！'))
     }
 
     // ── 全局提示（派生结果 / 动作结果 / 接口错误）───────────────────────────
@@ -2829,6 +2857,169 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { ref, className: 'fang-mount', style: props.style || { display: 'block', minWidth: 0 } })
     }
 
+    function mountDiagnostics(app) {
+      const doc = document
+      const btn = doc.createElement('button')
+      btn.id = 'fang-diag-btn'
+      btn.setAttribute('data-btn-id', 'LOG-01')
+      btn.type = 'button'
+      btn.textContent = '日志'
+      Object.assign(btn.style, {
+        position: 'fixed', right: '16px', bottom: '16px', zIndex: '9999',
+        height: '34px', padding: '0 12px', borderRadius: '10px',
+        border: '1px solid rgba(127,127,127,.4)', background: '#fff', color: '#111',
+        font: '600 13px/1 system-ui, sans-serif', cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,.18)',
+      })
+      const overlay = doc.createElement('div')
+      overlay.id = 'fang-diag-panel'
+      overlay.hidden = true
+      Object.assign(overlay.style, {
+        position: 'fixed', right: '16px', bottom: '58px', zIndex: '9999',
+        width: 'min(520px, calc(100vw - 32px))', maxHeight: '60vh', overflow: 'auto',
+        background: '#fff', color: '#111', border: '1px solid rgba(127,127,127,.35)',
+        borderRadius: '12px', boxShadow: '0 12px 40px rgba(0,0,0,.25)', padding: '10px',
+        font: '12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace',
+      })
+      const head = doc.createElement('div')
+      head.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px'
+      const title = doc.createElement('strong')
+      title.textContent = '瓮城日志'
+      const spacer = doc.createElement('span')
+      spacer.style.flex = '1'
+      const clear = doc.createElement('button')
+      clear.type = 'button'; clear.textContent = '清空'; clear.setAttribute('data-btn-id', 'LOG-02')
+      clear.onclick = () => app.diagnostics.clear()
+      const close = doc.createElement('button')
+      close.type = 'button'; close.textContent = '关闭'; close.setAttribute('data-btn-id', 'LOG-03')
+      close.onclick = () => { overlay.hidden = true }
+      head.append(title, spacer, clear, close)
+      const list = doc.createElement('div')
+      overlay.append(head, list)
+      function renderLogs() {
+        const entries = app.diagnostics.list()
+        list.replaceChildren()
+        btn.textContent = entries.length ? `日志 (${entries.length})` : '日志'
+        if (!entries.length) {
+          const empty = doc.createElement('div')
+          empty.textContent = '暂无报错'
+          empty.style.opacity = '.6'
+          list.append(empty)
+          return
+        }
+        for (const entry of entries.slice().reverse()) {
+          const row = doc.createElement('div')
+          row.style.cssText = 'padding:6px 0;border-top:1px solid rgba(127,127,127,.18);white-space:pre-wrap;word-break:break-word'
+          const when = new Date(entry.at).toLocaleTimeString()
+          row.textContent = `[${when}] ${entry.level} · ${entry.message}${entry.detail ? '\n' + entry.detail : ''}`
+          if (entry.level === 'bad') row.style.color = '#b42318'
+          list.append(row)
+        }
+      }
+      btn.onclick = () => { overlay.hidden = !overlay.hidden; renderLogs() }
+      const onDiag = () => renderLogs()
+      const onError = (event) => app.diagnostics.push('bad', event.message || 'window error', `${event.filename || ''}:${event.lineno || ''}`)
+      const onRejection = (event) => app.diagnostics.push('bad', 'unhandledrejection', String(event.reason?.message ?? event.reason ?? ''))
+      window.addEventListener('fang:diag', onDiag)
+      window.addEventListener('error', onError)
+      window.addEventListener('unhandledrejection', onRejection)
+      doc.body.append(btn, overlay)
+      renderLogs()
+      return () => {
+        window.removeEventListener('fang:diag', onDiag)
+        window.removeEventListener('error', onError)
+        window.removeEventListener('unhandledrejection', onRejection)
+        btn.remove()
+        overlay.remove()
+      }
+    }
+
+    function mountConnectionInfo(app) {
+      const doc = document
+      const trigger = doc.createElement('button')
+      trigger.id = 'fang-conn-trigger'
+      trigger.type = 'button'
+      trigger.setAttribute('data-btn-id', 'CONN-00')
+      trigger.textContent = '连接信息'
+      Object.assign(trigger.style, {
+        position: 'fixed', left: '16px', bottom: '16px', zIndex: '9999',
+        height: '34px', padding: '0 12px', borderRadius: '10px',
+        border: '1px solid rgba(127,127,127,.4)', background: '#fff', color: '#111',
+        font: '600 13px/1 system-ui, sans-serif', cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,.18)',
+      })
+      const popup = doc.createElement('div')
+      popup.id = 'fang-conn-popup'
+      popup.hidden = true
+      Object.assign(popup.style, {
+        position: 'fixed', left: '16px', bottom: '58px', zIndex: '9999',
+        display: 'flex', alignItems: 'center', gap: '6px', maxWidth: 'calc(100vw - 32px)',
+        padding: '6px 8px', borderRadius: '10px', background: '#fff', color: '#111',
+        border: '1px solid rgba(127,127,127,.35)', boxShadow: '0 4px 14px rgba(0,0,0,.14)',
+        font: '12px/1.4 ui-monospace, Consolas, monospace',
+      })
+      const label = doc.createElement('span')
+      label.id = 'fang-conn-url'
+      label.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42vw'
+      const eye = doc.createElement('button')
+      eye.type = 'button'
+      eye.setAttribute('data-btn-id', 'CONN-01')
+      eye.textContent = '显示'
+      const copy = doc.createElement('button')
+      copy.type = 'button'
+      copy.setAttribute('data-btn-id', 'CONN-02')
+      copy.textContent = '复制'
+      const close = doc.createElement('button')
+      close.type = 'button'
+      close.setAttribute('data-btn-id', 'CONN-03')
+      close.textContent = '关闭'
+      for (const btn of [eye, copy, close]) {
+        btn.style.cssText = 'height:28px;padding:0 8px;border-radius:8px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;cursor:pointer;font:inherit'
+      }
+      let full = ''
+      let revealed = false
+      let opened = false
+      let loaded = false
+      const mask = (url) => {
+        try {
+          const token = new URL(url).searchParams.get('token') || ''
+          return String(url).replace(/([?&]token=)[^&]*/, (_, prefix) => prefix + '•'.repeat(Math.min(16, token.length || 8)))
+        } catch { return url }
+      }
+      const render = () => {
+        popup.hidden = !opened
+        if (!opened) { label.textContent = ''; label.title = ''; return }
+        label.textContent = full ? (revealed ? full : mask(full)) : '连接信息加载中…'
+        label.title = revealed ? full : ''
+        eye.textContent = revealed ? '隐藏' : '显示'
+      }
+      const load = async () => {
+        if (loaded) return
+        loaded = true
+        try {
+          const info = await window.fangShell?.desktopInfo?.()
+          if (info?.upstream) {
+            const token = String(info.token || '')
+            full = String(info.upstream).replace(/\/+$/, '') + '/?token=' + encodeURIComponent(token)
+          }
+        } catch { /* ignore */ }
+        if (!full) full = String(location.origin || '') + '/?token=—'
+      }
+      trigger.onclick = async () => {
+        opened = !opened
+        if (opened) await load()
+        revealed = false
+        render()
+      }
+      eye.onclick = () => { revealed = !revealed; render() }
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(full); app.notify('ok', '已复制连接地址') } catch { app.notify('warn', '复制失败：浏览器未授权剪贴板') }
+      }
+      close.onclick = () => { opened = false; revealed = false; render() }
+      popup.append(label, eye, copy, close)
+      doc.body.append(trigger, popup)
+      render()
+      return () => { trigger.remove(); popup.remove() }
+    }
+
     function mountPanel(host) {
       // v3.0.7 UI 分析日志：记录面板挂载与所有按钮/链接点击，供自动冒烟/诊断读取
       try {
@@ -2850,7 +3041,9 @@ window.__ModuleLoader__.load({
         window.__fangUiLog.push({ at: Date.now(), kind: 'panel-mount' })
       } catch { /* 宿主无 window 时忽略 */ }
       const app = createConsole(host)
-      return () => app.destroy()
+      const unmountDiagnostics = mountDiagnostics(app)
+      const unmountConnection = mountConnectionInfo(app)
+      return () => { unmountConnection(); unmountDiagnostics(); app.destroy() }
     }
 
     // 左侧导航图标：单击由宿主行负责打开面板；双击 = 快速派生（与面板按钮同一单飞）

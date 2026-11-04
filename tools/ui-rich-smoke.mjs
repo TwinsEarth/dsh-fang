@@ -97,7 +97,7 @@ const send = (method, params = {}) => new Promise((res, rej) => { const id = ++s
 
 await send('Page.enable')
 await send('Runtime.enable')
-await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__uiSmoke={errors:[],opens:[]};window.addEventListener('error',e=>window.__uiSmoke.errors.push(String(e.message)));window.open=u=>{window.__uiSmoke.opens.push(String(u));return null};document.addEventListener('click',e=>{const a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a){e.preventDefault();e.stopPropagation();window.__uiSmoke.opens.push(a.href)}},true);` })
+await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__uiSmoke={errors:[],opens:[]};window.addEventListener('error',e=>window.__uiSmoke.errors.push(String(e.message)));window.open=u=>{window.__uiSmoke.opens.push(String(u));return null};window.fangShell={desktopInfo:async()=>({upstream:'http://127.0.0.1:3081',token:'smoke-token-123'})};document.addEventListener('click',e=>{const a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a){e.preventDefault();e.stopPropagation();window.__uiSmoke.opens.push(a.href)}},true);` })
 await send('Page.navigate', { url: pageUrl })
 for (let i = 0; i < 80; i += 1) {
   const r = await send('Runtime.evaluate', { expression: 'document.body.dataset.mounted || document.body.dataset.mountError || ""', returnByValue: true })
@@ -243,6 +243,16 @@ const hoverState = JSON.parse(await evalr(`JSON.stringify([...document.querySele
   return { display: s.display, w: Math.round(r.width), h: Math.round(r.height) };
 }))`))
 await send('Emulation.setEmulatedMedia', { features: [] })
+const connInfo = JSON.parse(await evalr(`(async () => {
+  document.querySelector('[data-btn-id="CONN-00"]')?.click();
+  await new Promise((r) => setTimeout(r, 300));
+  const el = document.getElementById('fang-conn-url');
+  const before = el ? el.textContent : '';
+  document.querySelector('[data-btn-id="CONN-01"]')?.click();
+  await new Promise((r) => setTimeout(r, 80));
+  const after = el ? el.textContent : '';
+  return JSON.stringify({ before, after });
+})()`))
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
@@ -263,6 +273,8 @@ const cases = [
   { id: 'UI-12-f2', ok: f2Input === true, evidence: `input=${f2Input}` },
   { id: 'UI-12-size', ok: tooSmall.length === 0, evidence: tooSmall.length ? JSON.stringify(tooSmall.slice(0, 4)) : `${sizes.length} targets ≥34px` },
   { id: 'UI-12-hover', ok: hoverState.length > 0 && hoverState.every((s) => s.display !== 'none' && s.h >= 34 && s.w >= 34), evidence: JSON.stringify(hoverState.slice(0, 4)) },
+  { id: 'UI-13-conn', ok: /127\.0\.0\.1:3081/.test(connInfo.before) && connInfo.before.includes('••') && !connInfo.before.includes('smoke-token') && connInfo.after.includes('smoke-token'), evidence: JSON.stringify(connInfo) },
+  { id: 'UI-14-slogan', ok: u.header.includes('DeepSeekHarness的第一台虚拟机'), evidence: u.header.includes('DeepSeekHarness的第一台虚拟机') ? 'slogan-present' : 'missing' },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })
