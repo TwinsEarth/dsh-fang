@@ -1781,7 +1781,6 @@ window.__ModuleLoader__.load({
             h('h1', { class: 'fh-title' }, '瓮城'),
             h('span', { class: 'fh-sub' }, '母体 × 分身 · 三区控制台'))),
         renderStats(S),
-        renderSlotStrip(cap),
         h('div', { class: 'fh-actions' },
           quotaFull ? h('span', { class: 'quota-reason', id: reasonId, tabindex: -1, 'data-reason': 'M-05', 'data-reason-code': 'quota-exceeded' }, `配额已满（${cap.used}/${cap.limit}）：先归档旧分身。`) : null,
           button(`${S.view === 'archive' ? '返回面板' : `读档 (${archivedCount})`}`, {
@@ -1975,7 +1974,10 @@ window.__ModuleLoader__.load({
           '工作区由 DSH 宿主创建与管理；本面板只读，只有显示名可改（双击名称）。'))
       }
 
-      return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' }, head, scroll)
+      return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
+        head,
+        h('div', { class: 'mother-slots' }, renderSlotStrip(projectCapacity(S.status.data, S.tasks.items))),
+        scroll)
     }
 
     function renderMotherCard(S, app, group, selectedSession) {
