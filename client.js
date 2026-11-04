@@ -857,13 +857,16 @@ window.__ModuleLoader__.load({
 }
 @media (hover:none){
   .mother-actions .text-action{display:inline-block}
+  .text-action,.task-actions .text-action{display:inline-block}
   .fork-card:hover{transform:none}
   .btn:hover{background:transparent}
   .btn--ghost:hover{background:var(--f-surface);border-color:var(--f-border)}
   .text-action:hover{background:transparent}
   .expand-btn{width:34px;height:34px}
-  .btn--sm{height:34px}
+  .btn--sm{height:34px;min-height:34px}
+  .section-title{min-height:34px}
 }
+.btn--sm{min-height:34px}
 @media (prefers-reduced-motion:reduce){
   .fang-console *,.fang-console *::before,.fang-console *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
