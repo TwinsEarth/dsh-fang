@@ -1,0 +1,1320 @@
+{
+  "plan": "dsh-Fang v3.0.8 → v3.3.3 总体架构与分阶段实施计划",
+  "source_doc": "docs/PLAN-v3.0.8-v3.3.3.md",
+  "generated_at": "2026-11-05",
+  "status": "planning-only（未提交、未推 main、未打 tag、未发布）",
+  "baseline": {
+    "repo": "TwinsEarth/dsh-fang",
+    "head": "d3e2989",
+    "branch": "feat/upgrade-coordinator",
+    "describe": "v3.0.7-8-gd3e2989",
+    "released_versions": [
+      "3.0.7"
+    ],
+    "npm_published": false,
+    "routes": 62,
+    "tests": {
+      "total": 690,
+      "pass": 679,
+      "fail": 0,
+      "skipped": 1,
+      "todo": 10
+    },
+    "governance": {
+      "main_is_ancestor_of_v3_0_7": true,
+      "v3_0_7_ahead_of_origin_main": 71,
+      "local_main_behind_origin_main": 16
+    }
+  },
+  "constraints": [
+    "no-push-main-without-explicit-user-instruction",
+    "pr-only",
+    "no-version-skipping",
+    "browser-must-not-expose-fang-panel",
+    "pc-electron-is-the-only-console",
+    "six-surface-release-requires-user-confirmation"
+  ],
+  "releases": [
+    {
+      "version": "3.0.8",
+      "theme": "分支运行时转正 + 回流契约 + MCP 政策面",
+      "routes_contract": 72,
+      "estimate_days": 12
+    },
+    {
+      "version": "3.0.9",
+      "theme": "只读升级状态面冻结 + 不跳号机器校验",
+      "routes_contract": 72,
+      "estimate_days": 4
+    },
+    {
+      "version": "3.0.10",
+      "theme": "母体代际 + 指针切换 + 秒级回滚",
+      "routes_contract": 76,
+      "estimate_days": 10
+    },
+    {
+      "version": "3.0.11",
+      "theme": "原身重算 + 影子实例 + 健康检查 + 切换",
+      "routes_contract": 79,
+      "estimate_days": 14
+    },
+    {
+      "version": "3.0.12",
+      "theme": "插件更新 + 快照/冒烟/回滚",
+      "routes_contract": 83,
+      "estimate_days": 12
+    },
+    {
+      "version": "3.1.0",
+      "theme": "MCP 接入（客户端/工具投影/禁止暴露/熔断）",
+      "routes_contract": 88,
+      "estimate_days": 10
+    },
+    {
+      "version": "3.1.1",
+      "theme": "升级路径控制台 + IPC 桥 + 浏览器面清零",
+      "routes_contract": 89,
+      "estimate_days": 12
+    },
+    {
+      "version": "3.1.2",
+      "theme": "状态同步单一真相（rev/ETag/六态/轮询统一）",
+      "routes_contract": 90,
+      "estimate_days": 10
+    },
+    {
+      "version": "3.1.3",
+      "theme": "三向合并回流（base/ours/theirs）",
+      "routes_contract": 94,
+      "estimate_days": 14
+    },
+    {
+      "version": "3.2.0",
+      "theme": "三根 fail-closed 强制 + broker 唯一通道",
+      "routes_contract": 96,
+      "estimate_days": 8
+    },
+    {
+      "version": "3.2.1",
+      "theme": "配额账本 + 端口租约 + 派生幂等",
+      "routes_contract": 99,
+      "estimate_days": 8
+    },
+    {
+      "version": "3.2.2",
+      "theme": "备份封印（SEAL/MANIFEST）+ 崩溃注入 + 启动 GC",
+      "routes_contract": 103,
+      "estimate_days": 8
+    },
+    {
+      "version": "3.2.3",
+      "theme": "官方插件清单版本化 + 兼容矩阵",
+      "routes_contract": 106,
+      "estimate_days": 6
+    },
+    {
+      "version": "3.3.0",
+      "theme": "长稳与性能（REL 全量）",
+      "routes_contract": 106,
+      "estimate_days": 10
+    },
+    {
+      "version": "3.3.1",
+      "theme": "安全复审（注入/token/IPC/审计覆盖）",
+      "routes_contract": 106,
+      "estimate_days": 8
+    },
+    {
+      "version": "3.3.2",
+      "theme": "六方发布事务化 + 确认闸",
+      "routes_contract": 106,
+      "estimate_days": 6
+    },
+    {
+      "version": "3.3.3",
+      "theme": "GA 收口",
+      "routes_contract": 106,
+      "estimate_days": 5
+    }
+  ],
+  "lanes_note": "同 lane 可并行；不同 lane 有依赖顺序",
+  "totals": {
+    "tasks": 77,
+    "estimate_days": 157
+  },
+  "tasks": [
+    {
+      "id": "T-308-01",
+      "version": "3.0.8",
+      "title": "ops 长任务账本",
+      "depends_on": [],
+      "lane": "A",
+      "estimate_days": 1.5,
+      "files": [
+        "src/lib/ops.mjs",
+        "test/ops.test.mjs"
+      ],
+      "acceptance": "open/phase/close/get/list 6 条单测"
+    },
+    {
+      "id": "T-308-02",
+      "version": "3.0.8",
+      "title": "branch 陈锁回收",
+      "depends_on": [],
+      "lane": "A",
+      "estimate_days": 1,
+      "files": [
+        "src/lib/branch.mjs"
+      ],
+      "acceptance": "死 pid 锁可回收；活 pid 返回 409"
+    },
+    {
+      "id": "T-308-03",
+      "version": "3.0.8",
+      "title": "分支 HTTP 6 路由",
+      "depends_on": [
+        "T-308-02"
+      ],
+      "lane": "B",
+      "estimate_days": 3,
+      "files": [
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "建/切/封/档/日志/列表 全绿"
+    },
+    {
+      "id": "T-308-04",
+      "version": "3.0.8",
+      "title": "分支工作区隔离",
+      "depends_on": [
+        "T-308-02"
+      ],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "删文件后切回仍在；>200MB 拒绝"
+    },
+    {
+      "id": "T-308-05",
+      "version": "3.0.8",
+      "title": "回流 collect/verify 4 路由",
+      "depends_on": [
+        "T-308-01"
+      ],
+      "lane": "C",
+      "estimate_days": 2.5,
+      "files": [
+        "src/lib/flowback.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "凭据字段拒绝；inbox 落位"
+    },
+    {
+      "id": "T-308-06",
+      "version": "3.0.8",
+      "title": "MCP 政策只读路由 + 禁止名单",
+      "depends_on": [],
+      "lane": "C",
+      "estimate_days": 0.5,
+      "files": [
+        "src/lib/mcp-policy.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "名单含 promote/adapter/session-bridge"
+    },
+    {
+      "id": "T-308-07",
+      "version": "3.0.8",
+      "title": "e2e 新增 6 条 + 路由计数 72",
+      "depends_on": [
+        "T-308-03",
+        "T-308-04",
+        "T-308-05"
+      ],
+      "lane": "D",
+      "estimate_days": 1,
+      "files": [
+        "tools/e2e.mjs",
+        "tools/release/allowlist.mjs",
+        "src/lib/compat.mjs"
+      ],
+      "acceptance": "e2e 全绿；allowlist count=72"
+    },
+    {
+      "id": "T-308-08",
+      "version": "3.0.8",
+      "title": "文档 BRANCH.md + CHANGELOG/AUDIT",
+      "depends_on": [
+        "T-308-07"
+      ],
+      "lane": "D",
+      "estimate_days": 0.5,
+      "files": [
+        "docs/BRANCH.md",
+        "docs/CHANGELOG.md",
+        "docs/AUDIT-v3.0.8.md"
+      ],
+      "acceptance": "三件齐"
+    },
+    {
+      "id": "T-309-01",
+      "version": "3.0.9",
+      "title": "upgrade-status 增 baseMirrorVersion/stale + ETag",
+      "depends_on": [
+        "T-308-07"
+      ],
+      "lane": "A",
+      "estimate_days": 1.5,
+      "files": [
+        "src/lib/upgrade-status.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "304 命中；字段齐"
+    },
+    {
+      "id": "T-309-02",
+      "version": "3.0.9",
+      "title": "docs/releases.json + releases-ledger.mjs（复用 version-cut --check）",
+      "depends_on": [],
+      "lane": "B",
+      "estimate_days": 1.5,
+      "files": [
+        "docs/releases.json",
+        "tools/release/releases-ledger.mjs"
+      ],
+      "acceptance": "3.0.9 通过 / 3.0.10 前驱缺失时失败",
+      "reuse": [
+        "tools/git/version-cut.mjs"
+      ]
+    },
+    {
+      "id": "T-309-03",
+      "version": "3.0.9",
+      "title": "preflight 接入 version-cut --check + 台账",
+      "depends_on": [
+        "T-309-02"
+      ],
+      "lane": "B",
+      "estimate_days": 0.5,
+      "files": [
+        "tools/release/preflight.mjs"
+      ],
+      "acceptance": "两项任一失败即 RED"
+    },
+    {
+      "id": "T-309-04",
+      "version": "3.0.9",
+      "title": "只读防呆静态断言",
+      "depends_on": [
+        "T-309-01"
+      ],
+      "lane": "A",
+      "estimate_days": 0.5,
+      "files": [
+        "test/upgrade-status.test.mjs",
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "处理函数不含写调用"
+    },
+    {
+      "id": "T-310-01",
+      "version": "3.0.10",
+      "title": "generation.mjs（stage/verify/switch/rollback/gc）",
+      "depends_on": [
+        "T-309-01"
+      ],
+      "lane": "A",
+      "estimate_days": 3.5,
+      "files": [
+        "src/lib/generation.mjs",
+        "test/generation.test.mjs"
+      ],
+      "acceptance": "12 条单测"
+    },
+    {
+      "id": "T-310-02",
+      "version": "3.0.10",
+      "title": "mirror.upgrade 委托 generation",
+      "depends_on": [
+        "T-310-01"
+      ],
+      "lane": "A",
+      "estimate_days": 2,
+      "files": [
+        "src/lib/mirror.mjs"
+      ],
+      "acceptance": "旧 mirror 测试等价通过"
+    },
+    {
+      "id": "T-310-03",
+      "version": "3.0.10",
+      "title": "指针原子性与自校验",
+      "depends_on": [
+        "T-310-01"
+      ],
+      "lane": "B",
+      "estimate_days": 1.5,
+      "files": [
+        "src/lib/generation.mjs"
+      ],
+      "acceptance": "半写→指针不变；sha 不匹配→用 prevGen"
+    },
+    {
+      "id": "T-310-04",
+      "version": "3.0.10",
+      "title": "compat 门禁前移到 staging",
+      "depends_on": [
+        "T-310-01"
+      ],
+      "lane": "B",
+      "estimate_days": 1,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "src/lib/compat.mjs"
+      ],
+      "acceptance": "compat 失败不发指针"
+    },
+    {
+      "id": "T-310-05",
+      "version": "3.0.10",
+      "title": "4 条路由 + 7 阶段崩溃注入 e2e",
+      "depends_on": [
+        "T-310-02",
+        "T-310-03"
+      ],
+      "lane": "C",
+      "estimate_days": 1.5,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "注入后重启自洽"
+    },
+    {
+      "id": "T-310-06",
+      "version": "3.0.10",
+      "title": "磁盘预检 + GC 策略 + 文档",
+      "depends_on": [
+        "T-310-01"
+      ],
+      "lane": "C",
+      "estimate_days": 0.5,
+      "files": [
+        "src/lib/generation.mjs",
+        "docs/MIRROR.md"
+      ],
+      "acceptance": "≥2.5× 预检；keep=2/24h"
+    },
+    {
+      "id": "T-311-01",
+      "version": "3.0.11",
+      "title": "instance.mjs（start/probe/stop/list）",
+      "depends_on": [
+        "T-310-05"
+      ],
+      "lane": "A",
+      "estimate_days": 3.5,
+      "files": [
+        "src/lib/instance.mjs",
+        "test/instance.test.mjs"
+      ],
+      "acceptance": "端口段/探针/无僵尸 3 组"
+    },
+    {
+      "id": "T-311-02",
+      "version": "3.0.11",
+      "title": "merged 按代际分目录 + merged/current.json",
+      "depends_on": [
+        "T-310-01"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "src/lib/essence.mjs"
+      ],
+      "acceptance": "指针正确；旧 merged 保留 1"
+    },
+    {
+      "id": "T-311-03",
+      "version": "3.0.11",
+      "title": "影子启动→探针→切流量",
+      "depends_on": [
+        "T-311-01",
+        "T-311-02"
+      ],
+      "lane": "B",
+      "estimate_days": 3,
+      "files": [
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "注入坏插件→保留旧实例"
+    },
+    {
+      "id": "T-311-04",
+      "version": "3.0.11",
+      "title": "recompute 协调器按代际批次",
+      "depends_on": [
+        "T-311-02"
+      ],
+      "lane": "B",
+      "estimate_days": 1.5,
+      "files": [
+        "src/lib/upgrade-coordinator.mjs"
+      ],
+      "acceptance": "并发 4 / 60s / 失败隔离"
+    },
+    {
+      "id": "T-311-05",
+      "version": "3.0.11",
+      "title": "3 条路由 + 端口泄漏测试",
+      "depends_on": [
+        "T-311-03"
+      ],
+      "lane": "C",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "5 次连续无泄漏"
+    },
+    {
+      "id": "T-311-06",
+      "version": "3.0.11",
+      "title": "目录 GC + 文档",
+      "depends_on": [
+        "T-311-02"
+      ],
+      "lane": "C",
+      "estimate_days": 1,
+      "files": [
+        "src/lib/essence.mjs",
+        "docs/ESSENCE.md"
+      ],
+      "acceptance": "旧 merged 保留 1"
+    },
+    {
+      "id": "T-312-01",
+      "version": "3.0.12",
+      "title": "snapshot.mjs（create/restore/verify/gc）",
+      "depends_on": [
+        "T-311-01"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "src/lib/snapshot.mjs",
+        "test/snapshot.test.mjs"
+      ],
+      "acceptance": "逐字节还原 8 条"
+    },
+    {
+      "id": "T-312-02",
+      "version": "3.0.12",
+      "title": "SnapshotBackend 接口 + dir 实现",
+      "depends_on": [
+        "T-312-01"
+      ],
+      "lane": "A",
+      "estimate_days": 1,
+      "files": [
+        "src/lib/snapshot.mjs"
+      ],
+      "acceptance": "vm backend 占位抛 unsupported"
+    },
+    {
+      "id": "T-312-03",
+      "version": "3.0.12",
+      "title": "plugin-updater plan/apply",
+      "depends_on": [
+        "T-312-01"
+      ],
+      "lane": "B",
+      "estimate_days": 3,
+      "files": [
+        "src/lib/plugin-updater.mjs"
+      ],
+      "acceptance": "依赖冲突→回滚"
+    },
+    {
+      "id": "T-312-04",
+      "version": "3.0.12",
+      "title": "smoke（dump-config + import + compat + probe）",
+      "depends_on": [
+        "T-312-03",
+        "T-311-01"
+      ],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "src/lib/plugin-updater.mjs"
+      ],
+      "acceptance": "4 项任一失败即回滚"
+    },
+    {
+      "id": "T-312-05",
+      "version": "3.0.12",
+      "title": "4 条路由 + e2e 6 条",
+      "depends_on": [
+        "T-312-03",
+        "T-312-04"
+      ],
+      "lane": "C",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "回滚耗时记录 <60s"
+    },
+    {
+      "id": "T-312-06",
+      "version": "3.0.12",
+      "title": "快照空间治理 + 文档",
+      "depends_on": [
+        "T-312-01"
+      ],
+      "lane": "C",
+      "estimate_days": 1,
+      "files": [
+        "src/lib/snapshot.mjs",
+        "docs/PLUGIN-UPDATE.md"
+      ],
+      "acceptance": "≤50MB/份，保留 3"
+    },
+    {
+      "id": "T-3100-01",
+      "version": "3.1.0",
+      "title": "mcp.mjs（registry/transport/tools）",
+      "depends_on": [
+        "T-308-01"
+      ],
+      "lane": "A",
+      "estimate_days": 3.5,
+      "files": [
+        "src/lib/mcp.mjs",
+        "src/plugins/mcp.mjs"
+      ],
+      "acceptance": "挂载/发现/命名空间 mcp_<server>_<tool>"
+    },
+    {
+      "id": "T-3100-02",
+      "version": "3.1.0",
+      "title": "禁止暴露 + 工具描述注入扫描",
+      "depends_on": [
+        "T-3100-01",
+        "T-308-06"
+      ],
+      "lane": "A",
+      "estimate_days": 2,
+      "files": [
+        "src/lib/mcp.mjs"
+      ],
+      "acceptance": "MCP-03 断言 + 30 条语料"
+    },
+    {
+      "id": "T-3100-03",
+      "version": "3.1.0",
+      "title": "熔断 + 超时 + env 白名单",
+      "depends_on": [
+        "T-3100-01"
+      ],
+      "lane": "B",
+      "estimate_days": 1.5,
+      "files": [
+        "src/lib/mcp.mjs"
+      ],
+      "acceptance": "3 次超时→circuit-open"
+    },
+    {
+      "id": "T-3100-04",
+      "version": "3.1.0",
+      "title": "5 条路由 + fang-mcp 行（16→17）",
+      "depends_on": [
+        "T-3100-01"
+      ],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/mcp.mjs",
+        "cordis.patch.yml",
+        "tools/release/package-smoke.mjs"
+      ],
+      "acceptance": "行数门禁同步改 17"
+    },
+    {
+      "id": "T-3100-05",
+      "version": "3.1.0",
+      "title": "architecture.test.mjs 依赖方向",
+      "depends_on": [],
+      "lane": "C",
+      "estimate_days": 1,
+      "files": [
+        "test/architecture.test.mjs"
+      ],
+      "acceptance": "无环；lib 不导入 plugins"
+    },
+    {
+      "id": "T-3111-01",
+      "version": "3.1.1",
+      "title": "/api/version/matrix 三段状态",
+      "depends_on": [
+        "T-310-05",
+        "T-311-05",
+        "T-312-05"
+      ],
+      "lane": "A",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "src/lib/upgrade-status.mjs"
+      ],
+      "acceptance": "三段字段 + 断网静默降级"
+    },
+    {
+      "id": "T-3111-02",
+      "version": "3.1.1",
+      "title": "ipc-contract.mjs + 入参校验器",
+      "depends_on": [],
+      "lane": "A",
+      "estimate_days": 2,
+      "files": [
+        "src/lib/ipc-contract.mjs",
+        "test/ipc-contract.test.mjs"
+      ],
+      "acceptance": "7 通道 + 路径注入拒绝"
+    },
+    {
+      "id": "T-3111-03",
+      "version": "3.1.1",
+      "title": "docs/IPC-CONTRACT.md",
+      "depends_on": [
+        "T-3111-02"
+      ],
+      "lane": "B",
+      "estimate_days": 1,
+      "files": [
+        "docs/IPC-CONTRACT.md"
+      ],
+      "acceptance": "通道/入参/来源校验齐"
+    },
+    {
+      "id": "T-3111-04",
+      "version": "3.1.1",
+      "title": "client.js 浏览器面清零（保 mountPanel）",
+      "depends_on": [
+        "T-3111-01"
+      ],
+      "lane": "C",
+      "estimate_days": 2.5,
+      "files": [
+        "client.js"
+      ],
+      "acceptance": "无 slot/dock/面板链接"
+    },
+    {
+      "id": "T-3111-05",
+      "version": "3.1.1",
+      "title": "browser-surface.mjs 门禁 + preflight 接入",
+      "depends_on": [
+        "T-3111-04"
+      ],
+      "lane": "C",
+      "estimate_days": 1.5,
+      "files": [
+        "tools/release/browser-surface.mjs",
+        "tools/release/preflight.mjs"
+      ],
+      "acceptance": "findings=0 才 GREEN"
+    },
+    {
+      "id": "T-3111-06",
+      "version": "3.1.1",
+      "title": "UI 用例迁移（删除项→desktop harness）",
+      "depends_on": [
+        "T-3111-04"
+      ],
+      "lane": "D",
+      "estimate_days": 2,
+      "files": [
+        "test/ui-cases.test.mjs",
+        "tools/ui-rich-smoke.mjs"
+      ],
+      "acceptance": "用例数不减少"
+    },
+    {
+      "id": "T-3111-07",
+      "version": "3.1.1",
+      "title": "e2e：client 物化但无 slot",
+      "depends_on": [
+        "T-3111-04"
+      ],
+      "lane": "D",
+      "estimate_days": 1,
+      "files": [
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "2 条新断言"
+    },
+    {
+      "id": "T-3112-01",
+      "version": "3.1.2",
+      "title": "snapshot.rev + ETag（status/tasks）",
+      "depends_on": [
+        "T-3111-01"
+      ],
+      "lane": "A",
+      "estimate_days": 2.5,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "src/lib/mirror-etag.mjs"
+      ],
+      "acceptance": "304 且引用稳定"
+    },
+    {
+      "id": "T-3112-02",
+      "version": "3.1.2",
+      "title": "六态 taskView（starting/stopping/crashed）",
+      "depends_on": [
+        "T-3112-01"
+      ],
+      "lane": "A",
+      "estimate_days": 2.5,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "src/plugins/forker.mjs"
+      ],
+      "acceptance": "G1/G2/G3 回归"
+    },
+    {
+      "id": "T-3112-03",
+      "version": "3.1.2",
+      "title": "会话列表 N+1 收敛",
+      "depends_on": [],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/session-catalog.mjs"
+      ],
+      "acceptance": "全折叠时 0 请求"
+    },
+    {
+      "id": "T-3112-04",
+      "version": "3.1.2",
+      "title": "轮询统一 + status-store 接线",
+      "depends_on": [
+        "T-3112-01"
+      ],
+      "lane": "C",
+      "estimate_days": 2,
+      "files": [
+        "client.js",
+        "src/lib/status-store.mjs"
+      ],
+      "acceptance": "只一条活跃轮询"
+    },
+    {
+      "id": "T-3112-05",
+      "version": "3.1.2",
+      "title": "GET /api/state/rev + 陈旧丢弃",
+      "depends_on": [
+        "T-3112-01"
+      ],
+      "lane": "C",
+      "estimate_days": 1,
+      "files": [
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "rev 单调"
+    },
+    {
+      "id": "T-3113-01",
+      "version": "3.1.3",
+      "title": "三向合并矩阵（测试先行）",
+      "depends_on": [
+        "T-308-05"
+      ],
+      "lane": "A",
+      "estimate_days": 4,
+      "files": [
+        "src/lib/flowback.mjs",
+        "test/flowback.test.mjs"
+      ],
+      "acceptance": "矩阵 6 类全覆盖"
+    },
+    {
+      "id": "T-3113-02",
+      "version": "3.1.3",
+      "title": "冲突分级 + 清单 + decide",
+      "depends_on": [
+        "T-3113-01"
+      ],
+      "lane": "B",
+      "estimate_days": 3,
+      "files": [
+        "src/lib/flowback.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "needs-decision 返回 409"
+    },
+    {
+      "id": "T-3113-03",
+      "version": "3.1.3",
+      "title": "flowbackId 幂等 + 审计",
+      "depends_on": [
+        "T-3113-01"
+      ],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "src/lib/flowback.mjs"
+      ],
+      "acceptance": "重复提交收敛为一次"
+    },
+    {
+      "id": "T-3113-04",
+      "version": "3.1.3",
+      "title": "staging + 原子 swap + recompute",
+      "depends_on": [
+        "T-3113-01"
+      ],
+      "lane": "C",
+      "estimate_days": 3,
+      "files": [
+        "src/lib/flowback.mjs",
+        "src/lib/essence.mjs"
+      ],
+      "acceptance": "kill 后 merged 要么旧要么新"
+    },
+    {
+      "id": "T-3113-05",
+      "version": "3.1.3",
+      "title": "4 条路由 + e2e",
+      "depends_on": [
+        "T-3113-02",
+        "T-3113-03",
+        "T-3113-04"
+      ],
+      "lane": "D",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "5 条 e2e"
+    },
+    {
+      "id": "T-320-01",
+      "version": "3.2.0",
+      "title": "broker 强制（影子→enforce）",
+      "depends_on": [
+        "T-309-02",
+        "T-3113-04"
+      ],
+      "lane": "A",
+      "estimate_days": 4,
+      "files": [
+        "src/lib/broker.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "4x3x2=24 组矩阵全断言"
+    },
+    {
+      "id": "T-320-02",
+      "version": "3.2.0",
+      "title": "routes.manifest.json 单一来源",
+      "depends_on": [],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "routes.manifest.json",
+        "tools/release/allowlist.mjs",
+        "src/lib/compat.mjs"
+      ],
+      "acceptance": "三处不再硬编码"
+    },
+    {
+      "id": "T-320-03",
+      "version": "3.2.0",
+      "title": "2 条路由 + 拒绝即审计",
+      "depends_on": [
+        "T-320-01"
+      ],
+      "lane": "C",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "root-denied 记 1 条审计"
+    },
+    {
+      "id": "T-321-01",
+      "version": "3.2.1",
+      "title": "QuotaLedger（reserve/commit/release/墓碑）",
+      "depends_on": [
+        "T-3112-02"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "src/lib/quota.mjs",
+        "test/quota.test.mjs"
+      ],
+      "acceptance": "10 并发不超卖"
+    },
+    {
+      "id": "T-321-02",
+      "version": "3.2.1",
+      "title": "端口租约 + Idempotency-Key",
+      "depends_on": [
+        "T-321-01"
+      ],
+      "lane": "B",
+      "estimate_days": 3,
+      "files": [
+        "src/plugins/forker.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "双击派生 1 个实例"
+    },
+    {
+      "id": "T-321-03",
+      "version": "3.2.1",
+      "title": "3 条路由 + 优雅关闭",
+      "depends_on": [
+        "T-321-01"
+      ],
+      "lane": "C",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "墓碑到期释放"
+    },
+    {
+      "id": "T-322-01",
+      "version": "3.2.2",
+      "title": "backup-seal（SEAL/MANIFEST/verify）",
+      "depends_on": [
+        "T-310-01",
+        "T-312-01"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "src/lib/backup-seal.mjs",
+        "test/backup-seal.test.mjs"
+      ],
+      "acceptance": "缺文件不记成功"
+    },
+    {
+      "id": "T-322-02",
+      "version": "3.2.2",
+      "title": "启动 GC + 7 阶段崩溃注入",
+      "depends_on": [
+        "T-322-01"
+      ],
+      "lane": "B",
+      "estimate_days": 3,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "重启后自洽"
+    },
+    {
+      "id": "T-322-03",
+      "version": "3.2.2",
+      "title": "4 条路由 + 文档",
+      "depends_on": [
+        "T-322-01"
+      ],
+      "lane": "C",
+      "estimate_days": 2,
+      "files": [
+        "src/plugins/orchestrator.mjs",
+        "docs/RELEASE-MIRROR.md"
+      ],
+      "acceptance": "GC 幂等"
+    },
+    {
+      "id": "T-323-01",
+      "version": "3.2.3",
+      "title": "官方插件清单版本化",
+      "depends_on": [
+        "T-322-01"
+      ],
+      "lane": "A",
+      "estimate_days": 2,
+      "files": [
+        "src/lib/essence.mjs",
+        "src/lib/plugin-registry.mjs"
+      ],
+      "acceptance": "刷新后 pluginCount 变"
+    },
+    {
+      "id": "T-323-02",
+      "version": "3.2.3",
+      "title": "兼容矩阵 + 修复建议",
+      "depends_on": [
+        "T-322-01"
+      ],
+      "lane": "B",
+      "estimate_days": 2.5,
+      "files": [
+        "src/lib/compat.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "注入模块→矩阵给结论"
+    },
+    {
+      "id": "T-323-03",
+      "version": "3.2.3",
+      "title": "3 条路由 + 文档",
+      "depends_on": [
+        "T-323-01",
+        "T-323-02"
+      ],
+      "lane": "C",
+      "estimate_days": 1.5,
+      "files": [
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "无回归，路由 106"
+    },
+    {
+      "id": "T-330-01",
+      "version": "3.3.0",
+      "title": "soak 脚本 + 8h 报告",
+      "depends_on": [
+        "T-321-03"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "tools/soak.mjs",
+        "docs/DATA-RELIABILITY.md"
+      ],
+      "acceptance": "RSS 增长 <10%"
+    },
+    {
+      "id": "T-330-02",
+      "version": "3.3.0",
+      "title": "性能基线（100 任务首屏 <1s）",
+      "depends_on": [],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "tools/e2e.mjs"
+      ],
+      "acceptance": "P95 <1s"
+    },
+    {
+      "id": "T-330-03",
+      "version": "3.3.0",
+      "title": "磁盘满/崩溃重启/并发派生",
+      "depends_on": [
+        "T-321-01"
+      ],
+      "lane": "C",
+      "estimate_days": 3,
+      "files": [
+        "tools/soak.mjs"
+      ],
+      "acceptance": "REL-02..05"
+    },
+    {
+      "id": "T-330-04",
+      "version": "3.3.0",
+      "title": "定时器/句柄泄漏审计",
+      "depends_on": [],
+      "lane": "D",
+      "estimate_days": 2,
+      "files": [
+        "src/lib/status-store.mjs",
+        "src/plugins/orchestrator.mjs"
+      ],
+      "acceptance": "无泄漏"
+    },
+    {
+      "id": "T-331-01",
+      "version": "3.3.1",
+      "title": "注入语料 30 条 + 分级",
+      "depends_on": [
+        "T-3100-02",
+        "T-3113-02"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "test/security-injection.test.mjs"
+      ],
+      "acceptance": "不进入系统提示"
+    },
+    {
+      "id": "T-331-02",
+      "version": "3.3.1",
+      "title": "token 零落盘静态扫描 + e2e",
+      "depends_on": [],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "tools/e2e.mjs",
+        "test/security-hardening.test.mjs"
+      ],
+      "acceptance": "4 类文件无 token"
+    },
+    {
+      "id": "T-331-03",
+      "version": "3.3.1",
+      "title": "IPC 双端校验测试",
+      "depends_on": [
+        "T-3111-02"
+      ],
+      "lane": "C",
+      "estimate_days": 2,
+      "files": [
+        "test/ipc-contract.test.mjs"
+      ],
+      "acceptance": "伪造入参拒绝"
+    },
+    {
+      "id": "T-331-04",
+      "version": "3.3.1",
+      "title": "审计覆盖报告（写路由 100%）",
+      "depends_on": [
+        "T-320-03"
+      ],
+      "lane": "D",
+      "estimate_days": 1,
+      "files": [
+        "tools/release/audit-coverage.mjs"
+      ],
+      "acceptance": "无遗漏"
+    },
+    {
+      "id": "T-332-01",
+      "version": "3.3.2",
+      "title": "publish-six.mjs（复用 build/healthz/verify-release）+ 确认文件校验",
+      "depends_on": [
+        "T-330-01",
+        "T-331-01"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "tools/release/publish-six.mjs"
+      ],
+      "acceptance": "dry-run 无副作用",
+      "reuse": [
+        "tools/release/build.mjs",
+        "tools/release/healthz.mjs",
+        "tools/git/verify-release.mjs"
+      ]
+    },
+    {
+      "id": "T-332-02",
+      "version": "3.3.2",
+      "title": "release.yml 改造 + partial 手册",
+      "depends_on": [
+        "T-332-01"
+      ],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        ".github/workflows/release.yml",
+        "docs/RELEASE-PARTIAL.md"
+      ],
+      "acceptance": "S5 失败→partial"
+    },
+    {
+      "id": "T-332-03",
+      "version": "3.3.2",
+      "title": "单测与文档",
+      "depends_on": [
+        "T-332-01",
+        "T-332-02"
+      ],
+      "lane": "C",
+      "estimate_days": 1,
+      "files": [
+        "test/release-six.test.mjs"
+      ],
+      "acceptance": "≥10 条"
+    },
+    {
+      "id": "T-333-01",
+      "version": "3.3.3",
+      "title": "文档终态（ARCHITECTURE/GLOSSARY/CONTRACTS/TEST-PLAN）",
+      "depends_on": [
+        "T-332-03"
+      ],
+      "lane": "A",
+      "estimate_days": 3,
+      "files": [
+        "docs/ARCHITECTURE.md",
+        "docs/GLOSSARY.md",
+        "docs/CONTRACTS.md",
+        "docs/TEST-PLAN-v3.0.7.md"
+      ],
+      "acceptance": "零冲突断言"
+    },
+    {
+      "id": "T-333-02",
+      "version": "3.3.3",
+      "title": "六方发布执行（等用户确认）",
+      "depends_on": [
+        "T-333-01"
+      ],
+      "lane": "B",
+      "estimate_days": 2,
+      "files": [
+        "dist/publish-3.3.3.json",
+        "docs/releases.json"
+      ],
+      "acceptance": "全绿 + healthz 通过"
+    }
+  ],
+  "governance_reuse": [
+    "tools/git/guard-main.mjs",
+    "tools/git/pr-gate.mjs",
+    "tools/git/version-cut.mjs",
+    "tools/git/verify-release.mjs",
+    "tools/git/history-audit.mjs",
+    ".githooks/pre-push"
+  ],
+  "decisions_pending": [
+    "D-1 六方口径（已采用：六个会签域；六 job 改称六条通道）",
+    "D-2 VM 快照是否阻塞 v3.0.12",
+    "D-3 原身实例与会话术语冲突",
+    "D-4 71 提交回 main",
+    "D-5 发布确认粒度",
+    "D-6 并行 git 设施是否随 v3.0.8 合入",
+    "D-7 版本序列是否含 v3.0.13（本计划为 17 版，CHECKLIST 为 18 版）"
+  ],
+  "parallel_docs": [
+    "docs/CHECKLIST-v3.0.8-v3.3.3.md",
+    "docs/RELEASE-FLOW-v3.0.8-v3.3.3.md",
+    "docs/DUP-HISTORY-CLEANUP-v3.0.8.md"
+  ],
+  "six_party_definition": [
+    "代码库",
+    "母体",
+    "原身",
+    "分身",
+    "插件",
+    "发布/回滚"
+  ],
+  "release_channels": [
+    "test",
+    "build",
+    "npm",
+    "github-release",
+    "docker",
+    "healthz"
+  ],
+  "version_train_decision": "17 版（3.0.8-3.0.12, 3.1.0-3.1.3, 3.2.0-3.2.3, 3.3.0-3.3.3）；若采纳 CHECKLIST 的 3.0.13，则插入升级链收口版(+3 人日)"
+}
