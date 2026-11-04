@@ -2266,10 +2266,20 @@ window.__ModuleLoader__.load({
       const busyPromote = S.busy === 'promote:' + taskId
       const barTone = health.tone
       const folded = S.collapsedTasks?.has(taskId) ?? false
-      const toggleFold = () => {
-        if (S.collapsedTasks.has(taskId)) S.collapsedTasks.delete(taskId)
-        else S.collapsedTasks.add(taskId)
-        render(true)
+      const toggleFold = (event) => {
+        const btn = event?.currentTarget
+        const nextFolded = btn ? btn.getAttribute('aria-expanded') !== 'false' : !S.collapsedTasks.has(taskId)
+        if (nextFolded) S.collapsedTasks.add(taskId)
+        else S.collapsedTasks.delete(taskId)
+        // 同步更新 DOM，避免等到下一次轮询才反映折叠状态
+        if (btn) btn.setAttribute('aria-expanded', nextFolded ? 'false' : 'true')
+        const body = document.getElementById('task-body-' + taskId)
+        if (body) {
+          body.hidden = nextFolded
+          if (nextFolded) body.setAttribute('hidden', '')
+          else body.removeAttribute('hidden')
+        }
+        schedule()
       }
 
       const card = h('article', {

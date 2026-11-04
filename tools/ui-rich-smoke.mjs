@@ -190,22 +190,22 @@ const conflictDraft = await evalr(`(() => { const i=document.querySelector('[dat
 renameMode = 'ok'
 await reload()
 const foldState = JSON.parse(await evalr(`(async () => {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const b = document.querySelector('[data-fk^="task-fold:"]');
   const id = b?.getAttribute('aria-controls');
-  b?.click();
-  let b2 = null;
-  for (let i = 0; i < 30; i += 1) {
-    await new Promise((r) => setTimeout(r, 100));
-    b2 = document.querySelector('[data-fk^="task-fold:"]');
-    if (b2?.getAttribute('aria-expanded') === 'false') break;
-  }
-  const body = document.getElementById(id);
-  const folded = { expanded: b2?.getAttribute('aria-expanded'), hidden: body?.hidden };
-  document.querySelector('[data-btn-id="M-03"]')?.click();
-  await new Promise((r) => setTimeout(r, 1200));
-  const b3 = document.querySelector('[data-fk^="task-fold:"]');
-  const body3 = document.getElementById(id);
-  return JSON.stringify({ folded, afterRefresh: { expanded: b3?.getAttribute('aria-expanded'), hidden: body3?.hidden } });
+  const read = () => {
+    const btn = document.querySelector('[data-fk^="task-fold:"]');
+    const body = document.getElementById(id);
+    return { expanded: btn?.getAttribute('aria-expanded'), hidden: body?.hidden };
+  };
+  b?.click(); await wait(150);
+  const folded = read();
+  document.querySelector('[data-fk^="task-fold:"]')?.click(); await wait(150);
+  const restored = read();
+  document.querySelector('[data-fk^="task-fold:"]')?.click(); await wait(150);
+  document.querySelector('[data-btn-id="M-03"]')?.click(); await wait(900);
+  const afterRefresh = read();
+  return JSON.stringify({ folded, restored, afterRefresh });
 })()`))
 await reload()
 const infoText = await evalr(`document.querySelector('[data-zone="task-info"]')?.textContent || ''`)
@@ -243,7 +243,7 @@ const cases = [
   { id: 'UI-07-esc', ok: escZero === true, evidence: `zeroRequests=${escZero}` },
   { id: 'UI-07-500', ok: /UI 冒烟分身/.test(rollbackText), evidence: `title=${rollbackText}` },
   { id: 'UI-07-409', ok: conflictDraft === '冲突草稿', evidence: `draft=${conflictDraft}` },
-  { id: 'UI-08', ok: foldState.afterRefresh.expanded === 'false' && foldState.afterRefresh.hidden === true, evidence: JSON.stringify(foldState) },
+  { id: 'UI-08', ok: foldState.folded.expanded === 'false' && foldState.folded.hidden === true && foldState.restored.expanded === 'true' && foldState.restored.hidden === false && foldState.afterRefresh.expanded === 'false' && foldState.afterRefresh.hidden === true, evidence: JSON.stringify(foldState) },
   { id: 'UI-09', ok: /对话/.test(infoText) && /创建/.test(infoText) && /更新/.test(infoText) && /体积/.test(infoText) && /冒烟会话/.test(infoText) && /1\.0 KB/.test(infoText), evidence: infoText.replace(/\s+/g, ' ').slice(0, 120) },
   { id: 'UI-12-f2', ok: f2Input === true, evidence: `input=${f2Input}` },
   { id: 'UI-12-size', ok: tooSmall.length === 0, evidence: tooSmall.length ? JSON.stringify(tooSmall.slice(0, 4)) : `${sizes.length} targets ≥34px` },
