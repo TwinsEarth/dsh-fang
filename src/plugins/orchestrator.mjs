@@ -1353,6 +1353,15 @@ export function apply(ctx, config) {
       const webServer = child.get('webServer') ?? child.webServer
       if (!webServer || typeof webServer.register !== 'function') return
       compatWebServer = webServer
+      // v3.0.8：把当前宿主 origin 写到 dataDir/endpoint.json，供 Electron 面板发现，
+      // 避免桌面宿主端口每次变化后必须手工设置 FANG_UPSTREAM。
+      try {
+        const origin = typeof webServer.getOrigin === 'function' ? webServer.getOrigin() : ''
+        if (origin) {
+          fs.mkdirSync(layout.dataDir, { recursive: true })
+          fs.writeFileSync(path.join(layout.dataDir, 'endpoint.json'), JSON.stringify({ url: origin, updatedAt: new Date().toISOString() }) + '\n')
+        }
+      } catch { /* endpoint discovery is best-effort */ }
       const prefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
 
       const json = (res, code, obj) => {
