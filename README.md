@@ -3,7 +3,15 @@
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
 [![npm](https://img.shields.io/badge/npm-dsh--fang-red.svg)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
 
-# dsh-Fang v2.3.1
+# 瓮城
+
+## 让DSH不再需要反复重启客户端：
+加载、运行、更新、回滚、卸载、回收，全生命周期管理。
+
+### 技术原理：DSH的第一台虚拟机！
+
+1.用dsh-Web，当瓮城完成风险阻隔&审批（Beta）
+2.DeepSeekHarness，当主城保存原样不变（稳定版）
 
 **母体大脑 + 分身器官 + 容器兜底**：一个只读母体，每个任务派生一个用完即弃的子 dsh-Web；
 开发都在分身里，母体只在「提升」时被显式更新。崩溃不扩散、污染不残留、插件不串味。
