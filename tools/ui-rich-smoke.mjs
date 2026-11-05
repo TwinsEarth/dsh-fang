@@ -253,6 +253,22 @@ const connInfo = JSON.parse(await evalr(`(async () => {
   const after = el ? el.textContent : '';
   return JSON.stringify({ before, after });
 })()`))
+const logUI = JSON.parse(await evalr(`(async () => {
+  for (let i = 0; i < 350; i += 1) window.dispatchEvent(new ErrorEvent('error', { message: 'smoke-error-' + i }));
+  document.querySelector('[data-btn-id="LOG-01"]')?.click();
+  await new Promise((r) => setTimeout(r, 200));
+  const rows = () => document.querySelectorAll('[data-fang-log-row]').length;
+  const first = rows();
+  const more = document.querySelector('[data-btn-id="LOG-04"]');
+  const moreVisible = Boolean(more && !more.hidden);
+  more?.click();
+  await new Promise((r) => setTimeout(r, 150));
+  const second = rows();
+  document.querySelector('[data-btn-id="LOG-07"]')?.click();
+  await new Promise((r) => setTimeout(r, 100));
+  const warnEmpty = String(document.getElementById('fang-diag-panel')?.textContent || '').includes('暂无警告');
+  return JSON.stringify({ first, moreVisible, second, warnEmpty });
+})()`))
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
@@ -274,7 +290,7 @@ const cases = [
   { id: 'UI-12-size', ok: tooSmall.length === 0, evidence: tooSmall.length ? JSON.stringify(tooSmall.slice(0, 4)) : `${sizes.length} targets ≥34px` },
   { id: 'UI-12-hover', ok: hoverState.length > 0 && hoverState.every((s) => s.display !== 'none' && s.h >= 34 && s.w >= 34), evidence: JSON.stringify(hoverState.slice(0, 4)) },
   { id: 'UI-13-conn', ok: /127\.0\.0\.1:3081/.test(connInfo.before) && connInfo.before.includes('••') && !connInfo.before.includes('smoke-token') && connInfo.after.includes('smoke-token'), evidence: JSON.stringify(connInfo) },
-  { id: 'UI-14-slogan', ok: u.header.includes('DeepSeekHarness的第一台虚拟机'), evidence: u.header.includes('DeepSeekHarness的第一台虚拟机') ? 'slogan-present' : 'missing' },
+  { id: 'UI-14-log', ok: logUI.first === 100 && logUI.moreVisible === true && logUI.second === 350 && logUI.warnEmpty === true, evidence: JSON.stringify(logUI) },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })

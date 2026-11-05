@@ -356,7 +356,7 @@ window.__ModuleLoader__.load({
         detail: String(detail ?? '').slice(0, 2000),
       }
       diagLog.push(entry)
-      if (diagLog.length > 300) diagLog.shift()
+      if (diagLog.length > 3000) diagLog.shift()
       try { window.__fangUiLog?.push?.({ kind: 'diag', level: entry.level, message: entry.message }) } catch { /* ignore */ }
       try { window.dispatchEvent(new CustomEvent('fang:diag')) } catch { /* ignore */ }
     }
@@ -1603,7 +1603,7 @@ window.__ModuleLoader__.load({
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
         diagnostics: {
-          list: () => diagLog.slice(-200),
+          list: () => diagLog.slice(-3000),
           push: (level, message, detail) => diag(level, message, detail),
           clear: () => { diagLog.length = 0; try { window.dispatchEvent(new CustomEvent('fang:diag')) } catch { /* ignore */ } },
         },
@@ -1911,12 +1911,7 @@ window.__ModuleLoader__.load({
             },
             fk: 'derive',
           })),
-        version ? h('span', { class: 'fh-version', title: '母体版本' }, version) : null,
-        h('span', {
-          class: 'fh-slogan', 'data-zone': 'slogan',
-          title: 'DeepSeekHarness 的第一台虚拟机',
-          style: { marginLeft: '8px', fontSize: '12px', opacity: '.65', whiteSpace: 'nowrap' },
-        }, 'DeepSeekHarness的第一台虚拟机！'))
+        version ? h('span', { class: 'fh-version', title: '母体版本' }, version) : null)
     }
 
     // ── 全局提示（派生结果 / 动作结果 / 接口错误）───────────────────────────
@@ -2881,39 +2876,65 @@ window.__ModuleLoader__.load({
         font: '12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace',
       })
       const head = doc.createElement('div')
-      head.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px'
+      head.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap'
       const title = doc.createElement('strong')
       title.textContent = '瓮城日志'
+      let filter = 'all'
+      let limit = 100
+      const filterButtons = []
+      const makeFilter = (key, label, id) => {
+        const b = doc.createElement('button')
+        b.type = 'button'; b.textContent = label; b.setAttribute('data-btn-id', id)
+        b.style.cssText = 'height:24px;padding:0 8px;border-radius:7px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;cursor:pointer;font:inherit'
+        b.onclick = () => { filter = key; limit = 100; renderLogs() }
+        filterButtons.push({ key, b })
+        return b
+      }
       const spacer = doc.createElement('span')
       spacer.style.flex = '1'
       const clear = doc.createElement('button')
       clear.type = 'button'; clear.textContent = '清空'; clear.setAttribute('data-btn-id', 'LOG-02')
-      clear.onclick = () => app.diagnostics.clear()
+      clear.onclick = () => { app.diagnostics.clear(); limit = 100 }
       const close = doc.createElement('button')
       close.type = 'button'; close.textContent = '关闭'; close.setAttribute('data-btn-id', 'LOG-03')
       close.onclick = () => { overlay.hidden = true }
-      head.append(title, spacer, clear, close)
+      head.append(title, makeFilter('all', '全部', 'LOG-05'), makeFilter('bad', '错误', 'LOG-06'), makeFilter('warn', '警告', 'LOG-07'), spacer, clear, close)
       const list = doc.createElement('div')
-      overlay.append(head, list)
+      const loadMore = doc.createElement('button')
+      loadMore.type = 'button'; loadMore.setAttribute('data-btn-id', 'LOG-04')
+      loadMore.style.cssText = 'margin-top:8px;height:30px;width:100%;border-radius:8px;border:1px dashed rgba(127,127,127,.45);background:transparent;color:inherit;cursor:pointer;font:inherit'
+      loadMore.onclick = () => { limit += 300; renderLogs() }
+      overlay.append(head, list, loadMore)
       function renderLogs() {
-        const entries = app.diagnostics.list()
+        const all = app.diagnostics.list()
+        const entries = all.filter((entry) => filter === 'all' || entry.level === filter).slice().reverse()
         list.replaceChildren()
-        btn.textContent = entries.length ? `日志 (${entries.length})` : '日志'
+        btn.textContent = all.length ? `日志 (${all.length})` : '日志'
+        for (const { key, b } of filterButtons) {
+          b.style.background = key === filter ? 'rgba(127,127,127,.18)' : 'transparent'
+          b.style.fontWeight = key === filter ? '700' : '400'
+        }
         if (!entries.length) {
           const empty = doc.createElement('div')
-          empty.textContent = '暂无报错'
+          empty.textContent = filter === 'all' ? '暂无报错或警告' : (filter === 'bad' ? '暂无错误' : '暂无警告')
           empty.style.opacity = '.6'
           list.append(empty)
+          loadMore.hidden = true
           return
         }
-        for (const entry of entries.slice().reverse()) {
+        for (const entry of entries.slice(0, limit)) {
           const row = doc.createElement('div')
+          row.setAttribute('data-fang-log-row', '1')
           row.style.cssText = 'padding:6px 0;border-top:1px solid rgba(127,127,127,.18);white-space:pre-wrap;word-break:break-word'
           const when = new Date(entry.at).toLocaleTimeString()
           row.textContent = `[${when}] ${entry.level} · ${entry.message}${entry.detail ? '\n' + entry.detail : ''}`
           if (entry.level === 'bad') row.style.color = '#b42318'
+          else if (entry.level === 'warn') row.style.color = '#b54708'
           list.append(row)
         }
+        const remaining = entries.length - Math.min(limit, entries.length)
+        loadMore.hidden = remaining <= 0
+        loadMore.textContent = remaining > 0 ? `加载更多（剩余 ${remaining}）` : ''
       }
       btn.onclick = () => { overlay.hidden = !overlay.hidden; renderLogs() }
       const onDiag = () => renderLogs()
@@ -2951,7 +2972,7 @@ window.__ModuleLoader__.load({
       popup.hidden = true
       Object.assign(popup.style, {
         position: 'fixed', left: '16px', bottom: '58px', zIndex: '9999',
-        display: 'flex', alignItems: 'center', gap: '6px', maxWidth: 'calc(100vw - 32px)',
+        display: 'none', alignItems: 'center', gap: '6px', maxWidth: 'calc(100vw - 32px)',
         padding: '6px 8px', borderRadius: '10px', background: '#fff', color: '#111',
         border: '1px solid rgba(127,127,127,.35)', boxShadow: '0 4px 14px rgba(0,0,0,.14)',
         font: '12px/1.4 ui-monospace, Consolas, monospace',
@@ -2986,6 +3007,7 @@ window.__ModuleLoader__.load({
       }
       const render = () => {
         popup.hidden = !opened
+        popup.style.display = opened ? 'flex' : 'none'
         if (!opened) { label.textContent = ''; label.title = ''; return }
         label.textContent = full ? (revealed ? full : mask(full)) : '连接信息加载中…'
         label.title = revealed ? full : ''
