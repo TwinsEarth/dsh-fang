@@ -1,8 +1,13 @@
 {
   "name": "@twinsearth/dsh-fang-web-entry",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
+  "description": "DSH Web sidebar/config entry for dsh-Fang (Wengcheng); opens the PC Electron panel via dsh-fang://open.",
+  "license": "AGPL-3.0-or-later",
+  "author": {
+    "name": "dsh-Fang contributors"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
