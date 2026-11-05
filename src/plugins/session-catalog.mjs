@@ -29,9 +29,11 @@ import {
   z,
   roleGate,
   resolveDshHome,
+  resolveFangLayout,
   SERVICE,
   FANG_VERSION,
 } from '../kernel/index.mjs'
+import { createHttpGuard } from '../lib/http-auth.mjs'
 import {
   SESSION_ID_RE,
   SESSION_LOG_FILE,
@@ -86,6 +88,10 @@ export const Config = z.object({
     .description('digest 预览的最大字符数（超过 digest 32KiB 上限会 halt 而不是截断）'),
   allowArchived: z.boolean().default(true)
     .description('是否允许在请求 includeArchived 时列出已归档会话'),
+  authToken: z.string().default('')
+    .description('安装级鉴权 token；留空 = env DSH_FANG_AUTH_TOKEN 或 <dataDir>/fang-auth.json（0600，自动生成）'),
+  authEnabled: z.boolean().default(true)
+    .description('是否要求 /fang/api/sessions* 携带安装级鉴权 token（默认开启；仅测试/本地调试可关）'),
 })
 
 function clampInt(value, min, max, fallback) {
@@ -125,6 +131,13 @@ export function apply(ctx, config) {
   const cfg = { ...DEFAULTS, ...configDefaults, ...(config ?? {}) }
 
   const dshHome = resolveDshHome()
+  // v3.0.8/B1: these three routes read real session content; they must use the
+  // same install-level Host/Origin/token gate as /fang/api/status.
+  const authGuard = createHttpGuard({
+    dataDir: resolveFangLayout({ dataRoot: cfg.dataRoot }).dataDir,
+    token: cfg.authToken,
+    enabled: cfg.authEnabled !== false,
+  })
   const sessionsRoot = cfg.sessionsRoot ? path.resolve(String(cfg.sessionsRoot)) : path.join(dshHome, 'sessions')
   const storagesRoot = cfg.storagesRoot ? path.resolve(String(cfg.storagesRoot)) : path.join(dshHome, 'storages')
   const workspaceIndexFile = path.join(storagesRoot, WORKSPACE_INDEX_FILE)
@@ -671,9 +684,16 @@ export function apply(ctx, config) {
       webServer.register({
         kind: 'exact',
         path: routePath,
+        method,
         handler: async (req, res) => {
+          // Auth before method: a token-less POST must be 401, not 405 (fail-closed).
+          const decision = authGuard.check(req)
+          if (!decision.ok) {
+            return json(res, decision.status, { ok: false, error: decision.code, code: decision.code })
+          }
           const actual = String(req?.method ?? 'GET').toUpperCase()
           if (actual !== method) {
+            try { res.setHeader?.('allow', method) } catch { /* fake res */ }
             return json(res, 405, { ok: false, code: 'method-not-allowed', error: 'method-not-allowed', path: routePath })
           }
           try {

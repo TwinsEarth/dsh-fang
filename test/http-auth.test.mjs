@@ -6,7 +6,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import {
-  AUTH_HEADER, AUTH_TOKEN_FILE, checkRequestAuth, isAllowedOrigin, isLoopbackHost, loadAuthToken,
+  AUTH_HEADER, AUTH_TOKEN_FILE, authErrorBody, checkRequestAuth, createHttpGuard,
+  isAllowedOrigin, isLoopbackHost, loadAuthToken,
 } from '../src/lib/http-auth.mjs'
 import { tmpDir } from './helpers.mjs'
 
@@ -67,7 +68,7 @@ test('http-auth: publicRoute 仅跳过 token，不跳过 Host/Origin/Sec-Fetch-S
 })
 
 test('http-auth: loopback 判定与 Origin 白名单', () => {
-  for (const host of ['localhost', 'localhost:8080', '127.0.0.1:1', '[::1]:1', '::1']) {
+  for (const host of ['localhost', 'localhost:8080', '127.0.0.1:1', '[::1]:1', '[::1]', '::1']) {
     assert.equal(isLoopbackHost(host), true, host)
   }
   for (const host of ['evil.example', '192.168.1.1:80', '']) assert.equal(isLoopbackHost(host), false, host)
@@ -75,4 +76,43 @@ test('http-auth: loopback 判定与 Origin 白名单', () => {
   assert.equal(isAllowedOrigin('http://localhost:56071'), true)
   assert.equal(isAllowedOrigin('dsh-app://app'), true)
   assert.equal(isAllowedOrigin('https://evil.example'), false)
+})
+
+test('http-auth: Host 解析不接受带尾随垃圾的 loopback 前缀（DNS rebinding 绕过）', () => {
+  for (const host of [
+    '[::1]evil.example',
+    '[::1]:3080evil',
+    '[::1]:99999',
+    '127.0.0.1:3080@evil.example',
+    '127.0.0.1.evil.example',
+    'localhost.evil.example:3080',
+    'localhost:3080:evil',
+  ]) {
+    assert.equal(isLoopbackHost(host), false, host)
+    assert.equal(
+      checkRequestAuth(req({ token: TOKEN, host }), { token: TOKEN }).code,
+      'bad-host',
+      `${host} must be rejected as a non-loopback Host`,
+    )
+  }
+})
+
+test('http-auth: createHttpGuard 统一 token/env/dataDir 解析并保留 Host/Origin 校验', () => {
+  const dir = tmpDir('fang-guard-')
+  const guard = createHttpGuard({ dataDir: dir, token: TOKEN })
+  assert.equal(guard.enabled, true)
+  assert.equal(guard.token, TOKEN)
+  assert.equal(guard.check(req({ token: TOKEN })).ok, true)
+  assert.equal(guard.check(req()).status, 401)
+  assert.equal(guard.check(req({ token: TOKEN, host: 'evil.example' })).code, 'bad-host')
+  assert.equal(guard.check(req({ token: TOKEN, site: 'cross-site' })).code, 'cross-site')
+
+  const disabled = createHttpGuard({ dataDir: dir, enabled: false })
+  assert.equal(disabled.enabled, false)
+  assert.equal(disabled.check(req()).ok, true, 'disabled only skips the token, not Host/Origin')
+  assert.equal(disabled.check(req({ host: 'evil.example' })).code, 'bad-host')
+
+  const explicitOnly = createHttpGuard({ token: TOKEN })
+  assert.equal(explicitOnly.check(req({ token: TOKEN })).ok, true)
+  assert.equal(authErrorBody({ status: 403, code: 'bad-origin' }).code, 'bad-origin')
 })

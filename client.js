@@ -363,21 +363,40 @@ window.__ModuleLoader__.load({
 
     async function api(path, options) {
       const url = String(path)
-      const token = await ensureFangAuthToken()
+      // Absolute / scheme-relative URLs must never reach fetch(): the install token
+      // would travel to a foreign origin. The panel only talks to its own /fang API.
+      if (!url.startsWith('/') || url.startsWith('//')) {
+        const message = 'api() 只接受同源相对路径：' + url
+        diag('bad', message)
+        return { status: 0, body: { ok: false, error: 'invalid-api-path' }, diagnostic: { url, message } }
+      }
+      const request = { ...(options ?? {}) }
+      let token = await ensureFangAuthToken()
+      const buildHeaders = () => ({
+        ...(request.headers ?? {}),
+        'content-type': 'application/json',
+        accept: 'application/json',
+        ...(token ? { 'x-fang-auth': token } : {}),
+      })
       let res
       try {
-        res = await fetch(url, {
-          headers: {
-            'content-type': 'application/json',
-            accept: 'application/json',
-            ...(token ? { 'x-fang-auth': token } : {}),
-          },
-          ...(options ?? {}),
-        })
+        res = await fetch(url, { ...request, headers: buildHeaders() })
       } catch (error) {
         const message = String(error?.message ?? error)
         diag('bad', '网络请求失败：' + url, message)
         return { status: 0, body: null, diagnostic: { url, message } }
+      }
+      // A host restart can rotate the install token; retry once with the public
+      // /fang/api/auth-token bootstrap instead of leaving the panel stuck at 401.
+      if (res.status === 401) {
+        fangAuthToken = ''
+        const fresh = await ensureFangAuthToken()
+        if (fresh && fresh !== token) {
+          token = fresh
+          try {
+            res = await fetch(url, { ...request, headers: buildHeaders() })
+          } catch { /* keep the original 401 below */ }
+        }
       }
       const etag = (res.headers && typeof res.headers.get === 'function' && res.headers.get('etag')) || ''
       if (res.status === 304) return { status: 304, body: null, notModified: true, etag }
@@ -398,6 +417,12 @@ window.__ModuleLoader__.load({
     }
 
     function resolveMotherOrigin() {
+      // In the Electron shell the panel origin is the loopback proxy, which only
+      // serves /fang/api/*; the mother portal lives on the upstream DSH origin.
+      try {
+        const desktop = typeof window !== 'undefined' ? window.__fangDesktopUpstream : ''
+        if (typeof desktop === 'string' && /^https?:\/\//i.test(desktop)) return desktop.replace(/\/+$/, '')
+      } catch { /* ignore */ }
       try {
         const transport = typeof globalThis !== 'undefined' ? globalThis.__DSH_TRANSPORT__ : undefined
         const streamBaseUrl = transport && typeof transport.streamBaseUrl === 'string' ? transport.streamBaseUrl : ''
@@ -3052,6 +3077,15 @@ window.__ModuleLoader__.load({
     }
 
     function mountPanel(host) {
+      // Electron: remember the real upstream origin so "打开母体 Web" does not
+      // open the loopback proxy (which intentionally serves only /fang/api/*).
+      try {
+        window.fangShell?.desktopInfo?.().then((info) => {
+          if (info && typeof info.upstream === 'string' && /^https?:\/\//i.test(info.upstream)) {
+            window.__fangDesktopUpstream = info.upstream.replace(/\/+$/, '')
+          }
+        }).catch(() => {})
+      } catch { /* web host: no shell bridge */ }
       // v3.0.7 UI 分析日志：记录面板挂载与所有按钮/链接点击，供自动冒烟/诊断读取
       try {
         const doc = host?.ownerDocument ?? document

@@ -192,10 +192,26 @@ async function main() {
       JSON.stringify({ status: upgradeStatus.status, ok: upgradeStatus.body?.ok }))
     const unauthUpgrade = await fetch(`http://127.0.0.1:${booted.port}/fang/api/upgrade/status`).catch(() => null)
     check('upgrade/status rejects missing token (401)', unauthUpgrade?.status === 401, `status=${unauthUpgrade?.status ?? 'n/a'}`)
-    const branches = await api('/fang/api/tasks/branches?taskId=e2e-probe')
-    check('GET /fang/api/tasks/branches 200 + branches array',
-      branches.status === 200 && Array.isArray(branches.body?.branches),
-      JSON.stringify({ status: branches.status, count: branches.body?.branches?.length }))
+    // Route-table gate: catches duplicate-path registration losses (GET+POST same path)
+    // and stale DEFAULT_EXPECTED_ROUTE_COUNT / REQUIRED_ROUTE_PATHS.
+    const compatCheck = await api('/fang/api/compat/check', { method: 'POST', body: '{}' })
+    check('compat gate passes (route count + required paths)',
+      compatCheck.status === 200 && compatCheck.body?.ok === true,
+      JSON.stringify({
+        status: compatCheck.status,
+        ok: compatCheck.body?.ok,
+        routeCount: compatCheck.body?.routeCount,
+        expectedRouteCount: compatCheck.body?.expectedRouteCount,
+        findings: (compatCheck.body?.findings ?? []).map((f) => f.code).slice(0, 6),
+      }))
+    const unknownBranches = await api('/fang/api/tasks/branches?taskId=e2e-probe')
+    check('GET /fang/api/tasks/branches unknown task → 404 unknown-task',
+      unknownBranches.status === 404 && unknownBranches.body?.error === 'unknown-task',
+      JSON.stringify({ status: unknownBranches.status, error: unknownBranches.body?.error }))
+    const traversalBranches = await api('/fang/api/tasks/branches?taskId=' + encodeURIComponent('../../escape'))
+    check('GET /fang/api/tasks/branches traversal taskId → 404',
+      traversalBranches.status === 404 && traversalBranches.body?.error === 'unknown-task',
+      JSON.stringify({ status: traversalBranches.status, error: traversalBranches.body?.error }))
     check('mother has forker service', status.body?.services?.forker === true)
 
     const route = await api('/fang/api/route?realtime=1')
@@ -273,6 +289,46 @@ async function main() {
 
     const tasksList = await api('/fang/api/tasks')
     check('GET /fang/api/tasks lists the task', Array.isArray(tasksList.body?.tasks) && tasksList.body.tasks.length === 1)
+
+    // ── v3.0.8 branch contract: real task → 200, unknown → 404, branch errors mapped ──
+    const initialBranches = await api(`/fang/api/tasks/branches?taskId=${encodeURIComponent(taskId)}`)
+    check('GET /fang/api/tasks/branches 200 + main branch',
+      initialBranches.status === 200 && initialBranches.body?.activeBranchId === 'main'
+      && Array.isArray(initialBranches.body?.branches) && initialBranches.body.branches.some((b) => b.branchId === 'main'),
+      JSON.stringify({ status: initialBranches.status, active: initialBranches.body?.activeBranchId }))
+    const branchCreated = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'b1' }),
+    })
+    check('POST /fang/api/tasks/branches 200 + b1', branchCreated.status === 200 && branchCreated.body?.branch?.branchId === 'b1',
+      JSON.stringify({ status: branchCreated.status, error: branchCreated.body?.error }))
+    const duplicate = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'b1' }),
+    })
+    check('POST duplicate branch → 409 branch-exists', duplicate.status === 409 && duplicate.body?.error === 'branch-exists',
+      JSON.stringify({ status: duplicate.status, error: duplicate.body?.error }))
+    const invalidBranch = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: '../escape' }),
+    })
+    check('POST invalid branchId → 400 invalid-branch-id',
+      invalidBranch.status === 400 && invalidBranch.body?.error === 'invalid-branch-id',
+      JSON.stringify({ status: invalidBranch.status, error: invalidBranch.body?.error }))
+    const activated = await api('/fang/api/tasks/branches/activate', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'b1' }),
+    })
+    check('POST /branches/activate 200 + pointer move',
+      activated.status === 200 && activated.body?.activeBranchId === 'b1',
+      JSON.stringify({ status: activated.status, active: activated.body?.activeBranchId }))
+    const sealed = await api('/fang/api/tasks/branches/status', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'main', status: 'sealed' }),
+    })
+    check('POST /branches/status 200 + main sealed', sealed.status === 200 && sealed.body?.branch?.status === 'sealed',
+      JSON.stringify({ status: sealed.status, error: sealed.body?.error }))
+    const unknownPost = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId: 'missing-task', branchId: 'b2' }),
+    })
+    check('POST branches unknown task → 404 unknown-task',
+      unknownPost.status === 404 && unknownPost.body?.error === 'unknown-task',
+      JSON.stringify({ status: unknownPost.status, error: unknownPost.body?.error }))
 
     // ── the right pane of the panel: sessions owned by the fork itself ──
     const forkHome = path.join(homeRoot, 'fang', 'e2e', 'forks', taskId)

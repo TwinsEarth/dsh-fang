@@ -24,6 +24,7 @@ export const COMPAT_EXCLUDED_PLUGINS = Object.freeze(['imports.mjs'])
 /** 路由契约：客户端升级后仍必须存在的核心路由（诊断/升级/镜像）。 */
 export const REQUIRED_ROUTE_PATHS = Object.freeze([
   '/fang/api/status',
+  '/fang/api/auth-token',
   '/fang/api/mirror/status',
   '/fang/api/mirror/upgrade',
   '/fang/api/mirror/recompute-status',

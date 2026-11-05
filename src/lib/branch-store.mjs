@@ -4,18 +4,24 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { activateBranch, createBranch, createSession, setBranchStatus } from './branch.mjs'
 
+/** taskId is a path segment under <dataDir>/tasks; reject separators and traversal. */
+const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
 export class BranchStore {
   constructor(dataDir) {
     this.dataDir = dataDir
   }
 
   file(taskId) {
-    return path.join(this.dataDir, 'tasks', String(taskId), 'branches.json')
+    const id = String(taskId ?? '')
+    if (!TASK_ID_RE.test(id)) throw new Error('invalid-task-id')
+    return path.join(this.dataDir, 'tasks', id, 'branches.json')
   }
 
   load(taskId) {
+    const file = this.file(taskId) // validate outside the read fallback
     try {
-      const raw = JSON.parse(fs.readFileSync(this.file(taskId), 'utf8'))
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
       return {
         sessionId: raw.sessionId,
         activeBranchId: raw.activeBranchId,

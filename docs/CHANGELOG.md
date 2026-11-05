@@ -18,11 +18,17 @@
 
 ### 修复
 - 任务创建异常返回空响应 → 结构化 500；母体 palette `app is not defined`。
-- 代理绝对 URL 可崩溃主进程 → 仅接受 `/` 路径 + origin 校验 + 400。
+- 代理绝对 URL 可崩溃主进程 → 仅接受单一 `/` 路径 + origin 校验 + 400（absolute-form/`//`/反斜杠/控制字符全部拒绝）。
 - 启动器默认开 CDP、写死 Electron 路径；`desktopInfo` 下发 token；`#fang-fallback` 残留。
+- **HTTP 契约审计（docs/AUDIT-v3.0.8-HTTP-CONTRACT.md）**：
+  - 修复 DSH exact 路由以 path 为键导致的 GET+POST 同路径吞并：`/tasks/branches` 与 `/bridge/sessions` 改为单注册按 method 分发（否则 POST 405、后续路由不注册）。
+  - `/sessions*`、`/bridge/*`、`/sync/*`、`/route` 接入与 `/status` 相同的 Host/Origin/CSRF/token 门禁；鉴权先于 method（无 token 不再拿到 405）。
+  - 未知 `/fang/api/*` 统一 JSON 404（先鉴权）；branches 未知 taskId 404、taskId/branchId 路径穿越拒绝、分支错误映射 400/404/409。
+  - adapter 路由补 loopback Host、Origin/CSRF、JSON 写校验与 405 `Allow`；代理层 403/404/502 统一 JSON，接住 `file://`/`//`/反斜杠 target，token 轮换后自动 bootstrap 并重试 GET；`client.js` 不再因 `headers` 覆盖丢失 `x-fang-auth`。
+  - Host 严格解析，拒绝 `[::1]evil` 等 loopback 前缀伪造。
 
 ### 门禁
-- 路由 **67**；e2e **64/64**；preflight `--e2e` GREEN；安装包 `DSH-Fang-3.0.8-x64-Setup.exe` + SHA256SUMS。
+- 路由 **67**；单测 **718 pass / 0 fail / 1 skip**；e2e **73/73**；桌面代理套件 **51/51**；preflight `--e2e` GREEN；安装包 `DSH-Fang-3.0.8-x64-Setup.exe` + SHA256SUMS。
 
 ## v3.0.7（2026-11-03）
 

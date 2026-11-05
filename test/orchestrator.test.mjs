@@ -544,6 +544,103 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   fs.rmSync(dataRoot, { recursive: true, force: true })
 })
 
+test('orchestrator: branch/task-id 404 contract, traversal guard, and /fang/api catch-all', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-branch-http-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  orchestrator.apply(ctx, {
+    dataRoot,
+    forksRoot: path.join(dataRoot, 'forks'),
+    adapterTimeoutMs: 100,
+    adapterPollMs: 20,
+    routes: { enabled: true, prefix: '/fang' },
+    authToken: TEST_AUTH_TOKEN,
+  })
+  const svc = ctx.get(SERVICE.orchestrator)
+  try {
+    const created = await svc.createTask({ title: 'branch-contract' })
+    assert.equal(created.ok, true, JSON.stringify(created))
+    const taskId = created.taskId
+    const call = async (method, path, body, token = TEST_AUTH_TOKEN) => {
+      const req = body === undefined ? makeReq(undefined, method) : makeReq(body, method)
+      req.url = path
+      if (token === null) delete req.headers['x-fang-auth']
+      else req.headers['x-fang-auth'] = token
+      const res = makeRes()
+      const route = method === 'GET'
+        ? webServer.find('GET', path.split('?')[0])
+        : webServer.find('POST', path.split('?')[0])
+      assert.ok(route, `${method} ${path} must be registered`)
+      await route.handler(req, res)
+      return res
+    }
+
+    const branchRoutes = webServer.routes.filter((r) => r.path === '/fang/api/tasks/branches')
+    assert.equal(branchRoutes.length, 1, 'GET+POST 同路径只能注册一条（webServer 以 path 为键）')
+    assert.equal(branchRoutes[0].method, 'GET,POST')
+
+    const unknown = await call('GET', '/fang/api/tasks/branches?taskId=missing-task')
+    assert.equal(unknown.statusCode, 404)
+    assert.equal(unknown.json().error, 'unknown-task')
+
+    const traversal = await call('GET', '/fang/api/tasks/branches?taskId=' + encodeURIComponent('../../escape'))
+    assert.equal(traversal.statusCode, 404)
+    assert.equal(traversal.json().error, 'unknown-task')
+
+    const listed = await call('GET', `/fang/api/tasks/branches?taskId=${taskId}`)
+    assert.equal(listed.statusCode, 200)
+    assert.equal(listed.json().activeBranchId, 'main')
+
+    const createdBranch = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: 'b1' })
+    assert.equal(createdBranch.statusCode, 200)
+    assert.equal(createdBranch.json().branch.branchId, 'b1')
+
+    const duplicate = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: 'b1' })
+    assert.equal(duplicate.statusCode, 409)
+    assert.equal(duplicate.json().error, 'branch-exists')
+
+    const invalid = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: '../escape' })
+    assert.equal(invalid.statusCode, 400)
+    assert.equal(invalid.json().error, 'invalid-branch-id')
+
+    const activated = await call('POST', '/fang/api/tasks/branches/activate', { taskId, branchId: 'b1' })
+    assert.equal(activated.statusCode, 200)
+    assert.equal(activated.json().activeBranchId, 'b1')
+
+    const sealed = await call('POST', '/fang/api/tasks/branches/status', { taskId, branchId: 'main', status: 'sealed' })
+    assert.equal(sealed.statusCode, 200)
+    assert.equal(sealed.json().branch.status, 'sealed')
+
+    // Auth runs before method: a token-less POST must be 401, not 405.
+    const noTokenPost = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: 'b2' }, null)
+    assert.equal(noTokenPost.statusCode, 401)
+    assert.equal(noTokenPost.json().code, 'unauthorized')
+    // Invoke the GET route's handler with POST and no token: auth must win (401).
+    const statusGetRoute = webServer.find('GET', '/fang/api/status')
+    assert.ok(statusGetRoute)
+    const wrongMethodReq = makeReq({}, 'POST')
+    delete wrongMethodReq.headers['x-fang-auth']
+    const wrongMethod = makeRes()
+    await statusGetRoute.handler(wrongMethodReq, wrongMethod)
+    assert.equal(wrongMethod.statusCode, 401, 'token check precedes method check')
+
+    // Prefix catch-all: unknown /fang/api/* is JSON 404 and still gated.
+    const prefix = webServer.routes.find((r) => r.kind === 'prefix' && r.path === '/fang/api')
+    assert.ok(prefix, 'prefix /fang/api must be registered')
+    const unknownRes = makeRes()
+    await prefix.handler(makeReq(undefined, 'GET'), unknownRes)
+    assert.equal(unknownRes.statusCode, 404)
+    assert.equal(unknownRes.json().code, 'not-found')
+    const unknownNoToken = makeReq(undefined, 'GET')
+    delete unknownNoToken.headers['x-fang-auth']
+    const unknownNoTokenRes = makeRes()
+    await prefix.handler(unknownNoToken, unknownNoTokenRes)
+    assert.equal(unknownNoTokenRes.statusCode, 401)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: resolveInside rejects traversal and absolute plugin paths', () => {
   const base = 'C:\\tmp\\work'
   assert.equal(orchestrator.resolveInside(base, 'index.js') !== null, true)

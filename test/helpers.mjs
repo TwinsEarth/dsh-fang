@@ -75,7 +75,7 @@ export function makeWebServerStub() {
   return {
     routes,
     register(spec) {
-      const entry = { kind: spec?.kind, path: spec?.path, handler: spec?.handler }
+      const entry = { kind: spec?.kind, path: spec?.path, method: spec?.method ?? '', handler: spec?.handler }
       routes.push(entry)
       return () => {
         const i = routes.indexOf(entry)
@@ -83,7 +83,11 @@ export function makeWebServerStub() {
       }
     },
     find(method, path) {
-      return routes.find(r => (r.method ? r.method === method : true) && r.path === path) ?? null
+      return routes.find((r) => {
+        if (r.path !== path) return false
+        const methods = String(r.method ?? '').split(',').filter(Boolean)
+        return methods.length === 0 || methods.includes(method)
+      }) ?? null
     },
     paths() {
       return routes.map(r => r.path)
@@ -98,6 +102,7 @@ export function makeRes() {
     headers: {},
     body: '',
     writeHead(code, headers) { res.statusCode = code; Object.assign(res.headers, headers ?? {}) },
+    setHeader(name, value) { res.headers[String(name).toLowerCase()] = value },
     end(chunk) { res.body += chunk ?? '' },
     json() { try { return JSON.parse(res.body) } catch { return null } },
   }

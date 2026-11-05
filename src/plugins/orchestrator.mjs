@@ -28,7 +28,7 @@ import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
-import { checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
+import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { fileURLToPath } from 'node:url'
@@ -1370,19 +1370,77 @@ export function apply(ctx, config) {
       const route = (method, pathname, handler, routeOptions) => webServer.register({
         kind: 'exact',
         path: pathname,
+        method,
         handler: async (req, res) => {
-          if (req.method !== method) return json(res, 405, { ok: false, error: 'method-not-allowed' })
-          // v3.0.5/B1：loopback Host + Origin/CSRF + 安装 token（fail-closed）
+          // v3.0.5/B1：loopback Host + Origin/CSRF + 安装 token（fail-closed）。
+          // Auth must run before the method check: a token-less POST is 401, not 405.
           const decision = checkRequestAuth(req, {
             token: authToken,
             publicRoute: authToken.length === 0 || routeOptions?.public === true,
           })
-          if (!decision.ok) return json(res, decision.status, { ok: false, error: decision.code })
+          if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
+          if (req.method !== method) {
+            try { res.setHeader?.('allow', method) } catch { /* fake res */ }
+            return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
+          }
           try { return await handler(req, res) } catch (e) {
-            return json(res, 500, { ok: false, error: 'handler-threw', detail: String(e?.message ?? e) })
+            return json(res, 500, { ok: false, error: 'handler-threw', code: 'handler-threw', detail: String(e?.message ?? e) })
           }
         },
       })
+
+      // The DSH webServer keys exact routes by path only, so GET+POST on the same
+      // path cannot be two `register()` calls (the second throws and later routes
+      // silently never register). One handler dispatches by method instead.
+      const routeMethods = (pathname, handlers, routeOptions) => webServer.register({
+        kind: 'exact',
+        path: pathname,
+        method: Object.keys(handlers).join(','),
+        handler: async (req, res) => {
+          const decision = checkRequestAuth(req, {
+            token: authToken,
+            publicRoute: authToken.length === 0 || routeOptions?.public === true,
+          })
+          if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
+          const allow = Object.keys(handlers)
+          const fn = handlers[String(req.method ?? 'GET').toUpperCase()]
+          if (typeof fn !== 'function') {
+            try { res.setHeader?.('allow', allow.join(', ')) } catch { /* fake res */ }
+            return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
+          }
+          try { return await fn(req, res) } catch (e) {
+            return json(res, 500, { ok: false, error: 'handler-threw', code: 'handler-threw', detail: String(e?.message ?? e) })
+          }
+        },
+      })
+
+      // ── 分支路由共用：taskId 必须是注册表里的安全 id ─────────────────────
+      // 既保证 404 语义一致（tasks/status 对未知任务返回 404），也阻断把
+      // `../` 之类的 taskId 带进 BranchStore.file() 的路径逃逸。
+      const safeTaskId = (value) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(String(value ?? ''))
+      const requireTask = (value) => {
+        const taskId = String(value ?? '').trim()
+        if (!taskId) return { ok: false, status: 400, error: 'taskId-required' }
+        if (!safeTaskId(taskId) || !tasks.has(taskId)) return { ok: false, status: 404, error: 'unknown-task' }
+        return { ok: true, taskId }
+      }
+      const branchErrorStatus = (code) => {
+        switch (String(code ?? '')) {
+          case 'invalid-branch-id':
+          case 'invalid-status':
+          case 'invalid-task-id':
+            return 400
+          case 'branch-missing':
+          case 'parent-missing':
+            return 404
+          case 'branch-exists':
+          case 'branch-not-active':
+          case 'cannot-seal-active':
+            return 409
+          default:
+            return 500
+        }
+      }
 
       // 浏览器面板 bootstrap：同源读取 token（Host/Origin 已校验；不跨站）
       route('GET', `${prefix}/api/auth-token`, (req, res) => json(res, 200, {
@@ -1616,40 +1674,49 @@ export function apply(ctx, config) {
         return json(res, out.ok ? 200 : 409, out)
       })
       // v3.0.8 分支 HTTP 面（注册在末尾，避免影响既有路由初始化顺序）
-      route('GET', `${prefix}/api/tasks/branches`, (req, res) => {
-        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
-        const taskId = String(query.get('taskId') ?? '')
-        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
-        return json(res, 200, branchStore.list(taskId))
-      })
-      route('POST', `${prefix}/api/tasks/branches`, async (req, res) => {
-        const body = await readBody(req)
-        const taskId = String(body?.taskId ?? '')
-        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
-        try {
-          return json(res, 200, branchStore.create(taskId, {
-            branchId: String(body?.branchId ?? ''),
-            parentBranchId: body?.parentBranchId ? String(body.parentBranchId) : undefined,
-            baseTurn: Number(body?.baseTurn) || 0,
-          }))
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
-        }
+      routeMethods(`${prefix}/api/tasks/branches`, {
+        GET: (req, res) => {
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          const checked = requireTask(query.get('taskId'))
+          if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+          return json(res, 200, branchStore.list(checked.taskId))
+        },
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const checked = requireTask(body?.taskId)
+          if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+          try {
+            return json(res, 200, branchStore.create(checked.taskId, {
+              branchId: String(body?.branchId ?? ''),
+              parentBranchId: body?.parentBranchId ? String(body.parentBranchId) : undefined,
+              baseTurn: Number(body?.baseTurn) || 0,
+            }))
+          } catch (error) {
+            const code = String(error?.message ?? error)
+            return json(res, branchErrorStatus(code), { ok: false, error: code, code })
+          }
+        },
       })
       route('POST', `${prefix}/api/tasks/branches/activate`, async (req, res) => {
         const body = await readBody(req)
+        const checked = requireTask(body?.taskId)
+        if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
         try {
-          return json(res, 200, branchStore.activate(String(body?.taskId ?? ''), String(body?.branchId ?? '')))
+          return json(res, 200, branchStore.activate(checked.taskId, String(body?.branchId ?? '')))
         } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+          const code = String(error?.message ?? error)
+          return json(res, branchErrorStatus(code), { ok: false, error: code, code })
         }
       })
       route('POST', `${prefix}/api/tasks/branches/status`, async (req, res) => {
         const body = await readBody(req)
+        const checked = requireTask(body?.taskId)
+        if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
         try {
-          return json(res, 200, branchStore.setStatus(String(body?.taskId ?? ''), String(body?.branchId ?? ''), String(body?.status ?? '')))
+          return json(res, 200, branchStore.setStatus(checked.taskId, String(body?.branchId ?? ''), String(body?.status ?? '')))
         } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+          const code = String(error?.message ?? error)
+          return json(res, branchErrorStatus(code), { ok: false, error: code, code })
         }
       })
       route('GET', `${prefix}/api/reflow/policy`, (req, res) => json(res, 200, {
@@ -1664,6 +1731,22 @@ export function apply(ctx, config) {
         forbiddenFields: ['token', 'password', 'secret', 'credential', 'auth', 'cookie', 'sessionkey', 'apikey'],
         merge: false,
       }))
+
+      // v3.0.8 contract: an unknown /fang/api/* path must be a JSON 404 under the
+      // same Host/Origin/token gate — not an unauthenticated empty 404 from the host.
+      // Exact routes above win because the webServer matches exact before prefix.
+      webServer.register({
+        kind: 'prefix',
+        path: `${prefix}/api`,
+        handler: async (req, res) => {
+          const decision = checkRequestAuth(req, {
+            token: authToken,
+            publicRoute: authToken.length === 0,
+          })
+          if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
+          return json(res, 404, { ok: false, error: 'not-found', code: 'not-found' })
+        },
+      })
     })
   }
 }

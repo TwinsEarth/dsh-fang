@@ -1061,6 +1061,52 @@ test('v3: Bearer 认证（env 注入时强制；未注入时 v2 兼容放行）'
   await findHandler(legacyAllowed.ws, 'GET', ADAPTER_ROUTE.STATE)(getReq(), allowedRes)
   assert.equal(allowedRes.statusCode, 200, '显式 allowLegacyNoToken 时才允许 v2 兼容')
   legacyAllowed.ctx.dispose()
+
+  // Adapter perimeter must match /fang/api/*: loopback Host, Origin/CSRF, JSON writes,
+  // and auth-before-method (401 not 405).
+  const token = 'tok-perimeter-0123456789abcdef0123456789'
+  const secured2 = applyWithRole('fork', {}, {}, { env: { DSH_ADAPTER_TOKEN: token } })
+  const state = findHandler(secured2.ws, 'GET', ADAPTER_ROUTE.STATE)
+
+  const badHostReq = getReq()
+  badHostReq.headers = { host: 'evil.example', authorization: `Bearer ${token}` }
+  const badHostRes = makeRes()
+  await state(badHostReq, badHostRes)
+  assert.equal(badHostRes.statusCode, 403)
+  assert.equal(badHostRes.json().code, 'bad-host')
+
+  const badOriginReq = getReq()
+  badOriginReq.headers = { host: '127.0.0.1:1', origin: 'https://evil.example', authorization: `Bearer ${token}` }
+  const badOriginRes = makeRes()
+  await state(badOriginReq, badOriginRes)
+  assert.equal(badOriginRes.statusCode, 403)
+  assert.equal(badOriginRes.json().code, 'bad-origin')
+
+  const postNoAuth = getReq()
+  postNoAuth.method = 'POST'
+  postNoAuth.headers = { host: '127.0.0.1:1' }
+  const postNoAuthRes = makeRes()
+  await state(postNoAuth, postNoAuthRes)
+  assert.equal(postNoAuthRes.statusCode, 401, 'auth 必须先于 method 判定')
+
+  const wrongMethodReq = getReq()
+  wrongMethodReq.method = 'POST'
+  wrongMethodReq.headers = { host: '127.0.0.1:1', authorization: `Bearer ${token}` }
+  const wrongMethodRes = makeRes()
+  await state(wrongMethodReq, wrongMethodRes)
+  assert.equal(wrongMethodRes.statusCode, 405)
+  assert.equal(wrongMethodRes.headers.allow, 'GET')
+
+  const commands = findHandler(secured2.ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+  const textReq = makeReq({}, 'POST')
+  textReq.headers = {
+    host: '127.0.0.1:1', authorization: `Bearer ${token}`, 'content-type': 'text/plain',
+  }
+  const textRes = makeRes()
+  await commands(textReq, textRes)
+  assert.equal(textRes.statusCode, 415)
+  assert.equal(textRes.json().code, 'content-type-required')
+  secured2.ctx.dispose()
 })
 
 // ── v2.6.8：外部注册命令（registerCommand）与 413 body 上限 ──────────────────

@@ -57,6 +57,7 @@ import {
   sampleResources,
   totalResources,
 } from '../kernel/index.mjs'
+import { authErrorBody, checkRequestAuth } from '../lib/http-auth.mjs'
 import {
   CommandCache,
   EventLog,
@@ -1153,13 +1154,32 @@ export function apply(ctx, config) {
       webServer.register({
         kind: 'exact',
         path: routePath,
+        method,
         handler: async (req, res) => {
           const actual = String(req?.method ?? 'GET').toUpperCase()
-          if (actual !== method) {
-            return json(res, 405, { ok: false, code: 'method-not-allowed', error: 'method-not-allowed', path: routePath })
+          // Same perimeter as /fang/api/*: loopback Host, Origin/Sec-Fetch-Site,
+          // adapter Bearer token, JSON-only writes. Auth before method (401 not 405).
+          const decision = checkRequestAuth(req, {
+            token: adapterToken,
+            // v2 compatibility (explicit allowLegacyNoToken) is the only case where
+            // the token comparison is skipped; Host/Origin/CSRF still apply.
+            publicRoute: adapterToken.length === 0 && legacyAllowed,
+          })
+          if (!decision.ok) {
+            return json(res, decision.status, { ...authErrorBody(decision), path: routePath })
+          }
+          if (!['GET', 'HEAD', 'OPTIONS'].includes(actual)) {
+            const contentType = String(req?.headers?.['content-type'] ?? '').toLowerCase()
+            if (contentType && !contentType.includes('application/json')) {
+              return json(res, 415, { ok: false, code: 'content-type-required', error: 'content-type-required', path: routePath })
+            }
           }
           if (!authorized(req)) {
             return json(res, 401, { ok: false, code: 'unauthorized', error: 'unauthorized', path: routePath })
+          }
+          if (actual !== method) {
+            try { res.setHeader?.('allow', method) } catch { /* fake res */ }
+            return json(res, 405, { ok: false, code: 'method-not-allowed', error: 'method-not-allowed', path: routePath })
           }
           try {
             return await handler(req, res)

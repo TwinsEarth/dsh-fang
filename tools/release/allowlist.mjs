@@ -23,6 +23,9 @@ function walk(dir, out = []) {
 
 // ── 1) HTTP route allow-list: every route must be under ${prefix}/api/ and use an allowed method ──
 const ROUTE_RE = /route\('(GET|POST|PUT|PATCH|DELETE)',\s*`\$\{prefix\}([^`]*)`/g
+// GET+POST share one exact route (DSH keys routes by path); register it as one
+// logical path so the allow-list still sees it.
+const ROUTE_METHODS_RE = /routeMethods\(`\$\{prefix\}([^`]*)`/g
 const routes = []
 const pluginDir = path.join(ROOT, 'src', 'plugins')
 for (const file of fs.readdirSync(pluginDir).filter((f) => f.endsWith('.mjs'))) {
@@ -37,6 +40,13 @@ for (const file of fs.readdirSync(pluginDir).filter((f) => f.endsWith('.mjs'))) 
     const isPortal = method === 'GET' && routePath === '/panel'
     if (!isApi && !isAdapterConstant && !isPortal) fail('route-not-under-api', file, `${method} ${routePath}`)
     if (!['GET', 'POST'].includes(method)) fail('route-method-not-allowlisted', file, `${method} ${routePath}`)
+    if (routePath.includes('*') || routePath.includes('..')) fail('route-wildcard', file, routePath)
+  }
+  ROUTE_METHODS_RE.lastIndex = 0
+  while ((m = ROUTE_METHODS_RE.exec(text))) {
+    const routePath = m[1]
+    routes.push({ file, method: 'GET+POST', path: routePath })
+    if (!routePath.startsWith('/api/')) fail('route-not-under-api', file, `GET+POST ${routePath}`)
     if (routePath.includes('*') || routePath.includes('..')) fail('route-wildcard', file, routePath)
   }
 }

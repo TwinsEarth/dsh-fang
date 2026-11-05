@@ -28,16 +28,26 @@ export function loadAuthToken(dataDir, envToken = process.env.DSH_FANG_AUTH_TOKE
   return token
 }
 
-/** Host 是否 loopback（支持 localhost / 127.0.0.1 / [::1] / ::1，可带端口）。 */
+/**
+ * Host 是否 loopback（支持 localhost / 127.0.0.1 / [::1] / ::1，可带端口）。
+ *
+ * 严格解析：`[::1]evil.example`、`127.0.0.1:3080@evil.example` 这类带尾随垃圾的
+ * Host 必须判假——否则 DNS rebinding 防护会被一个字符串前缀绕过。
+ */
 export function isLoopbackHost(host) {
   const raw = String(host ?? '').trim().toLowerCase()
   if (raw.length === 0) return false
-  const name = raw.startsWith('[')
-    ? raw.slice(0, raw.indexOf(']') + 1)
-    : raw.includes(':') && raw.split(':').length === 2 && /^\d+$/.test(raw.split(':')[1])
-      ? raw.split(':')[0]
-      : raw
-  return name === 'localhost' || name === '127.0.0.1' || name === '[::1]' || name === '::1'
+  if (raw === '::1') return true
+  if (raw.startsWith('[')) {
+    const match = /^\[([0-9a-f:.]+)\](?::(\d{1,5}))?$/.exec(raw)
+    if (!match) return false
+    if (match[2] !== undefined && Number(match[2]) > 65535) return false
+    return match[1] === '::1'
+  }
+  const match = /^([a-z0-9.-]+)(?::(\d{1,5}))?$/.exec(raw)
+  if (!match) return false
+  if (match[2] !== undefined && Number(match[2]) > 65535) return false
+  return match[1] === 'localhost' || match[1] === '127.0.0.1'
 }
 
 /** Origin 是否允许（同源 loopback / dsh-app 壳 / 无 Origin）。 */
@@ -102,4 +112,51 @@ export function checkRequestAuth(req, options) {
     }
   }
   return { ok: true }
+}
+
+/** Stable error envelope for every auth/host/origin rejection (additive `code`). */
+export function authErrorBody(decision) {
+  const code = String(decision?.code ?? 'unauthorized')
+  return { ok: false, error: code, code }
+}
+
+/**
+ * Install-level guard shared by every plugin that owns `/fang/api/*` routes.
+ *
+ * Resolves the token exactly once at startup, with the same precedence as the
+ * orchestrator: explicit config > env > `<dataDir>/fang-auth.json` (0600).
+ * `enabled: false` is the explicit test/debug escape hatch and still enforces
+ * Host/Origin/CSRF — it only skips the token comparison.
+ *
+ * @param {{dataDir?:string, token?:string, envToken?:string, enabled?:boolean}} [options]
+ * @returns {{token:string, enabled:boolean, check:(req:any, routeOptions?:{public?:boolean})=>
+ *   ({ok:true}|{ok:false,status:number,code:string})}}
+ */
+export function createHttpGuard(options = {}) {
+  const enabled = options.enabled !== false
+  const dataDir = String(options.dataDir ?? '').trim()
+  const explicit = String(options.token ?? '').trim()
+  const envToken = options.envToken === undefined ? process.env.DSH_FANG_AUTH_TOKEN : options.envToken
+  let token = ''
+  if (enabled) {
+    if (dataDir) {
+      token = loadAuthToken(dataDir, explicit || envToken)
+    } else {
+      const candidate = explicit || String(envToken ?? '').trim()
+      if (candidate.length < MIN_TOKEN_LENGTH) {
+        throw new Error('http-auth: dataDir or a >=32-char auth token is required when auth is enabled')
+      }
+      token = candidate
+    }
+  }
+  return {
+    token,
+    enabled: token.length > 0,
+    check(req, routeOptions = {}) {
+      return checkRequestAuth(req, {
+        token,
+        publicRoute: token.length === 0 || routeOptions.public === true,
+      })
+    },
+  }
 }
