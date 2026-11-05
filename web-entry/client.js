@@ -7,19 +7,9 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    function openPanel(event) {
-      if (event && typeof event.preventDefault === 'function') event.preventDefault()
-      const url = 'dsh-fang://open'
-      try {
-        // Hidden iframe avoids page navigation being swallowed by the host shell.
-        const frame = document.createElement('iframe')
-        frame.style.display = 'none'
-        frame.src = url
-        document.body.appendChild(frame)
-        setTimeout(() => frame.remove(), 1500)
-      } catch {
-        try { window.location.href = url } catch { /* host blocked custom protocol */ }
-      }
+    function openPanel() {
+      // 顶层导航保留真实用户激活，Chromium 才会把自定义协议交给系统处理。
+      try { window.location.href = 'dsh-fang://open' } catch { /* host blocked custom protocol */ }
     }
 
     function GateIcon({ size = 18 }) {
@@ -36,7 +26,6 @@ window.__ModuleLoader__.load({
       return h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
         h('a', {
           href: 'dsh-fang://open',
-          onClick: openPanel,
           'data-fang-entry': 'open-pc-panel',
           style: {
             display: 'inline-flex', alignItems: 'center', gap: 6, height: 32, padding: '0 12px',
@@ -58,7 +47,7 @@ window.__ModuleLoader__.load({
 
     function FangLaunchPanel() {
       if (typeof React.useEffect === 'function') {
-        React.useEffect(() => { openPanel(null) }, [])
+        React.useEffect(() => { openPanel() }, [])
       }
       return h('div', {
         'data-fang-entry': 'launch-panel',
@@ -66,7 +55,7 @@ window.__ModuleLoader__.load({
       },
       h(GateIcon, { size: 40 }),
       h('div', { style: { fontSize: 16, fontWeight: 700 } }, '正在打开瓮城桌面…'),
-      h('a', { href: 'dsh-fang://open', onClick: openPanel, style: { color: 'inherit', fontSize: 13 } }, '若未自动打开，点此重试'),
+      h('button', { type: 'button', onClick: openPanel, style: { height: 32, padding: '0 12px', borderRadius: 8, cursor: 'pointer' } }, '打开瓮城桌面'),
       h('div', { style: { opacity: .65, fontSize: 12 } }, '需要在 PC 安装 dsh-fang 桌面端'))
     }
 
