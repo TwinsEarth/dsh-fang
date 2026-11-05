@@ -1,0 +1,21 @@
+{
+  "name": "@local/dsh-fang-queue-journal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Composer draft/queue journal for dsh-Fang: persist unsent input and a read-only queue mirror; recovery is always user-confirmed.",
+  "license": "AGPL-3.0-or-later",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}

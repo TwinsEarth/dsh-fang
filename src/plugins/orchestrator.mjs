@@ -31,6 +31,7 @@ import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
+import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -154,6 +155,7 @@ export function apply(ctx, config) {
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot })
   const branchStore = new BranchStore(layout.dataDir)
+  const composerJournal = new ComposerJournal(layout.dataDir)
   // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
   const authToken = cfg.authEnabled === false
     ? ''
@@ -1740,6 +1742,26 @@ export function apply(ctx, config) {
         forbiddenFields: ['token', 'password', 'secret', 'credential', 'auth', 'cookie', 'sessionkey', 'apikey'],
         merge: false,
       }))
+
+      // v3.0.9 composer journal: persist unsent drafts and a read-only queue mirror
+      // so a restart/crash can offer recovery. Nothing is auto-sent.
+      routeMethods(`${prefix}/api/composer/journal`, {
+        GET: (req, res) => {
+          const key = new URL(String(req.url ?? '/'), 'http://x').searchParams.get('key') || ''
+          if (!key) return json(res, 400, { ok: false, error: 'journal-key-required' })
+          return json(res, 200, { ok: true, entry: composerJournal.get(key) })
+        },
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const key = String(body?.key ?? '')
+          if (!key) return json(res, 400, { ok: false, error: 'journal-key-required' })
+          try {
+            return json(res, 200, { ok: true, entry: composerJournal.save(key, body) })
+          } catch (error) {
+            return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+          }
+        },
+      })
 
       // v3.0.8 contract: an unknown /fang/api/* path must be a JSON 404 under the
       // same Host/Origin/token gate — not an unauthenticated empty 404 from the host.

@@ -58,7 +58,7 @@ test('compat: 全部模块可导入且路由契约满足 → ok', async () => {
     '/fang/api/tasks/open-url', '/fang/api/essence/create', '/fang/api/tasks/rename',
     '/fang/api/upgrade/status', '/fang/api/tasks/branches',
     '/fang/api/tasks/branches/activate', '/fang/api/tasks/branches/status',
-    '/fang/api/reflow/policy', '/other',
+    '/fang/api/reflow/policy', '/fang/api/composer/journal', '/other',
   ]
   const result = await runCompatGate({
     rootDir: root,

@@ -1,0 +1,3 @@
+- insert:
+    - id: fang-queue-journal
+      name: '@local/dsh-fang-queue-journal'

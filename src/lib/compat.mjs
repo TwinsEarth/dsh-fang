@@ -33,8 +33,9 @@ export const REQUIRED_ROUTE_PATHS = Object.freeze([
   '/fang/api/upgrade/status',
   '/fang/api/tasks/branches',
   '/fang/api/reflow/policy',
+  '/fang/api/composer/journal',
 ])
-export const DEFAULT_EXPECTED_ROUTE_COUNT = 67
+export const DEFAULT_EXPECTED_ROUTE_COUNT = 69
 
 /**
  * 列出需要做导入检查的插件模块文件（排序稳定）。

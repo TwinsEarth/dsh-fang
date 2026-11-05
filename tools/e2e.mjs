@@ -208,6 +208,15 @@ async function main() {
     check('GET /fang/api/tasks/branches unknown task → 404 unknown-task',
       unknownBranches.status === 404 && unknownBranches.body?.error === 'unknown-task',
       JSON.stringify({ status: unknownBranches.status, error: unknownBranches.body?.error }))
+    const journalSave = await api('/fang/api/composer/journal', {
+      method: 'POST',
+      body: JSON.stringify({ key: 'e2e-journal', draft: '未发送草稿', queue: [{ text: '排队消息', at: 1 }] }),
+    })
+    check('POST /fang/api/composer/journal persists draft',
+      journalSave.status === 200 && journalSave.body?.entry?.draft === '未发送草稿', `status=${journalSave.status}`)
+    const journalGet = await api('/fang/api/composer/journal?key=e2e-journal')
+    check('GET /fang/api/composer/journal returns queue mirror',
+      journalGet.status === 200 && journalGet.body?.entry?.queue?.[0]?.text === '排队消息', `status=${journalGet.status}`)
     const traversalBranches = await api('/fang/api/tasks/branches?taskId=' + encodeURIComponent('../../escape'))
     check('GET /fang/api/tasks/branches traversal taskId → 404',
       traversalBranches.status === 404 && traversalBranches.body?.error === 'unknown-task',
