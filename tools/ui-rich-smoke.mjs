@@ -97,7 +97,7 @@ const send = (method, params = {}) => new Promise((res, rej) => { const id = ++s
 
 await send('Page.enable')
 await send('Runtime.enable')
-await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__uiSmoke={errors:[],opens:[]};window.addEventListener('error',e=>window.__uiSmoke.errors.push(String(e.message)));window.open=u=>{window.__uiSmoke.opens.push(String(u));return null};window.fangShell={desktopInfo:async()=>({upstream:'http://127.0.0.1:3081',token:'smoke-token-123'})};document.addEventListener('click',e=>{const a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a){e.preventDefault();e.stopPropagation();window.__uiSmoke.opens.push(a.href)}},true);` })
+await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__uiSmoke={errors:[],opens:[]};window.addEventListener('error',e=>window.__uiSmoke.errors.push(String(e.message)));window.open=u=>{window.__uiSmoke.opens.push(String(u));return null};window.fangShell={desktopInfo:async()=>({upstream:'http://127.0.0.1:3081'}),revealToken:async()=>({ok:true,token:'smoke-token-123'})};document.addEventListener('click',e=>{const a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(a){e.preventDefault();e.stopPropagation();window.__uiSmoke.opens.push(a.href)}},true);` })
 await send('Page.navigate', { url: pageUrl })
 for (let i = 0; i < 80; i += 1) {
   const r = await send('Runtime.evaluate', { expression: 'document.body.dataset.mounted || document.body.dataset.mountError || ""', returnByValue: true })

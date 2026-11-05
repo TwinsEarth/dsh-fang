@@ -1818,7 +1818,7 @@ window.__ModuleLoader__.load({
       }, ...slots)
     }
 
-    function toggleMotherPalette(anchor) {
+    function toggleMotherPalette(anchor, app) {
       const host = anchor?.parentElement
       if (!host) return
       const existing = host.querySelector('[data-zone="palette"]')
@@ -1883,7 +1883,7 @@ window.__ModuleLoader__.load({
             const motherButton = button('Mother', {
               variant: 'ghost', size: 'sm', icon: icon('globe', 14),
               title: '母体浮窗：版本、备份、升级与连接自检（只读优先，写操作均二次确认）',
-              onClick: (event) => toggleMotherPalette(event?.currentTarget),
+              onClick: (event) => toggleMotherPalette(event?.currentTarget, app),
               fk: 'mother', dataBtnId: 'M-04',
             })
             motherButton.addEventListener('dblclick', (event) => {
@@ -2996,6 +2996,7 @@ window.__ModuleLoader__.load({
         btn.style.cssText = 'height:28px;padding:0 8px;border-radius:8px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;cursor:pointer;font:inherit'
       }
       let full = ''
+      let baseUrl = ''
       let revealed = false
       let opened = false
       let loaded = false
@@ -3009,7 +3010,7 @@ window.__ModuleLoader__.load({
         popup.hidden = !opened
         popup.style.display = opened ? 'flex' : 'none'
         if (!opened) { label.textContent = ''; label.title = ''; return }
-        label.textContent = full ? (revealed ? full : mask(full)) : '连接信息加载中…'
+        label.textContent = full && revealed ? full : (baseUrl ? baseUrl + '/?token=••••••••' : '连接信息加载中…')
         label.title = revealed ? full : ''
         eye.textContent = revealed ? '隐藏' : '显示'
       }
@@ -3018,12 +3019,9 @@ window.__ModuleLoader__.load({
         loaded = true
         try {
           const info = await window.fangShell?.desktopInfo?.()
-          if (info?.upstream) {
-            const token = String(info.token || '')
-            full = String(info.upstream).replace(/\/+$/, '') + '/?token=' + encodeURIComponent(token)
-          }
+          if (info?.upstream) baseUrl = String(info.upstream).replace(/\/+$/, '')
         } catch { /* ignore */ }
-        if (!full) full = String(location.origin || '') + '/?token=—'
+        if (!baseUrl) baseUrl = String(location.origin || '')
       }
       trigger.onclick = async () => {
         opened = !opened
@@ -3031,7 +3029,16 @@ window.__ModuleLoader__.load({
         revealed = false
         render()
       }
-      eye.onclick = () => { revealed = !revealed; render() }
+      eye.onclick = async () => {
+        if (!revealed) {
+          try {
+            const info = await window.fangShell?.revealToken?.()
+            if (info?.token) full = baseUrl + '/?token=' + encodeURIComponent(String(info.token))
+          } catch { /* ignore */ }
+        }
+        revealed = !revealed
+        render()
+      }
       copy.onclick = async () => {
         try { await navigator.clipboard.writeText(full); app.notify('ok', '已复制连接地址') } catch { app.notify('warn', '复制失败：浏览器未授权剪贴板') }
       }
@@ -3065,6 +3072,7 @@ window.__ModuleLoader__.load({
       const app = createConsole(host)
       const unmountDiagnostics = mountDiagnostics(app)
       const unmountConnection = mountConnectionInfo(app)
+      try { host.ownerDocument?.getElementById('fang-fallback')?.remove() } catch { /* ignore */ }
       return () => { unmountConnection(); unmountDiagnostics(); app.destroy() }
     }
 
