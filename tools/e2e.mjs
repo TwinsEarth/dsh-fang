@@ -192,6 +192,10 @@ async function main() {
       JSON.stringify({ status: upgradeStatus.status, ok: upgradeStatus.body?.ok }))
     const unauthUpgrade = await fetch(`http://127.0.0.1:${booted.port}/fang/api/upgrade/status`).catch(() => null)
     check('upgrade/status rejects missing token (401)', unauthUpgrade?.status === 401, `status=${unauthUpgrade?.status ?? 'n/a'}`)
+    const branches = await api('/fang/api/tasks/branches?taskId=e2e-probe')
+    check('GET /fang/api/tasks/branches 200 + branches array',
+      branches.status === 200 && Array.isArray(branches.body?.branches),
+      JSON.stringify({ status: branches.status, count: branches.body?.branches?.length }))
     check('mother has forker service', status.body?.services?.forker === true)
 
     const route = await api('/fang/api/route?realtime=1')

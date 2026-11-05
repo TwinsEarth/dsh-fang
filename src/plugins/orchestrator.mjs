@@ -1615,6 +1615,55 @@ export function apply(ctx, config) {
         })
         return json(res, out.ok ? 200 : 409, out)
       })
+      // v3.0.8 分支 HTTP 面（注册在末尾，避免影响既有路由初始化顺序）
+      route('GET', `${prefix}/api/tasks/branches`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const taskId = String(query.get('taskId') ?? '')
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        return json(res, 200, branchStore.list(taskId))
+      })
+      route('POST', `${prefix}/api/tasks/branches`, async (req, res) => {
+        const body = await readBody(req)
+        const taskId = String(body?.taskId ?? '')
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        try {
+          return json(res, 200, branchStore.create(taskId, {
+            branchId: String(body?.branchId ?? ''),
+            parentBranchId: body?.parentBranchId ? String(body.parentBranchId) : undefined,
+            baseTurn: Number(body?.baseTurn) || 0,
+          }))
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/tasks/branches/activate`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          return json(res, 200, branchStore.activate(String(body?.taskId ?? ''), String(body?.branchId ?? '')))
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/tasks/branches/status`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          return json(res, 200, branchStore.setStatus(String(body?.taskId ?? ''), String(body?.branchId ?? ''), String(body?.status ?? '')))
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('GET', `${prefix}/api/reflow/policy`, (req, res) => json(res, 200, {
+        ok: true,
+        states: ['sealed', 'verified', 'quarantine', 'adopted'],
+        transitions: {
+          sealed: ['verified'],
+          verified: ['quarantine', 'adopted'],
+          quarantine: ['verified'],
+          adopted: [],
+        },
+        forbiddenFields: ['token', 'password', 'secret', 'credential', 'auth', 'cookie', 'sessionkey', 'apikey'],
+        merge: false,
+      }))
     })
   }
 }
