@@ -4,6 +4,26 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.0.8（2026-11-05）
+
+**主题：分支/回流运行时、MCP 只读桥、FANG_HOME 数据根、DSH Web 侧边栏入口。**
+
+### 新增
+- **分支 HTTP**：`GET/POST /fang/api/tasks/branches`、`/activate`、`/status`；`BranchStore` 原子持久化，单写者与不可合并约束沿用。
+- **回流策略**：`GET /fang/api/reflow/policy`（sealed→verified→quarantine→adopted，禁止字段，不合并）。
+- **MCP**：`tools/mcp/{tools,server}.mjs`；stdio JSON-RPC；默认只读工具 + 高风险 `get_op`/`abandon_op`；输出递归清洗 token/path/template。
+- **FANG_HOME**：`$FANG_HOME/mirror/<profile>`、`$FANG_HOME/essence`、`$FANG_HOME/sessions`；未设置时保持旧布局兼容。
+- **DSH Web 入口**：侧边栏「瓮城」图标 + 主面板自动唤起 `dsh-fang://open`；插件配置页保留「打开瓮城控制台」。
+- **Electron 桌面端**：宿主自动发现、托盘常驻/退出、连接信息掩码弹窗、日志分类与 100/300 分页、标题栏 Slogan；安装器默认 `D:\ToFuture`，AGPL 源码随包。
+
+### 修复
+- 任务创建异常返回空响应 → 结构化 500；母体 palette `app is not defined`。
+- 代理绝对 URL 可崩溃主进程 → 仅接受 `/` 路径 + origin 校验 + 400。
+- 启动器默认开 CDP、写死 Electron 路径；`desktopInfo` 下发 token；`#fang-fallback` 残留。
+
+### 门禁
+- 路由 **67**；e2e **64/64**；preflight `--e2e` GREEN；安装包 `DSH-Fang-3.0.8-x64-Setup.exe` + SHA256SUMS。
+
 ## v3.0.7（2026-11-03）
 
 **主题：发布门禁加固——e2e 不可跳过、client half 物化断言、16 行完整性、.sha256 伴随产物。**

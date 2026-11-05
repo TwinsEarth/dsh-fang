@@ -1602,6 +1602,9 @@ window.__ModuleLoader__.load({
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
+        backupMother: () => mirrorAction('backup', async () => (await api('/fang/api/mirror/backup', {
+          method: 'POST', body: JSON.stringify({ bucket: 'restore', label: '手动备份' }),
+        })).body),
         diagnostics: {
           list: () => diagLog.slice(-3000),
           push: (level, message, detail) => diag(level, message, detail),
@@ -1832,9 +1835,8 @@ window.__ModuleLoader__.load({
           borderRadius: '12px', boxShadow: '0 12px 32px rgba(0,0,0,.18)',
         },
       },
-      h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-btn-id': 'mother-clone', onClick: () => app.notify('warn', '克隆母体尚未接线') }, '克隆（PC 客户端）'),
       h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-btn-id': 'mother-open', onClick: () => openMotherPortal() }, '打开母体 Web'),
-      h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-btn-id': 'mother-backup', onClick: () => app.notify('warn', '备份入口尚未接线') }, '备份当前母体'))
+      h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-btn-id': 'mother-backup', onClick: () => app.backupMother() }, '备份当前母体'))
       host.style.position = 'relative'
       host.appendChild(palette)
       if (!window.__fangPaletteEsc) {
