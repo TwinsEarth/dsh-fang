@@ -13,15 +13,16 @@ export function safeJoin(root, ...parts) {
 
 export function assertInside(root, target, { followSymlink = true } = {}) {
   const base = path.resolve(root)
-  let resolved = path.resolve(target)
+  const lexical = path.resolve(target)
+  let resolved = lexical
   let boundary = base
   if (followSymlink) {
     try { boundary = fs.realpathSync.native(base) } catch { /* keep lexical */ }
-    try { resolved = fs.realpathSync.native(resolved) } catch {
-      try { resolved = path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved)) } catch { /* keep lexical */ }
+    try { resolved = fs.realpathSync.native(lexical) } catch {
+      try { resolved = path.join(fs.realpathSync.native(path.dirname(lexical)), path.basename(lexical)) } catch { /* keep lexical */ }
     }
   }
   const rel = path.relative(boundary, resolved)
   if (rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) throw new Error('path-escape')
-  return resolved
+  return lexical
 }
