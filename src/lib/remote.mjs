@@ -242,8 +242,8 @@ export function createRemote({
   async function request(method, pathname, { query = null, body = undefined } = {}) {
     if (!impl) return failure(0, 'no-fetch', REMOTE_FAILURE_KIND.NETWORK)
 
-    // 每次请求都从干净 URL 重新拼 token，避免 base URL 里旧的 token 影响结果。
-    const target = withToken(withQuery(joinUrl(targetUrl, pathname, routePrefix), query), effectiveToken)
+    // v3.0.5/B4：token 只走 Authorization header，绝不再拼进 URL（防日志/历史/Referer 泄漏）。
+    const target = withQuery(joinUrl(targetUrl, pathname, routePrefix), query)
 
     const controller = new AbortController()
     let timer = null

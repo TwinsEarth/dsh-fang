@@ -212,7 +212,9 @@ data: {"cursor":"1","sessionId":"s-…","at":1730000000000,"event":{"kind":"comm
 
 - `id` 是 cursor；母体重连时显式带 `?since=<lastCursor>`（不依赖浏览器 `Last-Event-ID`）；
 - 心跳是**注释帧**（`: heartbeat`），不占 cursor、不进审计流；间隔 `heartbeatMs`（默认 5s），同时驱动待审批 diff；
-- 单帧上限 64KB（超限由业务插件拆成多个 `command-progress`，Adapter 不静默截断）。
+- 单帧上限 64KB（超限由业务插件拆成多个 `command-progress`，Adapter 不静默截断）；
+- 母体侧解析器 `src/lib/sse-parser.mjs`（v2.6.5）：只按 `\n` 切行、行尾裁一个 `\r`、空行切帧、
+  `flush()` 丢弃残帧；模糊测试见 `docs/FUZZ-SSE-PARSER.md`。
 
 ### 5.3 三种同步模式
 
@@ -264,13 +266,20 @@ interface CommandEnvelope {
 }
 ```
 
-语义：
+语义（实现见 `src/lib/command-cache.mjs` / `docs/COMMAND-CACHE.md`）：
 
-- **幂等**：同一 `commandId` 重试 → 直接重放第一次的响应，**不重复执行副作用**（`CommandCache` LRU 500）；
-  重放响应带 `"deduplicated": true`；
+- **幂等**：同一 `commandId` 重试 → 直接重放第一次的响应，**不重复执行副作用**
+  （`CommandCache`，容量 500，LRU 只淘汰已完成项）；重放响应带 `"deduplicated": true`；
+- **并发合并**：同一 `commandId` 正在执行时再次提交 → 等待**同一个 promise**，不会执行两次；
+  只有真正执行的那一次会发 `command` / `command-done` 事件；
+- **失败契约**：业务失败（`fn` 返回 `{status:'rejected',code,message}`）与 async accepted
+  都会被缓存；`fn` 抛错（传输/编程错误，命令可能没执行）不缓存并移除，重试才会重新执行；
 - **同步**：返回 `200 {ok, op, result, commandId}`；
 - **异步**：返回 `202 {ok:true, status:'accepted', trackingId, commandId, async:true}`，
   完成后推 `command-done {trackingId, op, result}`。`trackingId`（追踪）与 `commandId`（去重）是两个字段；
+- **扩展命令**（v2.6.8）：插件可通过 `registerCommand(op, executor)` 注册新 op；executor 返回普通对象 =
+  同步 200，返回 `{status:'accepted',trackingId}` = 202 + 自行 `emit command-done`；内置 op 不可覆盖。
+  请求体上限 1 MB，超限 **413 `body-too-large`**（契约见 `docs/ADAPTER-COMMANDS.md`）；
 - 同一次重试窗口内（分身未重启）幂等成立；跨进程重启不保证（见 §12 遗留决策）。
 
 ### 6.3 待审批 diff
@@ -316,7 +325,8 @@ interface CommandEnvelope {
 |---|---|---|---|
 | 200 | — | 成功 | 直接使用 |
 | 202 | — | 异步命令已接受 | 用 `trackingId` 等 `command-done` |
-| 400 | `bad-request` / `invalid-json` / `invalid-payload` / `missing-op` / `unknown-op` / `path-escape` / `file-too-large` / `total-too-large` / `binary-file` / `body-too-large` / `cursor-invalid` / `command-id-invalid` | 参数/协议错误 | 记录，不重试 |
+| 400 | `bad-request` / `invalid-json` / `invalid-payload` / `missing-op` / `unknown-op` / `path-escape` / `file-too-large` / `total-too-large` / `binary-file` / `cursor-invalid` / `command-id-invalid` | 参数/协议错误 | 记录，不重试 |
+| 413 | `body-too-large` | 请求体超过 1 MB | 记录，不重试 |
 | 401 | `unauthorized` | token 错误 | 标记 fork 不可信；**不重试** |
 | 404 | `not-found` / `plugin-not-found` | 资源不存在 | 记录，不重试 |
 | 409 | `session-changed` / `state-conflict` / `not-pending` / `service-unavailable` / `not-configured` / `conflict` / `timeout` | 状态冲突/依赖缺失 | `session-changed` 重置 cursor；其余记录 |
@@ -366,6 +376,22 @@ idle ──connect()──▶ negotiating ──ok──▶ streaming
 ```
 
 失败语义：**永不抛出**；网络/超时按 `baseMs * 2^n` 无限退避（上限 `maxMs`）；401 致命、不重试。
+
+**ForkClient（v2.6.4 实现）**：`src/lib/fork-client.mjs` 在 AdapterClient 之上组合 `CommandCache`：
+
+- `inflight: Map<trackingId, {resolve,reject,timer}>` 追踪异步命令，`command-done` 按 trackingId 匹配；
+- 同步/异步命令统一走 `cache.run`；异步命令**等 command-done 拿到终态后才写缓存**（不是缓存 accepted）；
+- 同步 POST 用传输层超时（AbortController）；异步命令用 `asynchronousTimeoutMs`（默认 120s）兜底；
+- SSE 断开保留 inflight（cursor 补发），`resetCursor=true` / `disconnect()` 清空并 reject；
+- 契约与 13 项测试见 `docs/FORK-CLIENT.md`。
+
+**TaskHandle（v2.6.7 实现）**：`src/lib/task-handle.mjs` 组合 Forker + ForkClient：
+
+- `start()` 负责 spawn（可选）+ 用 forker 的内存 token 建 client + connect；
+- 监听 `fang/fork-crashed` → `reconnecting`；等 `fang/fork-started`（或轮询 status）→ 用
+  **新 url / 新 token** 重建 client（ForkClient 只处理同进程 SSE 断线，进程重启由 TaskHandle 处理）；
+- 重连窗口内命令最多等 `commandWaitMs`，超时 fail-closed；`stop/recycle/dispose` 幂等；
+- 状态机与 17 项测试见 `docs/TASK-HANDLE.md`。
 
 ---
 
@@ -438,14 +464,24 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 
 | 文件 | 覆盖 |
 |---|---|
-| `test/adapter-protocol.test.mjs`（11） | cursor 边界/uint64、环形缓冲与 gap、幂等缓存 LRU、版本协商、Bearer 解析、命令信封校验、错误码映射、SSE 帧跨 chunk、命令 id 生成 |
-| `test/adapter.test.mjs`（+5，共 31） | v3 路由注册顺序、version/health/state 形状、审批 diff 事件、SSE 回放/session-changed/cursor-invalid/410/close 清理、命令幂等+202+参数校验、Bearer 401/放行 |
+| `test/adapter-protocol.test.mjs`（11） | cursor 边界/uint64、环形缓冲与 gap、命令缓存 re-export、版本协商、Bearer 解析、命令信封校验、错误码映射、SSE 帧跨 chunk、命令 id 生成 |
+| `test/command-cache.test.mjs`（16，v2.6.3） | in-flight 合并、completed 重放、失败契约、LRU/touch、get 不 touch、超限收敛、invalidate/clear/onEvict、容量边界、stats |
+| `test/adapter.test.mjs`（+6，共 32） | v3 路由注册顺序、version/health/state 形状、审批 diff 事件、SSE 回放/session-changed/cursor-invalid/410/close 清理、命令幂等+202+参数校验、并发同 commandId 只执行一次、Bearer 401/放行 |
 | `test/adapter-client.test.mjs`（6） | connect 三步、协议过新拒绝、401 致命、409 重拉快照+续流、同 commandId 网络重试、400 不重试 |
+| `test/fork-client.test.mjs`（13，v2.6.4） | 同步直通/缓存、异步 accepted→command-done 终态、异步超时、传输失败不缓存、SSE 断开保留 inflight、session 变化清空、disconnect 清空、stale command-done、重复 trackingId、事件隔离、connect 失败、参数边界、9 个 op 便捷方法 |
+- `test/task-handle.test.mjs`（17，v2.6.7） | 启动链/token/spawn、崩溃后新端口新 token 重连、命令短等待、重启超时、stop/recycle/dispose、SSE 断开不改变状态、事件聚合、幂等、fail-closed |
+| `test/adapter.test.mjs`（36，v2.6.8 新增 4） | 既有：命令/审批/归档/SSE/认证；新增：registerCommand 同步+异步+disposer、accepted 重试同 trackingId、拒绝覆盖内置 op、1MB body → 413 |
+| `test/sse-directed.test.mjs`（8，v2.6.9） | 9 分支 61 条定向用例完整性、smoke（一次性+分块）、expectedFrames 覆盖、mutation 检出（裁掉所有尾部 CR）、混合策略确定性、均匀抽样、fuzz 全定向 900 次分支全覆盖、全随机/可复现 |
+| `test/sse-client-fuzz.test.mjs`（3，v2.7.0） | 性质（401 致命/409、410 reset/心跳无害/断连无重复且 since 正确）、120 次随机分块+断连 0 failures 且四类策略覆盖、同 seed 可复现 |
+| `test/orchestrator.test.mjs`（21，v2.7.1 新增 3） | 归档停进程且保留 home、stop-failed 不假装成功、还原重新 spawn、删除存档 reap 并移除记录 |
+| `test/adapter-client.test.mjs`（8，v2.7.4 新增 2） | 三步 connect（version→state→SSE）、协议过新拒绝、401 fatal、409 resync、重试幂等、version 信息/协议区间可观测、sessionMismatch 诊断 |
+| `test/forker.test.mjs`（27，v2.7.3 新增 1） | token 生命周期 + onTokenRefresh 广播/getToken 别名 + supervise give-up 时 emit fork-restart-failed(terminal=true) |
+| `test/sse-parser-fuzz.test.mjs`（7，v2.6.5） | 帧边界/多行 data/CRLF/flush/超长行/UTF-8 字节切分、固定种子分块等价、随机 seed smoke、RNG 可复现、参考实现一致、roundtrip、flush 后可用 |
 | `test/remote.test.mjs`（+2，共 14） | v3 路径 + Bearer 头、eventsUrl 的 since/session/token |
 | `test/forker.test.mjs`（+1，共 25） | token 每次 spawn 重新生成、进 env、stop 作废、不落 forks.json/fang-meta.json/status |
 | `test/orchestrator.test.mjs`（18） | 版本号改从 `FANG_VERSION` 读取；握手/任务生命周期回归 |
 
-全量：**331 项（330 pass / 1 skip）**。
+全量：**410 项（409 pass / 1 skip）**。
 
 ---
 
@@ -454,6 +490,26 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 ### 已落地
 
 - 分身侧 10 条路由（v2 五条 + v3 五条）、Bearer 认证、事件环形缓冲、审批 diff、命令幂等缓存、异步 202、SSE 心跳/回放/410/409；
+- `CommandCache.run()` 幂等执行（v2.6.3）：in-flight 合并、completed 重放、业务失败缓存 /
+  传输错误不缓存、LRU 只淘汰已完成项，契约见 `docs/COMMAND-CACHE.md`；
+- `ForkClient`（v2.6.4）：命令外观 + inflight/trackingId/超时兜底，契约见 `docs/FORK-CLIENT.md`；
+- `TaskHandle`（v2.6.7）：fork 进程 + ForkClient 的统一生命周期，崩溃后重建连接，契约见 `docs/TASK-HANDLE.md`；
+- `Adapter.registerCommand`（v2.6.8）：外部插件注册命令（同步/异步由 executor 返回值决定），
+  accepted 走 command-done；1 MB body 超限 → 413；契约见 `docs/ADAPTER-COMMANDS.md`；
+- SSE 定向生成器（v2.6.9）：9 分支 61 条最小输入 + expectedFrames + mutation 检出，
+  随机模糊按 `directedProb` 混入；契约见 `docs/FUZZ-SSE-DIRECTED.md`；
+- SSE 网络层模糊（v2.7.0）：真实 HTTP mock + 随机分块/断连，验证 cursor 无重复/无空洞、
+  `since` 续传、409/410 reset、401 致命；契约见 `docs/FUZZ-SSE-CLIENT.md`；
+- 归档/读档（v2.7.1）：归档 = 停进程 + 保留 home（stop-failed 如实返回），
+  还原 = 原 home 重新 spawn，删除 = reap；契约见 `docs/ARCHIVE.md`；
+- Forker token 公开面（v2.7.2）：getToken 别名 + onTokenRefresh 广播（每次 spawn 生成/刷新），
+  token 生命周期仍为内存 only + stop 作废；契约见 `docs/FORKER-TOKEN.md`；
+- 重启结果事件化（v2.7.3）：`fang/fork-restart-failed {terminal}` 让 TaskHandle 终态 fail-fast、
+  非终态继续等待；成功信号仍为 `fang/fork-started` + 轮询兜底；
+- 连接三步可观测（v2.7.4）：`lastVersionInfo` / `protocolRange` / `sessionMismatch` 诊断，
+  连接顺序仍为 version → state → SSE；契约见 `docs/CONNECT-PREFLIGHT.md`；
+- 端口生命周期（v2.7.5）：Adapter 复用 DSH 单端口（无 `adapterPort`/`DSH_ADAPTER_PORT`），
+  Forker 唯一分配者 + 六条归还路径；契约见 `docs/PORT-LIFECYCLE.md`；
 - 共享协议库 + ForkClient（SSE 解析、cursor 续传、409/410 处理、指数退避、幂等重试）；
 - Forker 每次 spawn 生成 token 并经 env 注入；`adapterToken(forkId)` 只读内存；
 - Orchestrator 在握手后做 `/version` 协商并记录 `task.adapter.protocol`；`remoteFor()` 自动带 Bearer。
@@ -470,7 +526,8 @@ ForkClient                     Adapter(旧)      Adapter(新, sessionId 变)
 
 1. **`/state` 是否 gzip**：快照在插件多时可达几十 KB。若 DSH web 已有压缩中间件则 Adapter 不重复实现；
    否则由 Adapter 自己 `zlib.gzip`（但会破坏「纯 HTTP 层」的简洁性）。
-2. **`CommandCache` 是否持久化**：现在纯内存，跨进程重启清空。极端窗口
+2. **`CommandCache` 是否持久化**：现在纯内存（v2.6.3 起 in-flight 合并与失败契约已实现，见
+   `docs/COMMAND-CACHE.md`），跨进程重启清空。极端窗口
    「命令执行成功 → 响应丢失 → 分身重启 → 母体重试」会执行两次。缓解方案是让每个命令副作用本身幂等
    （例如 `load-plugin` 对已加载插件返回 completed）；不建议落盘——它解决的是短窗口重试，不是跨重启一致性。
 3. **审批双确认**：`approve-action` 命令返回 `completed` 后，实际结果再由 `approval-resolved` 事件确认。

@@ -43,7 +43,7 @@ test('connect: 版本协商 → 快照 → SSE，cursor 推进、事件/状态�
     const target = String(url)
     calls.push({ url: target, headers: init.headers ?? {} })
     if (target.includes('/adapter/version')) {
-      return jsonRes({ ok: true, protocol: 3, sessionId: 's-1', version: '2.6.1' })
+      return jsonRes({ ok: true, protocol: 3, sessionId: 's-1', version: '2.6.2' })
     }
     if (target.includes('/adapter/state')) {
       return jsonRes({ ok: true, sessionId: 's-1', lastCursor: '5', plugins: [] })
@@ -84,7 +84,7 @@ test('connect: 版本协商 → 快照 → SSE，cursor 推进、事件/状态�
   assert.equal(states.length, 1)
 
   assert.equal(calls[0].headers.authorization, 'Bearer adapter-token', 'v3 请求带 Bearer')
-  assert.ok(calls[0].url.includes('token=web-token'), 'DSH web token 仍走 ?token=')
+  assert.equal(calls[0].url.includes('token='), false, 'v3.0.5/B4：JSON 请求不再把 token 拼进 URL')
   assert.ok(calls[2].url.includes('since=5'), '续流带 since=cursor')
   assert.ok(calls[2].url.includes('session=s-1'), '续流带 session')
   client.stop()
@@ -200,5 +200,53 @@ test('command: 非网络类失败不重试（例如 400 参数错误）', async 
   assert.equal(out.ok, false)
   assert.equal(out.status, 400)
   assert.equal(calls, 1)
+  client.stop()
+})
+
+// ── v2.7.4：三步 connect 的可观测性（version 信息 / 协议区间 / session 一致性）──
+
+test('connect: version 信息与协议区间可观测（lastVersionInfo / protocolRange）', async () => {
+  const fetchImpl = async (url) => {
+    const target = String(url)
+    if (target.includes('/adapter/version')) {
+      return jsonRes({ ok: true, protocol: 3, sessionId: 's-1', version: '2.7.4', minProtocol: 1 })
+    }
+    if (target.includes('/adapter/state')) return jsonRes({ ok: true, sessionId: 's-1', lastCursor: '0', plugins: [] })
+    if (target.includes('/adapter/events')) return sseRes([])
+    throw new Error(`unexpected ${target}`)
+  }
+  const client = createAdapterClient({ url: 'http://x', fetchImpl, autoReconnect: false })
+  const connected = await client.connect()
+  assert.equal(connected.ok, true)
+  assert.equal(connected.version.version, '2.7.4', 'connect 结果携带 version 响应')
+  assert.equal(client.lastVersionInfo.protocol, 3)
+  assert.equal(client.lastVersionInfo.sessionId, 's-1')
+  assert.equal(client.protocolRange.min, 1)
+  assert.equal(client.protocolRange.max, 3)
+  assert.equal(connected.sessionMismatch, null)
+  client.stop()
+})
+
+test('connect: version/state 的 sessionId 不一致 → 记录 sessionMismatch，仍用 state 的 session 续流', async () => {
+  const calls = []
+  const fetchImpl = async (url) => {
+    const target = String(url)
+    calls.push(target)
+    if (target.includes('/adapter/version')) return jsonRes({ ok: true, protocol: 3, sessionId: 's-old' })
+    if (target.includes('/adapter/state')) return jsonRes({ ok: true, sessionId: 's-new', lastCursor: '4', plugins: [] })
+    if (target.includes('/adapter/events')) return sseRes([])
+    throw new Error(`unexpected ${target}`)
+  }
+  const client = createAdapterClient({ url: 'http://x', fetchImpl, autoReconnect: false })
+  const connected = await client.connect()
+  assert.equal(connected.ok, true)
+  assert.equal(connected.sessionId, 's-new', 'state 是最新真相')
+  assert.equal(client.sessionId, 's-new')
+  assert.equal(client.sessionMismatch.versionSession, 's-old')
+  assert.equal(client.sessionMismatch.stateSession, 's-new')
+  assert.ok(Number(client.sessionMismatch.at) > 0)
+  const eventsUrl = calls.find((target) => target.includes('/adapter/events'))
+  assert.ok(eventsUrl.includes('since=4'), 'SSE 用 state.lastCursor')
+  assert.ok(eventsUrl.includes('session=s-new'), 'SSE 必须用 state 的 sessionId')
   client.stop()
 })

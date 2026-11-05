@@ -21,6 +21,7 @@ export const MATRIX = {
   adapter: ['fork'],
   scorer: ['mother', 'fork'],
   router: ['mother', 'fork'],
+  umbrella: ['mother', 'fork'],
   approver: ['mother', 'fork'],
   bufferKeeper: ['fork'],
   auditor: ['mother', 'fork'],

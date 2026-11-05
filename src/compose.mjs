@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
-// dsh-Fang compose mode — mounts the orchestrator and all nine sub-plugins as nested
+// dsh-Fang compose mode — mounts the orchestrator and every sub-plugin as nested
 // fibers of one loader row. This is the fallback composition used when the split-row
 // patch (`./cordis.patch.yml`) cannot resolve subpath entries; it is behaviourally
 // identical because every sub-plugin is the same module the split rows would load.
@@ -9,6 +9,7 @@ import * as auditor from './plugins/auditor.mjs'
 import * as forker from './plugins/forker.mjs'
 import * as bufferKeeper from './plugins/buffer-keeper.mjs'
 import * as scorer from './plugins/scorer.mjs'
+import * as umbrella from './plugins/umbrella.mjs'
 import * as healer from './plugins/healer.mjs'
 import * as router from './plugins/router.mjs'
 import * as approver from './plugins/approver.mjs'
@@ -28,6 +29,7 @@ export const Config = z.object({
   forker: z.object({}).default({}).description('派生器配置'),
   bufferKeeper: z.object({}).default({}).description('缓冲管理器配置'),
   scorer: z.object({}).default({}).description('评分配置'),
+  umbrella: z.object({}).default({}).description('保护伞（动作灯色 + 决策）配置'),
   healer: z.object({}).default({}).description('修复子插件配置'),
   router: z.object({}).default({}).description('路由决策配置'),
   approver: z.object({}).default({}).description('审批子插件配置'),
@@ -46,6 +48,7 @@ export function apply(ctx, config) {
   ctx.plugin(forker, cfg.forker ?? {})
   ctx.plugin(bufferKeeper, cfg.bufferKeeper ?? {})
   ctx.plugin(scorer, cfg.scorer ?? {})
+  ctx.plugin(umbrella, cfg.umbrella ?? {})
   ctx.plugin(healer, cfg.healer ?? {})
   ctx.plugin(router, cfg.router ?? {})
   ctx.plugin(approver, cfg.approver ?? {})
@@ -58,4 +61,4 @@ export function apply(ctx, config) {
   ctx.plugin(sessionRouter, cfg.sessionRouter ?? {})
 }
 
-export const _modules = { auditor, forker, bufferKeeper, scorer, healer, router, approver, hotReloader, restartGuard, adapter, orchestrator, sessionBridge, sessionSync, sessionRouter }
+export const _modules = { auditor, forker, bufferKeeper, scorer, umbrella, healer, router, approver, hotReloader, restartGuard, adapter, orchestrator, sessionBridge, sessionSync, sessionRouter }

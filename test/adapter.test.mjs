@@ -54,7 +54,7 @@ function applyWithRole(role, config = {}, services = {}, { webServer = true, env
   return { ctx, ws, service }
 }
 
-const applyAsFork = (config = {}, services = {}, opts = {}) => applyWithRole('fork', config, services, opts)
+const applyAsFork = (config = {}, services = {}, opts = {}) => applyWithRole('fork', { allowLegacyNoToken: true, ...config }, services, opts)
 
 // ── 服务桩（形状对齐 kernel SERVICE 的真实实现）──────────────────────────────
 
@@ -136,6 +136,7 @@ function makeAllServices({ dir = '', auditorRecords = [] } = {}) {
     [SERVICE.approver]: makeApprover({ items: [{ id: 'a1' }, { id: 'a2' }] }),
     [SERVICE.auditor]: makeAuditor(auditorRecords),
     [SERVICE.scorer]: makeScorer(),
+    [SERVICE.umbrella]: { decideAction: () => ({ decision: 'ask' }), assessAction: () => ({ light: 'yellow' }) },
     [SERVICE.router]: makeRouter(),
     [SERVICE.healer]: { gates: () => ({ pass: true, gates: [] }) },
     [SERVICE.hotReloader]: { swap: async () => ({ ok: true }) },
@@ -352,7 +353,7 @@ test('HTTP GET status: 200 + 服务表/缓冲三态/待批数/审计头', async 
     assert.equal(body.ok, true)
     assert.equal(body.role, 'fork')
     assert.equal(body.taskId, 'task_http')
-    for (const key of ['scorer', 'router', 'healer', 'approver', 'hotReloader', 'buffer', 'auditor', 'adapter']) {
+    for (const key of ['scorer', 'umbrella', 'router', 'healer', 'approver', 'hotReloader', 'buffer', 'auditor', 'adapter']) {
       assert.equal(body.services[key], true, `services.${key} 应为 true`)
     }
     assert.equal(body.services.adapter, true)
@@ -990,6 +991,38 @@ test('v3: POST commands 幂等（同 commandId 只执行一次）+ 202 异步 + 
   }
 })
 
+test('v3: 同一 commandId 并发提交 → in-flight 合并，只执行一次（CommandCache.run）', async () => {
+  const root = tmpDir('fang-v3-concurrent-')
+  try {
+    const gate = { resolve: null }
+    const buffer = makeBuffer({
+      dir: root,
+      flushImpl: () => new Promise((resolve) => {
+        gate.resolve = () => resolve({ state: 'settled', flushed: ['x.js'], timedOut: false })
+      }),
+    })
+    const { ctx, service } = applyAsFork({ taskId: 'task_conc' }, { [SERVICE.buffer]: buffer })
+
+    const p1 = service.commands({ commandId: 'cmd_conc_1', op: ADAPTER_OP.FLUSH_BUFFER })
+    const p2 = service.commands({ commandId: 'cmd_conc_1', op: ADAPTER_OP.FLUSH_BUFFER })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(buffer.calls.flush.length, 1, '同一 commandId 并发提交只能执行一次')
+    gate.resolve()
+    const [first, second] = await Promise.all([p1, p2])
+    assert.equal(first.ok, true)
+    assert.equal(second.ok, true)
+    assert.equal(first.deduplicated, undefined, '第一个调用是真实执行，不带 deduplicated')
+    assert.equal(second.deduplicated, true, '并发等待者拿到同一次执行的结果')
+
+    const later = await service.commands({ commandId: 'cmd_conc_1', op: ADAPTER_OP.FLUSH_BUFFER })
+    assert.equal(later.deduplicated, true, '完成后再次提交走 completed 重放')
+    assert.equal(buffer.calls.flush.length, 1)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('v3: Bearer 认证（env 注入时强制；未注入时 v2 兼容放行）', async () => {
   const secured = applyWithRole('fork', {}, {}, { env: { DSH_ADAPTER_TOKEN: 'tok-v3-secret-0123456789abcdef' } })
   assert.equal(secured.service.authEnabled, true)
@@ -1014,12 +1047,174 @@ test('v3: Bearer 认证（env 注入时强制；未注入时 v2 兼容放行）'
   assert.equal(okRes.json().ok, true)
   secured.ctx.dispose()
 
-  const legacy = applyAsFork({})
-  assert.equal(legacy.service.authEnabled, false, '无 env token = v2 兼容模式')
+  const legacy = applyAsFork({ allowLegacyNoToken: false })
+  assert.equal(legacy.service.authEnabled, false, '无 env token = authEnabled false')
   const legacyRes = makeRes()
   await findHandler(legacy.ws, 'GET', ADAPTER_ROUTE.STATE)(getReq(), legacyRes)
-  assert.equal(legacyRes.statusCode, 200)
+  assert.equal(legacyRes.statusCode, 401, 'v3.0.5/B2：fork 无 token 默认 fail-closed')
+  assert.equal(legacyRes.json().code, 'unauthorized')
   legacy.ctx.dispose()
+
+  const legacyAllowed = applyAsFork({})
+  assert.equal(legacyAllowed.service.authEnabled, false)
+  const allowedRes = makeRes()
+  await findHandler(legacyAllowed.ws, 'GET', ADAPTER_ROUTE.STATE)(getReq(), allowedRes)
+  assert.equal(allowedRes.statusCode, 200, '显式 allowLegacyNoToken 时才允许 v2 兼容')
+  legacyAllowed.ctx.dispose()
+
+  // Adapter perimeter must match /fang/api/*: loopback Host, Origin/CSRF, JSON writes,
+  // and auth-before-method (401 not 405).
+  const token = 'tok-perimeter-0123456789abcdef0123456789'
+  const secured2 = applyWithRole('fork', {}, {}, { env: { DSH_ADAPTER_TOKEN: token } })
+  const state = findHandler(secured2.ws, 'GET', ADAPTER_ROUTE.STATE)
+
+  const badHostReq = getReq()
+  badHostReq.headers = { host: 'evil.example', authorization: `Bearer ${token}` }
+  const badHostRes = makeRes()
+  await state(badHostReq, badHostRes)
+  assert.equal(badHostRes.statusCode, 403)
+  assert.equal(badHostRes.json().code, 'bad-host')
+
+  const badOriginReq = getReq()
+  badOriginReq.headers = { host: '127.0.0.1:1', origin: 'https://evil.example', authorization: `Bearer ${token}` }
+  const badOriginRes = makeRes()
+  await state(badOriginReq, badOriginRes)
+  assert.equal(badOriginRes.statusCode, 403)
+  assert.equal(badOriginRes.json().code, 'bad-origin')
+
+  const postNoAuth = getReq()
+  postNoAuth.method = 'POST'
+  postNoAuth.headers = { host: '127.0.0.1:1' }
+  const postNoAuthRes = makeRes()
+  await state(postNoAuth, postNoAuthRes)
+  assert.equal(postNoAuthRes.statusCode, 401, 'auth 必须先于 method 判定')
+
+  const wrongMethodReq = getReq()
+  wrongMethodReq.method = 'POST'
+  wrongMethodReq.headers = { host: '127.0.0.1:1', authorization: `Bearer ${token}` }
+  const wrongMethodRes = makeRes()
+  await state(wrongMethodReq, wrongMethodRes)
+  assert.equal(wrongMethodRes.statusCode, 405)
+  assert.equal(wrongMethodRes.headers.allow, 'GET')
+
+  const commands = findHandler(secured2.ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+  const textReq = makeReq({}, 'POST')
+  textReq.headers = {
+    host: '127.0.0.1:1', authorization: `Bearer ${token}`, 'content-type': 'text/plain',
+  }
+  const textRes = makeRes()
+  await commands(textReq, textRes)
+  assert.equal(textRes.statusCode, 415)
+  assert.equal(textRes.json().code, 'content-type-required')
+  secured2.ctx.dispose()
+})
+
+// ── v2.6.8：外部注册命令（registerCommand）与 413 body 上限 ──────────────────
+
+test('v4: registerCommand 同步命令（200 + commandId 幂等 + disposer 后 unknown-op）', async () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_reg' })
+  const calls = []
+  const dispose = service.registerCommand('demo-echo', async (payload, execCtx) => {
+    calls.push({ payload, commandId: execCtx.commandId, trackingId: execCtx.trackingId })
+    return { status: 'completed', result: { echo: payload.value ?? null } }
+  })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+
+  const first = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_1', op: 'demo-echo', payload: { value: 42 } }, 'POST'), first)
+  assert.equal(first.statusCode, 200)
+  assert.equal(first.json().status, 'completed')
+  assert.deepEqual(first.json().result, { echo: 42 })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].commandId, 'cmd_reg_1')
+  assert.equal(calls[0].trackingId, 'track_cmd_reg_1')
+
+  const second = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_1', op: 'demo-echo', payload: { value: 42 } }, 'POST'), second)
+  assert.equal(second.statusCode, 200)
+  assert.equal(second.json().deduplicated, true)
+  assert.equal(calls.length, 1, '同 commandId 不得重复执行')
+
+  dispose()
+  const gone = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_2', op: 'demo-echo', payload: {} }, 'POST'), gone)
+  assert.equal(gone.statusCode, 400)
+  assert.equal(gone.json().code, 'unknown-op')
+  ctx.dispose()
+})
+
+test('v4: registerCommand 异步命令（202 + command-done SSE + 重试同一 trackingId）', async () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_reg_async' })
+  const dispose = service.registerCommand('demo-load', async (payload, execCtx) => {
+    setTimeout(() => {
+      execCtx.emit({
+        kind: 'command-done',
+        trackingId: execCtx.trackingId,
+        op: 'demo-load',
+        result: { ok: true, op: 'demo-load', result: { loaded: payload.pluginId } },
+      })
+    }, 15)
+    return { status: 'accepted', trackingId: execCtx.trackingId }
+  })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+
+  const accepted = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_async', op: 'demo-load', payload: { pluginId: 'p1' } }, 'POST'), accepted)
+  assert.equal(accepted.statusCode, 202)
+  assert.equal(accepted.json().status, 'accepted')
+  assert.equal(accepted.json().trackingId, 'track_cmd_reg_async')
+
+  await new Promise((resolve) => setTimeout(resolve, 35))
+  const events = service.eventsSince('0')
+  const done = events.events.find((entry) => entry.event.kind === 'command-done')
+  assert.ok(done, '异步命令必须通过 EventLog 推 command-done')
+  assert.equal(done.event.trackingId, 'track_cmd_reg_async')
+  assert.deepEqual(done.event.result.result, { loaded: 'p1' })
+
+  const retry = makeRes()
+  await handler(makeReq({ commandId: 'cmd_reg_async', op: 'demo-load', payload: { pluginId: 'p1' } }, 'POST'), retry)
+  assert.equal(retry.statusCode, 202)
+  assert.equal(retry.json().deduplicated, true)
+  assert.equal(retry.json().trackingId, 'track_cmd_reg_async', '重试必须拿到同一个 trackingId')
+
+  dispose()
+  ctx.dispose()
+})
+
+test('v4: registerCommand 不允许覆盖内置 op；rejected 结果映射为失败信封', async () => {
+  const { ctx, service } = applyAsFork({})
+  assert.throws(
+    () => service.registerCommand(ADAPTER_OP.PING, () => ({})),
+    /cannot override built-in op/,
+  )
+  const dispose = service.registerCommand('demo-reject', async () => ({
+    status: 'rejected',
+    code: 'bad-request',
+    message: 'not allowed',
+  }))
+  const out = await service.commands({ commandId: 'cmd_rej', op: 'demo-reject' })
+  assert.equal(out.ok, false)
+  assert.equal(out.code, 'bad-request')
+  assert.equal(out.error, 'not allowed')
+  dispose()
+  ctx.dispose()
+})
+
+test('v4: 请求体超过 1MB → 413 body-too-large（executor 不被调用）', async () => {
+  const { ctx, ws, service } = applyAsFork({})
+  let called = 0
+  service.registerCommand('demo-big', async () => {
+    called += 1
+    return { status: 'completed', result: {} }
+  })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.COMMANDS)
+  const big = `{"commandId":"cmd_big","op":"demo-big","payload":"${'a'.repeat(1_000_100)}"}`
+  const res = makeRes()
+  await handler(makeRawReq(big), res)
+  assert.equal(res.statusCode, 413)
+  assert.equal(res.json().code, 'body-too-large')
+  assert.equal(called, 0)
+  ctx.dispose()
 })
 
 test('纯函数：normalizePrefix / resolveInside 的边界', () => {

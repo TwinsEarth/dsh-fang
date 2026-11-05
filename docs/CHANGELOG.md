@@ -1,5 +1,950 @@
 # CHANGELOG
 
+> **发布豁免（人工批准，2026-11-03）**：v3.0.0–v3.0.6 **永不发布**，首个 Release 为 **v3.0.7**；
+> 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
+
+
+## v3.0.8（2026-11-05）
+
+**主题：分支/回流运行时、MCP 只读桥、FANG_HOME 数据根、DSH Web 侧边栏入口。**
+
+### 新增
+- **分支 HTTP**：`GET/POST /fang/api/tasks/branches`、`/activate`、`/status`；`BranchStore` 原子持久化，单写者与不可合并约束沿用。
+- **回流策略**：`GET /fang/api/reflow/policy`（sealed→verified→quarantine→adopted，禁止字段，不合并）。
+- **MCP**：`tools/mcp/{tools,server}.mjs`；stdio JSON-RPC；默认只读工具 + 高风险 `get_op`/`abandon_op`；输出递归清洗 token/path/template。
+- **FANG_HOME**：`$FANG_HOME/mirror/<profile>`、`$FANG_HOME/essence`、`$FANG_HOME/sessions`；未设置时保持旧布局兼容。
+- **DSH Web 入口**：侧边栏「瓮城」图标 + 主面板自动唤起 `dsh-fang://open`；插件配置页保留「打开瓮城控制台」。
+- **Electron 桌面端**：宿主自动发现、托盘常驻/退出、连接信息掩码弹窗、日志分类与 100/300 分页、标题栏 Slogan；安装器默认 `D:\ToFuture`，AGPL 源码随包。
+
+### 修复
+- 任务创建异常返回空响应 → 结构化 500；母体 palette `app is not defined`。
+- 代理绝对 URL 可崩溃主进程 → 仅接受单一 `/` 路径 + origin 校验 + 400（absolute-form/`//`/反斜杠/控制字符全部拒绝）。
+- 启动器默认开 CDP、写死 Electron 路径；`desktopInfo` 下发 token；`#fang-fallback` 残留。
+- **HTTP 契约审计（docs/AUDIT-v3.0.8-HTTP-CONTRACT.md）**：
+  - 修复 DSH exact 路由以 path 为键导致的 GET+POST 同路径吞并：`/tasks/branches` 与 `/bridge/sessions` 改为单注册按 method 分发（否则 POST 405、后续路由不注册）。
+  - `/sessions*`、`/bridge/*`、`/sync/*`、`/route` 接入与 `/status` 相同的 Host/Origin/CSRF/token 门禁；鉴权先于 method（无 token 不再拿到 405）。
+  - 未知 `/fang/api/*` 统一 JSON 404（先鉴权）；branches 未知 taskId 404、taskId/branchId 路径穿越拒绝、分支错误映射 400/404/409。
+  - adapter 路由补 loopback Host、Origin/CSRF、JSON 写校验与 405 `Allow`；代理层 403/404/502 统一 JSON，接住 `file://`/`//`/反斜杠 target，token 轮换后自动 bootstrap 并重试 GET；`client.js` 不再因 `headers` 覆盖丢失 `x-fang-auth`。
+  - Host 严格解析，拒绝 `[::1]evil` 等 loopback 前缀伪造。
+
+### 门禁
+- 路由 **67**；单测 **718 pass / 0 fail / 1 skip**；e2e **73/73**；桌面代理套件 **51/51**；preflight `--e2e` GREEN；安装包 `DSH-Fang-3.0.8-x64-Setup.exe` + SHA256SUMS。
+
+## v3.0.7（2026-11-03）
+
+**主题：发布门禁加固——e2e 不可跳过、client half 物化断言、16 行完整性、.sha256 伴随产物。**
+
+### 门禁修复
+- **preflight**：未传 `--e2e` 时新增失败项 `e2e: required for release green`，不再可能 `e2e:null` 仍发绿灯；
+  已存在 tarball 时校验同目录 `.sha256`（缺失/不匹配均失败）。
+- **e2e**：新增两条免疫本次线上故障的断言：
+  - `client half registers @local/dsh-fang`：vm 执行 client.js，确认 `window.__ModuleLoader__.load` 注册；
+  - `client half materializes apply()`：调用 factory（stub React）后确认导出 `{inject, apply}`；
+  - `16 fang plugin rows composed`：`dsh --profile e2e --dump-config` 统计 `fang-*` 行 ≥16。
+- **build**：默认调用 `preflight --e2e`；构建前清理同版本旧产物；生成 `dist/dsh-fang-<ver>.tgz.sha256`。
+- **release workflow**：build job 改为 self-hosted Windows 且执行带 e2e 的构建；artifact 与 GitHub Release 均上传 `.sha256`。
+- **fallback 面板鉴权**：`/fang/panel` 注入 `<meta name="fang-auth">`，内联 `api()` 自动携带 `x-fang-auth`
+  （修复页面「派生失败: unauthorized」）。
+- **client half 发现机制纠正**：验证后确认 client half 由宿主 Loader 对**bare 包名行** `@local/dsh-fang`
+  的 `dsh.client` 扫描发现；**不新增** `ui-fang → @local/dsh-fang/client` 行（子路径不是包根，会被当作坏插件：
+  `failed to import`）。e2e 改为断言 `package declares dsh.client` 与 `no inactive plugin entries`。
+- **测试计划**：新增 `docs/TEST-PLAN-v3.0.7.md`（87 条用例，PKG/SEC/ESS/DRV/UI/MIR/CMP/BR/MCP/REL）。
+- **PKG-01**：新增 `tools/release/package-smoke.mjs` 并接入 build：解包 tarball、校验入口/16 行/插件 `apply`/
+  client 归一一致/`.sha256`；**SEC-07** 增加 e2e 磁盘断言（tasks.json/forks.json 无 token）。
+- **S1 UI 动作语义**：新增 `src/lib/ui-actions.mjs`（稳定 action id：分身 6 项 / 元主 7 项；
+  每项 `{enabled, code, reason, confirm}`；任务/元主接口统一返回 `actions + blocks`），
+  UI-10/UI-11 转为真实断言，剩余 UI 用例以 todo 追踪。
+
+### 验证（本机）
+- 无 `--e2e`：**RED**（e2e required + sidecar missing）；
+- `--e2e`：**GREEN 3.0.7**（**648 tests**、e2e **66/66**、62 路由、sha256 match）；
+- build：preflight GREEN → package smoke PASS → tarball 生成 + `.sha256` 一致。
+
+## v3.0.6（2026-11-03）
+
+**主题：元主 CRUD + 默认元主 + 分身列表契约字段（后端契约 B，先行；UI 移植随后）。**
+
+### 新增
+- `EssenceManager`：`rename/archive/setDefault/getDefault/copy/pluginCount/downloadBundle`；
+  - 复制只带 overlay/settings，**不复制 credentials**；导出 JSON 附件同样排除凭据；
+  - locked 官方原身拒绝 rename/archive；默认元主持久化到 `essences/default.json`，官方兜底。
+- orchestrator 路由（10 条）：`essence/create|rename|archive|delete|copy|default|download`、
+  `tasks/rename|copy|download`；`essence/list` 增加 `defaultId/defaultEssence/capacity{slots:7,defaultLimit:5,used}` 与
+  `locked/official/archived/pluginCount`。
+- 分身列表字段：`phase`、`health{adapter,error}`、`sessionTitle`、`startedAt/updatedAt`、`projectBytes`、`essenceId`。
+- 契约文档：`docs/API-v3.0.6.md`。
+
+### 测试
+- 新增 `test/essence-crud.test.mjs` 5 项（rename/archive/default/copy 无凭据/导出无凭据）；
+- orchestrator 路由断言更新（62 路由），create→rename→list 契约链路。
+
+### 未交付（明确）
+- 配额准入执行（reserve/commit/tombstone）、元主 pause/restart、分身完整项目归档、分支/单会话租约（v3.0.7+）。
+
+## v3.0.5（2026-11-03）
+
+**主题：安全止血（完整包）：B1 路由鉴权/CSRF/Host + B2 Adapter fail-closed + B3 路径穿越/大小上限 + B4 token 去 URL/不落盘 + B5 派生 env 白名单 + B6 官方原身 create-only + B8 凭据不复制。**
+
+### 安全修复
+- **B1** 新增 `src/lib/http-auth.mjs`：安装级 token（`<dataDir>/fang-auth.json`，0600，env/显式配置可覆盖）；
+  所有 `/fang/api/*` 默认要求 `x-fang-auth`（或 Bearer）；loopback Host 校验、Origin/`Sec-Fetch-Site` CSRF 校验、
+  写请求 JSON content-type；面板通过同源 `GET /fang/api/auth-token` bootstrap（仍受 Host/Origin 校验）；
+  `client.js` 统一缓存并携带 header。e2e 作为本机客户端按真实方式读取 token 文件。
+- **B2** `adapter.mjs`：fork 角色未拿到 `DSH_ADAPTER_TOKEN` 时默认 **fail-closed**（控制面 401），
+  v2 兼容必须显式 `allowLegacyNoToken: true`；启动时记录 warn。
+- **B3** `session-bundle.mjs`：导入时校验 `file/sessionId` 必须落在 bundle/sessions 与 targetRoot 内，
+  拒绝 `../` 穿越；新增单文件/总大小/文件数上限（默认 64MB/512MB/2000）。
+  `session-sync.mjs`：bundleId 只允许安全段；bundleDir 必须位于 bundleRoot 内；
+  targetHome 只允许当前 DSH_HOME 或 fork homes 根；请求体上限 1MB（413）。
+- **B4** `remote.mjs`：token 只走 `Authorization` header，不再拼进请求 URL；
+  `forker.mjs`：`publicFork`/`forks.json` 的 URL 去 token、不再持久化 token；
+  `orchestrator`：`tasks.json` 不落 token、列表 URL 去 token；新增 `GET /fang/api/tasks/open-url`
+  在内存中临时下发带 token 的 URL（client.js 打开分身改走该接口）。
+- **B5** `forker.mjs`：新增 `buildForkChildEnv` 环境变量白名单，不再 `...process.env` 全量继承；
+  云密钥/自定义 token 不进入派生子进程（Adapter token 仍由 forker 显式注入）。
+- **B6** `essence.mjs`：`create()` 改为 **create-only**（已存在 id 直接拒绝，不能抢占官方原身）；
+  `ensureOfficialEssence()` 发现 locked/official 被篡改时修复 meta（uid 不删数据）；
+  `locked/official` 只能由内部 official seed 设置。
+- **B8** `essence.mjs`：物化 `merged/profile` 时**永不复制 credentials**（镜像与原身凭据都不进入派生 profile）。
+
+### 测试
+- 新增 `test/security-hardening.test.mjs`（5 项：create-only、seed 修复、env 白名单、bundle 穿越、大小上限）；
+  新增 `test/http-auth.test.mjs`（7 项：token 文件 0600、Host/Origin/CSRF、415、bootstrap 校验）；
+- 更新 `essence` 凭据断言、`adapter` legacy auth 断言、`remote`/`adapter-client`/`orchestrator`/`e2e` 的 token 断言；
+- 门禁：**636 tests / 0 fail / 1 skip**、**e2e 59/59**、**52 路由**。
+
+### 说明
+- B1/B4 已包含在本版本内，v3.0.5 达到“安全止血包”退出条件（可进入 tag 流程，但仍需按 v3.0.0 起的严格序列补发）。
+- 已知例外：SSE `eventsUrl` 仍以查询参数携带 token（EventSource 无法设 header），后续改为 fetch streaming 时消除。
+
+## v3.0.4（2026-11-02）
+
+**主题：三层产品形态权限契约 + 官方推荐原身（fast derive 默认基底）。**
+
+### 新增
+- `src/lib/permissions.mjs`：三层权限矩阵（母体禁插件/禁会话、原身可插件/禁会话、分身禁插件/可会话），
+  `checkPermission` / `createEnvironmentGuard`（can/check/assert + `PermissionDeniedError`）/
+  `describePermissions`；未知环境或未知动作 **fail-closed**（供 UI 与 Adapter 第二道门）。
+- `EssenceManager` 官方推荐原身：
+  - `ensureOfficialEssence()` 首次启动幂等 seed（`essence-official-dev`，locked + official，
+    预装默认插件条目 `DEFAULT_OFFICIAL_PATCH_ENTRIES`）；
+  - 锁定保护：`update/remove/setTier` 对 locked 原身一律拒绝；
+  - `create()` 支持显式 id / locked / official / skipQuota / defaultPatchEntries。
+- orchestrator：启动时 seed 官方原身（失败仅 warn，不阻塞主插件）；
+  新增 `GET /fang/api/essence/list`（`{officialId, official, essences}`）。
+- 测试：`permissions` 7 项、`official-essence` 5 项 + orchestrator 路由断言。
+- compat 门禁路由契约更新为 50 条，必需路由增加 `/fang/api/essence/list`。
+
+### 边界
+- 分身派生（DerivedInstanceManager）与三种 Web 视图路由为 v3.0.5+；
+- 真正的硬隔离仍靠 profile 组合（装不装插件/会话），本版本提供第二道门与默认基底。
+
+## v3.0.3（2026-11-02）
+
+**主题：客户端升级后的兼容性门禁（compat gate）——子插件默认关闭，验证通过才启用。**
+
+### 新增
+- `src/lib/compat.mjs`：`runCompatGate`（内核入口可导入、全部子插件模块可导入且导出 `apply`（当前 16 个，后续自动纳入）、
+  路由契约数量 + 必需路径检查）；`writeCompatStatus`/`readCompatStatus`（`compat-status.json`，
+  **`subPluginsEnabled` 是唯一允许启用子插件的判据，未检查/失败时均为 false**）。
+- `MirrorManager` 新增 `compatGate` / `onCompatResult`：客户端版本升级成功后先跑 compat 门禁；
+  未通过 → 保留新版本但 `reason: 'compat-gate-failed'`、子插件保持关闭、**跳过原身重算钩子**；
+  门禁抛错按失败处理；通过 → 正常触发重算。升级返回体携带 `compat` 结果。
+- orchestrator 接线：`GET /fang/api/mirror/recompute-status`（协调器状态）、`GET /fang/api/compat`、
+  `POST /fang/api/compat/check`；启动 1.5s 后自动跑一次门禁；门禁使用真实 webServer 路由列表
+  （期望 49 条）+ 必需路由清单。
+- 测试：`compat` 10 项（模块导入/apply/路由契约/状态默认关闭/门禁与升级联动）+ orchestrator 路由断言。
+
+### 语义
+- 更新客户端版本后默认不开启子插件；门禁通过才写 `subPluginsEnabled: true`；
+- 失败时主插件继续服务（面板/路由可用），等待开发者更新插件版本后再次检查（POST compat/check）；
+- 门禁失败不回滚客户端版本（保留新版本），回滚仍可走镜像备份/还原盘。
+
+## v3.0.2（2026-11-02）
+
+**主题：升级后重算协调 + 镜像偏好 schema 化 + 空闲降级审计。**
+
+### 新增
+- `src/lib/semaphore.mjs`：计数信号量（并发上限）。
+- `EssenceManager.recomputeAll(options)` 异步增强：ensureFresh（fingerprint 匹配 → skipped）、
+  `concurrency`（默认 4）、`perEssenceTimeoutMs`（默认 60s）、`AbortSignal`、`onProgress`；
+  返回 `{recomputed, skipped, conflicted, failed, aborted, durationMs}`，单原身失败/超时不中断整批。
+- `MirrorManager.postUpgradeHook`：升级成功后 fire-and-forget 触发（`postUpgradeTriggered`），
+  失败/回滚不触发，钩子异常只 warn，不影响升级结果。
+- `src/lib/upgrade-coordinator.mjs`：`onUpgradeSuccess` 去重并发批次、`getRecomputeStatus`、
+  `waitForRecompute`，向 UI 暴露 running/startedAt/finishedAt/progress/lastResult/lastError。
+- `src/lib/preferences.mjs` 重写为 schema 驱动：6 个字段描述符（交互超时/活跃与空闲轮询间隔/
+  备份保留天数/空闲提示/严格冲突模式），默认值、min/max/step、enum options、migrate、
+  `normalizePreferences` 纯函数、未知字段丢弃、损坏文件不覆盖；新增
+  `GET /fang/api/mirror/preferences` 与 `POST /fang/api/mirror/preferences/set`。
+- `src/lib/status-store.mjs`：外部 store（每个订阅者共享状态、304 只更新 lastUpdatedAt、
+  订阅计数、`acquireActive` 引用计数 + `pokeActive` + 30s 无交互降级、`setActiveIdleTimeout`）。
+- `src/lib/idle-audit.mjs`：空闲降级事件聚合（单条审计 + 周期 summary、byTimeout 统计、
+  rapidAway/fullTimeout、样本足够时生成建议）；滚动窗口 `getRecommendations()` 输出结构化建议
+  （fieldKey/suggestedValue/text/sampleCount/confidence），快照窗口与滚动窗口分离。
+- `src/lib/interaction-poke.mjs`：DOM 交互节流 poke（框架无关）。
+- 测试：`upgrade-coordinator` 8 项、`status-store` 12 项、`idle-audit` 7 项、
+  `idle-recommendations` 7 项、`preferences` 9 项 + orchestrator preferences 路由断言。
+
+### 边界
+- coordinator / status-store / idle-audit 的 UI 接线在客户端包与后续版本完成；
+- 自动备份清理、dismissals 7 天冷却等仍待实现。
+
+## v3.0.1（2026-11-02）
+
+**主题：母体镜像管理（文件夹 1）：备份 / 恢复 / 自动备份 / 升级 / 回退 + 小光盘面板入口。**
+
+### 新增
+- `src/lib/mirror.mjs`（零依赖）：
+  - 目录布局 `active/ + backup/ + restore/ + backups.json + meta.json`；
+  - `backup()`（自动/手动分桶）、`restore()`（先自动备份当前 active 再替换）、`deleteBackup()`、
+    `setBackupInterval()`（仅 6/12/24）、`maybeAutoBackup()`（到期检查）、`checkUpdate()`；
+  - `upgrade({autoBackup, autoRollback, onProgress})`：检查 → 备份 → 下载 staging → 原子替换 → 失败自动回滚；
+    未配置官方源时显式返回 `official-source-unavailable`（不假装成功）；
+  - `getStatus()`：版本/官方最新/更新可用/备份列表/磁盘占用/活跃分身数；`backupId` 正则防路径穿越。
+- 服务 `SERVICE.mirror = 'fangMirror'`（由 `fang-orchestrator` 提供）+ 6 条路由：
+  `GET /fang/api/mirror/status`、`POST /fang/api/mirror/{backup,restore,backup/delete,backup-interval,upgrade}`。
+- orchestrator 每 60s 检查自动备份到期；新增 `Config.mirrorRoot`（空 = `<dataRoot>/mirror`）。
+- `client.js`：顶栏「镜像」按钮（蓝色小光盘 `IconDisc`）+ 「母体镜像」卡片：状态轮询（8s）、
+  6/12/24 小时间隔、立即备份、备份列表恢复/删除（二次确认）、升级（indeterminate + 已用时间）。
+- `test/mirror.test.mjs` 16 项 + `test/orchestrator.test.mjs` 路由/处理器断言；
+  `docs/MIRROR.md`（布局/路由/升级语义/边界/未交付）。
+
+### 未交付（明确边界）
+- 官方源未接入：`checkUpdate/upgrade` 显式降级，升级按钮在无更新/无源时禁用；
+- 原身（文件夹 2）与会话（文件夹 3）的派生与隔离（P2/P3）；
+- 升级进度的 SSE 推送（当前为 indeterminate + 已用时间）。
+
+> 版本策略：`x.y.z`；新增能力进 minor 位（v2.10.0 → v3.0.1）。
+
+## v2.10.0（2026-11-02）
+
+**主题：Essence 原身覆盖层合并库（镜像 × 原身，零依赖实现）。**
+
+### 新增
+- `src/lib/essence.mjs`（v2.10.0）：
+  - 纯合并 `mergeProfiles(mirror, overlay)`：patch 条目按 id（覆盖/禁用/新增，config 深合并）、
+    package.json 依赖并集与主版本兼容判定、settings 深合并、锁定项 fatal 保护、重复 id warning；
+  - 冲突模型：`missing-plugin` / `locked-plugin-overridden` / `locked-plugin-disabled` /
+    `version-incompatible` / `duplicate-id`，分 `fatal` 与 `warning`；
+  - `EssenceManager`：`create/update/remove/list/listChildren/setTier/recompute/recomputeAll/getConflicts`，
+    磁盘布局 `overlay/ + merged/profile/ + meta.json (+ conflicts.json)`；fatal 时保留上一次物化结果并标记
+    `status: conflicted`；物化时剔除镜像凭据、只复制原身 `credentials/`；
+  - 配额：`VIP_QUOTAS`（free 5 / vip10…vip100 100）+ `checkEssenceQuota` / `checkSubEssenceQuota` /
+    `checkActiveSessionQuota`；两级原身、父原身删除保护；
+  - YAML 复用 `rule-registry` 的 `parseYamlSubset`（无新增依赖）；写出 JSON（JSON 是合法 YAML）。
+- `test/essence.test.mjs` 23 项：合并语义 / 冲突分级 / 配额 / 物化 / 凭据边界 / 配额上限 / 两级原身 / recomputeAll。
+- `docs/ESSENCE.md`：三层数据边界、合并语义、配额表、冲突状态机、未交付项。
+
+### 未交付（明确边界）
+- 本版本不接 HTTP 路由、不接面板 UI、不创建分身进程；`merged/profile` 已可作为 `--profile` 供后续 P3 派生使用。
+
+> 版本策略：`x.y.z`；新增能力进 minor 位（v2.9.x → v2.10.0）。
+
+## v2.9.2（2026-11-02）
+
+**主题：顶栏新增「母体打开」按钮（蓝色地球图标）。**
+
+### 新增
+- `client.js`：顶栏在「母体连接」与「派生新分身」之间新增「母体打开」按钮（`IconGlobe`，
+  INFO 蓝色地球图标）；点击在新窗口打开母体瓮城独立门户 `/fang/panel`。
+- 桌面壳下用 v2.9.1 的 `resolveMotherOrigin()` 拼绝对地址（如
+  `http://127.0.0.1:52648/fang/panel`），避免 `dsh-app://app/fang/panel` 这类自定义协议
+  在新窗口里打不开；普通 Web 下回退相对路径 `/fang/panel`。
+- `window.open` 被拦截时回退到同标签页跳转，不静默失败。
+
+> 版本策略：`x.y.z`；这是 v2.9 的补丁位。
+
+## v2.9.1（2026-11-02）
+
+**主题：修复桌面端「母体连接」默认地址不可探测（`dsh-app://app` → target-scheme）。**
+
+### 修复
+- `client.js`：新增 `resolveMotherOrigin()`——桌面壳里 `window.location.origin` 是
+  `dsh-app://app`（自定义协议，不是可探测的 HTTP 源），改为优先读取宿主注入的
+  `__DSH_TRANSPORT__.streamBaseUrl`（desktop `main.ts` 注入的 Host 真实 HTTP 源，
+  如 `http://127.0.0.1:52648`）；普通 Web 下回退 `location.origin`；两者都不可用时
+  返回空串让用户手动填写，而不是预填一个必然失败的地址。
+- `client.js`：探测错误码翻译为可操作原因（`target-scheme` → “桌面壳地址不是可探测的
+  HTTP 源”，`timeout`/`network-error`/`target-empty` 等各有提示），不再把原始码直接丢给用户。
+- 服务端无改动：`probeLink` 继续只接受 http(s) origin（拒绝 `dsh-app://` 是正确行为，
+  分身无法跨进程访问该协议）。
+
+> 版本策略：`x.y.z`；这是 v2.9 的补丁位。
+
+## v2.9.0（2026-11-02）
+
+**主题：瓮城面板「母体连接」——只描述、只读探测，不持有连接状态。**
+
+### 新增
+- 服务 `SERVICE.link = 'fangLink'`（由 `fang-orchestrator` 提供）：
+  - `describe()`：`{ ok, role, version, at, prefix, motherApiBase, adapterBase, probe, tokenPolicy, sharedConfig, forkInstructions }`；
+  - `probe({ target, timeoutMs? })`：只读 GET `<target>/fang/api/status`，失败结构化、绝不抛异常。
+- 母体路由：`GET /fang/api/mother-link`、`POST /fang/api/mother-link/probe`（prefix 默认 `/fang`）。
+- `src/lib/mother-link.mjs`：地址归一化（只接受 http(s) origin，拒绝凭据/查询串/非 http）、
+  profile 共享配置摘要（读 `dsh.profile.bundles`，失败降级 null）、探测超时夹在 [200, 10000]ms。
+- 客户端：顶栏「母体连接」卡片（母体版本 / 母体 API / 分身 Adapter / 共享配置 / 令牌策略 +
+  地址输入 + 复制地址 + 测试连通 + 收起）；分身 Web UI 的说明页增加分身旁路模式，地址与结果
+  仅本次会话内存态（分身不保存插件设置）。
+- 审计：`AUDIT.LINK_PROBE='link-probe'`（target / ok / latencyMs / error）。
+
+### 语义与边界
+- 令牌由 Forker 在 spawn 时注入 `DSH_ADAPTER_TOKEN`；fang 不落盘、不回显（描述里不含 token 值，有测试断言）。
+- 共享配置 = 母体 profile 层（分身只读继承）；本版本不提供写入入口。
+- 分身跨源直读母体受浏览器 CORS 约束：失败显示 `cross-origin-or-network`，不伪造成连通。
+- 探测不写任何配置，不改变副本状态。
+
+### 文档与测试
+- `docs/CONTRACTS-V2.md §5.10`、`docs/UI-瓮城入口.md §9`、`docs/AUDIT-v2.9.0.md`。
+- `test/mother-link.test.mjs` 7 项；`orchestrator.test.mjs` 增路由与处理器断言。
+
+> 版本策略：`x.y.z` 每一位 0–9；v2.8 的补丁位已满（2.8.4），本次进位到 v2.9.0。
+
+## v2.8.4（2026-11-02）
+
+**主题：公共仓 / 私有镜像仓 发布管理 —— 可重复的 REST 同步 + 内容树/资产双重校验。**
+
+### 新增
+- `tools/release/sync-private.mjs`（零依赖，仅 GitHub REST API）：
+  - `verify --tag vX.Y.Z`：比较两仓 tag→commit→**内容树 SHA**，下载各自 Release tarball 校验
+    `manifest.json`、`.sha256`、实际哈希三者自洽；不一致退出码 1；支持 `--json`；
+  - `sync --tag vX.Y.Z`：以内容寻址做增量 blob（复用未变文件）、断言私有 tree == 公共 tree、
+    私有 `main` 仅 fast-forward、创建 annotated tag 与 Release 资产；支持 `--dry-run`；
+  - 用 REST 而非 git push：发布机只放行 `api.github.com`/`uploads.github.com`。
+- `docs/RELEASE-MIRROR.md`：两仓定位（公共=唯一事实来源、私有=只读镜像）、版本流转、
+  同步语义、发布后三件核对、故障表与红线（禁手工提交/禁 force push/同步后必须 verify）。
+- `test/sync-mirror.test.mjs` 8 项：参数解析、增量 blob 计划、资产自洽判定、树比较、SHA-256 向量。
+
+### 同步实践（v2.8.3 已镜像）
+- 私有仓 `main` 更新到 **v2.8.3 内容**（tree `cd9e53f4…`，与公共仓 tag 树一致），annotated tag `v2.8.3`，
+  Release 资产 3 个（tarball 286,944 B / sha256 `3c97748e…`、`manifest.json`、`.sha256`）；
+- 公共 Release v2.8.3 的 `.sha256` 已按 CI 重建产物校正为 `8bc30c67…`（286,952 B）；
+- `verify --tag v2.8.3` 通过（`trees.ok=true`、两仓资产均自洽）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 4 个补丁位。
+
+## v2.8.3（2026-11-02）
+
+**主题：严格模式 + 语法错误的回退语义（组 4 扩展）——事务化 rebuild，失败层对后续层不可见。**
+
+### 变更
+- `rule-registry.rebuild` 重构为**纯计算** `computeRebuild(layerList)`：不再就地修改 `effective`/`status`，
+  返回 `{ applied, effective, status }`；`applyLayer`/`applyConfig`/`clearLayers` 只在 `applied` 时提交。
+  失败时 `layers`/`effective`/`status`/`strictMode` **全部保持上一次成功值**，失败层对后续层完全不可见。
+- 失败结果新增 `revertedToLayerIndex`（`-1` = 内置全集），审计与 `ruleConfigStatus()` 可直接回答
+  「哪一层被拒绝、回退到了哪一层」。
+- **YAML 解析修正**：支持 flow 映射 `{ k: v, k2: v2 }` 与嵌套 flow 列表 `[{ re: "..." }]`
+  （深度感知、尊重引号）。此前 `settings: { failOnInvalidPattern: true }` 会被当成标量字符串，
+  导致 `settings` 静默回落到默认值——写了严格设置却不生效。这是组 4 测试暴露的真 bug。
+
+### 测试
+- 扩展组 4（`test/rule-config.test.mjs` 30 → **35 项**）：严格层编译失败回退到上一个成功层、
+  第二个严格层失败回退到第一个严格层（不是内置全集）、失败后 `inherit:true` 层叠加到上一个成功层、
+  失败层状态隔离（layers/effective/strictMode 均不被污染）、插件层状态报告。
+- 全量测试 **494 → 499 项**（498 pass / 1 skip）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 3 个补丁位。
+
+## v2.8.2（2026-11-02）
+
+**主题：`inherit: false` 严格模式 —— 项目可完全替换可调规则集，但拆不掉安全边界。**
+
+### 新增
+- YAML 顶层 `inherit`（boolean，默认 `true`）。`inherit: false` 表示**丢弃此层之前所有可调规则**，
+  只保留硬规则（`hard-deny`/`non-negotiable`）+ 兜底 `unknown-tool`，再从该层开始叠加。
+- `registry.applyLayer` 支持多段严格模式：以**最后一个** `inherit: false` 层为起点重建；它之前的层全部丢弃；
+  之后的 `inherit: true` 层叠加在严格结果上，**不会**恢复被丢弃的内置可调规则。
+- 后续层可按 id **重新引入**被丢弃的内置规则（用内置定义"复活"再覆盖），避免严格模式后必须重写谓词。
+- 严格模式返回 `source: 'strict-replaced'` 与 `strictMode: { layerIndex, preservedHardRules, preservedFallback, discardedRuleCount }`；
+  `ruleConfigStatus().strictMode` 同步可见。
+- 审计：严格模式激活时写一条 `AUDIT.UMBRELLA_STRICT_MODE`（`umbrella-strict-mode`），
+  记录层号、保留的硬规则、丢弃数量与各层应用结果（新增 kernel 审计类型）。
+- 安全网：rebuild 结果若不含 fallback 规则视为 bug，直接拒绝应用。
+- `docs/RULES-BASELINE.md §8`：严格模式语义矩阵、优先级重置、审计、示例；`CONTRACTS-V2.md §5.9` 同步。
+
+### 语义要点
+- `inherit: false` + 无规则定义 = 只剩 3 条硬规则 + 兜底的「极简安全模式」，**合法**，不报错；
+- 硬规则在严格模式下仍受锁定约束：不可关闭、不可降级；可追加 pattern、可提升灯色；
+- 严格模式层自身的 `errors` 按该层 `settings` 判定 fatal；锁定违规一律 fatal；
+- 被拒绝的层从层栈弹出，effective 保持上一次有效规则。
+
+### 测试
+- `test/rule-config.test.mjs` 23 → **30 项**：极简严格模式、只保留自定义可调规则、硬规则拒绝关闭/降级、
+  严格后叠加不回退、较晚严格模式覆盖较早层、`inherit` schema、插件状态与审计事件。
+- 全量测试 **487 → 494 项**（493 pass / 1 skip）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 2 个补丁位。
+
+## v2.8.1（2026-11-02）
+
+**主题：Umbrella 推荐基线配置 + 三层叠加 + 硬规则锁定。**
+
+### 新增
+- `defaults/umbrella-rules.yaml`：随包分发的**推荐基线**。只显式锁定 4 条规则——
+  `dsh-lifecycle` / `destructive-command` / `credential-access`（red，hard-deny + non-negotiable）
+  与兜底 `unknown-tool`（yellow，priority 9999）；11 条可调规则**留空 = 用内置默认**（注释里给推荐值），
+  项目按需在自己的叠加层里覆盖。`package.json files` 新增 `defaults/**`。
+- 分层加载（`registry.applyLayer`）：**基线 → 项目 `rulesFile` → 环境 `UMBRELLA_RULES_PATH`**（`envRulesFile` 可覆盖路径）；
+  后层按 id 覆盖前层；被拒绝的层**从层栈弹出**并恢复上一次有效规则（否则坏层会污染后续 rebuild）。
+- 硬规则锁定（`NON_NEGOTIABLE_TAGS = hard-deny | non-negotiable`）：不可 `enabled: false`、不可降低灯色；
+  允许提升灯色 / 追加 `pathPatterns`·`commandPatterns` / 改 reason / 改 priority。锁定违规**一律 fatal**。
+- 插件配置新增 `baselineFile`（空 = 随包基线；`:none:` = 关闭）与 `envRulesFile`；
+  `ruleConfigStatus()` 现在返回每层 `name/file/applied/found/errors`。
+- `docs/RULES-BASELINE.md`：基线内容、分层与合并、锁定语义、部署位置与加载顺序、覆盖率边界。
+
+### 测试
+- `test/rule-config.test.mjs` 18 → **23 项**：基线文件可解析且带锁定标签、三层合并顺序、
+  锁定拒绝关闭/降级且整层回退、允许追加 pattern、插件默认加载随包基线、环境层叠加。
+- 全量测试 **482 → 487 项**（486 pass / 1 skip）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.8 的第 1 个补丁位。
+
+## v2.8.0（2026-11-02）
+
+**主题：动作规则表 YAML 化 —— 内置规则 + 叠加层，按需启用/禁用/调参而不改代码。**
+
+### 新增
+- `src/lib/rule-registry.mjs`：
+  - **YAML 子集解析器**（`parseYamlSubset`）：块映射 / 序列 / 引号标量 / 简单 flow 列表 / 注释；
+    tab 缩进、多文档、结构错误都给出明确错误（不静默）；
+  - **schema 校验**（`validateRuleConfig`）：`version` / `settings` / 规则字段 / 9 种 matcher kind /
+    pattern 长度与数量上限；错误逐条给出，**不做部分接受**；
+  - **正则安全启发式**（`isSafePatternSource`）：拒绝明显灾难回溯形状（`(a+)+`、`(.*)*`）与超长模式，
+    `settings.rejectUnsafeRegex: false` 时可关闭（不推荐）；
+  - **声明式编译器**（`compileDeclarativeRule`）：9 种 matcher（`command-pattern` / `path-pattern` /
+    `path-outside` / `url-host-in` / `url-host-not-in` / `tool-in` / `pid-equal` / `always` / `never`）
+    + 3 种 evidence（`pattern-match` / `list-match` / `static`）；
+  - **RuleRegistry**（`createRuleRegistry`）：内置规则 + YAML 叠加，**事务化**应用
+    （失败保留旧规则）；支持 `enabled:false`、`light/priority/reason/tags/category` 覆盖、
+    给内置规则追加 `commandPatterns`/`pathPatterns`、声明式新规则、`resetToBuiltin`；
+  - **文件加载 + 热加载**：`loadRuleConfigFile` / `watchRuleConfigFile`（`fs.watch` + 防抖，失败保留旧规则）。
+- 插件 `fang-umbrella` 配置新增 `rulesFile` / `rulesWatch` / `rulesDebounceMs`；
+  服务面新增 `ruleConfigStatus()` / `reloadRules()` / `applyRuleConfig()` / `ruleRegistry`。
+- `createUmbrella({ registry })`：动作评分改用注册表规则（不传则沿用原规则集）。
+- `docs/UMBRELLA-RULES.example.yaml`：带注释的完整示例（开关 / 覆盖 / 追加正则 / 声明式新规则）。
+
+### 语义要点
+- 内置规则**永远存在**，YAML 只是叠加层；未提及的规则保持原样；
+- 优先级：`DEFAULT_RULE_PRIORITIES`（10…9999）为基线，YAML 可覆盖；同优先级按内置顺序稳定排序；
+- 未知 id 默认只警告；`settings.failOnUnknownRule: true` 时整份拒绝；
+- 正则编译失败：`failOnInvalidPattern: false` 跳过该条、`true` 整份拒绝；
+- 热加载失败 **不得** 让评分器裸奔：先构造新数组、校验通过才替换。
+
+### 测试
+- 新增 `test/rule-config.test.mjs` **18 项**（YAML 解析、schema、正则安全、9 种 matcher、
+  禁用/覆盖/优先级/追加正则、未知 id、failOnInvalidPattern 事务化、文件加载、热加载管线、
+  插件接线、门面 registry 接线）。
+- 全量测试 **464 → 482 项**。
+
+> 版本策略：`x.y.z` 每一位 0–9；`2.7.9` 已满位，本次进位到 `2.8.0`（v2.8 的首个补丁位）。
+
+## v2.7.9（2026-11-02）
+
+**主题：把 `parseShellRedirects` 从正则升级为 shell 词法/语法解析（AST-lite）。**
+
+### 变更
+- `src/lib/umbrella.mjs` 新增 **AST-lite 词法器**（`tokenizeShell`），`parseShellRedirects` 改为在其上按语法结构提目标：
+  - 重定向操作符语义化：`>` `>>` `>|` `&>` `&>>`、`<`、`<>`、`>&`、`<&`、`<<`、`<<-`、`<<<`，支持 fd 前缀（`2>` `3>>`）；
+  - **fd 复制不是文件**：`2>&1` 不再被误判为「写目标 `&1`」；
+  - **heredoc 正文整段跳过**（`cat <<EOF > out.txt` 只认 `out.txt`，正文里的 `>` 是数据）；
+  - **引号内的 `>` 不是重定向**（`bash -c 'echo x > out.txt'` 不误抓，落 exec 规则判黄）；
+  - 动态目标（`$VAR` / `$(...)` / 反引号 / brace / 通配）标记 `dynamic` 并写进 `warnings`，不当作路径；
+  - 命令段边界（`;` `&&` `||` `|` `&` 括号 换行）使重定向只归属自己那段命令；
+  - 隐式文件命令从 argv 取目标：`tee`、`dd if=/of=`、`Set-Content`/`Out-File`/`Add-Content`、`cat/Get-Content/type/less/head/tail/more`。
+- `buildActionContext()` 新增 `parseFailed` / `parseError` / `heredocs` / `warnings`；规则据此 **fail-closed**：
+  - `exec-read-only` 在解析失败时不再匹配（不宣称只读）；
+  - 有 `>` 且解析失败 → `write-outside-buffer` 命中，证据 `unparsed-redirect-fail-closed`（黄）；
+  - 否则 → `exec-side-effect` 的 `unparsed-command-fail-closed`（黄）。
+- 未引入第三方依赖：`shell-quote` 只 tokenize 不认操作符，`@aliou/sh`（v0.3.4，MIT AND BSD-3-Clause，零运行时依赖）
+  虽是合理选择但会破坏本仓库零依赖约束，因此手写只覆盖重定向提取的词法器；PowerShell 走同一词法器并如实声明边界。
+- TypeScript 参考实现同步（`tokenizeShell` / 新 `parseShellRedirects` / `parseFailed` / 规则 fail-closed）。
+
+### 测试
+- `test/umbrella.test.mjs` **45 → 53 项**：操作符全覆盖、fd 复制、heredoc 跳过、引号、动态目标、命令边界、
+  隐式文件命令、语法错误 fail-closed、token 结构断言。
+- 全量测试 **456 → 464 项**；TS 参考实现行为断言 **76 → 95 项**。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 9 个补丁位。
+
+## v2.7.8（2026-11-02）
+
+**主题：动作规则表声明化 —— 与 AST 规则表同粒度（`match` / `evidence` 可独立测试）。**
+
+### 新增
+- `src/lib/umbrella.mjs`：
+  - `DEFAULT_ACTION_RULES`：15 条**声明式规则**，字段统一为
+    `{ id, category, light, reason, tags[], match(evidence, context), evidence(evidence, context) }`，
+    数组顺序即优先级、**首个命中胜出**；规则 id / 灯色与 v2.7.6 完全一致（行为不变）。
+  - `buildActionContext()`：`mode` / `commandText` / `targetPath` / `url{raw,host,hostPort}` / `targetPid` /
+    `writeTargets[]` / `readTargets[]`，一次解析供 15 条规则共享。
+  - `parseShellRedirects()`：`>` `>>`、`tee`、`dd of=`、`Set-Content`/`Out-File` 的写目标，
+    `cat/less/head/tail/more/Get-Content/type` 的读目标；**只解析字面量**，`$VAR`/`$(...)`/通配等动态构造一律跳过
+    （交给兜底规则判黄，不静默放行）。
+  - `parseUrlParts()`：不依赖 `URL` 全局对象，带默认端口（http 80 / https 443）。
+  - `createActionRuleSet()` + `assertActionRule()`：`register(rule, {before|after})` / `override` / `remove` / `reset`。
+    注册**必须显式给位置**（追加到表尾等于永不命中）；重复 id、未知 `category`、未知灯色、缺 `match`/`evidence`
+    一律在注册时抛错，不会在评分路径上静默漏判。
+  - `baseLight()` 改为表驱动，返回新增 `category` / `tags` / 结构化 `evidence`（`matchedPattern` 等）；
+    `assessAction` 与 `umbrella-decision` 审计记录同步带 `category` + `evidence`。
+- 插件面 `fangUmbrella` 新增：`explain(evidence)`、`rules`、`ruleIds()`、
+  `registerRule/overrideRule/removeRule/resetRules`。
+- TypeScript 参考实现同步声明式规则表（`DEFAULT_ACTION_RULES` / `createActionRuleSet` / 上下文解析），
+  编译产物上跑 76 项行为断言。
+
+### 测试
+- `test/umbrella.test.mjs` **35 → 45 项**：规则表形状/顺序/冻结、15 条规则逐条命中与证据形状、
+  上下文解析（重定向/URL/相对路径/PID）、规则集注册/覆盖/移除/重置与错误分支、
+  自定义规则影响真实评分与决策审计、评分调用不修改规则表。
+- 全量测试 **446 → 456 项**。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 8 个补丁位。
+
+## v2.7.7（2026-11-01）
+
+**主题：保护伞的 TypeScript 参考实现 —— 可编译、可验证、不随包发布。**
+
+### 新增
+- `types/umbrella/`（7 个 `.ts`）：`types` / `paths` / `cache` / `plugin-scorer` / `action-scorer` /
+  `umbrella` / `index` —— v2.7.6 运行时语义的**可编译镜像**。它不 import 任何 `node:` 内建模块，
+  文件系统（mtime/hash）、时钟、评分服务、审计全部走注入端口，因此任意宿主只需一个 `tsc` 即可编译。
+- `types/tsconfig.json`：`strict` + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` +
+  `noUnusedLocals/Parameters` + `noImplicitReturns` + `noEmit`。
+- `tools/release/typecheck.mjs` + `npm run typecheck`：找到编译器就**真的编译**（失败非零退出）；
+  找不到就打印 `SKIP` 与安装方法并退出 0，**绝不会在未编译的情况下说 PASS**。
+- `types/README.md`：编译方法（`npx tsc -p types/tsconfig.json` 或 `DSH_FANG_TSC=…`）、Node 宿主适配示例、
+  `.mjs ↔ .ts` 映射、8 条与设计稿的差异、边界（无 realpath / 无 UNC / 无强制拦截）。
+
+### 说明
+- 运行时仍是纯 `.mjs`；`types/` **不进 `package.json files`**，tarball 不含它；CI 零第三方依赖策略不变
+  （未新增 workflow job，也没有新增 `devDependencies`）。
+- 本地证据：TypeScript **5.9.2** 严格编译 **0 error**；编译产物跑 35 项行为断言 **35/35**
+  （15 条规则、两张下限表、决策矩阵、指纹缓存 / LRU / mtime 失效、审计记录形状）。
+- `types/` 与运行时出现分歧时，以 `.mjs` + `docs/UMBRELLA.md` 为准，并应同步修正 `types/`。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 7 个补丁位。
+
+## v2.7.6（2026-11-01）
+
+**主题：保护伞系统（Umbrella）—— 一个证据管道，两个评分出口。**
+
+### 新增
+- 新增子插件 `fang-umbrella`（`src/plugins/umbrella.mjs`，loader 行 `fang-umbrella`，
+  服务键 `fangUmbrella`，母体 + 分身都激活）与纯逻辑库 `src/lib/umbrella.mjs`：
+  - **插件评分**：复用既有 `fang-scorer` 的 import 层扫描与 A–E 分档（不重复扫源码），
+    按入口文件 `mtime`（或 inline 源码 sha1）做 LRU 缓存；拿不到 scorer 时失败往坏里判（E + degraded）。
+  - **动作评分**：`green / blue / yellow / red` 四色，15 条规则（生命周期、破坏性、凭据、外连、
+    动态加载、写、只读 shell、只读、未知工具），每条带 `matchedRule` 供审计追溯。
+  - **耦合**：`effectiveLight = max(baseLight, gradeFloor(grade))`，等级只抬不降；
+    下限表 `umbrella`（A/B 绿、C 蓝、D 黄、E 红，= 设计稿）与 `strict`（= kernel `GRADE_COLOR`）可选。
+  - **决策矩阵**：`allow / mark / ask / delegate / deny`；DSH 生命周期动作委托 restart-guard
+    （带 `originLight`），凭据访问是唯一硬拒绝。
+  - **审计**：一次 `decideAction` 落一条 `umbrella-decision`；插件评分沿用 scorer 的 `score`，不双写。
+- kernel 词汇：`SERVICE.umbrella`、`ROW.umbrella`、`LIGHT`（四色）、`LIGHT_RANK`、
+  `AUDIT.UMBRELLA_DECISION`、`MATRIX.umbrella: ['mother','fork']`。
+- 依赖注入：`fang-umbrella` 在 `bufferRoot` 未配置时读 `buffer-keeper` 的实时 `dir`，
+  策略以函数形式传入，buffer root 变化不需要重建保护伞（缓存不受影响）。
+
+### 文档
+- 新增 `docs/UMBRELLA.md`：三层结构、两张下限表的取舍、15 条规则表与顺序、
+  决策矩阵、服务面、缓存策略、与 Router/Approver/RestartGuard/HotReloader 的**接线现状**
+  （含「没有工具拦截钩子，保护伞是决策库不是强制闸门」这一边界）、审计形态、校准三问、差异表。
+- `docs/CONTRACTS-V2.md §5.9`：`fangUmbrella` 服务契约（输入/输出/失败语义）。
+
+### 测试
+- `test/umbrella.test.mjs` 35 项：灯色词汇、两张下限表、4×6 单调性属性、15 条规则与优先级、
+  决策矩阵七行、缓存命中/失效/逐出/失效接口、失败往坏里判、等级耦合、审计、实时策略、延迟预算、插件形态。
+- `test/role-extensions.test.mjs`、`test/plugins-shape.test.mjs`、`test/kernel.test.mjs`、
+  `tools/e2e.mjs` 同步版本号与矩阵行数（15 → 16）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 6 个补丁位。
+
+## v2.7.5（2026-11-01）
+
+**主题：端口生命周期文档化 —— Adapter 复用 DSH 端口，不存在第二个 Adapter 端口。**
+
+### 说明（设计评审结论，非代码变更）
+- 设计稿提出「Forker 分配 DSH + Adapter 两个端口、写 `adapterPort`、注入 `DSH_ADAPTER_PORT`、
+  AdapterServer 独立 listen、双端口 waitReady / 归还」。本仓库在 v2.6.8 已明确采用
+  **单端口**方案：Adapter 的路由挂在分身自己的 DSH `webServer` 上
+  （`docs/ADAPTER-COMMANDS.md §1`），没有第二个监听者，因此没有第二份端口生命周期。
+- Forker 仍是唯一端口分配者：每分身 1 个池端口（18000–18100，101 个；`maxForks` 默认 8），
+  失败/超时/退出/stop/reap/死孤儿六条归还路径均已有代码与测试覆盖；
+  Adapter 就绪由 Orchestrator 在同端口做 `/fang/adapter/hello` 握手判定，而不是第二个端口探活。
+
+### 文档
+- 新增 `docs/PORT-LIFECYCLE.md`：端口所有权、env 契约、就绪判定、六条归还路径、
+  「为什么不需要双端口」、以及未来若真要独立端口的完整改动清单与风险。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 5 个补丁位。
+
+## v2.7.4（2026-11-01）
+
+**主题：连接三步流程可观测化 —— version 信息 / 协议区间 / session 一致性诊断。**
+
+### 说明
+- 「GET /version → GET /state → SSE」自 v2.6.1 起已是 `createAdapterClient().connect()`
+  的固定顺序（`negotiateProtocol` 先于 state，协议不兼容时不拉快照、不订阅）；
+  本版本只补**可观测性**，不改变连接行为。
+
+### 新增
+- `connect()` 结果新增 `version`（最近一次 version 响应）与 `sessionMismatch` 字段；
+- `client.lastVersionInfo`：version 原始响应（protocol / version / sessionId…）；
+- `client.protocolRange`：本次协商实际使用的 `{min,max}`；
+- `client.sessionMismatch`：version 与 state 的 `sessionId` 不一致时记录
+  `{versionSession, stateSession, at}`（Adapter 在两次请求之间重启过）；
+  此时仍以 state 为准续流，不重试三步（state 已是新进程的最新快照）。
+
+### 文档 / 测试
+- `docs/CONNECT-PREFLIGHT.md`：三步流程现状、可观测字段、版本兼容规则、错误处理与边界；
+- `test/adapter-client.test.mjs` 新增 2 项（8 项）：version 信息/协议区间可观测、
+  sessionId 不一致时记录 sessionMismatch 且 SSE 用 state 的 session。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 4 个补丁位。
+
+## v2.7.3（2026-11-01）
+
+**主题：重启结果事件化 —— Forker 发 `fork-restart-failed`，TaskHandle 终态 fail-fast。**
+
+### 新增
+- **事件 `fang/fork-restart-failed { forkId, error, terminal }`**（Forker）：
+  - 自动重启尝试失败（`restartFork` spawn 失败）→ `terminal:false`（Forker 可能按
+    supervise 计划再试）；
+  - 放弃重启（`planRestart` give-up / `restart-no-cli`）→ `terminal:true`（不会再有自动重试）。
+- **TaskHandle 订阅该事件**：
+  - `terminal=true` → 立即 `failed`，不再等 `restartTimeoutMs`（60s）；
+  - `terminal=false` → 只记日志、保持 `reconnecting`，由后续 `fork-started` 或
+    `forker.status()` 轮询兜底推进（不把「还会重试」误判为终态）；
+  - `taskId` 不匹配忽略；`stop()` 仍会立即打断等待（`restartSlot.finish`）。
+- 既有 `waitForRestart` 的「事件优先 + 轮询兜底」保留；`fork-started` 仍是成功的完成信号。
+
+### 说明
+- 设计稿的 `fork-restarted` 对应仓库既有 `fang/fork-started`（不再新增重复事件）；
+- TaskHandle 不自己挂 child `exit` handler，统一由 Forker 的 `fang/fork-crashed` 驱动，
+  因此没有「attach 两次」的重复挂载问题；
+- 非终态失败不 settle(false)：设计稿原方案会把「Forker 还会重试」误标成 failed，
+  这里改为继续等待（见 `docs/TASK-HANDLE.md §3`）。
+
+### 测试 / 文档
+- `test/task-handle.test.mjs` 新增 3 项（20 项）：terminal fail-fast、非终态继续等、
+  taskId 过滤；
+- `test/forker.test.mjs` 新增 1 项（27 项）：supervise give-up 时 emit
+  `fang/fork-restart-failed`（terminal=true）；
+- `docs/TASK-HANDLE.md §3`：事件驱动重启流程与 terminal 语义。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 3 个补丁位。
+
+## v2.7.2（2026-11-01）
+
+**主题：Forker token 生命周期显式化 —— 补齐 TokenRegistry 公开面（getToken / onTokenRefresh）。**
+
+### 说明
+- token 生命周期本身自 v2.6.1 起已在 `forker.mjs` 内联实现（每次 spawn 生成、
+  stop 作废、重启重生成、内存 only、env 注入）；本版本补齐设计稿 `TokenRegistry`
+  的**公开 API** 并对齐命名。
+
+### 新增
+- `forker.getToken(forkId)`：`adapterToken(forkId)` 的别名；
+- `forker.onTokenRefresh(handler) → disposer`：每次 `spawn()` 重新生成/刷新 token 时广播
+  `(forkId, token)`；handler 异常隔离，disposer 幂等；
+  - 首次派生（生成）与崩溃重启（刷新）都会触发；语义是「当前 token」，不是「进程就绪」。
+
+### 测试 / 文档
+- `test/forker.test.mjs` 新增 1 项（26 项）：onTokenRefresh 每次 spawn 广播、getToken 别名、
+  异常隔离、disposer；既有 adapterToken 生命周期测试保持不变；
+- `docs/FORKER-TOKEN.md`：现状、公开面、TS 形状映射、边界（含 adapterPort → webServer 复用）。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 2 个补丁位。
+
+## v2.7.1（2026-11-01）
+
+**主题：修复归档不生效 + 新增「读档」存档管理（还原 / 删除）。**
+
+### 修复
+- **归档失败却显示成功**：旧实现 `archiveTask` 调 `service.reap()`（停进程 + 删 home），
+  且 `reap` 失败时仍返回 `ok:true`。现在归档 = **停止进程 + 保留 home**：
+  - 调 `forker.stop()` 后用 `forker.alive()`（真实 PID 存活）确认进程退出；
+  - 超时/停不掉 → `{ok:false, error:'stop-failed'}`，任务保持原样，不再假装归档成功；
+  - 只有确认退出后才写 `status:'archived'`、`archivedAt`、清空 url/port/token。
+- `autoReapIdleMinutes` 的空闲回收改回 `reap()`（删 home），不再误用归档。
+
+### 新增
+- **读档 / 存档管理**：
+  - `POST /api/tasks/archive`：归档（保留 home，url/port/token 清空）；
+  - `POST /api/tasks/restore`：用原 home/profile 重新 spawn（新端口/新 token）+ 握手；
+  - `POST /api/tasks/archive/delete`：reap 删除 home + 记录（forker 记录丢失时按 home 兜底）；
+  - `GET /api/tasks` 的 archived 任务新增 `archivedAt` / `archiveRemote` 字段。
+- **面板顶栏「读档 (N)」按钮**：切换存档视图；存档卡片支持「还原」「删除存档」，
+  普通右栏只保留存档提示 +「打开读档」入口。
+- `forker.alive(forkId)`：真实 PID 存活判断（归档确认用，不只看 `rec.running`）。
+- `archiveStopTimeoutMs` 配置（100–30000，默认 3000）。
+
+### 测试 / 文档
+- `test/orchestrator.test.mjs` 新增 3 项：归档停进程且保留 home、stop-failed 不假装成功、
+  还原重新 spawn、删除存档 reap 并移除记录（21 项）；
+- `docs/ARCHIVE.md`：生命周期、接口、UI、配置、兼容与边界。
+
+> 版本策略：`x.y.z` 每一位 0–9；本次是 v2.7 的第 1 个补丁位。
+
+## v2.7.0（2026-11-01）
+
+**主题：ForkSseClient（SSE 层）网络层模糊测试 —— 随机分块 + 随机断连的等价性。**
+
+### 新增
+- **`tools/fuzz/sse-client-mock.mjs`**：真实 `http.createServer` mock：
+  - `/fang/adapter/version`、`/state`、`/events` 三个端点；
+  - `/events` 按 `since` 过滤帧并记录 `{since, session}`；
+  - plan 控制 200/401/409/410/503、`serve` 帧数、`ending`（hold/end/destroy）、心跳插入；
+  - `destroy` 前等最后一个 write 回调 + 5ms，降低“数据未到 TCP 就断开”的 flake。
+- **`tools/fuzz/sse-client-generators.mjs`**：事件序列（3–10 帧）、每帧 4 种切块模式、
+  四类策略（无断/单断/多断/心跳）、`expectedSinceFor()`。
+- **`tools/fuzz/sse-client-fuzz.mjs`**：
+  - 性质：401 致命不重试；409/410 触发 `resetCursor=true` + 快照重置；心跳不产生事件；
+    断连后 cursor 无重复/无空洞且 `since` 正确；
+  - 随机：逐 case 配置 mock → 新 client → `connect()` → 等覆盖全部 cursor →
+    比较**未去重**的 cursor 序列与请求 `since`；失败报告含 seed/iteration/strategy/
+    expectedCursors/actualCursors/requests；
+  - CLI `--iterations` / `--seed`。
+- **`test/sse-client-fuzz.test.mjs`（3 项）**：性质测试全通过；120 次随机 fuzz 0 failures
+  且四类策略均覆盖；同 seed 可复现。
+
+### 文档
+- `docs/FUZZ-SSE-CLIENT.md`：与 SseParser fuzz 的区别、MockSseServer 能力、I1–I7 不变量、
+  生成器、性质测试、CLI、证据与边界。
+- `docs/PROTOCOL-V3.md §11/§12`：测试与实现记录。
+
+### 本机证据
+- 200 次随机 fuzz（seed=20261110）：**0 failures**；
+  noDisconnect 47 / singleDisconnect 51 / multiDisconnect 53 / withHeartbeats 49；
+- 60 次：3.6s；200 次：10.8s（mock 无每 chunk 延迟，靠 write 回调保序）。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；v2.6 的补丁位已到 9，本次进位为 **v2.7.0**。
+
+## v2.6.9（2026-11-01）
+
+**主题：SseParser 定向生成器 —— 为 9 个分支各构造“边界恰好命中”的最小输入。**
+
+### 新增
+- **`tools/fuzz/sse-directed.mjs`**：
+  - 9 个分支、**61 条**定向用例：`cr-trimming`（8）/ `multi-line-data`（7）/
+    `empty-data-dropped`（9）/ `comment-ignored`（9）/ `space-trimming`（7）/
+    `field-override`（6）/ `retry-and-unknown`（6）/ `data-field-edge`（4）/ `buffer-boundary`（5）；
+  - 40+ 条用例带 `expectedFrames`，锁定“只裁一个 CR / 只裁一个空格 / 空 data 帧丢弃 /
+    无冒号 data 仍产帧”等精确语义；
+  - `pickDirected(rng)` 均匀选分支与用例；`generateMixed(rng, { directedProb })` 按概率混合定向/随机；
+  - `runDirectedSmokeTest()`：一次性解析 + expectedFrames + 6 种分块策略 × 3 种子等价性；
+    支持注入 parse 函数用于 mutation 测试。
+- **`tools/fuzz/sse-parser-fuzz.mjs`**：
+  - `runSseParserFuzz({ directedProb, directed })` 支持混合策略，返回 `branchCounts` /
+    `directedHits` / `randomHits`；失败记录带 `branch`；
+  - CLI 先跑定向 smoke（61/61），再跑随机模糊，并打印分支覆盖率；
+    `--directed-prob` / `--no-directed` 可调；`directedHits > 100` 时零命中分支告警。
+- **`test/sse-directed.test.mjs`（8 项）**：用例完整性、smoke、expectedFrames 覆盖、
+  mutation 检出（裁掉所有尾部 CR 会被抓到）、混合确定性、均匀抽样、fuzz 全定向/全随机/可复现。
+
+### 文档
+- `docs/FUZZ-SSE-DIRECTED.md`：分支表、用例设计、smoke 流程、混合策略、CLI、取舍与边界。
+- `docs/PROTOCOL-V3.md §11/§12`：定向生成器测试与实现记录。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 9 个补丁位。
+
+## v2.6.8（2026-11-01）
+
+**主题：Adapter 命令入口的扩展面 —— 外部插件注册命令 + 413 body 上限。**
+
+### 新增
+- **`adapter.registerCommand(op, executor)`**（`src/plugins/adapter.mjs`）：
+  - executor 签名 `(payload, { commandId, trackingId, emit, logger })`；
+  - **同步/异步由 executor 的返回值决定**：普通对象 = 200；`{status:'completed',result}` = 200；
+    `{status:'rejected',code,message}` = 失败信封；`{status:'accepted',trackingId}` = **202**，
+    由 executor 异步执行并通过 `emit({kind:'command-done',…})` 推送结果；
+  - `trackingId` 未显式给出时默认 `track_<commandId>`，同一 commandId 重试稳定；
+  - 内置 op 不可覆盖（抛错），避免协议语义被第三方替换；disposer 后该 op 回到 `unknown-op`；
+  - 仍由 `CommandCache.run(commandId, …)` 包裹：accepted 也缓存，重试不会启动第二个异步任务。
+
+### 修复
+- **body 超限 → 413**：`POST /adapter/commands`（以及 `/adapter/command`）请求体超过 1 MB 时，
+  之前返回 400 `bad-request`；现在按 `ADAPTER_ERROR_STATUS` 返回 **413 `body-too-large`**，
+  且 executor 不会被调用。
+
+### 文档 / 测试
+- `docs/ADAPTER-COMMANDS.md`：设计稿（CommandHttpHandler / EventLog / CommandHandler /
+  AdapterServer）与本仓库已有实现的映射；为什么复用 DSH webServer 而不是独立端口；
+  HTTP 状态表、SSE cursor/session 语义、命令注册示例、边界。
+- `docs/PROTOCOL-V3.md §6.2/§6.4/§11/§12`：扩展命令约定与 413。
+- `test/adapter.test.mjs` 新增 4 项：registerCommand 同步幂等 + disposer、异步 202 + command-done +
+  重试同 trackingId、拒绝覆盖内置 op / rejected 映射、1 MB body → 413。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 8 个补丁位。
+
+## v2.6.7（2026-11-01）
+
+**主题：TaskHandle —— 把 fork 启动、Adapter 连接、命令代理、崩溃重建连接收进一个生命周期对象。**
+
+### 新增
+- **`src/lib/task-handle.mjs`**：`TaskHandle` 组合 Forker（进程层）+ ForkClient（传输/命令层）。
+  - 状态机：`idle / starting / running / reconnecting / stopping / stopped / failed`；
+  - `start()`：fork 未运行则 `forker.spawn()`（可选 spawnOptions），用 `forker.adapterToken()`
+    建 ForkClient 并 connect；重复调用幂等；
+  - **崩溃重建连接**：监听 `fang/fork-crashed` → `reconnecting` → 等 `fang/fork-started`
+    （事件优先 + `forker.status()` 轮询兜底）→ 用**新 url + 新 token** 重建 client；
+    token 由 Forker 在每次 spawn 时重新生成（内存 only），重启后不会 401；
+  - **命令代理**：`command(op, payload)` + dsh-Fang 9 个便捷方法；重连窗口内最多等
+    `commandWaitMs`（默认 5s），超时 reject `task-unavailable`；idle/stopped/failed fail-closed；
+  - 生命周期：`stop()`（断开 client + forker.stop，保留 home）、`recycle()`（stop + reap）、
+    `dispose()`（只释放本地资源，不杀 fork）；stop/recycle 幂等；
+  - 事件聚合：`onEvent()` 转发 SSE 事件；`onTaskEvent()` 输出
+    `status-changed / crashed / restarting / reconnected / failed`。
+- **文档** `docs/TASK-HANDLE.md`：状态机、崩溃恢复流程、与 Forker 的接口约定、
+  TS 形状映射、测试清单、边界（supervise 默认关闭、命令不缓冲、未接线 Orchestrator）。
+
+### 变更
+- `docs/PROTOCOL-V3.md §9/§11/§12` 增加 TaskHandle 的职责与测试列。
+
+### 测试
+- 新增 `test/task-handle.test.mjs`（17 项）；全量门禁见 `docs/AUDIT-v2.6.7.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 7 个补丁位。
+
+## v2.6.6（2026-11-01）
+
+**主题：分身 Web UI 模式 —— 不再把「母体 API 在分身里不存在」渲染成插件故障。**
+
+### 修复
+- **分身 Web UI 面板 404**：分身的 profile 也包含 `@local/dsh-fang` 的 client 半，所以分身页面
+  侧栏会出现「瓮城」；但 orchestrator 是 mother-only，`/fang/api/status|tasks|sessions` 在分身里
+  全部 404。v2.6.6 先探测宿主角色（`/fang/api/status` 200 = 母体；否则 `/fang/adapter/hello`
+  200/401 = 分身），分身里只渲染一段说明卡，不再请求母体 API、不再显示「不可读」错误块。
+- **分身里隐藏 dock 徽标**：不再对 `/fang/api/status` 轮询，也不显示「瓮城离线」假故障。
+- **母体行为保持不变**：只有探测为 mother 后才开始刷新 `/fang/api/*`，避免启动时先打一轮 404。
+
+### 说明
+- 分身里 Adapter 路由存在但 v2.6.1+ 要求 Bearer（浏览器拿不到 token），所以角色探测把 401 也
+  视为「这是分身」，不展示 Adapter 详情（避免把 401 当适配器故障）。
+- 侧栏注册项无法按角色摘除，点击仍会打开说明卡；这是宿主 slot 能力的限制。
+
+### 文档
+- `docs/UI-FORK-MODE.md`：404 原因、探测规则、分身/母体行为差异、验证步骤、限制。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 6 个补丁位。
+
+## v2.6.5（2026-11-01）
+
+**主题：SSE 解析器独立成类 + 模糊测试（随机输入 / 分块等价 / 参考实现 / 帧边界）。**
+
+### 新增
+- **`src/lib/sse-parser.mjs`**：`SseParser` 类（行式增量解析，`push()`/`flush()`）。
+  只按 `\n` 切行、行尾裁一个 `\r`（CRLF 支持）；空行切帧、无 data 帧丢弃、注释/`retry`/未知字段忽略；
+  多行 data 用 `\n` 拼接；`flush()` 按 SSE 规范丢弃未完成残帧。
+- **模糊测试工具** `tools/fuzz/`：可复现种子 RNG（SplitMix32 + XorShift128）、9 种输入模式、
+  独立参考实现 oracle、6 种字符串分块 + 字节级切分、roundtrip、flush 不变量、失败报告（seed/hex/chunks）。
+- **CI 档位** `test/sse-parser-fuzz.test.mjs`（7 项）：性质断言 + 固定种子 × 6 × 25 iterations +
+  随机 seed smoke + 可复现性 + 已知 CRLF/多行/字节切分边界。
+- CLI：`node tools/fuzz/sse-parser-fuzz.mjs --iterations 5000 --seed <seed>`；失败时打印可复现命令。
+- 文档 `docs/FUZZ-SSE-PARSER.md`：不变量 I1–I6、结构、分块策略、复现方式、已知边界。
+
+### 修复 / 行为变化
+- **CRLF 帧边界**：旧 `createSseParser` 用 `indexOf('\n\n')` 找块边界，`\r\n\r\n` 不含 `\n\n`，
+  CRLF 流会延迟到 flush 且把 `\r` 混进 data；新 `SseParser` 逐行处理，CRLF 正常切帧。
+- `flush()` 不再解析残帧（SSE 规范：EOF 丢弃未完成事件）；解析器也不再把无 `event:` 的帧
+  默认成 `event:'message'`（字段缺失即省略）。
+- `adapter-protocol.mjs` 的 `createSseParser()` 改为 re-export `SseParser`（单一实现）。
+
+### 测试
+- 新增 `test/sse-parser-fuzz.test.mjs`（7 项）；CLI 额外跑过 5000 iterations，0 failure。
+  全量门禁见 `docs/AUDIT-v2.6.5.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 5 个补丁位。
+
+## v2.6.4（2026-11-01）
+
+**主题：ForkClient 完整实现 —— inflight 追踪、command-done 匹配、超时兜底。**
+
+### 新增
+- **`src/lib/fork-client.mjs`**：`ForkClient` 组合 AdapterClient（传输 + SSE）与 `CommandCache`（幂等）。
+  - **同步命令**：POST 返回 completed → 直接返回；同 commandId 命中缓存不重复 POST；
+  - **异步命令**：202 accepted + trackingId → `inflight` Map 等待 SSE `command-done`，
+    拿到终态后才写入缓存（不缓存 accepted）；
+  - **command-done 匹配**：按 trackingId 匹配（trackingId 与 commandId 是两个键）；
+    超时/断开后迟到的 command-done 静默忽略（debug）；
+  - **超时兜底**：同步 POST 走传输层 AbortController（`synchronousTimeoutMs`）；
+    异步命令用 `asynchronousTimeoutMs`（默认 120s）timer，超时 reject → 缓存移除 → 可重试；
+  - **SSE 生命周期**：断开保留 inflight（cursor 补发）；`resetCursor=true`（分身重启）/
+    `disconnect()`（用户主动）→ 全部 inflight reject；
+  - **事件扇出**：`onEvent/onReconnect/onDisconnect`，handler 异常隔离；`state-changed` 更新快照；
+  - **fail-closed**：未 connect 或已 disconnect 时命令直接 reject（`not-connected` / `disconnected`）；
+  - dsh-Fang 的 9 个 Adapter op 便捷方法：ping/status/flush-buffer/score-plugin/read-plugin/
+    route-confirm/approvals/approval-decide/archive。
+- **文档** `docs/FORK-CLIENT.md`：TS 接口形状与 `.mjs` 映射、命令生命周期、inflight 语义、
+  超时矩阵、SSE 处置规则、错误码、测试清单、边界（无 tsc、node:http 传输待实现、尚未接线）。
+
+### 变更
+- `docs/PROTOCOL-V3.md §9/§11/§12` 同步 ForkClient 实现与测试清单。
+
+### 测试
+- 新增 `test/fork-client.test.mjs`（13 项）；全量门禁见 `docs/AUDIT-v2.6.4.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 4 个补丁位。
+
+## v2.6.3（2026-11-01）
+
+**主题：CommandCache LRU + 幂等语义 —— in-flight 合并、失败契约、只淘汰已完成项。**
+
+### 新增
+- **`src/lib/command-cache.mjs`**：`CommandCache.run(commandId, fn)` 幂等执行。
+  - 两态：`running`（value 是同一个 promise）/ `completed`（value 是结果）；
+  - **并发合并**：同一 `commandId` 并发提交 → 第二次等待同一个 promise，不重复执行副作用；
+  - **失败契约**：业务失败（`fn` 返回 `status:'rejected'`）与 async accepted 都缓存；
+    `fn` 抛错（传输/编程错误，命令可能没执行）不缓存并移除，允许重试重新执行；
+  - **LRU**：Map 插入顺序即使用顺序；`run()` 命中 touch，纯 `get()` 不 touch；
+    超容量时从头部淘汰第一个 completed，跳过 running；全是 running 时允许临时超限，
+    in-flight 完成后自动收敛；
+  - `invalidate()` 只对 completed 生效、`clear()` 保留 running、`stats()` 暴露容量/命中/去重/淘汰/丢弃计数；
+  - 容量必须 ≥1（否则 `RangeError`）；`onEvict` 回调异常被隔离；缓存不实现超时（超时属于命令层）。
+- **Adapter 接线**：`commands()` 改为 `commandCache.run()`；并发同 commandId 只执行一次、
+  第二个请求返回 `deduplicated:true`；只有真正执行的那一次发 `command` / `command-done` 事件；
+  无 commandId 的请求仍不缓存（v2 兼容）。
+- **文档** `docs/COMMAND-CACHE.md`：决策表、API、并发时序、失败契约、LRU 细节、Adapter 接线、
+  测试清单、边界（单进程/不持久化/accepted 缓存）。
+
+### 变更
+- `adapter-protocol.mjs` 不再自带命令缓存实现，改为 re-export `command-cache.mjs`（避免两份幂等语义）；
+- `docs/PROTOCOL-V3.md §6.2/§12` 补充 in-flight 合并与失败契约，并指向 `docs/COMMAND-CACHE.md`。
+
+### 测试
+- 新增 `test/command-cache.test.mjs`（16 项）与 Adapter 并发幂等用例（1 项）；全量门禁见 `docs/AUDIT-v2.6.3.md`。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9；本次是 v2.6 的第 3 个补丁位。
+
+## v2.6.2（2026-11-01）
+
+**主题：控制面板分类折叠 —— 进行中 / 已归档 / 临时 三组，进行中只先显示 7 条会话。**
+
+### 新增
+- **左栏（母体 项目 & 对话）三组折叠**：
+  - **进行中**（默认展开）：只先渲染 7 条会话，其余折叠为「展开剩余 N 个」；展开后可「收起多余会话」；
+  - **已归档**（默认折叠）：`session.archived = true` 的对话，按工作区分组；
+  - **临时**（默认折叠）：`session.empty = true` 的空会话（没有用户消息、无法继续开发）。
+- **右栏（分身 任务 & 项目）三组折叠**：
+  - **进行中**（默认展开）：普通任务卡片；
+  - **已归档**（默认折叠）：`status = archived` 的任务（沿用原分组，改为统一分区标题）；
+  - **临时**（默认折叠）：快速派生任务（标题为 快速派生 / 双击快速派生 / 徽标快速派生 / 重试快速派生，
+    空白且未继承会话）。
+- **「隐藏/显示临时内容」顶栏开关**：整组隐藏或恢复临时内容；偏好写入
+  `localStorage["fang.panel.showTemporary"]`（storage 不可用时只影响本次面板会话）。
+- 分类判定**只用宿主已返回的事实**（`archived` / `empty` / 任务标题），不改协议、不新增接口；
+  分区标题的 tooltip 写明「临时」的定义。
+
+### 变更
+- 左栏/右栏标题栏的计数补充分类明细（进行中 / 已归档 / 临时，临时隐藏时标注「已隐藏」）。
+- 同一工作区同时存在进行中/已归档/临时会话时，会在对应分区各出现一次，折叠状态按分区独立记忆。
+- 临时全部隐藏且没有其它内容时，给出「当前只有 N 条临时内容（已隐藏）」的空态 + 一键恢复按钮。
+
+### 测试
+- UI 层改动，无新增单元测试；`node --check client.js` 通过；全量测试与 e2e 门禁见
+  `docs/AUDIT-v2.6.2.md`。视觉验收需重启宿主加载新 client 后人工确认（本机后台宿主未重启）。
+
+> 版本策略：`x.y.z` 每一位只能是 0–9（一个次版本含 10 个小版本）；本次是 v2.6 的第 2 个补丁位。
+
 ## v2.6.1（2026-11-01）
 
 **主题：Adapter v3 协议化 —— 版本协商 / 状态快照 / SSE 事件流 / 幂等命令 / Bearer 认证。**

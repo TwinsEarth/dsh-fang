@@ -8,6 +8,7 @@ import {
 } from '../kernel/index.mjs'
 import { exportSessions, importSessions } from '../lib/session-bundle.mjs'
 import { encodeWorkspaceKey } from '../lib/session-format.mjs'
+import { createHttpGuard } from '../lib/http-auth.mjs'
 
 export const name = 'fang-session-sync'
 export const inject = []
@@ -23,6 +24,10 @@ export const Config = z.object({
   maxBundleBytes: z.number().min(0).max(4 * 1024 * 1024 * 1024).default(512 * 1024 * 1024)
     .description('单个 bundle 的大小上限（字节）；超过则拒绝导出'),
   routes: z.object({ enabled: z.boolean().default(true) }).default({}),
+  authToken: z.string().default('')
+    .description('安装级鉴权 token；留空 = env DSH_FANG_AUTH_TOKEN 或 <dataDir>/fang-auth.json（0600，自动生成）'),
+  authEnabled: z.boolean().default(true)
+    .description('是否要求 /fang/api/sync/* 携带安装级鉴权 token（默认开启；仅测试/本地调试可关）'),
 })
 
 export function apply(ctx, config) {
@@ -34,6 +39,11 @@ export function apply(ctx, config) {
   const storagesRoot = cfg.storagesRoot ? path.resolve(cfg.storagesRoot) : path.join(resolveDshHome(), 'storages')
   const bundleRoot = cfg.bundleRoot ? path.resolve(cfg.bundleRoot) : path.join(layout.dataDir, 'sync-bundles')
   const prefix = String(cfg.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
+  const authGuard = createHttpGuard({
+    dataDir: layout.dataDir,
+    token: cfg.authToken,
+    enabled: cfg.authEnabled !== false,
+  })
 
   const workspacesOf = (homeDir) => {
     const file = path.join(homeDir, 'storages', 'workspace.json')
@@ -58,9 +68,14 @@ export function apply(ctx, config) {
     /** PC 侧：把勾选会话只读地导出到 staging bundle。 */
     exportSelected(input = {}) {
       const workspaces = workspacesOf(storagesRoot)
+      const requestedBundleId = input.bundleId === undefined ? `sync-${Date.now()}` : String(input.bundleId)
+      // v3.0.5/B3：bundleId 只允许安全段（防 `../` 写出 bundleRoot）
+      if (!/^[A-Za-z0-9._-]{1,128}$/.test(requestedBundleId) || requestedBundleId === '.' || requestedBundleId === '..') {
+        return { ok: false, code: 'invalid-bundle-id' }
+      }
       const out = exportSessions({
         sessionsRoot,
-        bundleDir: path.join(bundleRoot, String(input.bundleId ?? `sync-${Date.now()}`)),
+        bundleDir: path.join(bundleRoot, requestedBundleId),
         sessionIds: input.sessionIds,
         workspaces,
       })
@@ -73,6 +88,14 @@ export function apply(ctx, config) {
     importInto(input = {}) {
       const bundleDir = path.resolve(String(input.bundleDir ?? ''))
       const targetHome = path.resolve(String(input.targetHome ?? ''))
+      // v3.0.5/B3：bundle 必须位于 bundleRoot 内；目标 home 只允许当前 DSH_HOME 或 fork homes 根
+      const inside = (base, target) => {
+        const rel = path.relative(base, target)
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+      }
+      if (!inside(bundleRoot, bundleDir)) return { ok: false, code: 'bundle-outside-root' }
+      const allowedHomes = [resolveDshHome(), layout.forkHomesDir].filter((p) => typeof p === 'string' && p.length > 0)
+      if (!allowedHomes.some((base) => inside(base, targetHome))) return { ok: false, code: 'target-outside-allowed' }
       const targetSessions = path.join(targetHome, 'sessions')
       ensureDir(targetSessions)
       const workspaces = workspacesOf(path.join(targetHome, 'storages'))
@@ -100,7 +123,13 @@ export function apply(ctx, config) {
     }
     const readBody = async (req) => {
       const chunks = []
-      for await (const chunk of req) chunks.push(Buffer.from(chunk))
+      let size = 0
+      for await (const chunk of req) {
+        const buf = Buffer.from(chunk)
+        size += buf.length
+        if (size > 1_000_000) return { __tooLarge: true }
+        chunks.push(buf)
+      }
       const text = Buffer.concat(chunks).toString('utf8')
       if (!text) return {}
       try { return JSON.parse(text) } catch { return { __parseError: true } }
@@ -109,23 +138,31 @@ export function apply(ctx, config) {
       webServer.register({
         kind: 'exact',
         path: routePath,
+        method,
         handler: async (req, res) => {
           try {
-            if (String(req?.method ?? 'GET').toUpperCase() !== method) return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            const decision = authGuard.check(req)
+            if (!decision.ok) return json(res, decision.status, { ok: false, error: decision.code, code: decision.code })
+            if (String(req?.method ?? 'GET').toUpperCase() !== method) {
+              try { res.setHeader?.('allow', method) } catch { /* fake res */ }
+              return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
+            }
             return await handler(req, res)
-          } catch (e) { return json(res, 500, { ok: false, error: String(e?.message ?? e) }) }
+          } catch (e) { return json(res, 500, { ok: false, error: String(e?.message ?? e), code: 'handler-threw' }) }
         },
       })
     }
     route('GET', `${prefix}/api/sync/status`, (req, res) => json(res, 200, service.status()))
     route('POST', `${prefix}/api/sync/export`, async (req, res) => {
       const body = await readBody(req)
+      if (body.__tooLarge) return json(res, 413, { ok: false, error: 'body-too-large' })
       if (body.__parseError) return json(res, 400, { ok: false, error: 'bad-json' })
       const out = service.exportSelected(body)
       json(res, out.ok ? 200 : 400, out)
     })
     route('POST', `${prefix}/api/sync/import`, async (req, res) => {
       const body = await readBody(req)
+      if (body.__tooLarge) return json(res, 413, { ok: false, error: 'body-too-large' })
       if (body.__parseError) return json(res, 400, { ok: false, error: 'bad-json' })
       const out = service.importInto(body)
       json(res, out.ok ? 200 : 400, out)

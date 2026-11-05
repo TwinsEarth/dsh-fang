@@ -15,12 +15,15 @@ export const SERVICE = {
   buffer: 'fangBuffer',
   auditor: 'fangAudit',
   router: 'fangRouter',
+  umbrella: 'fangUmbrella',
   adapter: 'fangAdapter',
   commercial: 'fangCommercial',
   sessionCatalog: 'fangSessionCatalog',
   sessionBridge: 'fangSessionBridge',
   sessionSync: 'fangSessionSync',
   sessionRouter: 'fangSessionRouter',
+  link: 'fangLink',
+  mirror: 'fangMirror',
 }
 
 /** Loader row ids used by cordis.patch.yml. */
@@ -35,6 +38,7 @@ export const ROW = {
   buffer: 'fang-buffer-keeper',
   auditor: 'fang-auditor',
   router: 'fang-router',
+  umbrella: 'fang-umbrella',
   sessionCatalog: 'fang-session-catalog',
   sessionBridge: 'fang-session-bridge',
   sessionSync: 'fang-session-sync',
@@ -51,6 +55,20 @@ export const FORK_STATUS = {
 
 /** Risk vocabulary shared by scorer / approver / restart-guard. */
 export const RISK = { BLUE: 'blue', YELLOW: 'yellow', RED: 'red' }
+
+/**
+ * Action light vocabulary (v2.7.6, `fang-umbrella`).
+ *
+ * `RISK` above is the *approval* enum of restart-guard (three levels, no "nothing to
+ * approve"). The umbrella light is four levels because it also has to say "no side
+ * effect at all" — green. Mapping: green → auto-allow, blue → auto-allow + mark,
+ * yellow → ask, red → ask(critical)/deny/delegate.
+ */
+export const LIGHT = { GREEN: 'green', BLUE: 'blue', YELLOW: 'yellow', RED: 'red' }
+
+/** Light severity order; higher rank == more dangerous. */
+export const LIGHT_RANK = { green: 1, blue: 2, yellow: 3, red: 4 }
+
 
 /** Static plugin grades (A safest .. E veto). */
 export const GRADE = ['A', 'B', 'C', 'D', 'E']
@@ -94,16 +112,20 @@ export const AUDIT = {
   ROUND_OPEN: 'round-open',
   ROUND_RESET: 'round-reset',
   SCORE: 'score',
+  UMBRELLA_DECISION: 'umbrella-decision',
+  UMBRELLA_STRICT_MODE: 'umbrella-strict-mode',
   ROUTE: 'route',
   BUFFER_FLUSH: 'buffer-flush',
   TASK_READY: 'task-ready',
   TASK_ARCHIVED: 'task-archived',
+  TASK_RESTORED: 'task-restored',
   ADAPTER_HANDSHAKE: 'adapter-handshake',
   ROUTE_CONFIRMED: 'route-confirmed',
+  LINK_PROBE: 'link-probe',
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '2.6.1'
+export const FANG_VERSION = '3.0.8'
 
 /**
  * @typedef {object} ForkInfo
@@ -211,7 +233,7 @@ export const ADAPTER_ERROR_STATUS = {
   'file-too-large': 400,
   'total-too-large': 400,
   'binary-file': 400,
-  'body-too-large': 400,
+  'body-too-large': 413,
   'cursor-invalid': 400,
   'command-id-invalid': 400,
   unauthorized: 401,

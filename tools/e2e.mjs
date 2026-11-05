@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import net from 'node:net'
 import { spawn, execFileSync } from 'node:child_process'
+import vm from 'node:vm'
 import zlib from 'node:zlib'
 
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
@@ -156,12 +157,21 @@ async function main() {
     check('mother boots with v2 bundle', true, `port=${booted.port}`)
     const token = (() => { try { return new URL(booted.url).searchParams.get('token') ?? '' } catch { return '' } })()
     check('mother URL carries a token', token.length > 0)
+    // v3.0.7/B1：fang 安装级 token（0600 文件）；e2e 作为本机客户端按真实方式带上 header
+    let fangToken = ''
+    try {
+      fangToken = JSON.parse(fs.readFileSync(path.join(homeRoot, 'fang', 'e2e', 'fang-auth.json'), 'utf8')).token ?? ''
+    } catch { /* 无 token 文件 = 旧版本；后续断言会暴露 401 */ }
 
     const api = async (p, opts = {}) => {
       const url = `${booted.url.replace(/\/\?.*$/, '')}${p}${p.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
       const res = await fetch(url, {
         ...opts,
-        headers: { 'content-type': 'application/json', ...(opts.headers ?? {}) },
+        headers: {
+          'content-type': 'application/json',
+          ...(fangToken ? { 'x-fang-auth': fangToken } : {}),
+          ...(opts.headers ?? {}),
+        },
       })
       const text = await res.text()
       let body = null
@@ -172,8 +182,36 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 2.6.1', status.body?.version === '2.6.1')
+    check('status reports version 3.0.8', status.body?.version === '3.0.8')
     check('status reports role=mother', status.body?.role === 'mother')
+    const upgradeStatus = await api('/fang/api/upgrade/status')
+    check('GET /fang/api/upgrade/status 200 + read-only shape',
+      upgradeStatus.status === 200 && upgradeStatus.body?.ok === true &&
+      upgradeStatus.body?.mother !== undefined && Array.isArray(upgradeStatus.body?.essences) &&
+      upgradeStatus.body?.operation === null,
+      JSON.stringify({ status: upgradeStatus.status, ok: upgradeStatus.body?.ok }))
+    const unauthUpgrade = await fetch(`http://127.0.0.1:${booted.port}/fang/api/upgrade/status`).catch(() => null)
+    check('upgrade/status rejects missing token (401)', unauthUpgrade?.status === 401, `status=${unauthUpgrade?.status ?? 'n/a'}`)
+    // Route-table gate: catches duplicate-path registration losses (GET+POST same path)
+    // and stale DEFAULT_EXPECTED_ROUTE_COUNT / REQUIRED_ROUTE_PATHS.
+    const compatCheck = await api('/fang/api/compat/check', { method: 'POST', body: '{}' })
+    check('compat gate passes (route count + required paths)',
+      compatCheck.status === 200 && compatCheck.body?.ok === true,
+      JSON.stringify({
+        status: compatCheck.status,
+        ok: compatCheck.body?.ok,
+        routeCount: compatCheck.body?.routeCount,
+        expectedRouteCount: compatCheck.body?.expectedRouteCount,
+        findings: (compatCheck.body?.findings ?? []).map((f) => f.code).slice(0, 6),
+      }))
+    const unknownBranches = await api('/fang/api/tasks/branches?taskId=e2e-probe')
+    check('GET /fang/api/tasks/branches unknown task → 404 unknown-task',
+      unknownBranches.status === 404 && unknownBranches.body?.error === 'unknown-task',
+      JSON.stringify({ status: unknownBranches.status, error: unknownBranches.body?.error }))
+    const traversalBranches = await api('/fang/api/tasks/branches?taskId=' + encodeURIComponent('../../escape'))
+    check('GET /fang/api/tasks/branches traversal taskId → 404',
+      traversalBranches.status === 404 && traversalBranches.body?.error === 'unknown-task',
+      JSON.stringify({ status: traversalBranches.status, error: traversalBranches.body?.error }))
     check('mother has forker service', status.body?.services?.forker === true)
 
     const route = await api('/fang/api/route?realtime=1')
@@ -196,17 +234,25 @@ async function main() {
     check('session titleSource is session/title', titled?.titleSource === 'session/title', String(titled?.titleSource))
     check('session preview carries the first user message', String(titled?.preview ?? '').includes('e2e 首条用户消息'), JSON.stringify(titled?.preview ?? null))
 
-    const panel = await fetch(`${booted.url.replace(/\?.*$/, '')}?token=${encodeURIComponent(token)}`).catch(() => null)
-    const panelRes = await api('/fang/panel')
-    check('GET /fang/panel 200', panelRes.status === 200)
-    check('panel is v2', String(panelRes.body?.raw ?? '').includes('dsh-Fang v2') || String(panelRes.body?.raw ?? '').includes('派生新任务'))
+    // ── v3.0.7 门禁：组合配置必须包含 16 个 fang-* 行 ────────────────────
+    let dumpText = ''
+    try {
+      dumpText = execFileSync(CLI, ['--profile', 'e2e', '--dump-config'], { env, encoding: 'utf8', timeout: 120000, shell: true, maxBuffer: 8 * 1024 * 1024 })
+    } catch (e) { dumpText = String(e?.stdout ?? '') }
+    const fangRowIds = [...new Set([...dumpText.matchAll(/\bid:\s*['"]?(fang-[a-z0-9-]+)/g)].map((m) => m[1]))]
+    check('16 fang plugin rows composed', fangRowIds.length >= 16, `rows=${fangRowIds.length} ${fangRowIds.slice(0, 3).join(',')}`)
+    // v3.0.7：client half 由宿主 Loader 对「bare 包名行」的 dsh.client 扫描发现，
+    // 不能新增 `<pkg>/client` 行（子路径不是包根，会被当成坏插件）。
+    const pkgDsh = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).dsh ?? {}
+    check('browser client half disabled (no dsh.client)', !pkgDsh.client)
+    check('no inactive plugin entries', !/entry did not activate/.test(`${stdout}\n${stderr}`))
 
     // ── create a real task/fork ─────────────────────────────────────────
     const created = await api('/fang/api/tasks/create', {
       method: 'POST',
       body: JSON.stringify({ title: 'e2e 验收任务' }),
     })
-    check('POST /fang/api/tasks/create accepted', created.body?.ok === true, JSON.stringify(created.body?.error ?? ''))
+    check('POST /fang/api/tasks/create accepted', created.body?.ok === true, `status=${created.status} ${JSON.stringify(created.body).slice(0, 200)}`)
     const taskId = created.body?.taskId
     check('task id returned', typeof taskId === 'string' && taskId.startsWith('task_'), taskId ?? '')
 
@@ -216,7 +262,18 @@ async function main() {
       return 1
     }
 
-    check('fork returned a tokenized url', String(created.body?.url ?? '').includes('token='))
+    check('create returned tokenless url', !String(created.body?.url ?? '').includes('token='))
+    const openUrl = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+    check('open-url returns tokenized url (memory only)', openUrl.status === 200 && String(openUrl.body?.url ?? '').includes('token='), JSON.stringify({ status: openUrl.status, hasUrl: !!openUrl.body?.url }))
+
+    // v3.0.7/SEC-07：token 不得落盘到 tasks.json / forks.json
+    const readMaybe = (p) => { try { return fs.readFileSync(p, 'utf8') } catch { return '' } }
+    const fangDir = path.join(homeRoot, 'fang', 'e2e')
+    const tasksPersist = readMaybe(path.join(fangDir, 'tasks.json'))
+    const forksPersist = readMaybe(path.join(fangDir, 'forks.json'))
+    const tokenValueLeak = /"token"\s*:\s*"[^"]+"/.test(tasksPersist) || /"token"\s*:\s*"[^"]+"/.test(forksPersist)
+    const tokenUrlLeak = tasksPersist.includes('token=') || forksPersist.includes('token=')
+    check('no token persisted in tasks/forks json', !tokenValueLeak && !tokenUrlLeak, JSON.stringify({ tasks: tasksPersist.length, forks: forksPersist.length }))
     check('adapter handshake succeeded', created.body?.adapter?.ok === true, JSON.stringify(created.body?.adapter))
 
     const taskStatus = await api(`/fang/api/tasks/status?taskId=${encodeURIComponent(taskId)}`)
@@ -226,11 +283,52 @@ async function main() {
     check('fork adapter is up', forkServices.adapter === true, JSON.stringify(forkServices))
     check('fork has hot-reloader organ', forkServices.hotReloader === true)
     check('fork has scorer organ', forkServices.scorer === true)
+    check('fork has umbrella organ', forkServices.umbrella === true)
     check('fork does NOT expose orchestrator', forkServices.orchestrator !== true)
     check('fork does NOT expose forker', forkServices.forker !== true)
 
     const tasksList = await api('/fang/api/tasks')
     check('GET /fang/api/tasks lists the task', Array.isArray(tasksList.body?.tasks) && tasksList.body.tasks.length === 1)
+
+    // ── v3.0.8 branch contract: real task → 200, unknown → 404, branch errors mapped ──
+    const initialBranches = await api(`/fang/api/tasks/branches?taskId=${encodeURIComponent(taskId)}`)
+    check('GET /fang/api/tasks/branches 200 + main branch',
+      initialBranches.status === 200 && initialBranches.body?.activeBranchId === 'main'
+      && Array.isArray(initialBranches.body?.branches) && initialBranches.body.branches.some((b) => b.branchId === 'main'),
+      JSON.stringify({ status: initialBranches.status, active: initialBranches.body?.activeBranchId }))
+    const branchCreated = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'b1' }),
+    })
+    check('POST /fang/api/tasks/branches 200 + b1', branchCreated.status === 200 && branchCreated.body?.branch?.branchId === 'b1',
+      JSON.stringify({ status: branchCreated.status, error: branchCreated.body?.error }))
+    const duplicate = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'b1' }),
+    })
+    check('POST duplicate branch → 409 branch-exists', duplicate.status === 409 && duplicate.body?.error === 'branch-exists',
+      JSON.stringify({ status: duplicate.status, error: duplicate.body?.error }))
+    const invalidBranch = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: '../escape' }),
+    })
+    check('POST invalid branchId → 400 invalid-branch-id',
+      invalidBranch.status === 400 && invalidBranch.body?.error === 'invalid-branch-id',
+      JSON.stringify({ status: invalidBranch.status, error: invalidBranch.body?.error }))
+    const activated = await api('/fang/api/tasks/branches/activate', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'b1' }),
+    })
+    check('POST /branches/activate 200 + pointer move',
+      activated.status === 200 && activated.body?.activeBranchId === 'b1',
+      JSON.stringify({ status: activated.status, active: activated.body?.activeBranchId }))
+    const sealed = await api('/fang/api/tasks/branches/status', {
+      method: 'POST', body: JSON.stringify({ taskId, branchId: 'main', status: 'sealed' }),
+    })
+    check('POST /branches/status 200 + main sealed', sealed.status === 200 && sealed.body?.branch?.status === 'sealed',
+      JSON.stringify({ status: sealed.status, error: sealed.body?.error }))
+    const unknownPost = await api('/fang/api/tasks/branches', {
+      method: 'POST', body: JSON.stringify({ taskId: 'missing-task', branchId: 'b2' }),
+    })
+    check('POST branches unknown task → 404 unknown-task',
+      unknownPost.status === 404 && unknownPost.body?.error === 'unknown-task',
+      JSON.stringify({ status: unknownPost.status, error: unknownPost.body?.error }))
 
     // ── the right pane of the panel: sessions owned by the fork itself ──
     const forkHome = path.join(homeRoot, 'fang', 'e2e', 'forks', taskId)
@@ -244,25 +342,53 @@ async function main() {
       check('fork session list contains the seeded session', Boolean(ft))
       check('fork session title is native', ft?.title === 'e2e 分身会话标题', JSON.stringify(ft?.title ?? null))
     }
-    // ── archive the task (flush + reap) ────────────────────────────────
+    // ── archive the task (flush + stop, keep home for read/restore) ─────
     const archived = await api('/fang/api/tasks/archive', {
       method: 'POST',
       body: JSON.stringify({ taskId }),
     })
     check('POST /fang/api/tasks/archive accepted', archived.body?.ok === true, JSON.stringify(archived.body?.error ?? ''))
+    check('archive stopped the process', archived.body?.stopped === true && archived.body?.homeKept === true)
     const after = await api('/fang/api/status')
-    check('registry empty after archive', (after.body?.tasks?.total ?? -1) === 0)
+    check('archived task stays in the registry', (after.body?.tasks?.total ?? -1) === 1)
+    const archivedTask = (after.body?.tasks?.list ?? []).find((t) => t.taskId === taskId)
+    check('task status is archived', archivedTask?.status === 'archived', JSON.stringify(archivedTask?.status ?? null))
+    check('archived task has archivedAt', Number(archivedTask?.archivedAt) > 0)
+    check('archived task has no live url', !archivedTask?.url)
+    check('fork home kept after archive', fs.existsSync(forkHome), forkHome)
 
+    // ── restore the archive (new process/port/token, same home) ─────────
+    const restored = await api('/fang/api/tasks/restore', {
+      method: 'POST',
+      body: JSON.stringify({ taskId }),
+    })
+    check('POST /fang/api/tasks/restore accepted', restored.body?.ok === true, JSON.stringify(restored.body?.error ?? ''))
+    check('restored task is ready', restored.body?.adapter?.ok === true && Boolean(restored.body?.url))
+    check('fork home still exists after restore', fs.existsSync(forkHome), forkHome)
+    const reArchived = await api('/fang/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId }) })
+    check('re-archive after restore accepted', reArchived.body?.ok === true)
 
     // ── v2.1 derive endpoint (lineage-only quick derive, same path the double-click uses) ──
+    let derivedTaskId = ''
     const derived = await api('/fang/api/derive', { method: 'POST', body: JSON.stringify({ title: 'e2e derive' }) })
     check('POST /fang/api/derive accepted', derived.body?.ok === true, JSON.stringify(derived.body?.error ?? ''))
     if (derived.body?.ok) {
+      derivedTaskId = String(derived.body.taskId ?? '')
       const dStatus = await api('/fang/api/tasks/status?taskId=' + encodeURIComponent(derived.body.taskId))
       check('derive → task ready with adapter', dStatus.body?.status === 'ready' && dStatus.body?.adapter?.ok === true)
       const dArchived = await api('/fang/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId: derived.body.taskId }) })
       check('derive task archived', dArchived.body?.ok === true)
     }
+
+    // ── delete archives: stop + remove home, then the record ──────────
+    const deleted = await api('/fang/api/tasks/archive/delete', { method: 'POST', body: JSON.stringify({ taskId }) })
+    check('POST /fang/api/tasks/archive/delete accepted', deleted.body?.ok === true, JSON.stringify(deleted.body?.error ?? ''))
+    if (derivedTaskId) {
+      const dDeleted = await api('/fang/api/tasks/archive/delete', { method: 'POST', body: JSON.stringify({ taskId: derivedTaskId }) })
+      check('derived archive deleted', dDeleted.body?.ok === true, JSON.stringify(dDeleted.body?.error ?? ''))
+    }
+    const finalStatus = await api('/fang/api/status')
+    check('registry empty after delete', (finalStatus.body?.tasks?.total ?? -1) === 0)
 
     // ── audit ledger on the mother ─────────────────────────────────────
     const motherData = path.join(homeRoot, 'fang', 'e2e')
@@ -279,10 +405,10 @@ async function main() {
       check('audit records adapter handshake', kinds.has('adapter-handshake'))
     }
 
-    // ── fork home was reaped ───────────────────────────────────────────
+    // ── fork homes removed by delete-archive ───────────────────────────
     const forksRoot = path.join(motherData, 'forks')
     const leftover = fs.existsSync(forksRoot) ? fs.readdirSync(forksRoot) : []
-    check('fork home reaped after archive', leftover.length === 0, leftover.join(','))
+    check('fork home removed after delete-archive', leftover.length === 0, leftover.join(','))
 
     return results.every(r => r.ok) ? 0 : 1
   } catch (e) {

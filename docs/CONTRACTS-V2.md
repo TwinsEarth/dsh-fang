@@ -266,7 +266,85 @@ archiveTask(taskId) -> { ok, archived, reaped }
 ```
 事件话题（bus）：`fang/task-created`、`fang/task-ready`、`fang/task-archived`、`fang/task-failed`、`fang/adapter-command`。
 
+### 5.9 Umbrella / 保护伞（v2.7.6）
+一个证据管道、两个评分出口：插件等级（静态，来自 5.4 的 scorer）与动作灯色（动态，本插件自算）。
+```js
+Config = z.object({
+  bufferRoot: z.string().default(''),         // 空 = 取 buffer-keeper 的实时 dir
+  productionRoot: z.string().default(''),
+  allowPaths: z.array(z.string()).default([]),
+  networkAllowlist: z.array(z.string()).default([]),
+  credentialPatterns: z.array(z.string()).default([]),   // 空 = 内置默认；非空 = 完全替换
+  destructivePatterns: z.array(z.string()).default([]),
+  lifecyclePatterns: z.array(z.string()).default([]),
+  lifecycleTools: z.array(z.string()).default([]),
+  gradeFloorTable: z.string().default('umbrella'),       // umbrella | strict
+  cacheSize: z.natural().default(200),
+  auditDecisions: z.boolean().default(true),
+  baselineFile: z.string().default(''),  // v2.8.1：基线（默认随包 defaults/umbrella-rules.yaml；:none: 关闭）
+  envRulesFile: z.string().default(''),    // v2.8.1：环境层（空 = 读 UMBRELLA_RULES_PATH）
+  rulesFile: z.string().default(''),      // v2.8.0：项目层（空 = 只用基线+内置）
+  // v2.8.2：YAML 顶层 inherit:false = 严格模式（丢弃此前可调规则，只保留 hard-deny + fallback）
+  rulesWatch: z.boolean().default(true),    // 热加载（失败保留上一次有效规则）
+  rulesDebounceMs: z.natural().default(200),
+})
+
+assessPlugin({pluginId?, dir?, manifest?, source?, pkg?, version?, refresh?}) -> {
+  pluginId, version, grade:'A'|'B'|'C'|'D'|'E', score, color, veto, degraded,
+  signals, reasons, basis, entry, dir, cachedAt, fingerprint, durationMs, fromCache
+}                                              // 无 scorer / 扫描异常 = grade 'E' + degraded
+assessAction(evidence, {grade?|assessment?|pluginId?}) -> {
+  light, baseLight, gradeFloor, raised, pluginGrade, gradeBasis,
+  matchedRule, category, tags, lifecycle, credential, reason, evidence, tool, target, path, durationMs
+}
+decideAction(evidence, opts?) -> assessAction 结果 + { decision:'allow'|'mark'|'ask'|'delegate'|'deny', severity, decisionRecord }
+baseLight(evidence) -> { light, matchedRule, category, tags, lifecycle, credential, target, path, reason, evidence }
+explain(evidence)   -> { light, matchedRule, category, tags, reason, evidence, target }
+rules / ruleIds() / registerRule(rule, {before|after}) / overrideRule(id, patch) / removeRule(id) / resetRules()
+ruleConfigStatus() / reloadRules() / applyRuleConfig(config) / ruleRegistry   // v2.8.0 YAML 叠加层
+// v2.8.1: registry.applyLayer(config) 分层（基线→项目→环境）；hard-deny/non-negotiable 不可关闭/降级
+// v2.8.3: applyLayer 事务化——失败时 layers/effective/status 全部回滚，失败结果带 revertedToLayerIndex
+gradeFloor(grade) / effectiveLight(base, grade) / cachedGrade(id) / cacheStats() / invalidate(id) / clearCache()
+```
+不变量（有测试）：`rank(effectiveLight) >= rank(baseLight)` 且 `>= rank(gradeFloor)`；
+等级永不降低动作风险；未知等级按 E、未知工具按黄、未知灯色按黄。
+
+**动作规则表（v2.7.8）**：`ActionRule = { id, category, light, reason, tags[], match(ev, ctx), evidence(ev, ctx) }`，
+默认 15 条，数组顺序即优先级、**首个命中胜出**；`register` 必须给 `before`/`after`（追加到表尾等于永不命中），
+形状不合法在注册时抛错。`evidence` 返回结构化 `{ matchedPattern, ... }` 进审计，回答「为什么是这个灯色」；
+上下文由 `buildActionContext()` 一次解析（`mode`/`commandText`/`writeTargets`/`readTargets`/`targetPath`/`url`/`targetPid`），
+shell 重定向由 AST-lite 词法器解析（v2.7.9）：操作符语义、fd 复制、heredoc 跳过、引号、命令边界；语法错误 → parseFailed，规则 fail-closed 判黄。
+
+审计：一次 `decideAction` 一条 `AUDIT.UMBRELLA_DECISION`（`kind:'umbrella-decision'`，含 `category` 与 `evidence`）；
+插件评分不重复写（沿用 5.4 的 `AUDIT.SCORE`）。
+**边界**：本仓库没有工具执行钩子，本服务提供决策而**不强制拦截**；`delegate`/`ask` 的落点
+（restart-guard / approver）需要调用方显式投递。详见 `docs/UMBRELLA.md §7`。
+
+### 5.10 母体连接 / fang-link（v2.9.0）
+
+只描述与只读探测：不持有连接状态、不回显或落盘任何令牌；配置只来自母体 profile（分身只读继承）。
+
+路由（母体侧，`prefix` 默认 `/fang`）：
+
+```
+GET  /fang/api/mother-link
+  -> { ok, role, version, at, prefix, motherApiBase, adapterBase,
+       probe: { method:'POST', path, body:{target,timeoutMs} },
+       tokenPolicy, sharedConfig:{ layer:'profile', profile, bundles, name? },
+       forkInstructions: string[] }
+POST /fang/api/mother-link/probe   { target, timeoutMs? }
+  -> { ok, target, httpStatus?, latencyMs, version?, error?, message?, checkedAt }
+```
+
+服务 `SERVICE.link = 'fangLink'`：`describe()` / `probe({ target, timeoutMs? })`。
+探测**不抛异常**，失败返回结构化错误码：
+`target-empty` / `target-invalid-url` / `target-scheme` / `target-credentials` / `target-query` /
+`target-too-long` / `status-http-error` / `timeout` / `network-error` / `fetch-unavailable`。
+目标只接受 http(s) origin（拒绝凭据、查询串、非 http）；`timeoutMs` 夹在 `[200, 10000]`。
+审计：每次探测一条 `AUDIT.LINK_PROBE`（`target` / `ok` / `latencyMs` / `error`）。
+
 ---
+
 
 ## 6. 商用接入点（钩子已就绪，实现不在本期）
 

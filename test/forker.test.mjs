@@ -311,6 +311,7 @@ test('apply registers fangForker and an empty registry reports clean failures', 
     assert.equal(ctx.get(SERVICE.forker), service)
     for (const method of [
       'provision', 'spawn', 'stop', 'reap', 'status', 'list', 'logs', 'adapterToken',
+      'getToken', 'onTokenRefresh',
       'allocatePort', 'releasePort', 'ensureTemplate', 'health', 'recover',
     ]) {
       assert.equal(typeof service[method], 'function', `missing service.${method}`)
@@ -1182,6 +1183,79 @@ test('v3: adapterToken 每次 spawn 重新生成、只存内存、经 env 注入
     assert.notEqual(token2, token, '每次 spawn 都换新 token')
     service.stop('f-token')
   } finally {
+    ctx.dispose()
+  }
+})
+
+test('v3: onTokenRefresh 广播每次 spawn 的 token；getToken 是 adapterToken 的别名；异常隔离 + disposer', async () => {
+  const root = tmp()
+  const template = makeTemplate(root)
+  const homeDir = path.join(root, 'fork-home-refresh')
+  const dataRoot = path.join(root, 'data-refresh')
+  const { ctx, service } = newForkContext({ dataRoot })
+  const seen = []
+  const offBoom = service.onTokenRefresh(() => { throw new Error('boom') })
+  const off = service.onTokenRefresh((forkId, token) => seen.push({ forkId, token }))
+  try {
+    assert.equal(service.provision({ forkId: 'f-refresh', homeDir, profile: 'web', profileTemplate: template }).ok, true)
+    const first = await service.spawn({
+      forkId: 'f-refresh', homeDir, profile: 'web', cliPath: FAKE_CLI,
+      env: { FAKE_DSH_MODE: 'ok' }, timeoutMs: 8000,
+    })
+    assert.equal(first.ok, true)
+    const token1 = service.adapterToken('f-refresh')
+    assert.equal(service.getToken('f-refresh'), token1, 'getToken 与 adapterToken 一致')
+    assert.equal(seen.length, 1, '首次派生也广播 token 生成')
+    assert.equal(seen[0].forkId, 'f-refresh')
+    assert.equal(seen[0].token, token1)
+
+    service.stop('f-refresh')
+    const second = await service.spawn({
+      forkId: 'f-refresh', homeDir, profile: 'web', cliPath: FAKE_CLI,
+      env: { FAKE_DSH_MODE: 'ok' }, timeoutMs: 8000,
+    })
+    assert.equal(second.ok, true)
+    const token2 = service.adapterToken('f-refresh')
+    assert.notEqual(token2, token1)
+    assert.equal(seen.length, 2, '重启再次广播新 token')
+    assert.equal(seen[1].token, token2)
+
+    off()
+    service.stop('f-refresh')
+    await service.spawn({
+      forkId: 'f-refresh', homeDir, profile: 'web', cliPath: FAKE_CLI,
+      env: { FAKE_DSH_MODE: 'ok' }, timeoutMs: 8000,
+    })
+    assert.equal(seen.length, 2, 'disposer 后不再广播')
+    service.stop('f-refresh')
+  } finally {
+    off()
+    offBoom()
+    ctx.dispose()
+  }
+})
+
+test('v2.7.3: supervise 放弃重启时 emit fang/fork-restart-failed (terminal=true)', async () => {
+  const root = tmp()
+  const template = makeTemplate(root)
+  const homeDir = path.join(root, 'fork-home-giveup')
+  const dataRoot = path.join(root, 'data-giveup')
+  const { ctx, service } = newForkContext({ dataRoot, supervise: true, maxRestarts: 0 })
+  const events = []
+  const off = bus.on('fang/fork-restart-failed', (payload) => events.push(payload))
+  try {
+    assert.equal(service.provision({ forkId: 'f-giveup', homeDir, profile: 'web', profileTemplate: template }).ok, true)
+    const res = await service.spawn({
+      forkId: 'f-giveup', homeDir, profile: 'web', cliPath: FAKE_CLI,
+      env: { FAKE_DSH_MODE: 'crash' }, timeoutMs: 8000,
+    })
+    assert.equal(res.ok, false)
+    assert.equal(await waitFor(() => events.length > 0), true, 'give-up must emit restart-failed')
+    assert.equal(events[0].forkId, 'f-giveup')
+    assert.equal(events[0].terminal, true)
+    assert.match(String(events[0].error), /restart-given-up|crash/i)
+  } finally {
+    off()
     ctx.dispose()
   }
 })

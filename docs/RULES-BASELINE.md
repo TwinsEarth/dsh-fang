@@ -1,0 +1,160 @@
+# 推荐基线配置与分层规则（v2.8.1）
+
+> 基线文件：`defaults/umbrella-rules.yaml`（随包分发）。
+> 实现：`src/lib/rule-registry.mjs`（分层 + 硬规则锁定）、`src/plugins/umbrella.mjs`（三层加载与状态）。
+> 契约：`docs/CONTRACTS-V2.md §5.9`；YAML 能力总览：`docs/UMBRELLA.md §2.4`。
+
+## 1. 设计原则
+
+基线**不替用户做所有决策**，只做三件事：
+
+1. **把红线钉死**：`dsh-lifecycle` / `destructive-command` / `credential-access` 显式 `enabled: true`，
+   带 `hard-deny + non-negotiable` 标签，项目层**不能关闭、不能降低灯色**。
+2. **把可调规则留给项目**：基线只写一行注释表列出推荐默认值；未列出的规则 = 内置默认，
+   项目在自己的叠加层里按需覆盖。
+3. **把接入点留出来**：三层加载顺序（基线 → 项目 → 环境）与 fail-safe 语义写进文档与代码。
+
+## 2. 基线内容（`defaults/umbrella-rules.yaml`）
+
+基线只显式锁定 4 条规则：
+
+| id | 灯色 | 优先级 | 标签 | 说明 |
+|---|---|---|---|---|
+| `dsh-lifecycle` | red | 10 | hard-deny, non-negotiable, delegate-to-restart-guard | 宿主动作 → restart-guard |
+| `destructive-command` | red | 20 | hard-deny, non-negotiable | 破坏性命令 |
+| `credential-access` | red | 30 | hard-deny, non-negotiable | 凭据访问（唯一硬拒绝） |
+| `unknown-tool` | yellow | 9999 | conservative, non-negotiable | 兜底安全网，永远最后 |
+
+设置：`failOnUnknownRule: false`（基线可能领先于代码）、`failOnInvalidPattern: true`（正则/声明式规则
+编译失败整层拒绝）、`rejectUnsafeRegex: true`。
+
+可调规则（`network-allowlisted` blue/40 … `read-outside-buffer` blue/140 等 11 条）**不写在基线里**，
+只在注释中给出推荐值——这样升级内置默认值时不会与基线里的旧副本打架。
+
+## 3. 分层与合并
+
+```
+defaults/umbrella-rules.yaml（随包基线，默认自动加载）
+        ↓ 按 id 覆盖
+<project>/.dsh/umbrella-rules.yaml（插件配置 rulesFile）
+        ↓ 按 id 覆盖
+$UMBRELLA_RULES_PATH（环境级，CI/部署注入；插件配置 envRulesFile 可覆盖该路径）
+```
+
+- 每层独立校验；**层内规则**按 id 覆盖前层结果，未提及的规则保持前层值；
+- 声明式新规则（带 `match`）插入到优先级对应位置；同优先级按内置顺序稳定排序；
+- 优先级基线 `DEFAULT_RULE_PRIORITIES`，层内 `priority` 可覆盖。
+
+## 4. 锁定语义（不可协商）
+
+`NON_NEGOTIABLE_TAGS = ['hard-deny', 'non-negotiable']`。判定依据是**当前生效规则**的标签：
+
+| 操作 | 结果 |
+|---|---|
+| `enabled: false` | ❌ 拒绝：`rule "X" is non-negotiable and cannot be disabled` |
+| 降低灯色（red→yellow/blue/green） | ❌ 拒绝：`light cannot be lowered from red to yellow` |
+| 提升灯色（yellow→red）、改 `reason`、追加 `pathPatterns`/`commandPatterns` | ✅ 允许 |
+| 改 `priority` | ✅ 允许（顺序可用，但硬规则一般不该被挪到兜底之后） |
+
+**锁定违规一律 fatal**（不受 `failOnInvalidPattern` 影响）：被拒绝的层会**从层栈弹出**，
+effective 恢复到不含它的上一次有效规则，并返回 `applied: false` + 错误列表。
+否则一个坏层会污染后续所有层的 rebuild。
+
+## 5. 部署位置与加载顺序
+
+| 层 | 路径 | 谁维护 | 缺失时 |
+|---|---|---|---|
+| baseline | 包内 `defaults/umbrella-rules.yaml`（`baselineFile` 可覆盖；`:none:` 关闭） | 包作者 | 跳过基线（不报错） |
+| project | 插件配置 `rulesFile` | 项目团队 | 跳过（不报错） |
+| env | `UMBRELLA_RULES_PATH` 或插件配置 `envRulesFile` | CI/部署 | 跳过（不报错） |
+
+插件启动时按序 `applyLayer`；`ruleConfigStatus()` 返回 `layers[]`（每层 `name/file/applied/found/errors`）
+与总 `ruleCount/applied/warnings/errors`。热加载监听「项目文件优先，其次环境文件，最后基线」中的第一个，
+变化后重读全部层（整份重新应用，不是增量）；`reloadRules()` 是手动兜底入口。
+
+## 6. 覆盖率边界（如实说明）
+
+1. **`light: blue` 不能把 `network-egress` 变成"内网放行"**：该规则谓词看 allowlist；
+   要放行内网域请把它们加进 `policy.networkAllowlist`，而不是只改灯色。
+2. **追加 pattern 是「或」语义**：追加让规则更容易命中。基线只允许通过项目层追加，
+   且对硬规则是"扩大覆盖面"，不会造成漏判；但把大范围正则加到 `destructive-command` 上会提高误报，
+   属于项目自己的取舍（`reason` 应写清）。
+3. **兜底双保险**：`unknown-tool` 既有 `non-negotiable` 标签，又是规则表最后一项（priority 9999）。
+   即使锁定逻辑失效，排序仍让它兜底。
+
+## 7. 已知缺口
+
+- `types/` 的 TypeScript 参考实现**尚未镜像** v2.8.0/v2.8.1 的 YAML 配置层（基线/分层/锁定），
+  仍停留在 v2.7.9 语义（声明式规则表 + AST-lite 解析）。已在 `docs/AUDIT-v2.8.0.md §6` 与
+  `docs/AUDIT-v2.8.1.md` 登记，计划后续补丁补齐。
+- 热加载依赖 `fs.watch`：Windows 正常；网络盘/容器挂载可能不触发，用 `reloadRules()` 兜底。
+
+## 8. 严格模式：`inherit: false`（v2.8.2）
+
+语义不是「替换整个规则表」，而是**丢弃此层之前所有可调规则，只保留硬规则 + fallback**，
+再从该层开始叠加。安全边界不能被严格模式绕过。
+
+| 场景 | `inherit: true`（默认） | `inherit: false` |
+|---|---|---|
+| 未列出的可调规则（`network-egress` 等） | 保持上一层/内置默认 | **从表中删除** |
+| 未列出的硬规则（`credential-access` 等） | 保持 | **强制保留**（锁标签来自规则自身） |
+| 兜底 `unknown-tool` | 保持 | **强制保留**（rebuild 后无 fallback 视为 bug，拒绝应用） |
+| 关闭/降级硬规则 | 拒绝 | 拒绝 |
+| 追加 pattern 到硬规则 | 允许 | 允许 |
+| 后续 `inherit: true` 层 | 叠加 | 叠加到严格结果上；**不会**恢复被丢弃的内置规则（除非该层按 id 显式引用，此时用内置定义"复活"它） |
+| 多个 `inherit: false` | — | 最后一个生效，它之前的层全部丢弃 |
+
+- **优先级**：严格模式下优先级表重置为「仅保留硬规则 + fallback」；用户新增规则未写 `priority` 时用默认 500——
+  严格模式建议显式写 priority，否则同档规则只能靠声明顺序。
+- **合法边界**：`inherit: false` 且没有任何规则 = 只剩 `dsh-lifecycle`/`destructive-command`/`credential-access`
+  + `unknown-tool` 的「极简安全模式」，不报错。
+- **审计**：严格模式激活时写一条 `AUDIT.UMBRELLA_STRICT_MODE`（`umbrella-strict-mode`），
+  含 `layerIndex` / `preservedHardRules` / `preservedFallback` / `discardedRuleCount`；
+  `ruleConfigStatus().strictMode` 同步可见。这是重大配置行为，必须能事后追溯「哪个项目从何时起丢掉了哪些规则」。
+
+示例（项目层完全替换）：
+
+```yaml
+version: 1
+inherit: false
+settings: { failOnInvalidPattern: true }
+rules:
+  - id: credential-access          # 硬规则：只能扩面，不能关闭
+    pathPatterns: [{ re: "\\.company-secrets" }]
+  - id: write-outside-buffer       # 可调规则必须重新定义，否则从表中消失
+    light: red
+    priority: 40
+  - id: network-egress
+    priority: 50
+  - id: project-build-guard        # 新增声明式规则
+    category: destructive
+    light: red
+    priority: 25
+    match: { kind: command-pattern, patterns: [{ re: "\\brm\\s+-rf\\s+(?:dist|build)\\b" }] }
+    evidence: { kind: pattern-match }
+```
+
+### 8.1 严格层失败时的回退语义（v2.8.3）
+
+`applyLayer` 是**事务化**的：`rebuild` 改为纯计算（不修改 `effective`/`status`/`strictMode`），
+只有 `applied: true` 时才提交 `layers` / `effective` / `status`。因此失败层对后续层**完全不可见**。
+
+| 场景 | layers | effective | strictMode | 返回 |
+|---|---|---|---|---|
+| 严格层成功 | 追加 | 严格结果 | 新值 | `applied:true, source:'strict-replaced'` |
+| 严格层失败（锁定违规/正则编译错/未知 id 且 fatal） | **不追加** | 保持上一个成功层 | 保持上一个成功层 | `applied:false, revertedToLayerIndex:N` |
+| 失败后再加 `inherit:true` 层 | 追加到旧 layers 末尾 | 叠加到上一个成功层 | 保持 | `applied:true` |
+| 失败后再加另一个严格层 | 追加 | 以新严格层为起点重建 | 新值 | 视结果 |
+
+- `revertedToLayerIndex`：失败结果里的回退目标层索引（`-1` = 内置全集）。审计可直接回答
+  「第 N 层被拒绝，回退到第 N-1 层」而不只是「应用失败」。
+- 首个层就失败 → `layers` 为空、`effective` 为内置 15 条、`status.source='builtin'`、`strictMode=null`。
+- 测试覆盖：`test/rule-config.test.mjs` 组 4A–4E（见下）。
+
+### 8.2 YAML 解析修正：flow 映射（v2.8.3）
+
+这些测试顺带暴露了一个**真 bug**：`settings: { failOnInvalidPattern: true }` 这种 flow 映射
+在旧解析器里被当成**标量字符串**，导致 `settings` 全部回落到默认值（`failOnInvalidPattern:false`）——
+即「写了严格设置但被静默忽略」。现已支持 `{ k: v, k2: v2 }`（深度感知、尊重引号），
+flow 列表也改为嵌套感知（`[{ re: "..." }]` 可解析）。**无论对错都不会再静默**：解析失败会给明确错误。
+

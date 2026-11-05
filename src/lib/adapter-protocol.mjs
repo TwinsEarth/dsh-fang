@@ -143,52 +143,9 @@ export class EventLog {
   }
 }
 
-/**
- * 命令幂等缓存（LRU）。键是 commandId；命中后重放第一次的结果，不重复执行副作用。
- * 命中会刷新 LRU 顺序（Map 保序：先删后插）。
- */
-export class CommandCache {
-  constructor({ capacity = DEFAULT_COMMAND_CACHE_SIZE } = {}) {
-    const size = Math.floor(Number(capacity))
-    this.capacity = Number.isFinite(size) && size > 0 ? size : DEFAULT_COMMAND_CACHE_SIZE
-    this.map = new Map()
-  }
-
-  get size() {
-    return this.map.size
-  }
-
-  /** 命中返回值（任意 JSON 兼容对象），未命中返回 null。 */
-  get(commandId) {
-    const key = String(commandId ?? '')
-    if (!key || !this.map.has(key)) return null
-    const value = this.map.get(key)
-    this.map.delete(key)
-    this.map.set(key, value)
-    return value
-  }
-
-  has(commandId) {
-    return this.map.has(String(commandId ?? ''))
-  }
-
-  set(commandId, value) {
-    const key = String(commandId ?? '')
-    if (!key) return null
-    if (this.map.has(key)) this.map.delete(key)
-    this.map.set(key, value)
-    while (this.map.size > this.capacity) {
-      const oldest = this.map.keys().next().value
-      if (oldest === undefined) break
-      this.map.delete(oldest)
-    }
-    return value
-  }
-
-  clear() {
-    this.map.clear()
-  }
-}
+// 命令幂等缓存已独立到 `command-cache.mjs`（v2.6.3 起：in-flight 合并 + 失败契约）；
+// 这里保留 re-export，避免 Adapter 与旧测试的 import 路径断裂。
+export { CommandCache, COMMAND_CACHE_DEFAULT_CAPACITY } from './command-cache.mjs'
 
 /**
  * 版本协商。父体拿到分身 /adapter/version 的 protocol 后调用。
@@ -267,58 +224,11 @@ export const SSE_RETRY_FRAME = 'retry: 2000\n\n'
 
 /**
  * 增量 SSE 解析器（母体侧）：把任意 chunk 切片还原成完整帧。
- * push() 返回本次解析出的帧数组；flush() 处理流结束时残留的半帧。
+ * v2.6.5 起独立成 `sse-parser.mjs` 的 `SseParser` 类（便于模糊测试）；
+ * `flush()` 按 SSE 规范丢弃未完成的残帧。
  * @returns {{push:(chunk:unknown)=>object[], flush:()=>object[]}}
  */
-export function createSseParser() {
-  let buffer = ''
-  return {
-    push(chunk) {
-      buffer += String(chunk ?? '')
-      const frames = []
-      let at = buffer.indexOf('\n\n')
-      while (at >= 0) {
-        const block = buffer.slice(0, at)
-        buffer = buffer.slice(at + 2)
-        const frame = parseSseBlock(block)
-        if (frame) frames.push(frame)
-        at = buffer.indexOf('\n\n')
-      }
-      return frames
-    },
-    flush() {
-      const block = buffer
-      buffer = ''
-      if (!block.trim()) return []
-      const frame = parseSseBlock(block)
-      return frame ? [frame] : []
-    },
-  }
-}
-
-/** 解析一个 SSE 块：返回 {event, id, data}；只有注释的块返回 null。 */
-function parseSseBlock(block) {
-  const lines = String(block ?? '').split(/\r?\n/)
-  let event = 'message'
-  let id = ''
-  const data = []
-  let hasData = false
-  for (const line of lines) {
-    if (!line || line.startsWith(':')) continue
-    const colon = line.indexOf(':')
-    const field = colon < 0 ? line : line.slice(0, colon)
-    let value = colon < 0 ? '' : line.slice(colon + 1)
-    if (value.startsWith(' ')) value = value.slice(1)
-    if (field === 'event') event = value
-    else if (field === 'id') id = value
-    else if (field === 'data') {
-      data.push(value)
-      hasData = true
-    }
-  }
-  if (!hasData) return null
-  return { event, id, data: data.join('\n') }
-}
+export { SseParser, createSseParser } from './sse-parser.mjs'
 
 /** 生成一个命令幂等键（crypto.randomUUID 可用时优先）。 */
 export function newCommandId() {

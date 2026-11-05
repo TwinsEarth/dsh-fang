@@ -66,6 +66,8 @@ const EVENTS = {
   started: 'fang/fork-started',
   crashed: 'fang/fork-crashed',
   reaped: 'fang/fork-reaped',
+  /** v2.7.3：自动重启失败 / 放弃重启（terminal=true 表示不会再有自动重试）。 */
+  restartFailed: 'fang/fork-restart-failed',
 }
 
 /** v2 deterministic port pool (CONTRACTS-V2.md §5.5). */
@@ -189,6 +191,33 @@ export function buildLaunchSpec({ cliPath = '', profile = 'default', port = 0 } 
     return { command: process.execPath, args: [entry, ...args], shell: false, windowsHide: true, nodeScript: true }
   }
   return { command: entry, args, shell: false, windowsHide: true, nodeScript: false }
+}
+
+/**
+ * v3.0.5/B5：派生进程环境变量白名单（不再全量继承母体 env —— 防止云密钥/适配器 token 泄漏给最低信任层）。
+ * 只放行启动 DSH 必需的运行时/代理变量；DSH_*、API key、token 等一律不继承（由 overrides 显式注入）。
+ * @param {Record<string, string|undefined>} [base]
+ * @param {Record<string, string|undefined>} [overrides]
+ * @returns {Record<string, string>}
+ */
+export function buildForkChildEnv(base = process.env, overrides = {}) {
+  const KEYS = [
+    'PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec',
+    'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+    'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'OS', 'NUMBER_OF_PROCESSORS',
+    'PROCESSOR_ARCHITECTURE', 'USERNAME', 'USERDOMAIN', 'LANG', 'LC_ALL', 'TERM', 'SHELL',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  ]
+  /** @type {Record<string,string>} */
+  const env = {}
+  for (const key of KEYS) {
+    if (typeof base?.[key] === 'string') env[key] = base[key]
+  }
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (typeof value === 'string') env[key] = value
+    else delete env[key]
+  }
+  return env
 }
 
 /**
@@ -364,10 +393,23 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 广播 Adapter token 刷新/生成；handler 异常隔离，绝不影响 spawn 流程。 */
+  const emitTokenRefresh = (forkId, token) => {
+    for (const handler of [...tokenRefreshHandlers]) {
+      try {
+        handler(forkId, token)
+      } catch {
+        /* 订阅者异常不得打断 spawn */
+      }
+    }
+  }
+
   /** forkId -> fork record. Only the live child handle and log tail are in-memory-only. */
   const records = new Map()
   /** forkId -> disposer for an in-flight spawn promise (so plugin dispose cannot hang one). */
   const pendingSpawns = new Set()
+  /** (forkId, token) 订阅者：每次 spawn 重新生成 Adapter token 时广播（首次派生与重启都会触发）。 */
+  const tokenRefreshHandlers = new Set()
   /** port -> forkId reserved/assigned by THIS plugin instance (never release another instance's). */
   const ownedPorts = new Map()
   /** port -> {forkId,pid,at} persisted view of the pool (loaded lazily). */
@@ -392,19 +434,32 @@ export function apply(ctx, config) {
   let disposed = false
   const starting = () => [...records.values()].filter((r) => r.running || r.child || r.starting).length
 
+  /** v3.0.5/B4：持久化/列表用的 URL 一律去掉 ?token=（token 只在内存）。 */
+  const stripUrlToken = (url) => {
+    const raw = String(url ?? '')
+    if (!raw) return raw || null
+    try {
+      const parsed = new URL(raw)
+      if (!parsed.searchParams.has('token')) return raw
+      parsed.searchParams.delete('token')
+      return parsed.toString()
+    } catch {
+      return raw.replace(/([?&])token=[^&#]*&?/i, (_, sep) => (sep === '?' ? '?' : '')).replace(/[?&]$/, '')
+    }
+  }
+
   const publicFork = (rec) => ({
     forkId: rec.forkId,
     taskTitle: rec.taskTitle ?? '',
     status: rec.status ?? FORK_STATUS.STOPPED,
     pid: rec.pid ?? null,
     port: rec.port ?? null,
-    url: rec.url ?? null,
+    url: stripUrlToken(rec.url),
     homeDir: rec.homeDir ?? '',
     profile: rec.profile ?? '',
     profileDir: rec.profileDir ?? '',
     template: rec.template ?? '',
     bufferDir: rec.bufferDir ?? '',
-    token: rec.token ?? null,
     running: !!rec.running,
     createdAt: rec.createdAt ?? null,
     startedAt: rec.startedAt ?? null,
@@ -829,6 +884,9 @@ export function apply(ctx, config) {
     })
     records.set(forkId, rec)
     writeForkMetaOf(rec)
+    // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
+    // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。
+    emitTokenRefresh(forkId, rec.adapterToken)
 
     // Port: explicit spawn option > deterministic pool allocation > v1 --port 0.
     const requested = Math.floor(Number(opts.port))
@@ -896,8 +954,7 @@ export function apply(ctx, config) {
       pendingSpawns.add(cleanup)
 
       const spec = buildLaunchSpec({ cliPath, profile, port: expectedPort })
-      const env = {
-        ...process.env,
+      const env = buildForkChildEnv(process.env, {
         DSH_HOME: homeDir,
         // Fork identity is injected by the forker (a fork must never be able to call itself mother).
         DSH_FANG_ROLE: 'fork',
@@ -905,7 +962,7 @@ export function apply(ctx, config) {
         ...(opts.env ?? {}),
         // v3：Adapter Bearer token（PROTOCOL-V3 §3）。放在 opts.env 之后，母体生成的 token 优先。
         DSH_ADAPTER_TOKEN: rec.adapterToken,
-      }
+      })
       let child = null
       try {
         child = spawnProcess(spec.command, spec.args, {
@@ -1033,6 +1090,8 @@ export function apply(ctx, config) {
             rec.lastError = `restart-given-up:${plan.reason}`
             writeForkMetaOf(rec)
             audit(AUDIT.FORK_CRASHED, { forkId, restartGivenUp: plan.reason })
+            // 放弃重启 = 终态：不会再有自动重试，订阅者据此 fail-fast。
+            emit(EVENTS.restartFailed, { forkId, error: rec.lastError, terminal: true })
           }
         }
         finish({ ok: false, error: 'exited', code: exitInfo.code, signal, kind: exitInfo.kind, log: collector.tail(20) })
@@ -1146,10 +1205,26 @@ export function apply(ctx, config) {
     return typeof rec?.adapterToken === 'string' ? rec.adapterToken : ''
   }
 
+  /**
+   * v3.0.5/B4：只在内存中返回带 token 的 Web URL，用于“打开分身”。
+   * 该值绝不落盘、不进入 publicFork/list/status。
+   */
+  const openUrl = (forkId) => {
+    ensureRegistry()
+    const rec = records.get(String(forkId ?? '').trim())
+    if (!rec || !rec.running || !rec.url) return { ok: false, error: 'not-running' }
+    return { ok: true, forkId: rec.forkId, url: rec.url, port: rec.port ?? null }
+  }
+
   /** Re-spawn a crashed-but-ready fork after the backoff timer fires. */
   const restartFork = async (rec) => {
     if (disposed || rec.intentionalStop || records.get(rec.forkId) !== rec) return
-    if (!rec.cliPath) { rec.lastError = 'restart-no-cli'; writeForkMetaOf(rec); return }
+    if (!rec.cliPath) {
+      rec.lastError = 'restart-no-cli'
+      writeForkMetaOf(rec)
+      emit(EVENTS.restartFailed, { forkId: rec.forkId, error: 'restart-no-cli', terminal: true })
+      return
+    }
     rec.ready = false
     const out = await spawn({
       forkId: rec.forkId, homeDir: rec.homeDir, profile: rec.profile,
@@ -1158,6 +1233,12 @@ export function apply(ctx, config) {
     if (!out.ok && !disposed && records.get(rec.forkId) === rec) {
       rec.lastError = `restart-failed:${out.error}`
       writeForkMetaOf(rec)
+      // 自动重启尝试失败：Forker 可能还会按 supervise 计划再试，因此 terminal=false。
+      emit(EVENTS.restartFailed, {
+        forkId: rec.forkId,
+        error: String(out.error ?? 'restart-failed'),
+        terminal: false,
+      })
     }
   }
 
@@ -1198,18 +1279,35 @@ export function apply(ctx, config) {
     return { ok: true, actions, forks: actions.filter((a) => a.action === 'mark-crashed').length }
   }
 
+  /** 真实进程存活判断（用于归档确认 stop 真的生效，而不是只看 rec.running 状态）。 */
+  const alive = (forkId) => {
+    ensureRegistry()
+    const rec = records.get(String(forkId ?? '').trim())
+    if (!rec) return false
+    const pid = rec.pid ?? rec.child?.pid ?? null
+    return isPidAlive(pid)
+  }
+
   const service = {
     role: gate.role,
     provision,
     spawn,
     stop,
     reap,
+    alive,
     health,
     recover,
     status,
     list,
     logs,
     adapterToken,
+    getToken: adapterToken,
+    openUrl,
+    onTokenRefresh(handler) {
+      if (typeof handler !== 'function') return () => {}
+      tokenRefreshHandlers.add(handler)
+      return () => tokenRefreshHandlers.delete(handler)
+    },
     allocatePort,
     releasePort,
     ensureTemplate,

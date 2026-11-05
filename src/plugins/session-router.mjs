@@ -6,7 +6,8 @@
 //   cross-machine + realtime        -> deny (bridge is loopback-only, sync not realtime)
 //   same machine + host + bridge    -> bridge
 //   otherwise                       -> sync
-import { z, roleGate, SERVICE, FANG_VERSION } from '../kernel/index.mjs'
+import { z, roleGate, resolveFangLayout, SERVICE, FANG_VERSION } from '../kernel/index.mjs'
+import { createHttpGuard } from '../lib/http-auth.mjs'
 import { readBridgeDescriptor } from '../lib/bridge-client.mjs'
 
 export const name = 'fang-session-router'
@@ -23,6 +24,10 @@ export const Config = z.object({
     .description('PC 宿主 DSH_HOME（查找 desktop-bridge.json）；留空 = 本机 $DSH_HOME'),
   prefix: z.string().default('/fang'),
   routes: z.object({ enabled: z.boolean().default(true) }).default({}),
+  authToken: z.string().default('')
+    .description('安装级鉴权 token；留空 = env DSH_FANG_AUTH_TOKEN 或 <dataDir>/fang-auth.json（0600，自动生成）'),
+  authEnabled: z.boolean().default(true)
+    .description('是否要求 /fang/api/route 携带安装级鉴权 token（默认开启；仅测试/本地调试可关）'),
 })
 
 /** Pure decision function; `deny` means the request cannot be satisfied honestly. */
@@ -43,6 +48,11 @@ export function apply(ctx, config) {
   if (!gate.active) return
   const cfg = { ...Config({}), ...(config ?? {}) }
   const prefix = String(cfg.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
+  const authGuard = createHttpGuard({
+    dataDir: resolveFangLayout().dataDir,
+    token: cfg.authToken,
+    enabled: cfg.authEnabled !== false,
+  })
 
   const probe = (context = {}) => {
     const desc = readBridgeDescriptor({ dshHome: cfg.dshHome })
@@ -86,10 +96,19 @@ export function apply(ctx, config) {
     webServer.register({
       kind: 'exact',
       path: `${prefix}/api/route`,
+      method: 'GET',
       handler: async (req, res) => {
+        const decision = authGuard.check(req)
+        if (!decision.ok) {
+          res.statusCode = decision.status
+          res.setHeader?.('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ ok: false, error: decision.code, code: decision.code }))
+          return
+        }
         if (String(req?.method ?? 'GET').toUpperCase() !== 'GET') {
           res.statusCode = 405
-          res.end(JSON.stringify({ ok: false, error: 'method-not-allowed' }))
+          res.setHeader?.('allow', 'GET')
+          res.end(JSON.stringify({ ok: false, error: 'method-not-allowed', code: 'method-not-allowed' }))
           return
         }
         const q = new URL(String(req?.url ?? '/'), 'http://fang.local').searchParams

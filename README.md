@@ -75,7 +75,7 @@ node tools/e2e.mjs
 
 ---
 
-## 十一个插件（部署矩阵）
+## 十二个插件（部署矩阵）
 
 | 行 id | 模块 | 母体 | 分身 | 职责 | 服务 key |
 |---|---|---|---|---|---|
@@ -83,6 +83,7 @@ node tools/e2e.mjs
 | `fang-forker` | forker.mjs | ✅ | ❌ | 端口池、spawn/kill、junction、URL 解析 | `fangForker` |
 | `fang-restart-guard` | restart-guard.mjs | ✅ | ❌ | 母体重启唯一闸门（只决策/审批/审计） | `fangRestart` |
 | `fang-scorer` | scorer.mjs | ✅（复核） | ✅（主） | 静态 A–E + 动作灯色，阈值按环境分叉 | `fangScorer` |
+| `fang-umbrella` | umbrella.mjs | ✅ | ✅ | 保护伞：A–E 下限抬高动作灯色 + allow/mark/ask/delegate/deny | `fangUmbrella` |
 | `fang-router` | router.mjs | ✅（初判） | ✅（复核） | decide / confirm（只升不降）/ 容器分支 | `fangRouter` |
 | `fang-healer` | healer.mjs | ❌ | ✅ | 自检/证据/G1–G12/补丁建议（不放行） | `fangHealer` |
 | `fang-approver` | approver.mjs | ✅（汇总） | ✅（本地） | 待批队列/A-B/监控/回滚 | `fangApprover` |
@@ -93,6 +94,7 @@ node tools/e2e.mjs
 
 契约：[CONTRACTS-V2.md](docs/CONTRACTS-V2.md) · 协议：[PROTOCOL-V2.md](docs/PROTOCOL-V2.md) ·
 架构：[ARCHITECTURE-V2.md](docs/ARCHITECTURE-V2.md) · 变更：[CHANGELOG.md](docs/CHANGELOG.md)。
+发布：[RULES-BASELINE.md](docs/RULES-BASELINE.md)（规则基线） · [RELEASE-MIRROR.md](docs/RELEASE-MIRROR.md)（公共/私有仓发布管理）。
 
 ---
 
@@ -128,6 +130,6 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 - 逐目录许可地图：[NOTICE](NOTICE)；方案与边界分析：[docs/LICENSING.md](docs/LICENSING.md)。
 - 许可全文：[LICENSE-CORE](LICENSE-CORE) · [LICENSE-SDK](LICENSE-SDK) · [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL)。
 - 贡献前请阅读并签署 [CLA.md](CLA.md)（用于双许可证与商业授权）。
-- 商业授权/OEM：`fangwenxin@geefish.com`。
+- 商业授权/OEM：`licensing@example.com`（占位，发布前替换）。
 - 本仓库不含第三方运行时依赖；vendored schemastery/cosmokit 保留上游 MIT（见 [LICENSES/cordis-MIT.txt](LICENSES/cordis-MIT.txt)）。
 - 所有源码文件头带 `SPDX-License-Identifier`；`test/licensing.test.mjs` 防止分层漂移。

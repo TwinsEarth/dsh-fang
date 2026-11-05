@@ -1,0 +1,36 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# .githooks/pre-push — 本地第一道闸门：main / release/* / 版本标签的推送必须显式授权。
+#
+# 启用（每个 clone 一次）：
+#   git config core.hooksPath .githooks
+#
+# 行为：
+#   * feat/*、fix/*、hotfix/* 等普通分支：静默放行（含 rebase 后的强推）。
+#   * refs/heads/main、refs/heads/release/*：DENY，除非环境变量里有「ref@完整sha」的授权。
+#   * 版本标签 vX.Y.Z：必须指向 main 的 first-parent 提交；已存在的标签禁止移动。
+#
+# 应急授权（只在维护者确认后执行，授权只对那一个提交生效）：
+#   FANG_ALLOW_PROTECTED_PUSH="refs/heads/main@$(git rev-parse HEAD)" git push origin main
+set -u
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+  case "$remote_ref" in
+    refs/heads/main | refs/heads/release/* | refs/tags/v*)
+      node "$(git rev-parse --show-toplevel)/tools/git/guard-main.mjs" check \
+        --ref "$remote_ref" --local "$local_sha" --remote "$remote_sha" || status=$?
+      ;;
+    *) : ;;
+  esac
+done
+
+if [ "$status" -ne 0 ]; then
+  echo ""
+  echo "推送被本地钩子拦截（exit $status）。这不是 git 的报错，是仓库规则：main 只经 PR 进入。"
+  echo "确需直推：按上面的提示设置 ref@sha 授权后重试；若不慎已推错，见 docs/RELEASE-FLOW-v3.0.8-v3.3.3.md §7。"
+  echo "要临时停用钩子：git push --no-verify（仍会被 GitHub 分支保护拦下）。"
+  exit "$status"
+fi
+exit 0

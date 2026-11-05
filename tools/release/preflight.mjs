@@ -3,7 +3,7 @@
 // 用法：node tools/release/preflight.mjs [--e2e] [--json]
 import fs from 'node:fs'
 import path from 'node:path'
-import { ROOT, readJson, readText, versionOf, nodeRun, listTestFiles } from './lib.mjs'
+import { ROOT, readJson, readText, versionOf, nodeRun, listTestFiles, sha256File, PUBLISH_BASENAME } from './lib.mjs'
 
 const args = process.argv.slice(2)
 const wantE2e = args.includes('--e2e')
@@ -22,6 +22,10 @@ add('license: core AGPL text', readText('LICENSE-CORE').includes('GNU AFFERO GEN
 add('license: package.json AGPL', pkg.license === 'AGPL-3.0-or-later', String(pkg.license))
 add('license: SDK MIT text', readText('LICENSE-SDK').includes('MIT License'))
 add('license: commercial + CLA + NOTICE', ['LICENSE-COMMERCIAL', 'CLA.md', 'NOTICE'].every((f) => fs.existsSync(path.join(ROOT, f))))
+
+// UI 半是浏览器模块，没有单元测试；至少保证它是一份可解析的 JS（v2.6.2 起纳入门禁）。
+const clientParse = nodeRun(['--check', 'client.js'])
+add('client half: node --check client.js', clientParse.status === 0, clientParse.status === 0 ? 'green' : (clientParse.stderr || clientParse.stdout).slice(-300))
 
 const lic = nodeRun(['test/licensing.test.mjs'])
 add('license layering guard', lic.status === 0, lic.status === 0 ? 'green' : (lic.stderr || lic.stdout).slice(-300))
@@ -49,6 +53,23 @@ if (wantE2e) {
   const m = text.match(/(\d+)\/(\d+) checks passed/)
   e2e = { status: r.status, passed: Number(m?.[1] ?? -1), total: Number(m?.[2] ?? -1), ms: Date.now() - t0 }
   add('e2e: real dsh mother + fork', r.status === 0 && e2e.passed === e2e.total && e2e.total > 0, `e2e=${e2e.passed}/${e2e.total} (${(e2e.ms / 1000).toFixed(1)}s)`)
+} else {
+  // v3.0.7 门禁修复：e2e 是发布必要条件；跳过 e2e 不得再发绿灯
+  add('e2e: required for release green', false, 'e2e not run; pass --e2e')
+}
+
+// 若已存在 tarball，校验同目录 .sha256 与其一致（不存在/不匹配都失败）
+const tarball = path.join(ROOT, 'dist', `${PUBLISH_BASENAME}-${version}.tgz`)
+if (fs.existsSync(tarball)) {
+  const sidecar = `${tarball}.sha256`
+  let ok = false
+  let detail = 'missing'
+  if (fs.existsSync(sidecar)) {
+    const expected = fs.readFileSync(sidecar, 'utf8').trim().split(/\s+/)[0]
+    ok = expected === sha256File(tarball)
+    detail = ok ? 'match' : 'mismatch'
+  }
+  add('artifact: sha256 sidecar', ok, detail)
 }
 
 const green = checks.every((c) => c.ok)

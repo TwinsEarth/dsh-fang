@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "2.6.1",
+  "version": "3.0.8",
   "private": true,
   "type": "module",
   "description": "dsh-Fang (瓮城) — mother/fork plugin development environment for DeepSeek Harness: one readonly mother, a disposable child dsh-Web per task, 1 orchestrator + 12 sub-plugins.",
@@ -10,6 +10,7 @@
     "./orchestrator": "./src/plugins/orchestrator.mjs",
     "./forker": "./src/plugins/forker.mjs",
     "./scorer": "./src/plugins/scorer.mjs",
+    "./umbrella": "./src/plugins/umbrella.mjs",
     "./healer": "./src/plugins/healer.mjs",
     "./approver": "./src/plugins/approver.mjs",
     "./hot-reloader": "./src/plugins/hot-reloader.mjs",
@@ -33,6 +34,7 @@
     "src/**/*.mjs",
     "src/**/*.js",
     "client.js",
+    "tools/mcp/**/*.mjs",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -42,19 +44,12 @@
     "NOTICE",
     "CLA.md",
     "LICENSES/**",
-    "sdk/**"
+    "sdk/**",
+    "defaults/**"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true,
-      "inject": [
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-conversation"
-      ]
     }
   },
   "scripts": {
@@ -66,7 +61,9 @@
     "build": "node tools/release/build.mjs",
     "healthz": "node tools/release/healthz.mjs",
     "compat": "node tools/release/compat.mjs",
-    "publish:npm": "node tools/release/publish-npm.mjs"
+    "mcp": "node tools/mcp/server.mjs",
+    "publish:npm": "node tools/release/publish-npm.mjs",
+    "typecheck": "node tools/release/typecheck.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {

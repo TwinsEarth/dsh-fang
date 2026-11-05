@@ -9,7 +9,7 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 
 import {
-  makeCtx, makeWebServerStub, makeReq, makeRes, tmpDir,
+  makeCtx, makeWebServerStub, makeReq, makeRes, tmpDir, TEST_AUTH_TOKEN,
 } from './helpers.mjs'
 import { SERVICE, digestTree } from '../src/kernel/index.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
@@ -91,7 +91,9 @@ function applyCatalog({ home, role = 'mother', config = {}, services = {}, webSe
   if (role !== 'mother') process.env.DSH_FANG_ROLE = role
   let service
   try {
-    service = sessionCatalog.apply(ctx, config)
+    // Route tests run with the same token makeReq() carries; auth-specific tests
+    // override authToken or strip the header explicitly.
+    service = sessionCatalog.apply(ctx, { authToken: TEST_AUTH_TOKEN, ...config })
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome
@@ -458,6 +460,52 @@ test('HTTP: 3 条 exact 路由 + 自定义 prefix', () => {
       '/x/api/sessions/head',
     ])
     custom.ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('HTTP /sessions* 与 /status 同一套 Host/Origin/token 门禁（401/403/405 顺序）', async () => {
+  const home = standardHome()
+  try {
+    const { ctx, ws } = applyCatalog({ home })
+    const handler = findHandler(ws, 'GET', '/fang/api/sessions')
+
+    const noToken = getReq('/fang/api/sessions')
+    delete noToken.headers['x-fang-auth']
+    const noTokenRes = makeRes()
+    await handler(noToken, noTokenRes)
+    assert.equal(noTokenRes.statusCode, 401, '没有 token 不得读取会话列表')
+    assert.equal(noTokenRes.json().code, 'unauthorized')
+
+    const badHost = getReq('/fang/api/sessions')
+    badHost.headers.host = 'evil.example'
+    const badHostRes = makeRes()
+    await handler(badHost, badHostRes)
+    assert.equal(badHostRes.statusCode, 403)
+    assert.equal(badHostRes.json().code, 'bad-host')
+
+    const crossSite = getReq('/fang/api/sessions/item?sessionId=' + SESSION_B)
+    crossSite.headers.origin = 'https://attacker.example'
+    crossSite.headers['sec-fetch-site'] = 'cross-site'
+    const crossSiteRes = makeRes()
+    await findHandler(ws, 'GET', '/fang/api/sessions/item')(crossSite, crossSiteRes)
+    assert.equal(crossSiteRes.statusCode, 403)
+    assert.equal(crossSiteRes.json().code, 'bad-origin')
+
+    const postNoToken = getReq('/fang/api/sessions')
+    postNoToken.method = 'POST'
+    delete postNoToken.headers['x-fang-auth']
+    const postNoTokenRes = makeRes()
+    await handler(postNoToken, postNoTokenRes)
+    assert.equal(postNoTokenRes.statusCode, 401, 'auth 必须先于 method 判定')
+
+    const post = makeReq({}, 'POST')
+    const postRes = makeRes()
+    await handler(post, postRes)
+    assert.equal(postRes.statusCode, 405)
+    assert.equal(postRes.headers.allow, 'GET')
+    ctx.dispose()
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

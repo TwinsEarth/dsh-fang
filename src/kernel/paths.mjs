@@ -37,6 +37,13 @@ export function resolveProfileDir(profileTag, env = process.env) {
   return path.join(resolveDshHome(env), 'profiles', profileTag)
 }
 
+/** 用户级数据根：$FANG_HOME（默认由安装器设为 D:\fang；未设置时保持旧布局）。 */
+export function resolveFangHome(env = process.env) {
+  const raw = env && env.FANG_HOME
+  if (typeof raw === 'string' && raw.trim()) return path.resolve(raw.trim())
+  return ''
+}
+
 /**
  * Every path a Fang plugin needs. Pure: no directory is created here.
  * @returns {{dataDir:string, profileTag:string, dshHome:string, ledgerFile:string, stateFile:string,
@@ -48,16 +55,24 @@ export function resolveFangLayout(options = {}) {
     dataRoot = '',
     bufferRoot = '',
     forksRoot = '',
+    fangHome = '',
     env = process.env,
     argv = process.argv,
   } = options
   const profileTag = detectProfileTag(argv, env)
   const dshHome = resolveDshHome(env)
-  const dataDir = dataRoot ? path.resolve(dataRoot) : path.join(dshHome, 'fang', profileTag)
+  const resolvedFangHome = fangHome ? path.resolve(fangHome) : resolveFangHome(env)
+  const dataDir = dataRoot
+    ? path.resolve(dataRoot)
+    : (resolvedFangHome ? path.join(resolvedFangHome, 'mirror', profileTag) : path.join(dshHome, 'fang', profileTag))
+  const forkHomesDir = forksRoot
+    ? path.resolve(forksRoot)
+    : (resolvedFangHome ? path.join(resolvedFangHome, 'essence') : path.join(dataDir, 'forks'))
   return {
     dataDir,
     profileTag,
     dshHome,
+    fangHome: resolvedFangHome,
     ledgerFile: path.join(dataDir, 'audit.jsonl'),
     stateFile: path.join(dataDir, 'state.json'),
     forksFile: path.join(dataDir, 'forks.json'),
@@ -67,7 +82,9 @@ export function resolveFangLayout(options = {}) {
     snapshotsDir: path.join(dataDir, 'snapshots'),
     roundsDir: path.join(dataDir, 'rounds'),
     runDir: path.join(dataDir, 'run'),
-    forkHomesDir: forksRoot ? path.resolve(forksRoot) : path.join(dataDir, 'forks'),
+    forkHomesDir,
+    essenceRoot: forkHomesDir,
+    sessionsRoot: resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : '',
   }
 }
 

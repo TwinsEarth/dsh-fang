@@ -20,6 +20,18 @@ import {
 } from '../kernel/index.mjs'
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
+import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
+import { MirrorManager } from '../lib/mirror.mjs'
+import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
+import { PreferencesStore } from '../lib/preferences.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
+import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
+import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
+import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
+import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
+import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
+import { BranchStore } from '../lib/branch-store.mjs'
+import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
 export const name = 'fang-orchestrator'
@@ -40,6 +52,8 @@ export const Config = z.object({
     .description('数据根目录；留空 = $DSH_HOME/fang/<profileTag>'),
   forksRoot: z.string().default('')
     .description('分身 home 根目录；留空 = <dataRoot>/forks'),
+  mirrorRoot: z.string().default('')
+    .description('母体镜像根目录；留空 = <dataRoot>/mirror（备份/恢复/升级都在这一个文件夹里）'),
   adapterTimeoutMs: z.number().min(100).max(120000).default(10000)
     .description('派生后等待分身 Adapter 就绪的上限（毫秒）；超时任务记为 running（adapter 未就绪）'),
   adapterPollMs: z.number().min(50).max(5000).default(400)
@@ -49,7 +63,9 @@ export const Config = z.object({
   allowProcessRestart: z.boolean().default(false)
     .description('是否允许编排器主动重启母体（默认禁止；重启一律交给 restart-guard）'),
   autoReapIdleMinutes: z.number().min(0).max(1440).default(0)
-    .description('空闲多少分钟后自动归档任务（0 = 不自动）'),
+    .description('空闲多少分钟后自动回收任务（0 = 不自终）'),
+  archiveStopTimeoutMs: z.number().min(100).max(30000).default(3000)
+    .description('归档时等待分身进程真正退出的上限（毫秒）'),
   commercial: z.object({
     collaboration: z.boolean().default(false).description('联合开发（需 fangCommercial provider）'),
     git: z.boolean().default(false).description('本地 Git 快照（需 provider）'),
@@ -61,11 +77,29 @@ export const Config = z.object({
     enabled: z.boolean().default(true).description('是否注册 /fang 路由'),
     prefix: z.string().default('/fang').description('路由前缀'),
   }).default({}),
+  authToken: z.string().default('')
+    .description('v3.0.5/B1：安装级鉴权 token；留空 = 读 DSH_FANG_AUTH_TOKEN 或 <dataDir>/fang-auth.json（0600，自动生成）'),
+  authEnabled: z.boolean().default(true)
+    .description('v3.0.5/B1：是否要求 /fang/api 携带鉴权 token（默认开启；仅测试/本地调试可关）'),
 })
 
 const HTML_ESCAPE = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ))
+
+/** v3.0.5/B4：对外的任务 URL 一律去掉 ?token=（token 只在内存/打开时临时下发）。 */
+export function stripUrlToken(url) {
+  const raw = String(url ?? '')
+  if (!raw) return raw || null
+  try {
+    const parsed = new URL(raw)
+    if (!parsed.searchParams.has('token')) return raw
+    parsed.searchParams.delete('token')
+    return parsed.toString()
+  } catch {
+    return raw.replace(/([?&])token=[^&#]*&?/i, (_, sep) => (sep === '?' ? '?' : '')).replace(/[?&]$/, '')
+  }
+}
 
 /** Find a runnable dsh launcher. `.cmd` wrappers are spawned through a shell by the forker. */
 export function resolveCliPath(explicit = '', env = process.env) {
@@ -119,6 +153,11 @@ export function apply(ctx, config) {
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot })
+  const branchStore = new BranchStore(layout.dataDir)
+  // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
+  const authToken = cfg.authEnabled === false
+    ? ''
+    : loadAuthToken(layout.dataDir, cfg.authToken || process.env.DSH_FANG_AUTH_TOKEN)
   const motherProfile = cfg.motherProfile || layout.profileTag
   ensureDir(layout.dataDir)
   ensureDir(layout.forkHomesDir)
@@ -141,7 +180,12 @@ export function apply(ctx, config) {
     try { bus.emit('fang/audit', { kind, data }) } catch { /* ignore */ }
   }
   const persist = () => {
-    try { saveRegistry(layout.tasksFile, [...tasks.values()]) } catch { /* best effort */ }
+    try {
+      // v3.0.5/B4：tasks.json 不落 token，URL 也不带 ?token=（打开时走 open-url 临时下发）
+      saveRegistry(layout.tasksFile, [...tasks.values()].map(task => ({
+        ...task, token: '', url: stripUrlToken(task.url),
+      })))
+    } catch { /* best effort */ }
   }
   const forker = () => safeGet(SERVICE.forker)
   const cliPath = () => (cfg.cliPath ? cfg.cliPath : resolveCliPath('', process.env))
@@ -292,15 +336,30 @@ export function apply(ctx, config) {
     const running = live ? !!live.running : t.status === TASK_STATUS.RUNNING || t.status === TASK_STATUS.READY
     const status = !running ? (t.status === TASK_STATUS.ARCHIVED ? TASK_STATUS.ARCHIVED : TASK_STATUS.FAILED)
       : (t.adapter?.ok ? TASK_STATUS.READY : TASK_STATUS.RUNNING)
+    const phase = !running
+      ? (t.status === TASK_STATUS.ARCHIVED ? 'archived' : (t.status === TASK_STATUS.FAILED ? 'failed' : 'stopped'))
+      : (t.adapter?.ok ? 'running' : 'starting')
     return {
       taskId: t.taskId,
       forkId: t.taskId,
       title: t.title,
       taskTitle: t.title,
       status,
+      phase,
+      health: { adapter: t.adapter?.ok ? 'ok' : 'pending', error: t.adapter?.error ?? '' },
+      // v3.0.7/S1：动作可用性由服务端给出，UI 不再自行推断
+      ...(() => {
+        const ui = buildTaskActions({ running, archived: t.status === TASK_STATUS.ARCHIVED })
+        return { actions: ui.actions, blocks: ui.blocks }
+      })(),
+      sessionTitle: t.importedSession?.title ?? t.seed?.title ?? '',
+      startedAt: t.startedAt ?? live?.startedAt ?? null,
+      updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
+      projectBytes: t.projectBytes ?? 0,
+      essenceId: t.essenceId ?? null,
       pid: live?.pid ?? t.pid ?? null,
       port: t.port ?? null,
-      url: t.url ?? null,
+      url: stripUrlToken(t.url),
       homeDir: t.homeDir,
       profile: t.profile,
       createdAt: t.createdAt,
@@ -309,6 +368,8 @@ export function apply(ctx, config) {
       collaborators: t.collaborators ?? [],
       seed: t.seed ?? null,
       importedSession: t.importedSession ?? null,
+      archivedAt: t.archivedAt ?? null,
+      archiveRemote: t.archiveRemote ?? null,
     }
   }
 
@@ -504,7 +565,7 @@ export function apply(ctx, config) {
           taskId,
           forkId: taskId,
           title,
-          url: task.url,
+          url: stripUrlToken(task.url),
           port: task.port,
           homeDir,
           profile,
@@ -528,6 +589,49 @@ export function apply(ctx, config) {
 
     listTasks() {
       return [...tasks.values()].map(taskView).sort((a, b) => a.createdAt - b.createdAt)
+    },
+
+    /** v3.0.6：任务重命名（archived 拒绝；1–80 字符）。 */
+    renameTask(taskId, title) {
+      const id = String(taskId ?? '').trim()
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status === TASK_STATUS.ARCHIVED) return { ok: false, error: 'task-archived' }
+      const clean = String(title ?? '').trim()
+      if (clean.length === 0 || clean.length > 80) return { ok: false, error: 'invalid-title' }
+      task.title = clean
+      task.updatedAt = nowMs()
+      persist()
+      audit(AUDIT.FORK_CREATED + '-rename', { taskId: id, title: clean })
+      return { ok: true, task: taskView(task) }
+    },
+
+    /** v3.0.6：复制分身访问信息（不克隆实例；token 不返回，打开走 open-url）。 */
+    copyTaskInfo(taskId) {
+      const task = tasks.get(String(taskId ?? '').trim())
+      if (!task) return { ok: false, error: 'unknown-task' }
+      return { ok: true, taskId: task.taskId, title: task.title, url: stripUrlToken(task.url), port: task.port ?? null }
+    },
+
+    /** v3.0.6：导出分身元数据清单（完整项目/会话打包留给后续版本）。 */
+    downloadTaskManifest(taskId) {
+      const task = tasks.get(String(taskId ?? '').trim())
+      if (!task) return { ok: false, error: 'unknown-task' }
+      return {
+        ok: true,
+        manifest: {
+          version: 1,
+          taskId: task.taskId,
+          title: task.title,
+          createdAt: task.createdAt,
+          status: taskView(task).phase,
+          port: task.port ?? null,
+          importedSession: task.importedSession ?? null,
+          seed: task.seed ?? null,
+          files: [],
+          note: 'v3.0.6 metadata-only; full project/session archive is planned for v3.0.7',
+        },
+      }
     },
 
     listForks() {
@@ -842,11 +946,14 @@ export function apply(ctx, config) {
       })
       return { ok: true, taskId: task.taskId, sessions, degraded: index.degraded ?? [] }
     },
-    /** v2 归档：先让分身 flush + 落审计，再回收进程与 home。 */
+    /** v2 归档：先让分身 flush + 落审计，再**停止进程但保留 home**（读档/还原/删除见 restoreTask/deleteArchived）。 */
     async archiveTask(taskId) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status === TASK_STATUS.ARCHIVED) {
+        return { ok: true, archived: true, already: true, taskId: id, title: task.title, homeKept: true }
+      }
       const summary = taskView(task)
       let remote = { ok: false, error: 'adapter-unavailable' }
       if (task.adapter?.ok) {
@@ -856,12 +963,130 @@ export function apply(ctx, config) {
           remote = { ok: !!(res.ok && res.data?.ok !== false), error: res.data?.error ?? res.error }
         }
       }
+
+      // 归档 = 停止进程 + 保留 home；必须确认进程真的退了，否则把失败如实返回，
+      // 不能把「列表里没了、进程还在」当成归档成功。
+      const f = forker()
+      if (!f || typeof f.stop !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id, remote }
+      try {
+        const stopped = await f.stop(id)
+        if (stopped && stopped.ok === false && stopped.error !== 'not-found') {
+          return { ok: false, error: 'stop-failed', detail: stopped.error ?? 'stop-failed', taskId: id, remote }
+        }
+      } catch (e) {
+        return { ok: false, error: 'stop-failed', detail: String(e?.message ?? e), taskId: id, remote }
+      }
+      const deadline = nowMs() + cfg.archiveStopTimeoutMs
+      let alive = true
+      while (nowMs() < deadline) {
+        alive = typeof f.alive === 'function' ? !!f.alive(id) : !!(f.status?.(id)?.running)
+        if (!alive) break
+        await sleep(100)
+      }
+      if (alive) {
+        audit(AUDIT.TASK_ARCHIVED, { taskId: id, title: task.title, ok: false, error: 'stop-failed', remote })
+        return { ok: false, error: 'stop-failed', detail: 'fork process is still alive after stop', taskId: id, remote, alive: true }
+      }
+
       task.status = TASK_STATUS.ARCHIVED
+      task.archivedAt = nowMs()
+      task.archiveRemote = remote
+      task.pid = null
+      task.port = null
+      task.url = null
+      task.token = ''
+      task.adapter = { ok: false, error: 'archived', at: nowMs() }
       persist()
-      const reaped = await service.reap(id)
-      audit(AUDIT.TASK_ARCHIVED, { taskId: id, title: task.title, remote })
+      remoteCache.delete(id)
+      audit(AUDIT.TASK_ARCHIVED, { taskId: id, title: task.title, remote, stopped: true, homeKept: true })
       bus.emit('fang/task-archived', { taskId: id, title: task.title })
-      return { ok: true, archived: true, taskId: id, title: task.title, summary, remote, reaped: reaped.ok === true }
+      return {
+        ok: true,
+        archived: true,
+        taskId: id,
+        title: task.title,
+        summary,
+        remote,
+        stopped: true,
+        homeKept: true,
+      }
+    },
+
+    /** 还原存档：用原 home/profile 重新 spawn（新端口 + 新 token），再握手。 */
+    async restoreTask(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived', taskId: id }
+      if (!task.homeDir || !exists(task.homeDir)) {
+        return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
+      }
+      const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
+      const forkBundle = path.join(forkProfileDir, 'node_modules', '@local', 'dsh-fang')
+      if (!exists(forkBundle)) {
+        return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
+      }
+      const f = forker()
+      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      const started = await f.spawn({
+        forkId: id,
+        homeDir: task.homeDir,
+        profile: task.profile,
+        cliPath: cliPath(),
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+      })
+      if (!started || started.ok === false) {
+        audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
+        return { ok: false, error: 'spawn-failed', detail: started?.error ?? 'unknown', taskId: id }
+      }
+      task.status = TASK_STATUS.RUNNING
+      task.archivedAt = null
+      task.archiveRemote = null
+      task.pid = started.pid ?? null
+      task.port = started.port ?? null
+      task.url = started.url ?? null
+      task.token = started.token ?? extractTokenSafe(task.url)
+      task.adapter = { ok: false, error: 'handshaking' }
+      persist()
+      audit(AUDIT.FORK_STARTED, { taskId: id, pid: task.pid, port: task.port, profile: task.profile, restored: true })
+      const adapter = await handshake(task)
+      task.status = adapter.ok ? TASK_STATUS.READY : TASK_STATUS.RUNNING
+      persist()
+      audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
+      bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
+      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter }
+    },
+
+    /** 永久删除存档：reap（杀进程 + 删 home + 删记录）；forker 记录已丢时按 home 兜底清理。 */
+    async deleteArchivedTask(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived', taskId: id }
+      const f = forker()
+      let reaped = { ok: true }
+      try {
+        if (f && typeof f.reap === 'function') reaped = await f.reap(id)
+      } catch (e) {
+        reaped = { ok: false, error: String(e?.message ?? e) }
+      }
+      if (reaped && reaped.ok === false && reaped.error !== 'not-found') {
+        return { ok: false, error: 'reap-failed', detail: reaped.error, taskId: id }
+      }
+      // forker 记录不存在（宿主重启/旧归档）时，仍清理 task.homeDir（限定在 forks 根内）。
+      if (reaped?.error === 'not-found' && task.homeDir) {
+        const root = path.resolve(layout.forkHomesDir) + path.sep
+        const target = path.resolve(task.homeDir)
+        if (target.startsWith(root) && exists(target)) {
+          try { removeTree(target) } catch (e) { return { ok: false, error: 'remove-failed', detail: String(e?.message ?? e), taskId: id } }
+        }
+      }
+      tasks.delete(id)
+      remoteCache.delete(id)
+      persist()
+      audit(AUDIT.FORK_REAPED, { taskId: id, title: task.title, archivedDelete: true })
+      bus.emit('fang/fork-reaped', { forkId: id })
+      return { ok: true, deleted: true, taskId: id, title: task.title }
     },
 
     async reap(taskId) {
@@ -937,6 +1162,147 @@ export function apply(ctx, config) {
 
   ctx.effect(() => ctx.provide(SERVICE.orchestrator, service))
 
+  // ── v2.9.0 母体连接：只描述 + 只读探测，不持有连接状态 ──────────────────
+  const linkProfileDir = () => {
+    try {
+      const dir = resolveProfileDir?.()
+      return typeof dir === 'string' ? dir : ''
+    } catch {
+      return ''
+    }
+  }
+  const linkService = {
+    /** 母体连接描述：前缀/门户/接入说明/共享配置摘要（不包含任何 token）。 */
+    describe: () => describeMotherLink({
+      role: 'mother',
+      version: FANG_VERSION,
+      prefix: cfg.routes?.prefix ?? '/fang',
+      sharedConfig: readSharedProfileSummary({ profileDir: linkProfileDir() }),
+    }),
+    /** 只读探测一个 http(s) 母体地址的 /api/status；失败以结构化错误返回。 */
+    probe: (input = {}) => probeLink({
+      target: input?.target,
+      prefix: cfg.routes?.prefix ?? '/fang',
+      timeoutMs: input?.timeoutMs,
+    }),
+  }
+  ctx.effect(() => ctx.provide(SERVICE.link, linkService))
+
+  // ── v2.11.0 母体镜像：备份 / 恢复 / 升级 / 自动备份（只管理文件夹 1）──────
+  const mirrorRoot = cfg.mirrorRoot ? String(cfg.mirrorRoot) : path.join(layout.dataDir, 'mirror')
+  // v3.0.3：客户端升级后的兼容性门禁（模块导入 + 路由契约；失败保持子插件关闭）
+  const compatRoot = fileURLToPath(new URL('../../', import.meta.url))
+  let compatWebServer = null
+  const runCompatCheck = async () => {
+    const status = await runCompatGate({
+      rootDir: compatRoot,
+      expectedRouteCount: DEFAULT_EXPECTED_ROUTE_COUNT,
+      routePaths: compatWebServer !== null && typeof compatWebServer.paths === 'function'
+        ? compatWebServer.paths()
+        : null,
+    })
+    writeCompatStatus(layout.dataDir, status)
+    return status
+  }
+  let upgradeCoordinator = null
+  const mirrorManager = new MirrorManager({
+    mirrorRoot,
+    logger: ctx.logger ?? {},
+    usageProvider: () => ({
+      activeEssenceCount: 0,
+      activeSessionCount: Array.isArray(service.listForks?.())
+        ? service.listForks().filter(fork => fork.status === 'running').length
+        : 0,
+    }),
+    compatGate: () => runCompatCheck(),
+    onCompatResult: (compat) => { writeCompatStatus(layout.dataDir, compat) },
+    postUpgradeHook: () => { if (upgradeCoordinator !== null) void upgradeCoordinator.onUpgradeSuccess() },
+  })
+  mirrorManager.ensureLayout()
+  const preferencesStore = new PreferencesStore({ mirrorRoot, logger: ctx.logger ?? {} })
+  preferencesStore.load()
+  const essenceManager = new EssenceManager({
+    essencesRoot: path.join(layout.dataDir, 'essences'),
+    mirrorRoot,
+    logger: ctx.logger ?? {},
+  })
+  // v3.0.4：首次启动 seed 官方推荐原身（锁定、预装默认插件）；失败不阻塞主插件
+  let officialEssence = null
+  try {
+    officialEssence = essenceManager.ensureOfficialEssence()
+  } catch (error) {
+    ctx.logger?.warn?.('[essence] official essence seed failed', { error: String(error?.message ?? error) })
+  }
+  upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
+  const mirrorService = {
+    status: () => mirrorManager.getStatus(),
+    getPreferences: () => preferencesStore.get(),
+    setPreferences: (patch = {}) => preferencesStore.update(patch),
+    listEssences: () => {
+      const defaultEssence = essenceManager.getDefault()
+      const essences = essenceManager.list().map((meta) => {
+        const ui = buildEssenceActions({ locked: meta.locked === true, archived: meta.archived === true })
+        return {
+          ...meta,
+          locked: meta.locked === true,
+          official: meta.official === true,
+          archived: meta.archived === true,
+          pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
+          actions: ui.actions,
+          blocks: ui.blocks,
+        }
+      })
+      return {
+        officialId: OFFICIAL_ESSENCE_ID,
+        official: officialEssence,
+        defaultId: defaultEssence.essenceId,
+        defaultEssence,
+        essences,
+        capacity: { slots: 7, defaultLimit: 5, used: essences.filter(item => item.archived !== true).length },
+      }
+    },
+    createEssence: (input = {}) => essenceManager.create({
+      name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
+    }),
+    renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
+    archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
+    deleteEssence: (essenceId) => essenceManager.remove(essenceId),
+    copyEssence: (essenceId, name) => essenceManager.copy(essenceId, { name }),
+    setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
+    downloadEssence: (essenceId) => essenceManager.downloadBundle(essenceId),
+    backup: (input = {}) => mirrorManager.backup({
+      label: input?.label, bucket: input?.bucket === 'restore' ? 'restore' : 'backup',
+    }),
+    restore: (backupId) => mirrorManager.restore(backupId),
+    deleteBackup: (backupId) => mirrorManager.deleteBackup(backupId),
+    setBackupInterval: (hours) => mirrorManager.setBackupInterval(hours),
+    checkUpdate: () => mirrorManager.checkUpdate(),
+    recomputeStatus: () => upgradeCoordinator.getRecomputeStatus(),
+    compatStatus: () => readCompatStatus(layout.dataDir),
+    runCompatCheck,
+    upgrade: (input = {}) => mirrorManager.upgrade({
+      autoBackup: input?.autoBackup !== false,
+      autoRollback: input?.autoRollback !== false,
+    }),
+  }
+  ctx.effect(() => ctx.provide(SERVICE.mirror, mirrorService))
+  // 启动后自检一次；兼容状态默认 subPluginsEnabled=false，直到门禁通过
+  const compatBootTimer = setTimeout(() => { void runCompatCheck() }, 1500)
+  compatBootTimer.unref?.()
+  ctx.effect(() => () => clearTimeout(compatBootTimer))
+  const mirrorAutoTimer = setInterval(() => {
+    try {
+      const status = mirrorService.status()
+      if (status.meta?.nextBackupAt !== null && Date.now() >= status.meta.nextBackupAt) {
+        mirrorManager.maybeAutoBackup()
+      }
+    } catch (error) {
+      ctx.logger?.warn?.('[mirror] auto backup tick failed', { error: String(error?.message ?? error) })
+    }
+  }, 60_000)
+  mirrorAutoTimer.unref?.()
+  ctx.effect(() => () => clearInterval(mirrorAutoTimer))
+
   // ── 启动自检 ───────────────────────────────────────────────────────────
   const bootState = { at: nowMs(), ok: null, findings: [] }
   const bootAuditTimer = setTimeout(() => {
@@ -974,7 +1340,7 @@ export function apply(ctx, config) {
       const idleMs = cfg.autoReapIdleMinutes * 60_000
       for (const task of [...tasks.values()]) {
         if (nowMs() - (task.lastActiveAt ?? task.createdAt) > idleMs) {
-          service.archiveTask(task.taskId).catch(() => { /* best effort */ })
+          service.reap(task.taskId).catch(() => { /* best effort */ })
         }
       }
     }, 60_000)
@@ -986,6 +1352,7 @@ export function apply(ctx, config) {
     ctx.inject(['webServer'], (child) => {
       const webServer = child.get('webServer') ?? child.webServer
       if (!webServer || typeof webServer.register !== 'function') return
+      compatWebServer = webServer
       const prefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
 
       const json = (res, code, obj) => {
@@ -1000,36 +1367,130 @@ export function apply(ctx, config) {
         })
         req.on('error', () => resolve({}))
       })
-      const route = (method, pathname, handler) => webServer.register({
+      const route = (method, pathname, handler, routeOptions) => webServer.register({
         kind: 'exact',
         path: pathname,
+        method,
         handler: async (req, res) => {
-          if (req.method !== method) return json(res, 405, { ok: false, error: 'method-not-allowed' })
+          // v3.0.5/B1：loopback Host + Origin/CSRF + 安装 token（fail-closed）。
+          // Auth must run before the method check: a token-less POST is 401, not 405.
+          const decision = checkRequestAuth(req, {
+            token: authToken,
+            publicRoute: authToken.length === 0 || routeOptions?.public === true,
+          })
+          if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
+          if (req.method !== method) {
+            try { res.setHeader?.('allow', method) } catch { /* fake res */ }
+            return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
+          }
           try { return await handler(req, res) } catch (e) {
-            return json(res, 500, { ok: false, error: 'handler-threw', detail: String(e?.message ?? e) })
+            return json(res, 500, { ok: false, error: 'handler-threw', code: 'handler-threw', detail: String(e?.message ?? e) })
           }
         },
       })
 
-      route('GET', `${prefix}/panel`, (req, res) => {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(renderPanelHtml(prefix))
+      // The DSH webServer keys exact routes by path only, so GET+POST on the same
+      // path cannot be two `register()` calls (the second throws and later routes
+      // silently never register). One handler dispatches by method instead.
+      const routeMethods = (pathname, handlers, routeOptions) => webServer.register({
+        kind: 'exact',
+        path: pathname,
+        method: Object.keys(handlers).join(','),
+        handler: async (req, res) => {
+          const decision = checkRequestAuth(req, {
+            token: authToken,
+            publicRoute: authToken.length === 0 || routeOptions?.public === true,
+          })
+          if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
+          const allow = Object.keys(handlers)
+          const fn = handlers[String(req.method ?? 'GET').toUpperCase()]
+          if (typeof fn !== 'function') {
+            try { res.setHeader?.('allow', allow.join(', ')) } catch { /* fake res */ }
+            return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
+          }
+          try { return await fn(req, res) } catch (e) {
+            return json(res, 500, { ok: false, error: 'handler-threw', code: 'handler-threw', detail: String(e?.message ?? e) })
+          }
+        },
       })
+
+      // ── 分支路由共用：taskId 必须是注册表里的安全 id ─────────────────────
+      // 既保证 404 语义一致（tasks/status 对未知任务返回 404），也阻断把
+      // `../` 之类的 taskId 带进 BranchStore.file() 的路径逃逸。
+      const safeTaskId = (value) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(String(value ?? ''))
+      const requireTask = (value) => {
+        const taskId = String(value ?? '').trim()
+        if (!taskId) return { ok: false, status: 400, error: 'taskId-required' }
+        if (!safeTaskId(taskId) || !tasks.has(taskId)) return { ok: false, status: 404, error: 'unknown-task' }
+        return { ok: true, taskId }
+      }
+      const branchErrorStatus = (code) => {
+        switch (String(code ?? '')) {
+          case 'invalid-branch-id':
+          case 'invalid-status':
+          case 'invalid-task-id':
+            return 400
+          case 'branch-missing':
+          case 'parent-missing':
+            return 404
+          case 'branch-exists':
+          case 'branch-not-active':
+          case 'cannot-seal-active':
+            return 409
+          default:
+            return 500
+        }
+      }
+
+      // 浏览器面板 bootstrap：同源读取 token（Host/Origin 已校验；不跨站）
+      route('GET', `${prefix}/api/auth-token`, (req, res) => json(res, 200, {
+        ok: true, token: authToken,
+      }), { public: true })
+
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
+      route('GET', `${prefix}/api/upgrade/status`, (req, res) => {
+        let mirror = null
+        let essences = []
+        try { mirror = service.status()?.mirror ?? null } catch { /* empty */ }
+        try { essences = service.listEssences?.() ?? [] } catch { /* empty */ }
+        return json(res, 200, buildUpgradeStatus({ version: FANG_VERSION, mirror, essences }))
+      })
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
-        const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators })
-        return json(res, out.ok ? 200 : 409, out)
+        try {
+          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators })
+          return json(res, out.ok ? 200 : 409, out)
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
       })
       route('GET', `${prefix}/api/tasks/status`, async (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         const out = await service.getTaskStatus(query.get('taskId') ?? '')
         return json(res, out.ok === false ? 404 : 200, out)
       })
+      // v3.0.5/B4：打开分身时才在内存中取带 token 的 URL（不落盘、不进列表）
+      route('GET', `${prefix}/api/tasks/open-url`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const taskId = String(query.get('taskId') ?? '').trim()
+        const out = taskId ? forker()?.openUrl?.(taskId) : null
+        if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running' })
+        return json(res, 200, out)
+      })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
         const body = await readBody(req)
         const out = await service.archiveTask(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('POST', `${prefix}/api/tasks/restore`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.restoreTask(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('POST', `${prefix}/api/tasks/archive/delete`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.deleteArchivedTask(String(body?.taskId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
       })
       route('POST', `${prefix}/api/tasks/promote`, async (req, res) => {
@@ -1065,6 +1526,227 @@ export function apply(ctx, config) {
         const out = await service.promote(String(body?.forkId ?? ''), String(body?.pluginId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
       })
+      // v2.9.0 母体连接
+      route('GET', `${prefix}/api/mother-link`, (req, res) => json(res, 200, linkService.describe()))
+      route('POST', `${prefix}/api/mother-link/probe`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await linkService.probe(body && typeof body === 'object' ? body : {})
+        try {
+          ctx.get(SERVICE.auditor)?.append?.(AUDIT.LINK_PROBE, {
+            target: out.target ?? null, ok: out.ok === true,
+            latencyMs: out.latencyMs ?? null, error: out.error ?? null,
+          })
+        } catch { /* 审计缺失不影响探测结果 */ }
+        return json(res, 200, out)
+      })
+      // v2.11.0 母体镜像管理
+      route('GET', `${prefix}/api/mirror/status`, (req, res) => {
+        const payload = mirrorService.status()
+        const ifNoneMatch = req && req.headers ? req.headers['if-none-match'] : undefined
+        const out = buildMirrorStatusResponse(payload, ifNoneMatch)
+        res.writeHead(out.statusCode, out.headers)
+        res.end(out.notModified ? '' : out.body)
+      })
+      route('POST', `${prefix}/api/mirror/backup`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const entry = mirrorService.backup({ label: body?.label, bucket: body?.bucket })
+          return json(res, 200, { ok: true, entry })
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/mirror/restore`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = mirrorService.restore(body?.backupId)
+          return json(res, out.ok ? 200 : 409, out)
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/mirror/backup/delete`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = mirrorService.deleteBackup(body?.backupId)
+          return json(res, out.ok ? 200 : 404, out)
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/mirror/backup-interval`, async (req, res) => {
+        const body = await readBody(req)
+        const out = mirrorService.setBackupInterval(body?.hours)
+        return json(res, out.ok ? 200 : 400, out)
+      })
+      // v3.0.8 镜像偏好：对话框交互超时 15/30/60s（宿主侧持久化）
+      route('GET', `${prefix}/api/mirror/preferences`, (req, res) => json(res, 200, mirrorService.getPreferences()))
+      route('POST', `${prefix}/api/mirror/preferences/set`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const preferences = mirrorService.setPreferences({ activeIdleTimeoutMs: body?.activeIdleTimeoutMs })
+          return json(res, 200, preferences)
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.3 compat 门禁：客户端升级后子插件默认关闭，门禁通过才允许启用
+      route('GET', `${prefix}/api/mirror/recompute-status`, (req, res) => json(res, 200, mirrorService.recomputeStatus()))
+      route('GET', `${prefix}/api/essence/list`, (req, res) => json(res, 200, mirrorService.listEssences()))
+      // v3.0.6 元主 CRUD / 默认元主 / 导出
+      route('POST', `${prefix}/api/essence/create`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.createEssence(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.renameEssence(String(body?.essenceId ?? ''), body?.name) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/archive`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.archiveEssence(String(body?.essenceId ?? ''), body?.archived !== false) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/delete`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.deleteEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/copy`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, essence: mirrorService.copyEssence(String(body?.essenceId ?? ''), body?.name) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/default`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, default: mirrorService.setDefaultEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('GET', `${prefix}/api/essence/download`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        try {
+          const bundle = mirrorService.downloadEssence(String(query.get('essenceId') ?? ''))
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': `attachment; filename="essence-${bundle.essenceId}.json"`,
+            'cache-control': 'no-store',
+          })
+          return res.end(JSON.stringify(bundle))
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.6 分身 rename/copy/download（copy=访问信息；download=元数据清单）
+      route('POST', `${prefix}/api/tasks/rename`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.renameTask(String(body?.taskId ?? ''), body?.title)
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('POST', `${prefix}/api/tasks/copy`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.copyTaskInfo(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 404, out)
+      })
+      route('GET', `${prefix}/api/tasks/download`, async (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const out = await Promise.resolve(service.downloadTaskManifest(String(query.get('taskId') ?? '')))
+        return json(res, out.ok ? 200 : 404, out)
+      })
+      route('GET', `${prefix}/api/compat`, (req, res) => json(res, 200, mirrorService.compatStatus()))
+      route('POST', `${prefix}/api/compat/check`, async (req, res) => {
+        const status = await mirrorService.runCompatCheck()
+        return json(res, status.ok ? 200 : 409, status)
+      })
+      route('POST', `${prefix}/api/mirror/upgrade`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await mirrorService.upgrade({
+          autoBackup: body?.autoBackup !== false,
+          autoRollback: body?.autoRollback !== false,
+        })
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      // v3.0.8 分支 HTTP 面（注册在末尾，避免影响既有路由初始化顺序）
+      routeMethods(`${prefix}/api/tasks/branches`, {
+        GET: (req, res) => {
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          const checked = requireTask(query.get('taskId'))
+          if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+          return json(res, 200, branchStore.list(checked.taskId))
+        },
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const checked = requireTask(body?.taskId)
+          if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+          try {
+            return json(res, 200, branchStore.create(checked.taskId, {
+              branchId: String(body?.branchId ?? ''),
+              parentBranchId: body?.parentBranchId ? String(body.parentBranchId) : undefined,
+              baseTurn: Number(body?.baseTurn) || 0,
+            }))
+          } catch (error) {
+            const code = String(error?.message ?? error)
+            return json(res, branchErrorStatus(code), { ok: false, error: code, code })
+          }
+        },
+      })
+      route('POST', `${prefix}/api/tasks/branches/activate`, async (req, res) => {
+        const body = await readBody(req)
+        const checked = requireTask(body?.taskId)
+        if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+        try {
+          return json(res, 200, branchStore.activate(checked.taskId, String(body?.branchId ?? '')))
+        } catch (error) {
+          const code = String(error?.message ?? error)
+          return json(res, branchErrorStatus(code), { ok: false, error: code, code })
+        }
+      })
+      route('POST', `${prefix}/api/tasks/branches/status`, async (req, res) => {
+        const body = await readBody(req)
+        const checked = requireTask(body?.taskId)
+        if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+        try {
+          return json(res, 200, branchStore.setStatus(checked.taskId, String(body?.branchId ?? ''), String(body?.status ?? '')))
+        } catch (error) {
+          const code = String(error?.message ?? error)
+          return json(res, branchErrorStatus(code), { ok: false, error: code, code })
+        }
+      })
+      route('GET', `${prefix}/api/reflow/policy`, (req, res) => json(res, 200, {
+        ok: true,
+        states: ['sealed', 'verified', 'quarantine', 'adopted'],
+        transitions: {
+          sealed: ['verified'],
+          verified: ['quarantine', 'adopted'],
+          quarantine: ['verified'],
+          adopted: [],
+        },
+        forbiddenFields: ['token', 'password', 'secret', 'credential', 'auth', 'cookie', 'sessionkey', 'apikey'],
+        merge: false,
+      }))
+
+      // v3.0.8 contract: an unknown /fang/api/* path must be a JSON 404 under the
+      // same Host/Origin/token gate — not an unauthenticated empty 404 from the host.
+      // Exact routes above win because the webServer matches exact before prefix.
+      webServer.register({
+        kind: 'prefix',
+        path: `${prefix}/api`,
+        handler: async (req, res) => {
+          const decision = checkRequestAuth(req, {
+            token: authToken,
+            publicRoute: authToken.length === 0,
+          })
+          if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
+          return json(res, 404, { ok: false, error: 'not-found', code: 'not-found' })
+        },
+      })
     })
   }
 }
@@ -1081,10 +1763,12 @@ export function resolveInside(base, rel) {
 }
 
 /** Server-rendered portal (v2): task table + adapter state + four actions. */
-export function renderPanelHtml(prefix = '/fang') {
+export function renderPanelHtml(prefix = '/fang', authToken = '') {
   const p = HTML_ESCAPE(prefix)
+  const token = HTML_ESCAPE(authToken)
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="fang-auth" content="${token}">
 <title>dsh-Fang v2 · 瓮城</title>
 <style>
   :root { color-scheme: light dark; }
@@ -1124,10 +1808,26 @@ export function renderPanelHtml(prefix = '/fang') {
 <script>
 const P = ${JSON.stringify(p)};
 const $ = (id) => document.getElementById(id);
+// v3.0.5/B1：面板同源读取安装 token，所有 /api 请求必须携带 header（否则 401 unauthorized）
+const AUTH = (document.querySelector('meta[name="fang-auth"]')?.content || '');
+// UI 分析日志：所有按钮/链接点击都记录（可被自动冒烟读取）
+window.__fangUiLog = [];
+document.addEventListener('click', (ev) => {
+  const el = ev.target && ev.target.closest ? ev.target.closest('button, a[href]') : null;
+  if (!el) return;
+  window.__fangUiLog.push({
+    at: Date.now(),
+    text: String(el.textContent || '').trim().slice(0, 80),
+    act: el.getAttribute('data-act') || null,
+    href: el.href || null,
+  });
+}, true);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function msg(t, bad) { $('msg').textContent = t || ''; $('msg').style.color = bad ? '#dc2626' : '#16a34a'; }
 async function api(path, opts) {
-  const res = await fetch(P + path, Object.assign({ headers: { 'content-type': 'application/json' } }, opts));
+  const res = await fetch(P + path, Object.assign({
+    headers: Object.assign({ 'content-type': 'application/json' }, AUTH ? { 'x-fang-auth': AUTH } : {}),
+  }, opts));
   const body = await res.json().catch(() => ({}));
   return { status: res.status, body };
 }

@@ -501,3 +501,38 @@
 - 派生成功提示会说明历史会话是否导入：`已导入历史会话（N MiB）` / `历史过大仅带交接摘要` / `历史未导入`；
 - 母体会话在分身的出现方式：日志复制到 `<forkHome>/sessions/<workspaceKey>/<sessionId>/`，并登记到分身 `storages/workspace.json`；
 - 空会话、导入失败、宿主版本过旧（无 /tasks/sessions）都走显式降级文案，不伪造数据。
+
+## 13. 母体连接（v2.9.0）
+
+### 13.1 入口与卡片
+
+- **母体侧**：顶栏「刷新」右侧新增「母体连接」按钮（`quiet` ↔ `primary` 表示展开态），展开后
+  在顶栏下方渲染只读卡片；读档视图同样可用。
+- **分身侧**：分身 Web UI 的「当前页面是分身的 Web UI」说明页底部增加「母体连接」按钮，展开分身旁路卡片。
+
+### 13.2 卡片内容（母体侧）
+
+| 字段 | 来源 | 说明 |
+|---|---|---|
+| 母体版本 | `GET /fang/api/mother-link` → `version` | 宿主侧 dsh-Fang 版本 |
+| 母体 API | `motherApiBase` | 默认 `/fang/api`（与 `routes.prefix` 一致） |
+| 分身 Adapter | `adapterBase` | 默认 `/fang/adapter` |
+| 共享配置 | `sharedConfig` | profile 层：`profile` 名 + `bundles` 数量，分身只读继承 |
+| 令牌策略 | `tokenPolicy` | 令牌由 Forker 注入，fang 不落盘、不回显 |
+
+底部操作：地址输入（默认当前 origin）→「复制地址」→「测试连通」（只读探测，显示
+`连通 · <origin> · <latency>ms · 版本 x.y.z` 或 `不可达 · 原因 <error>`）。
+
+### 13.3 分身旁路
+
+- 分身不保存插件设置：地址与探测结果只保留在**本次会话内存**，刷新即失（卡片内文案明示）。
+- 分身跨源读取母体受浏览器 CORS 限制；失败显示 `cross-origin-or-network`，**不伪造成连通**，
+  引导回母体窗口的瓮城面板查看。
+
+### 13.4 不变量
+
+- 探测是只读 GET `<target>/fang/api/status`，不写任何配置、不改变副本状态；
+- 失败以结构化错误码返回（`target-empty` / `target-invalid-url` / `target-scheme` /
+  `target-credentials` / `target-query` / `target-too-long` / `status-http-error` /
+  `timeout` / `network-error` / `fetch-unavailable`），绝不抛异常；
+- 描述与响应中不含任何令牌值（测试断言）。

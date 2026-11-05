@@ -10,7 +10,7 @@ import os from 'node:os'
 import http from 'node:http'
 import zlib from 'node:zlib'
 
-import { makeCtx, makeWebServerStub, makeReq, makeRes } from './helpers.mjs'
+import { makeCtx, makeWebServerStub, makeReq, makeRes, TEST_AUTH_TOKEN } from './helpers.mjs'
 import { SERVICE, FANG_VERSION } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
@@ -19,7 +19,7 @@ const hasRemote = await import('../src/lib/remote.mjs').then(() => true).catch((
 const skipNoRemote = hasRemote ? {} : { skip: 'src/lib/remote.mjs not delivered yet (T5)' }
 
 function makeFakeForker(overrides = {}) {
-  const calls = { provision: [], spawn: [], reap: [] }
+  const calls = { provision: [], spawn: [], stop: [], reap: [] }
   const live = new Set()
   let counter = 0
   const fake = {
@@ -45,6 +45,12 @@ function makeFakeForker(overrides = {}) {
       live.delete(forkId)
       return { ok: true, removed: true }
     },
+    async stop(forkId) {
+      calls.stop.push(forkId)
+      live.delete(forkId)
+      return { ok: true, forkId, killed: true }
+    },
+    alive(forkId) { return live.has(forkId) },
     status(forkId) { return { running: live.has(forkId), pid: live.has(forkId) ? 6001 : null } },
     list() { return [...live].map(forkId => ({ forkId, running: true })) },
     logs() { return '' },
@@ -119,6 +125,7 @@ async function boot({ forker = makeFakeForker(), extraServices = {}, config = {}
     adapterTimeoutMs: 400,
     adapterPollMs: 40,
     routes: { enabled: false },
+    authToken: TEST_AUTH_TOKEN,
     ...config,
   })
   const svc = ctx.get(SERVICE.orchestrator)
@@ -167,11 +174,16 @@ test('orchestrator: createTask degrades honestly when the adapter never answers'
   assert.equal(out.ok, true)
   assert.ok(out.taskId.startsWith('task_'))
   assert.equal(out.adapter.ok, false, 'no adapter server → adapter not ready')
-  assert.equal(out.url.includes('?token='), true)
+  assert.equal(out.url.includes('token='), false, 'v3.0.5/B4：createTask 返回/持久化 URL 不含 token')
   const list = svc.listTasks()
   assert.equal(list.length, 1)
   assert.equal(list[0].title, '开发 dsh-foo')
   assert.equal(list[0].status, 'running', 'reachable-but-adapter-down → running, not ready')
+  // v3.0.7/S1：动作可用性与 blocks 由服务端给出
+  assert.equal(typeof list[0].actions?.open?.enabled, 'boolean')
+  assert.equal(typeof list[0].actions?.rename?.enabled, 'boolean')
+  assert.equal(typeof list[0].actions?.delete?.enabled, 'boolean')
+  assert.ok(Array.isArray(list[0].blocks))
   assert.equal(forker.calls.spawn.length, 1)
   assert.equal(forker.calls.spawn[0].env.DSH_FANG_ROLE, 'fork')
   assert.equal(forker.calls.spawn[0].env.DSH_FANG_TASK_ID, out.taskId)
@@ -218,7 +230,7 @@ test('orchestrator: getTaskStatus merges the fork-side adapter status', skipNoRe
   } finally { await adapter.close() }
 })
 
-test('orchestrator: archiveTask asks the fork to flush, then reaps', skipNoRemote, async () => {
+test('orchestrator: archiveTask stops the fork and keeps the home (no reap)', skipNoRemote, async () => {
   const adapter = await makeAdapterServer()
   try {
     const { ctx, svc, forker, dataRoot } = await boot({ forker: makeFakeForker({ url: adapter.url, port: adapter.port }) })
@@ -226,9 +238,69 @@ test('orchestrator: archiveTask asks the fork to flush, then reaps', skipNoRemot
     const archived = await svc.archiveTask(created.taskId)
     assert.equal(archived.ok, true)
     assert.equal(archived.archived, true)
+    assert.equal(archived.stopped, true)
+    assert.equal(archived.homeKept, true)
     assert.ok(adapter.state.commands.some(c => c.op === 'archive'), 'fork received archive command')
+    assert.deepEqual(forker.calls.stop, [created.taskId])
+    assert.deepEqual(forker.calls.reap, [], 'archive must keep the home for read/restore')
+    const tasks = svc.listTasks()
+    assert.equal(tasks.length, 1, 'archived task stays in the archive list')
+    assert.equal(tasks[0].status, 'archived')
+    assert.ok(tasks[0].archivedAt > 0)
+    assert.equal(tasks[0].url, null)
+    cleanup(ctx, dataRoot)
+  } finally { await adapter.close() }
+})
+
+test('orchestrator: archiveTask reports stop-failed instead of pretending success', skipNoRemote, async () => {
+  const adapter = await makeAdapterServer()
+  try {
+    const forker = makeFakeForker({ url: adapter.url, port: adapter.port })
+    forker.stop = async () => ({ ok: true, killed: true })
+    forker.alive = () => true
+    const { ctx, svc, dataRoot } = await boot({ forker, config: { archiveStopTimeoutMs: 120 } })
+    const created = await svc.createTask({ title: '停不掉的任务' })
+    const archived = await svc.archiveTask(created.taskId)
+    assert.equal(archived.ok, false)
+    assert.equal(archived.error, 'stop-failed')
+    const task = svc.listTasks().find(t => t.taskId === created.taskId)
+    assert.ok(task, 'task must not disappear when stop fails')
+    assert.notEqual(task.status, 'archived')
+    cleanup(ctx, dataRoot)
+  } finally { await adapter.close() }
+})
+
+test('orchestrator: restoreTask re-spawns the archived home and updates url/token', skipNoRemote, async () => {
+  const adapter = await makeAdapterServer()
+  try {
+    const { ctx, svc, forker, dataRoot } = await boot({ forker: makeFakeForker({ url: adapter.url, port: adapter.port }) })
+    const created = await svc.createTask({ title: '可还原任务' })
+    await svc.archiveTask(created.taskId)
+    const restored = await svc.restoreTask(created.taskId)
+    assert.equal(restored.ok, true)
+    assert.equal(restored.restored, true)
+    assert.equal(forker.calls.spawn.length, 2, 'restore must spawn again')
+    assert.equal(forker.calls.spawn[1].homeDir, created.homeDir)
+    assert.equal(forker.calls.spawn[1].profile, forker.calls.spawn[0].profile)
+    const task = svc.listTasks().find(t => t.taskId === created.taskId)
+    assert.ok(task)
+    assert.notEqual(task.status, 'archived')
+    assert.equal(task.archivedAt, null)
+    assert.equal(task.url.includes('token='), false, 'v3.0.5/B4：列表 URL 不含 token')
+    cleanup(ctx, dataRoot)
+  } finally { await adapter.close() }
+})
+
+test('orchestrator: deleteArchivedTask reaps the home and removes the record', skipNoRemote, async () => {
+  const adapter = await makeAdapterServer()
+  try {
+    const { ctx, svc, forker, dataRoot } = await boot({ forker: makeFakeForker({ url: adapter.url, port: adapter.port }) })
+    const created = await svc.createTask({ title: '待删除存档' })
+    await svc.archiveTask(created.taskId)
+    const deleted = await svc.deleteArchivedTask(created.taskId)
+    assert.equal(deleted.ok, true)
     assert.deepEqual(forker.calls.reap, [created.taskId])
-    assert.deepEqual(svc.listTasks(), [])
+    assert.equal(svc.listTasks().some(t => t.taskId === created.taskId), false)
     cleanup(ctx, dataRoot)
   } finally { await adapter.close() }
 })
@@ -313,21 +385,152 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   orchestrator.apply(ctx, {
     dataRoot, forksRoot: path.join(dataRoot, 'forks'),
     adapterTimeoutMs: 100, routes: { enabled: true, prefix: '/fang' },
+    authToken: TEST_AUTH_TOKEN,
   })
   const paths = webServer.paths()
   for (const p of [
-    '/fang/panel', '/fang/api/status', '/fang/api/tasks', '/fang/api/tasks/create',
-    '/fang/api/tasks/status', '/fang/api/tasks/archive', '/fang/api/tasks/promote',
+    '/fang/api/status', '/fang/api/tasks', '/fang/api/tasks/create',
+    '/fang/api/tasks/status', '/fang/api/tasks/archive', '/fang/api/tasks/restore',
+    '/fang/api/tasks/archive/delete', '/fang/api/tasks/promote',
     '/fang/api/forks', '/fang/api/forks/create', '/fang/api/reap', '/fang/api/promote',
+    '/fang/api/mother-link', '/fang/api/mother-link/probe',
+    '/fang/api/mirror/status', '/fang/api/mirror/backup', '/fang/api/mirror/restore',
+    '/fang/api/mirror/backup/delete', '/fang/api/mirror/backup-interval', '/fang/api/mirror/upgrade',
+    '/fang/api/mirror/preferences', '/fang/api/mirror/preferences/set',
+    '/fang/api/mirror/recompute-status', '/fang/api/compat', '/fang/api/compat/check',
+    '/fang/api/essence/list', '/fang/api/auth-token', '/fang/api/tasks/open-url',
+    '/fang/api/essence/create', '/fang/api/essence/rename', '/fang/api/essence/archive',
+    '/fang/api/essence/delete', '/fang/api/essence/copy', '/fang/api/essence/default',
+    '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
+    '/fang/api/tasks/download',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
   }
 
-  const panel = makeRes()
-  await webServer.find('GET', '/fang/panel').handler(makeReq(undefined, 'GET'), panel)
-  assert.equal(panel.statusCode, 200)
-  assert.match(panel.body, /dsh-Fang v2/)
-  assert.match(panel.body, /派生新任务/)
+  const linkDescribe = makeRes()
+  await webServer.find('GET', '/fang/api/mother-link').handler(makeReq(undefined, 'GET'), linkDescribe)
+  assert.equal(linkDescribe.statusCode, 200)
+  const described = linkDescribe.json()
+  assert.equal(described.role, 'mother')
+  assert.equal(described.motherApiBase, '/fang/api')
+  assert.match(described.probe.path, /mother-link\/probe$/)
+  assert.ok(described.sharedConfig && typeof described.sharedConfig === 'object')
+
+  const linkProbe = makeRes()
+  await webServer.find('POST', '/fang/api/mother-link/probe').handler(makeReq({ target: '' }, 'POST'), linkProbe)
+  assert.equal(linkProbe.statusCode, 200)
+  assert.equal(linkProbe.json().ok, false)
+  assert.equal(linkProbe.json().error, 'target-empty')
+
+  // v2.11.0 母体镜像路由
+  const mirrorStatus = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/status').handler(makeReq(undefined, 'GET'), mirrorStatus)
+  assert.equal(mirrorStatus.statusCode, 200)
+  const mirrorBody = mirrorStatus.json()
+  assert.equal(mirrorBody.ok, true)
+  assert.equal(typeof mirrorBody.currentVersion, 'string')
+  assert.ok(Array.isArray(mirrorBody.backups))
+  // v3.0.1 条件 GET：ETag → 304 无 body
+  assert.match(String(mirrorStatus.headers.ETag ?? ''), /^"[0-9a-f]{24}"$/)
+  assert.equal(mirrorStatus.headers['Cache-Control'], 'no-cache, must-revalidate')
+
+  const condReq = makeReq(undefined, 'GET')
+  condReq.headers = { ...condReq.headers, 'if-none-match': mirrorStatus.headers.ETag }
+  const notModified = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/status').handler(condReq, notModified)
+  assert.equal(notModified.statusCode, 304)
+  assert.equal(notModified.body, '')
+  assert.equal(notModified.headers.ETag, mirrorStatus.headers.ETag)
+
+  const forced = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/status')
+    .handler(makeReq(undefined, 'GET'), forced)
+  assert.equal(forced.statusCode, 200)
+
+  const mirrorBackup = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/backup')
+    .handler(makeReq({ bucket: 'restore', label: '测试恢复点' }, 'POST'), mirrorBackup)
+  assert.equal(mirrorBackup.statusCode, 200)
+  assert.equal(mirrorBackup.json().ok, true)
+  assert.equal(mirrorBackup.json().entry.bucket, 'restore')
+
+  const mirrorInterval = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/backup-interval')
+    .handler(makeReq({ hours: 8 }, 'POST'), mirrorInterval)
+  assert.equal(mirrorInterval.statusCode, 400)
+  assert.equal(mirrorInterval.json().ok, false)
+
+  const mirrorUpgrade = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/upgrade').handler(makeReq({}, 'POST'), mirrorUpgrade)
+  assert.equal(mirrorUpgrade.statusCode, 409)
+  assert.equal(mirrorUpgrade.json().ok, false)
+  assert.equal(mirrorUpgrade.json().reason, 'official-source-unavailable')
+
+  // v3.0.8 镜像偏好（交互超时 15/30/60s）
+  const preferencesGet = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/preferences')
+    .handler(makeReq(undefined, 'GET'), preferencesGet)
+  assert.equal(preferencesGet.statusCode, 200)
+  assert.equal(preferencesGet.json().activeIdleTimeoutMs, 30_000)
+
+  const preferencesInvalid = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/preferences/set')
+    .handler(makeReq({ activeIdleTimeoutMs: 1_000 }, 'POST'), preferencesInvalid)
+  assert.equal(preferencesInvalid.statusCode, 400)
+
+  const preferencesOk = makeRes()
+  await webServer.find('POST', '/fang/api/mirror/preferences/set')
+    .handler(makeReq({ activeIdleTimeoutMs: 15_000 }, 'POST'), preferencesOk)
+  assert.equal(preferencesOk.statusCode, 200)
+  assert.equal(preferencesOk.json().activeIdleTimeoutMs, 15_000)
+
+  // v3.0.3 重算状态 + compat 门禁
+  const recomputeStatus = makeRes()
+  await webServer.find('GET', '/fang/api/mirror/recompute-status')
+    .handler(makeReq(undefined, 'GET'), recomputeStatus)
+  assert.equal(recomputeStatus.statusCode, 200)
+  assert.equal(typeof recomputeStatus.json().running, 'boolean')
+
+  const compatStatus = makeRes()
+  await webServer.find('GET', '/fang/api/compat').handler(makeReq(undefined, 'GET'), compatStatus)
+  assert.equal(compatStatus.statusCode, 200)
+  assert.equal(typeof compatStatus.json().subPluginsEnabled, 'boolean')
+
+  const compatCheck = makeRes()
+  await webServer.find('POST', '/fang/api/compat/check').handler(makeReq({}, 'POST'), compatCheck)
+  assert.ok(compatCheck.statusCode === 200 || compatCheck.statusCode === 409)
+  assert.equal(typeof compatCheck.json().ok, 'boolean')
+
+  // v3.0.4 原身列表 + 官方推荐原身 ID
+  const essenceList = makeRes()
+  await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), essenceList)
+  assert.equal(essenceList.statusCode, 200)
+  const essenceBody = essenceList.json()
+  assert.equal(essenceBody.officialId, 'essence-official-dev')
+  assert.ok(Array.isArray(essenceBody.essences))
+  assert.equal(essenceBody.capacity.slots, 7)
+  assert.equal(typeof essenceBody.defaultId, 'string')
+
+  // v3.0.6：create → rename → list 契约
+  const createdEssence = makeRes()
+  await webServer.find('POST', '/fang/api/essence/create')
+    .handler(makeReq({ name: '契约元主', tier: 'vip100' }, 'POST'), createdEssence)
+  assert.equal(createdEssence.statusCode, 200)
+  const createdId = createdEssence.json().essence.id
+  assert.ok(createdId)
+
+  const renamedEssence = makeRes()
+  await webServer.find('POST', '/fang/api/essence/rename')
+    .handler(makeReq({ essenceId: createdId, name: '契约元主改名' }, 'POST'), renamedEssence)
+  assert.equal(renamedEssence.statusCode, 200)
+  assert.equal(renamedEssence.json().essence.name, '契约元主改名')
+
+  const essenceList2 = makeRes()
+  await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), essenceList2)
+  const listed = essenceList2.json().essences.find(item => item.id === createdId)
+  assert.ok(listed)
+  assert.equal(typeof listed.pluginCount, 'number')
+  assert.equal(listed.locked, false)
 
   const status = makeRes()
   await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
@@ -339,6 +542,103 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   assert.equal(wrongMethod.statusCode, 405)
   ctx.dispose()
   fs.rmSync(dataRoot, { recursive: true, force: true })
+})
+
+test('orchestrator: branch/task-id 404 contract, traversal guard, and /fang/api catch-all', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-branch-http-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  orchestrator.apply(ctx, {
+    dataRoot,
+    forksRoot: path.join(dataRoot, 'forks'),
+    adapterTimeoutMs: 100,
+    adapterPollMs: 20,
+    routes: { enabled: true, prefix: '/fang' },
+    authToken: TEST_AUTH_TOKEN,
+  })
+  const svc = ctx.get(SERVICE.orchestrator)
+  try {
+    const created = await svc.createTask({ title: 'branch-contract' })
+    assert.equal(created.ok, true, JSON.stringify(created))
+    const taskId = created.taskId
+    const call = async (method, path, body, token = TEST_AUTH_TOKEN) => {
+      const req = body === undefined ? makeReq(undefined, method) : makeReq(body, method)
+      req.url = path
+      if (token === null) delete req.headers['x-fang-auth']
+      else req.headers['x-fang-auth'] = token
+      const res = makeRes()
+      const route = method === 'GET'
+        ? webServer.find('GET', path.split('?')[0])
+        : webServer.find('POST', path.split('?')[0])
+      assert.ok(route, `${method} ${path} must be registered`)
+      await route.handler(req, res)
+      return res
+    }
+
+    const branchRoutes = webServer.routes.filter((r) => r.path === '/fang/api/tasks/branches')
+    assert.equal(branchRoutes.length, 1, 'GET+POST 同路径只能注册一条（webServer 以 path 为键）')
+    assert.equal(branchRoutes[0].method, 'GET,POST')
+
+    const unknown = await call('GET', '/fang/api/tasks/branches?taskId=missing-task')
+    assert.equal(unknown.statusCode, 404)
+    assert.equal(unknown.json().error, 'unknown-task')
+
+    const traversal = await call('GET', '/fang/api/tasks/branches?taskId=' + encodeURIComponent('../../escape'))
+    assert.equal(traversal.statusCode, 404)
+    assert.equal(traversal.json().error, 'unknown-task')
+
+    const listed = await call('GET', `/fang/api/tasks/branches?taskId=${taskId}`)
+    assert.equal(listed.statusCode, 200)
+    assert.equal(listed.json().activeBranchId, 'main')
+
+    const createdBranch = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: 'b1' })
+    assert.equal(createdBranch.statusCode, 200)
+    assert.equal(createdBranch.json().branch.branchId, 'b1')
+
+    const duplicate = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: 'b1' })
+    assert.equal(duplicate.statusCode, 409)
+    assert.equal(duplicate.json().error, 'branch-exists')
+
+    const invalid = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: '../escape' })
+    assert.equal(invalid.statusCode, 400)
+    assert.equal(invalid.json().error, 'invalid-branch-id')
+
+    const activated = await call('POST', '/fang/api/tasks/branches/activate', { taskId, branchId: 'b1' })
+    assert.equal(activated.statusCode, 200)
+    assert.equal(activated.json().activeBranchId, 'b1')
+
+    const sealed = await call('POST', '/fang/api/tasks/branches/status', { taskId, branchId: 'main', status: 'sealed' })
+    assert.equal(sealed.statusCode, 200)
+    assert.equal(sealed.json().branch.status, 'sealed')
+
+    // Auth runs before method: a token-less POST must be 401, not 405.
+    const noTokenPost = await call('POST', '/fang/api/tasks/branches', { taskId, branchId: 'b2' }, null)
+    assert.equal(noTokenPost.statusCode, 401)
+    assert.equal(noTokenPost.json().code, 'unauthorized')
+    // Invoke the GET route's handler with POST and no token: auth must win (401).
+    const statusGetRoute = webServer.find('GET', '/fang/api/status')
+    assert.ok(statusGetRoute)
+    const wrongMethodReq = makeReq({}, 'POST')
+    delete wrongMethodReq.headers['x-fang-auth']
+    const wrongMethod = makeRes()
+    await statusGetRoute.handler(wrongMethodReq, wrongMethod)
+    assert.equal(wrongMethod.statusCode, 401, 'token check precedes method check')
+
+    // Prefix catch-all: unknown /fang/api/* is JSON 404 and still gated.
+    const prefix = webServer.routes.find((r) => r.kind === 'prefix' && r.path === '/fang/api')
+    assert.ok(prefix, 'prefix /fang/api must be registered')
+    const unknownRes = makeRes()
+    await prefix.handler(makeReq(undefined, 'GET'), unknownRes)
+    assert.equal(unknownRes.statusCode, 404)
+    assert.equal(unknownRes.json().code, 'not-found')
+    const unknownNoToken = makeReq(undefined, 'GET')
+    delete unknownNoToken.headers['x-fang-auth']
+    const unknownNoTokenRes = makeRes()
+    await prefix.handler(unknownNoToken, unknownNoTokenRes)
+    assert.equal(unknownNoTokenRes.statusCode, 401)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
 })
 
 test('orchestrator: resolveInside rejects traversal and absolute plugin paths', () => {

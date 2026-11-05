@@ -2,7 +2,8 @@
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 // fang-session-bridge — mother-side façade over a running PC host's loopback bridge.
 // Transport only: it never copies session files and never writes to the PC host.
-import { z, roleGate, SERVICE, FANG_VERSION } from '../kernel/index.mjs'
+import { z, roleGate, resolveFangLayout, SERVICE, FANG_VERSION } from '../kernel/index.mjs'
+import { createHttpGuard } from '../lib/http-auth.mjs'
 import { createBridgeClient, readBridgeDescriptor } from '../lib/bridge-client.mjs'
 
 export const name = 'fang-session-bridge'
@@ -16,6 +17,10 @@ export const Config = z.object({
   timeoutMs: z.number().min(1000).max(120000).default(15000)
     .description('每次桥接请求的超时（毫秒）'),
   routes: z.object({ enabled: z.boolean().default(true) }).default({}),
+  authToken: z.string().default('')
+    .description('安装级鉴权 token；留空 = env DSH_FANG_AUTH_TOKEN 或 <dataDir>/fang-auth.json（0600，自动生成）'),
+  authEnabled: z.boolean().default(true)
+    .description('是否要求 /fang/api/bridge/* 携带安装级鉴权 token（默认开启；仅测试/本地调试可关）'),
 })
 
 export function apply(ctx, config) {
@@ -25,6 +30,11 @@ export function apply(ctx, config) {
   const cfg = { ...Config({}), ...(config ?? {}) }
   const client = createBridgeClient({ dshHome: cfg.dshHome, timeoutMs: cfg.timeoutMs })
   const prefix = String(cfg.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
+  const authGuard = createHttpGuard({
+    dataDir: resolveFangLayout().dataDir,
+    token: cfg.authToken,
+    enabled: cfg.authEnabled !== false,
+  })
 
   const audit = (kind, data) => {
     try {
@@ -89,19 +99,57 @@ export function apply(ctx, config) {
       webServer.register({
         kind: 'exact',
         path: routePath,
+        method,
         handler: async (req, res) => {
           try {
-            if (String(req?.method ?? 'GET').toUpperCase() !== method) return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            const decision = authGuard.check(req)
+            if (!decision.ok) return json(res, decision.status, { ok: false, error: decision.code, code: decision.code })
+            if (String(req?.method ?? 'GET').toUpperCase() !== method) {
+              try { res.setHeader?.('allow', method) } catch { /* fake res */ }
+              return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
+            }
             return await handler(req, res)
           } catch (e) {
-            return json(res, 500, { ok: false, error: String(e?.message ?? e) })
+            return json(res, 500, { ok: false, error: String(e?.message ?? e), code: 'handler-threw' })
+          }
+        },
+      })
+    }
+
+    // DSH exact routes are keyed by path only: GET+POST share one registration.
+    const routeMethods = (routePath, handlers) => {
+      webServer.register({
+        kind: 'exact',
+        path: routePath,
+        method: Object.keys(handlers).join(','),
+        handler: async (req, res) => {
+          try {
+            const decision = authGuard.check(req)
+            if (!decision.ok) return json(res, decision.status, { ok: false, error: decision.code, code: decision.code })
+            const allow = Object.keys(handlers)
+            const fn = handlers[String(req?.method ?? 'GET').toUpperCase()]
+            if (typeof fn !== 'function') {
+              try { res.setHeader?.('allow', allow.join(', ')) } catch { /* fake res */ }
+              return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
+            }
+            return await fn(req, res)
+          } catch (e) {
+            return json(res, 500, { ok: false, error: String(e?.message ?? e), code: 'handler-threw' })
           }
         },
       })
     }
 
     route('GET', `${prefix}/api/bridge/status`, (req, res) => json(res, 200, service.descriptor()))
-    route('GET', `${prefix}/api/bridge/sessions`, async (req, res) => json(res, 200, await service.listSessions()))
+    routeMethods(`${prefix}/api/bridge/sessions`, {
+      GET: async (req, res) => json(res, 200, await service.listSessions()),
+      POST: async (req, res) => {
+        const body = await readBody(req)
+        if (body.__parseError) return json(res, 400, { ok: false, error: 'bad-json' })
+        const out = await service.create({ cwd: body.cwd, title: body.title })
+        json(res, out.ok ? 201 : 400, out)
+      },
+    })
     route('GET', `${prefix}/api/bridge/sessions/events`, async (req, res) => {
       const q = queryOf(req)
       const out = await service.events(q.get('sessionId') ?? '', { limit: q.get('limit') })
@@ -113,11 +161,6 @@ export function apply(ctx, config) {
       const out = await service.send(body.sessionId, body.text)
       json(res, out.ok ? 200 : 400, out)
     })
-    route('POST', `${prefix}/api/bridge/sessions`, async (req, res) => {
-      const body = await readBody(req)
-      if (body.__parseError) return json(res, 400, { ok: false, error: 'bad-json' })
-      const out = await service.create({ cwd: body.cwd, title: body.title })
-      json(res, out.ok ? 201 : 400, out)
-    })
+
   })
 }

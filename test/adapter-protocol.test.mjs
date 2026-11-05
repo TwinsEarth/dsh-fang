@@ -121,28 +121,16 @@ test('4) EventLog: 非对象事件也安全；capacity 非法值兜底', () => {
   assert.equal(log.since(0).events.length, 1)
 })
 
-test('5) CommandCache: 同一 commandId 重放第一次结果、LRU 淘汰、容量', () => {
+test('5) CommandCache 由 command-cache.mjs 提供（协议库只做 re-export）', async () => {
+  const direct = await import('../src/lib/command-cache.mjs')
+  assert.equal(CommandCache, direct.CommandCache, 're-export 必须是同一个类，避免两份幂等语义')
+
   const cache = new CommandCache({ capacity: 2 })
-  assert.equal(cache.get('cmd_a'), null)
-
   const first = { ok: true, op: 'ping', result: { pong: true } }
-  cache.set('cmd_a', first)
+  assert.deepEqual(await cache.run('cmd_a', async () => first), first)
   assert.equal(cache.has('cmd_a'), true)
-  assert.deepEqual(cache.get('cmd_a'), first, '重复 commandId 返回缓存结果')
-
-  cache.set('cmd_b', { ok: true, op: 'status' })
-  cache.set('cmd_c', { ok: true, op: 'audit' }) // 淘汰 cmd_a
-  assert.equal(cache.has('cmd_a'), false, 'LRU 淘汰最旧')
-  assert.equal(cache.size, 2)
-
-  cache.get('cmd_b') // 刷新 cmd_b 的 LRU 位置
-  cache.set('cmd_d', { ok: true, op: 'approvals' }) // 淘汰 cmd_c
-  assert.equal(cache.has('cmd_b'), true)
-  assert.equal(cache.has('cmd_c'), false)
-
-  assert.equal(cache.set('', { ok: true }), null, '空 commandId 不入缓存')
-  cache.clear()
-  assert.equal(cache.size, 0)
+  assert.deepEqual(cache.get('cmd_a'), first, 'completed 命中返回缓存结果')
+  assert.equal(cache.stats().executions, 1)
 })
 
 test('6) negotiateProtocol: 版本区间内通过，过旧/过新/非法拒绝', () => {
@@ -221,7 +209,7 @@ test('9) 错误码 → HTTP 状态码映射（PROTOCOL-V3 §8）', () => {
   assert.deepEqual(failure, { ok: false, code: 'bad-request', error: 'pluginId-required', op: 'read-plugin' })
 })
 
-test('10) SSE 帧编解码：id/event/data、注释心跳、跨 chunk 半帧、flush 残留', () => {
+test('10) SSE 帧编解码：id/event/data、注释心跳、跨 chunk 半帧、flush 丢弃残帧', () => {
   const envelope = envelopeOf({ kind: 'command', op: 'ping', ok: true })
   const frame = sseFrame(envelope)
   assert.match(frame, /^id: 1\nevent: adapter\ndata: \{/)
@@ -246,13 +234,19 @@ test('10) SSE 帧编解码：id/event/data、注释心跳、跨 chunk 半帧、f
   assert.equal(rest.length, 1)
   assert.equal(rest[0].id, '3')
 
-  // 流结束但缓冲里还有半帧 → flush 也解析（容错），纯注释/空块不产出
+  // 流结束：按 SSE 规范，未遇到空行边界的半帧被丢弃（flush 不产出）
   const tailParser = createSseParser()
   tailParser.push('id: 9\ndata: {"x":1}')
-  const flushed = tailParser.flush()
-  assert.equal(flushed.length, 1)
-  assert.equal(flushed[0].id, '9')
-  assert.deepEqual(tailParser.flush(), [], 'flush 幂等（第二次为空）')
+  assert.deepEqual(tailParser.flush(), [], 'EOF 丢弃未完成帧')
+  assert.deepEqual(tailParser.flush(), [], 'flush 幂等（第二次也为空）')
+
+  // CRLF：只按 \n 切行、行尾裁一个 \r（v2.6.5 的 SseParser 语义）
+  const crlf = createSseParser()
+  const crlfFrames = crlf.push('id: 7\r\nevent: adapter\r\ndata: {"x":1}\r\n\r\n')
+  assert.equal(crlfFrames.length, 1)
+  assert.equal(crlfFrames[0].id, '7')
+  assert.equal(crlfFrames[0].event, 'adapter')
+  assert.equal(crlfFrames[0].data, '{"x":1}')
 
   const commentOnly = createSseParser()
   assert.deepEqual(commentOnly.push(': heartbeat\n\n'), [])
