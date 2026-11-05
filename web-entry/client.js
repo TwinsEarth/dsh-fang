@@ -1,27 +1,38 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// DSH Web plugin-config entry: a single link that opens the PC Electron panel.
-// No fang control panel is rendered in the browser.
+// DSH Web entries: one sidebar icon and one plugin-config link. Both open the PC
+// Electron panel through dsh-fang://open; no fang control panel is rendered here.
 window.__ModuleLoader__.load({
   id: '@twinsearth/dsh-fang-web-entry',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
-    function WengchengEntry() {
-      const openPanel = (event) => {
-        event.preventDefault()
-        const url = 'dsh-fang://open'
-        try {
-          // Hidden iframe avoids page navigation being swallowed by the host shell.
-          const frame = document.createElement('iframe')
-          frame.style.display = 'none'
-          frame.src = url
-          document.body.appendChild(frame)
-          setTimeout(() => frame.remove(), 1500)
-        } catch {
-          try { window.location.href = url } catch { /* host blocked custom protocol */ }
-        }
+    function openPanel(event) {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault()
+      const url = 'dsh-fang://open'
+      try {
+        // Hidden iframe avoids page navigation being swallowed by the host shell.
+        const frame = document.createElement('iframe')
+        frame.style.display = 'none'
+        frame.src = url
+        document.body.appendChild(frame)
+        setTimeout(() => frame.remove(), 1500)
+      } catch {
+        try { window.location.href = url } catch { /* host blocked custom protocol */ }
       }
+    }
+
+    function GateIcon({ size = 18 }) {
+      return h('svg', {
+        width: size, height: size, viewBox: '0 0 24 24', 'aria-hidden': 'true',
+        style: { display: 'block', flex: 'none' },
+      },
+      h('path', { d: 'M5 21V8a7 7 0 0 1 14 0v13', fill: 'none', stroke: '#C8102E', strokeWidth: 2.2, strokeLinecap: 'round' }),
+      h('path', { d: 'M3 21h18', fill: 'none', stroke: '#C8102E', strokeWidth: 2.2, strokeLinecap: 'round' }),
+      h('path', { d: 'M9 21v-6a3 3 0 0 1 6 0v6', fill: 'none', stroke: '#C8102E', strokeWidth: 2, strokeLinecap: 'round' }))
+    }
+
+    function WengchengEntry() {
       return h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
         h('a', {
           href: 'dsh-fang://open',
@@ -36,9 +47,44 @@ window.__ModuleLoader__.load({
         h('span', { style: { opacity: .7, fontSize: 12 } }, '需要在 PC 安装 dsh-fang 桌面端'))
     }
 
+    function WengchengSidebarEntry({ size = 18, active } = {}) {
+      return h('span', {
+        title: '瓮城',
+        'aria-label': '瓮城',
+        'data-fang-entry': 'sidebar',
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: active ? 1 : .82 },
+      }, h(GateIcon, { size }))
+    }
+
+    function FangLaunchPanel() {
+      if (typeof React.useEffect === 'function') {
+        React.useEffect(() => { openPanel(null) }, [])
+      }
+      return h('div', {
+        'data-fang-entry': 'launch-panel',
+        style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, minHeight: 240, padding: 24 },
+      },
+      h(GateIcon, { size: 40 }),
+      h('div', { style: { fontSize: 16, fontWeight: 700 } }, '正在打开瓮城桌面…'),
+      h('a', { href: 'dsh-fang://open', onClick: openPanel, style: { color: 'inherit', fontSize: 13 } }, '若未自动打开，点此重试'),
+      h('div', { style: { opacity: .65, fontSize: 12 } }, '需要在 PC 安装 dsh-fang 桌面端'))
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
+        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+          name: 'sidebar.panellist',
+          id: 'fang-sidebar-entry',
+          label: '瓮城',
+          order: 100,
+        }, WengchengSidebarEntry))
+        ctx.slots.inject('main', () => ctx.slots.register({
+          name: 'main',
+          key: 'fang-sidebar-entry',
+          id: 'fang-launch-panel',
+          order: 100,
+        }, FangLaunchPanel))
         ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
           name: 'plugins.bundle.config',
           key: '@twinsearth/dsh-fang',
