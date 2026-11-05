@@ -14,17 +14,14 @@ export function safeJoin(root, ...parts) {
 export function assertInside(root, target, { followSymlink = true } = {}) {
   const base = path.resolve(root)
   let resolved = path.resolve(target)
+  let boundary = base
   if (followSymlink) {
+    try { boundary = fs.realpathSync.native(base) } catch { /* keep lexical */ }
     try { resolved = fs.realpathSync.native(resolved) } catch {
       try { resolved = path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved)) } catch { /* keep lexical */ }
     }
-    try {
-      const realBase = fs.realpathSync.native(base)
-      if (resolved !== realBase && !resolved.startsWith(realBase + path.sep)) throw new Error('path-escape')
-    } catch (error) {
-      if (error?.message === 'path-escape') throw error
-    }
   }
-  if (resolved !== base && !resolved.startsWith(base + path.sep)) throw new Error('path-escape')
+  const rel = path.relative(boundary, resolved)
+  if (rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) throw new Error('path-escape')
   return resolved
 }
