@@ -287,7 +287,7 @@ api('/fang/api/mirror/status', { headers })
 4. **Origin 允许任意 loopback 端口**：同机另一个本地 Web 应用可发起请求（浏览器仍受同源策略限制，读不到响应）；若要更严，可收紧为同端口或 `dsh-app://`。
 5. **代理对 POST 的 401 不自动重试**（避免重复写），只刷新 token 供下次调用；这是有意的幂等/安全取舍。
 6. **未在本机执行**：`gh` 推送、npm 发布、安装包构建、真机 3080/3081 重启。本次仅本地分支 + 测试。
-7. **`tools/release/allowlist.mjs` 仍 RED**：唯一失败项是审计前已存在的未跟踪文件 `docs/WEB-ENTRY-INTEROP-DIAGNOSIS.md` 含本机绝对路径（`C:\Users\fangw`、`E:\GPT\dsh-fang`）。本次新增/修改文件均通过 secret/local-path 扫描；路由 allow-list 已覆盖 `routeMethods()`（65 条）。
+7. **`tools/release/allowlist.mjs` 仍 RED**：唯一失败项是审计前已存在的未跟踪文件 `docs/WEB-ENTRY-INTEROP-DIAGNOSIS.md` 含本机绝对路径（`<user-home>`、`<repo>`）。本次新增/修改文件均通过 secret/local-path 扫描；路由 allow-list 已覆盖 `routeMethods()`（65 条）。
 
 ---
 
