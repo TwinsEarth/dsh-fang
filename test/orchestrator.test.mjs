@@ -734,6 +734,38 @@ test('orchestrator: 强制单会话（运行中拒绝；停止态隔离多余会
   }
 })
 
+test('orchestrator: 复制元主时带走沙盒会话（运行态 sessions）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-copysess-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const source = mirror.createEssence({ name: '带会话的源元主' })
+    const srcForkId = `rt-${source.id.replace(/^essence-/, '')}`
+    const srcSessionFile = path.join(dataRoot, 'runtime', srcForkId, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')
+    fs.mkdirSync(path.dirname(srcSessionFile), { recursive: true })
+    fs.writeFileSync(srcSessionFile, 'conversation', 'utf8')
+
+    const copied = mirror.copyEssence(source.id, '带会话的副本')
+    assert.notEqual(copied.id, source.id)
+    assert.ok(copied.copy.sessionsCopied >= 1, '沙盒会话必须被复制')
+    const dstForkId = `rt-${copied.id.replace(/^essence-/, '')}`
+    assert.equal(
+      fs.existsSync(path.join(dataRoot, 'runtime', dstForkId, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')),
+      true,
+      '副本的运行态 sessions 必须可见',
+    )
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

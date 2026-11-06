@@ -1455,7 +1455,31 @@ export function apply(ctx, config) {
     renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
     archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
     deleteEssence: (essenceId) => essenceManager.remove(essenceId),
-    copyEssence: (essenceId, name) => essenceManager.copy(essenceId, { name }),
+    copyEssence: (essenceId, name) => {
+      const result = essenceManager.copy(essenceId, { name })
+      // v3.0.9：沙盒会话（运行态隔离 home 里的 sessions）随副本一起复制，副本可继续开发。
+      const candidates = [
+        path.join(layout.dataDir, 'runtime', runtimeForkId(String(essenceId)), 'home', 'sessions'),
+        path.join(essenceManager.essenceRoot(String(essenceId)), 'runtime', 'home', 'sessions'),
+      ]
+      const source = candidates.find((dir) => exists(dir))
+      let sessionsCopied = 0
+      if (source) {
+        const target = path.join(layout.dataDir, 'runtime', runtimeForkId(result.id), 'home', 'sessions')
+        try {
+          copyTree(source, target)
+          const walk = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const file = path.join(dir, entry.name)
+              if (entry.isDirectory()) walk(file)
+              else if (entry.isFile()) sessionsCopied += 1
+            }
+          }
+          walk(target)
+        } catch { /* 会话复制失败不阻塞配置副本，如实返回 0 */ }
+      }
+      return { ...result, copy: { ...(result.copy ?? {}), sessionsCopied } }
+    },
     // v3.0.9 母体 → 元主：克隆母体 profile 的可写层（patch/依赖/设置），不带凭据与会话。
     captureEssence: (input = {}) => {
       const result = essenceManager.captureFromProfile(templateDir(), {
