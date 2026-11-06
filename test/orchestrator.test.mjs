@@ -13,6 +13,7 @@ import zlib from 'node:zlib'
 import { makeCtx, makeWebServerStub, makeReq, makeRes, TEST_AUTH_TOKEN } from './helpers.mjs'
 import { SERVICE, FANG_VERSION } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
+import { BranchStore } from '../src/lib/branch-store.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
 const hasRemote = await import('../src/lib/remote.mjs').then(() => true).catch(() => false)
@@ -718,6 +719,16 @@ test('orchestrator: 强制单会话（运行中拒绝；停止态隔离多余会
     const remaining = fs.readdirSync(sessionsRoot).filter((name) => fs.statSync(path.join(sessionsRoot, name)).isDirectory())
     assert.equal(remaining.length, 1, '只允许保留一个会话')
     assert.equal(fs.existsSync(path.join(task.homeDir, 'quarantine-sessions')), true)
+
+    // #7：同一分身、同一会话可派生多个分支
+    const store = new BranchStore(dataRoot)
+    assert.equal(store.load(task.taskId).sessionId, stoppedGuard.kept, '分支库必须绑定到真实会话')
+    store.create(task.taskId, { branchId: 'exp-1' })
+    store.create(task.taskId, { branchId: 'exp-2' })
+    const listed = store.list(task.taskId)
+    assert.equal(listed.branches.length, 3, 'main + 两条新分支')
+    store.activate(task.taskId, 'exp-2')
+    assert.equal(store.list(task.taskId).activeBranchId, 'exp-2')
   } finally {
     cleanup(ctx, dataRoot)
   }

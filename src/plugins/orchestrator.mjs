@@ -447,7 +447,12 @@ export function apply(ctx, config) {
   }
   const applySingleSessionGuard = (task) => {
     const sessions = scanForkSessions(task)
-    if (sessions.length <= 1) return { ok: true, kept: sessions[0]?.sessionId ?? null, quarantined: [] }
+    const bindBranches = (keptId) => { try { branchStore?.bindSession?.(task.taskId, keptId) } catch { /* ignore */ } }
+    if (sessions.length <= 1) {
+      const kept = sessions[0]?.sessionId ?? null
+      bindBranches(kept)
+      return { ok: true, kept, quarantined: [] }
+    }
     const [keep, ...rest] = sessions
     const stamp = String(nowMs())
     const quarantined = []
@@ -464,6 +469,7 @@ export function apply(ctx, config) {
       persist()
       audit('fork-session-quarantined', { taskId: task.taskId, kept: keep.sessionId, moved: quarantined.length })
     }
+    bindBranches(keep.sessionId)
     return { ok: true, kept: keep.sessionId, quarantined }
   }
 

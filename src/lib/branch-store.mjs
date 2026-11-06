@@ -58,6 +58,16 @@ export class BranchStore {
     return { ok: true, branch }
   }
 
+  /** 把分支库的 sessionId 绑定到该分身真实会话（启动/还原时由单会话守卫调用）。 */
+  bindSession(taskId, sessionId) {
+    const session = this.load(taskId)
+    const next = String(sessionId ?? '').trim()
+    if (!next || session.sessionId === next) return { ok: true, sessionId: session.sessionId, changed: false }
+    session.sessionId = next
+    this.save(taskId, session)
+    return { ok: true, sessionId: session.sessionId, changed: true }
+  }
+
   activate(taskId, branchId) {
     const session = this.load(taskId)
     const branch = activateBranch(session, branchId)
