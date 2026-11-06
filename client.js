@@ -3095,11 +3095,30 @@ window.__ModuleLoader__.load({
           return String(url).replace(/([?&]token=)[^&]*/, (_, prefix) => prefix + '•'.repeat(Math.min(16, token.length || 8)))
         } catch { return url }
       }
+      // 桌面壳里 token 由主进程保管；纯 Web 里没有 fangShell，
+      // 连接地址就是当前页面地址本身（同源打开，token 已在地址栏里）。
+      const isDesktopShell = () => typeof window !== 'undefined' && typeof window.fangShell?.revealToken === 'function'
+      const resolveFull = async () => {
+        if (full) return full
+        if (isDesktopShell()) {
+          try {
+            const info = await window.fangShell.revealToken()
+            if (info?.token) { full = baseUrl + '/?token=' + encodeURIComponent(String(info.token)); return full }
+          } catch { /* 主进程拒绝就退回页面地址 */ }
+        }
+        if (typeof location !== 'undefined' && location.href) full = String(location.href)
+        return full
+      }
+      const maskedText = () => {
+        if (full) return mask(full)
+        if (baseUrl) return baseUrl + '/?token=••••••••'
+        return '连接信息加载中…'
+      }
       const render = () => {
         popup.hidden = !opened
         popup.style.display = opened ? 'flex' : 'none'
         if (!opened) { label.textContent = ''; label.title = ''; return }
-        label.textContent = full && revealed ? full : (baseUrl ? baseUrl + '/?token=••••••••' : '连接信息加载中…')
+        label.textContent = full && revealed ? full : maskedText()
         label.title = revealed ? full : ''
         eye.textContent = revealed ? '隐藏' : '显示'
       }
@@ -3120,16 +3139,30 @@ window.__ModuleLoader__.load({
       }
       eye.onclick = async () => {
         if (!revealed) {
-          try {
-            const info = await window.fangShell?.revealToken?.()
-            if (info?.token) full = baseUrl + '/?token=' + encodeURIComponent(String(info.token))
-          } catch { /* ignore */ }
+          const text = await resolveFull()
+          if (!text) { app.notify('warn', '还没拿到连接地址：宿主可能未就绪'); return }
         }
         revealed = !revealed
         render()
       }
       copy.onclick = async () => {
-        try { await navigator.clipboard.writeText(full); app.notify('ok', '已复制连接地址') } catch { app.notify('warn', '复制失败：浏览器未授权剪贴板') }
+        const text = await resolveFull()
+        if (!text) { app.notify('warn', '还没拿到连接地址：宿主可能未就绪'); return }
+        try {
+          await navigator.clipboard.writeText(text)
+          app.notify('ok', '已复制连接地址')
+        } catch {
+          // 老 Electron / 无剪贴板权限时退回 execCommand。
+          const area = doc.createElement('textarea')
+          area.value = text
+          area.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+          doc.body.appendChild(area)
+          area.select()
+          let ok = false
+          try { ok = doc.execCommand('copy') } catch { /* ignore */ }
+          area.remove()
+          app.notify(ok ? 'ok' : 'warn', ok ? '已复制连接地址' : '复制失败：浏览器未授权剪贴板')
+        }
       }
       close.onclick = () => { opened = false; revealed = false; render() }
       popup.append(label, eye, copy, close)
