@@ -4,6 +4,22 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.0.10（2026-11-07）
+
+**主题：修复 npm 发布包剥离 `dsh.client` 导致 Web「瓮城」主面板不加载；发布门禁补上 client half 物化断言。**
+
+### 修复
+- **npm 包恢复浏览器 client half**：`tools/release/build.mjs` 不再删除 `dsh.client`。v3.0.9 的发布包在 staging 时删掉了该字段，安装后 Web 端只剩设置页入口，侧边栏「瓮城」与主面板（元主/分身 50:50 控制台）全部不出现；构建现在在 `dsh.client` 缺失时直接失败。
+- **smoke 断言反转**：`package-smoke.mjs` 由「client half 必须禁用」改为断言 `dsh.client.platform === 'web'`、`client.js` 注册发布包 ID、包含 `sidebar.panellist` 与 `main` 槽位；v3.0.9 的 tarball 会在该门禁直接 FAIL。
+- **安装 drill 真实拉取 boot 页**：`install-drill.mjs` 在干净 profile 启动 Web 后请求首页（先交换 302 的 set-cookie），断言 `@twinsearth/dsh-fang/client.js` 在插件清单中；profile 现在写入 `dependencies`，与 `pnpm add` 落盘一致。drill 结束时用 `taskkill /T` 清理宿主进程。
+- **healthz 增加 client half 启用检查**。
+
+### 门禁
+- `preflight --e2e` GREEN：751 pass / 0 fail / 1 skip；e2e 75/75；allow-list routes=84 findings=0。
+- `dist/dsh-fang-3.0.10.tgz` sha256 `6afe97710f54a6dc84cfff1cb7d8d425a73a5c241d3bb6b3f3488964b240bbb0`。
+- `package-smoke` PASS；`install-drill` GREEN 7/7（干净 profile boot 含 `@twinsearth/dsh-fang/client.js`）；`healthz` HEALTHY。
+- 详见 `docs/AUDIT-v3.0.10.md`。
+
 ## v3.0.9（2026-11-06）
 
 **主题：三区数据布局落地、元主默认元宝与派生入口、分身生产盘硬禁修复、发布物 v3.0.9。**

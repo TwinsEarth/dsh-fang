@@ -47,7 +47,8 @@ try {
   execFileSync('tar', ['-xzf', tarball, '-C', pkgDir, '--strip-components=1'], { stdio: 'pipe' })
   fs.writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
     name: 'dsh-profile-drill', private: true,
-    dependencies: {},
+    // 与 pnpm add 落盘一致：客户端半只按 profile 依赖物化，缺依赖时 boot 不会分发 client.js。
+    dependencies: { '@twinsearth/dsh-fang': version },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/dsh-fang'] } },
   }, null, 2) + '\n', 'utf8')
   fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), '[]\n', 'utf8')
@@ -71,6 +72,24 @@ try {
 
   const token = new URL(url).searchParams.get('token') ?? ''
   const port = new URL(url).port
+  // v3.0.10：干净安装后 Web boot 必须包含主面板 client half；这是 v3.0.9 的发包回归门禁。
+  // Node fetch 没有 cookie jar：先取 302 的 set-cookie，再带 cookie 请求首页（浏览器行为）。
+  const bootHtml = async () => {
+    const first = await fetch(url, { redirect: 'manual', headers: { accept: 'text/html' } })
+    if (first.status === 200) return await first.text()
+    const jar = typeof first.headers.getSetCookie === 'function' ? first.headers.getSetCookie() : []
+    const cookie = jar.map((value) => value.split(';')[0]).join('; ')
+    const location = new URL(first.headers.get('location') ?? '/', url).href
+    const page = await fetch(location, { redirect: 'manual', headers: { cookie, accept: 'text/html' } })
+    return await page.text()
+  }
+  let boot = ''
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    boot = await bootHtml().catch(() => '')
+    if (boot.includes('@twinsearth/dsh-fang/client.js')) break
+    await sleep(500)
+  }
+  check('clean boot lists the fang client half', boot.includes('@twinsearth/dsh-fang/client.js'), boot ? '' : 'boot page unavailable')
   // B1：先同源 bootstrap 安装级 token，再带 x-fang-auth 访问 API
   const authToken = await fetch(`http://127.0.0.1:${port}/fang/api/auth-token?token=${encodeURIComponent(token)}`)
     .then((r) => r.json()).then((b) => b?.token ?? '').catch(() => '')
@@ -92,7 +111,7 @@ try {
   const rows = [...new Set([...dump.matchAll(/\bid:\s*['"]?(fang-[a-z0-9-]+)/g)].map((m) => m[1]))]
   check('16 fang-* rows composed', rows.length >= 16, `rows=${rows.length}`)
   const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
-  check('browser client half disabled', pkg.dsh?.client === undefined)
+  check('browser client half enabled', pkg.dsh?.client?.platform === 'web', JSON.stringify(pkg.dsh?.client ?? null))
 
   if (!NO_POPUP) {
     const choiceFile = path.join(home, 'choice.txt')
@@ -117,7 +136,11 @@ try {
 } catch (error) {
   check('drill completed', false, String(error?.message ?? error))
 } finally {
-  if (child && !child.killed) { try { child.kill() } catch { /* ignore */ } }
+  if (child && !child.killed) {
+    // Windows: spawn(shell:true) 的 child 是 cmd.exe，必须杀进程树，否则 Electron 宿主会残留。
+    if (process.platform === 'win32') { try { execFileSync('taskkill.exe', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore' }) } catch { /* already gone */ } }
+    try { child.kill() } catch { /* already gone */ }
+  }
   const failed = checks.filter((c) => !c.ok).length
   console.log(`\n${failed ? 'RED' : 'GREEN'}  install drill ${checks.length - failed}/${checks.length}`)
   console.log('home:', home)
