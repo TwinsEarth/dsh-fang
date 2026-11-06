@@ -857,6 +857,8 @@ export function apply(ctx, config) {
 
     const collector = createTextTail(maxLogLines)
     const rec = previous ?? { forkId, createdAt: nowMs(), taskTitle: '' }
+    // v3.0.9 生产盘硬锁：每次启动/重启都确保 profile 关闭插件安装/设置（旧分身也生效）。
+    try { rec.configLock = applyForkConfigLock(path.join(path.resolve(homeDir), 'profiles', profile)) } catch { rec.configLock = { ok: false } }
     Object.assign(rec, {
       forkId,
       homeDir,
