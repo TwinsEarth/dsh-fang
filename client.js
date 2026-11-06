@@ -434,9 +434,15 @@ window.__ModuleLoader__.load({
       } catch { /* ignore */ }
       return ''
     }
-    function openMotherPortal() {
-      // 母体 Web 是 DSH 客户端本身；/fang/panel 不是已注册路由，直接打开只会白屏。
-      // 只有当前页面本身带着 DSH web token 时，才可能在新标签恢复同一个宿主。
+    async function openMotherPortal() {
+      // 母体 Web 就是 DSH 客户端本身。Electron 壳优先把 DSH 桌面窗口置前，
+      // 而不是打开没有 token 的裸 HTTP URL（那会 401）。
+      if (window.fangShell?.focusMother) {
+        try {
+          const result = await window.fangShell.focusMother()
+          if (result?.ok) return
+        } catch { /* fall through */ }
+      }
       const token = new URLSearchParams(location.search).get('token') || ''
       const origin = resolveMotherOrigin()
       if (!window.fangShell && token && origin) {
@@ -447,7 +453,7 @@ window.__ModuleLoader__.load({
       }
       try {
         window.dispatchEvent(new CustomEvent('fang:notice', {
-          detail: '母体 Web 就是当前 DSH 客户端：请在左侧会话列表/工作区中查看（/fang/panel 不是有效路由）。',
+          detail: '母体 Web 就是当前 DSH 客户端：请在 DSH 桌面窗口中查看（/fang/panel 不是有效路由）。',
         }))
       } catch { /* ignore */ }
     }
