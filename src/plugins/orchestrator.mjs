@@ -1458,6 +1458,31 @@ export function apply(ctx, config) {
         ok: true, token: authToken,
       }), { public: true })
 
+      // 完整连接地址（带进程 token）：Web 端「连接信息」用它，不再依赖桌面壳。
+      // 桌面壳缺失时也能给出可复制的真实登录地址；拿不到 token 时如实标 tokenized:false。
+      const connectionService = (() => {
+        try { return child.get('connection') ?? child.connection ?? null } catch { return null }
+      })()
+      const webAppService = (() => {
+        try { return child.get('webApp') ?? child.webApp ?? null } catch { return null }
+      })()
+      route('GET', `${prefix}/api/connection`, (req, res) => {
+        const advertised = (() => { try { return String(webAppService?.getAdvertisedUrl?.() ?? '') } catch { return '' } })()
+        const origin = (() => { try { return String(webServer.getOrigin?.() ?? '') } catch { return '' } })()
+        const base = advertised || origin
+        let url = base
+        let tokenized = false
+        try {
+          if (base && typeof connectionService?.authenticatedUrl === 'function') {
+            const next = connectionService.authenticatedUrl(base)
+            if (next) { url = String(next); tokenized = url !== base }
+          }
+        } catch { /* 无 connection 服务时退回裸地址，不假装成功 */ }
+        return json(res, 200, {
+          ok: true, url, origin, advertisedUrl: advertised, tokenized, available: Boolean(url),
+        })
+      })
+
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
       route('GET', `${prefix}/api/upgrade/status`, (req, res) => {
         let mirror = null

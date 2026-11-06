@@ -3069,6 +3069,10 @@ window.__ModuleLoader__.load({
       const label = doc.createElement('span')
       label.id = 'fang-conn-url'
       label.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42vw'
+      // Web 模式需要第二行显示安装 token；桌面模式保持原来的单行样子。
+      const labelWrap = doc.createElement('div')
+      labelWrap.style.cssText = 'display:flex;flex-direction:column;gap:2px;min-width:0'
+      labelWrap.append(label)
       const eye = doc.createElement('button')
       eye.type = 'button'
       eye.setAttribute('data-btn-id', 'CONN-01')
@@ -3086,6 +3090,9 @@ window.__ModuleLoader__.load({
       }
       let full = ''
       let baseUrl = ''
+      let tokenValue = ''
+      let tokenLabel = null
+      let copyToken = null
       let revealed = false
       let opened = false
       let loaded = false
@@ -3106,6 +3113,11 @@ window.__ModuleLoader__.load({
             if (info?.token) { full = baseUrl + '/?token=' + encodeURIComponent(String(info.token)); return full }
           } catch { /* 主进程拒绝就退回页面地址 */ }
         }
+        try {
+          const result = await api('/fang/api/connection')
+          const url = result?.body?.url
+          if (typeof url === 'string' && url) { full = url; return full }
+        } catch { /* 宿主没这个路由时继续兜底 */ }
         if (typeof location !== 'undefined' && location.href) full = String(location.href)
         return full
       }
@@ -3117,9 +3129,15 @@ window.__ModuleLoader__.load({
       const render = () => {
         popup.hidden = !opened
         popup.style.display = opened ? 'flex' : 'none'
-        if (!opened) { label.textContent = ''; label.title = ''; return }
+        if (!opened) { label.textContent = ''; label.title = ''; if (tokenLabel) { tokenLabel.textContent = ''; tokenLabel.title = '' } return }
         label.textContent = full && revealed ? full : maskedText()
         label.title = revealed ? full : ''
+        if (tokenLabel) {
+          tokenLabel.textContent = tokenValue
+            ? (revealed ? tokenValue : 'Token ' + '•'.repeat(Math.min(16, tokenValue.length)))
+            : 'Token 未获取（宿主未就绪）'
+          tokenLabel.title = revealed ? tokenValue : ''
+        }
         eye.textContent = revealed ? '隐藏' : '显示'
       }
       const load = async () => {
@@ -3130,6 +3148,51 @@ window.__ModuleLoader__.load({
           if (info?.upstream) baseUrl = String(info.upstream).replace(/\/+$/, '')
         } catch { /* ignore */ }
         if (!baseUrl) baseUrl = String(location.origin || '')
+        // 宿主侧 /fang/api/connection 给出带进程 token 的完整地址；
+        // 拿不到就用当前页面地址兜底（同源，能用就能复制）。
+        try {
+          const result = await api('/fang/api/connection')
+          const url = result?.body?.url
+          if (typeof url === 'string' && url) full = url
+        } catch { /* ignore */ }
+        if (!isDesktopShell()) {
+          // 纯 Web：宿主没有桌面壳桥，token 走同源的 /fang/api/auth-token。
+          try {
+            const result = await api('/fang/api/auth-token')
+            const token = result?.body?.token
+            if (typeof token === 'string' && token) tokenValue = token
+          } catch { /* ignore */ }
+          tokenLabel = doc.createElement('span')
+          tokenLabel.id = 'fang-conn-token'
+          tokenLabel.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42vw;color:#6E6E73'
+          labelWrap.append(tokenLabel)
+          copyToken = doc.createElement('button')
+          copyToken.type = 'button'
+          copyToken.setAttribute('data-btn-id', 'CONN-04')
+          copyToken.textContent = '复制 Token'
+          copyToken.style.cssText = 'height:28px;padding:0 8px;border-radius:8px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;cursor:pointer;font:inherit'
+          copyToken.onclick = async () => {
+            if (!tokenValue) { app.notify('warn', '还没拿到 Token：宿主可能未就绪'); return }
+            const ok = await writeClipboard(tokenValue)
+            app.notify(ok ? 'ok' : 'warn', ok ? '已复制 Token' : '复制失败：浏览器未授权剪贴板')
+          }
+          popup.insertBefore(copyToken, close)
+          if (!full && typeof location !== 'undefined' && location.href) full = String(location.href)
+        }
+      }
+      // 老 Electron / 无剪贴板权限时退回 execCommand。
+      const writeClipboard = async (text) => {
+        try { await navigator.clipboard.writeText(text); return true } catch { /* fall through */ }
+        try {
+          const area = doc.createElement('textarea')
+          area.value = text
+          area.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+          doc.body.appendChild(area)
+          area.select()
+          const ok = doc.execCommand('copy')
+          area.remove()
+          return Boolean(ok)
+        } catch { return false }
       }
       trigger.onclick = async () => {
         opened = !opened
@@ -3148,24 +3211,11 @@ window.__ModuleLoader__.load({
       copy.onclick = async () => {
         const text = await resolveFull()
         if (!text) { app.notify('warn', '还没拿到连接地址：宿主可能未就绪'); return }
-        try {
-          await navigator.clipboard.writeText(text)
-          app.notify('ok', '已复制连接地址')
-        } catch {
-          // 老 Electron / 无剪贴板权限时退回 execCommand。
-          const area = doc.createElement('textarea')
-          area.value = text
-          area.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
-          doc.body.appendChild(area)
-          area.select()
-          let ok = false
-          try { ok = doc.execCommand('copy') } catch { /* ignore */ }
-          area.remove()
-          app.notify(ok ? 'ok' : 'warn', ok ? '已复制连接地址' : '复制失败：浏览器未授权剪贴板')
-        }
+        const ok = await writeClipboard(text)
+        app.notify(ok ? 'ok' : 'warn', ok ? '已复制连接地址' : '复制失败：浏览器未授权剪贴板')
       }
       close.onclick = () => { opened = false; revealed = false; render() }
-      popup.append(label, eye, copy, close)
+      popup.append(labelWrap, eye, copy, close)
       parent.append(trigger, popup)
       render()
       return () => { trigger.remove(); popup.remove() }

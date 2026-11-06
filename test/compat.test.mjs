@@ -99,6 +99,20 @@ test('compat: 路由数量不匹配 / 必需路由缺失 → 失败', async () =
   assert.ok(result.findings.some(f => f.code === 'route-missing'))
 })
 
+test('compat: 路由数量增长只记 warning，不关闭子插件', async () => {
+  const root = makeFakeRoot()
+  const result = await runCompatGate({
+    rootDir: root,
+    expectedRouteCount: 2,
+    routePaths: ['/fang/api/status', '/fang/api/auth-token', '/fang/api/connection'],
+    requiredRoutes: ['/fang/api/status', '/fang/api/auth-token'],
+    importModule: fakeImporter(),
+  })
+  assert.equal(result.ok, true)
+  assert.ok(result.findings.some(f => f.code === 'route-count-growth' && f.severity === 'warning'))
+  assert.equal(result.findings.filter(item => item.severity === 'error').length, 0)
+})
+
 test('compat: 内核导入失败 → 失败', async () => {
   const root = makeFakeRoot()
   const result = await runCompatGate({
