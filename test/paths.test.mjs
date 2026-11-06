@@ -36,15 +36,9 @@ test('without FANG_HOME: legacy data keeps legacy layout, fresh install defaults
   assert.equal(legacy.fangHome, '')
   assert.equal(legacy.dataDir, path.join(legacyHome, 'fang', 'desktop'))
 
-  // 全新环境：Windows 且有 D: → 默认主文件夹 D:\ToFuture；否则保持旧布局
+  // 显式 DSH_HOME（e2e/测试/便携）→ 保持旧布局，不自动跳 D:\ToFuture
   const freshHome = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fang-fresh-')), '.dsh')
   const fresh = resolveFangLayout({ env: { DSH_HOME: freshHome, DSH_PROFILE: 'desktop' }, argv: [] })
-  const expected = process.platform === 'win32' && fs.existsSync('D:\\') ? path.resolve('D:\\ToFuture') : ''
-  assert.equal(fresh.fangHome, expected)
-  if (expected) {
-    assert.equal(fresh.dataDir, path.join(expected, 'mirror', 'desktop'))
-    assert.equal(fresh.essenceRoot, path.join(expected, 'essence'))
-  } else {
-    assert.equal(fresh.dataDir, path.join(freshHome, 'fang', 'desktop'))
-  }
+  assert.equal(fresh.fangHome, '')
+  assert.equal(fresh.dataDir, path.join(freshHome, 'fang', 'desktop'))
 })

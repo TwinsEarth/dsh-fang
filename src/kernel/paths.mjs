@@ -54,8 +54,10 @@ export function resolveFangHome(env = process.env) {
   try {
     if (fs.existsSync(path.join(resolveDshHome(env), 'fang'))) return ''
   } catch { /* ignore */ }
-  // 新装默认主文件夹（Windows：D:\ToFuture；其他平台保持旧布局）。
-  if (process.platform === 'win32') {
+  // 新装默认主文件夹（Windows：D:\ToFuture）——只对“真正的默认安装”生效：
+  // 显式设置 DSH_HOME（e2e/测试/便携安装）时不得跳盘，否则会写进真实 D: 数据根。
+  const explicitDshHome = Boolean(env && String(env.DSH_HOME ?? '').trim())
+  if (!explicitDshHome && process.platform === 'win32') {
     try { if (fs.existsSync('D:\\')) return 'D:\\ToFuture' } catch { /* ignore */ }
   }
   return ''

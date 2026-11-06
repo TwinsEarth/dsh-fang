@@ -4,6 +4,29 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.0.9（2026-11-06）
+
+**主题：三区数据布局落地、元主默认元宝与派生入口、分身生产盘硬禁修复、发布物 v3.0.9。**
+
+### 新增
+- **三区布局**：`mirror/<tag>`、`essence/`、`forks/`、`sessions/<essenceId>/home` 实拆；`fang-home.txt` 迁移指针；跨区路径守卫（`path-escape` / `invalid-workspace-key`）。
+- **迁移工具**：`tools/migrate-to-fang-home.mjs`（dry-run 默认、自动备份、junction 感知、结构化路径重写、运行态归口）、`tools/migrate-runtime-homes.mjs`、`tools/rewrite-fang-paths.mjs`、`tools/repair-fork-patches.mjs`。
+- **默认元宝**：`copy-local` 模式只复制本机插件启用状态与设置（不复制会话/数据/代码/凭据）；无用户元主时自动创建，快速派生默认使用。
+- **元主「派生」按钮**：替代详情按钮；选一个进行中会话 → 创建分身沙箱并整目录复制会话。
+- **物理分支**：adapter `fork-session` op（分身内 `ctx.sessions.fork`）+ 分支库 `sessionId` + `activeBranchId`；分身卡分支面板。
+- **运行态开关**：运行中显示「停止 + 进入」，停止后回「打开」；工作区比例 50:50。
+
+### 修复
+- 分身 profile patch 的 `[]` 残留导致 YAML 非法、`spawn-failed: exited`；`cordis.yml` 只读导致启动 `EPERM`；两处均已修复并修复存量分身。
+- 元主派生时 `cleanTemplate` 覆盖原身模板的问题；派生模板固定为来源元主 `merged/profile`，每次 spawn 重放配置。
+- `forker.spawn` 缺 `homeDir` 的 `no-home-dir` 诊断与回归测试。
+- 显式 `dataRoot` 不再自动跳 `D:\ToFuture`。
+
+### 门禁
+- 全量测试 **750 pass / 0 fail / 1 skip**；rich UI smoke **21/21**。
+- 发布物：`dsh-fang-v3.0.9.zip`；PC 安装包 `DSH-Fang-3.0.9-x64-Setup.exe`（默认安装目录 `D:\ToFuture\app`，升级沿用原目录，不删数据区）。
+- 已知边界：官方源升级适配器未接入；物理分支真实 `sessions.fork` 待现场验收；分身硬禁的文件系统 ACL 需宿主权限位。
+
 ## v3.0.8（2026-11-05）
 
 **主题：分支/回流运行时、MCP 只读桥、FANG_HOME 数据根、DSH Web 侧边栏入口。**

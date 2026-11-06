@@ -2204,7 +2204,7 @@ export function apply(ctx, config) {
       }), { public: true })
 
       // 母体不可删除：即使有人直接打接口也返回 403，而不是“没有这个路由”。
-      route('DELETE', `${prefix}/api/mother`, (req, res) => json(res, 403, { ok: false, error: 'mother-immutable' }))
+      // 仅 POST（allow-list 只允许 GET/POST；DELETE 语义由该 403 表达）。
       route('POST', `${prefix}/api/mother/delete`, (req, res) => json(res, 403, { ok: false, error: 'mother-immutable' }))
 
       // 完整连接地址（带进程 token）：Web 端「连接信息」用它，不再依赖桌面壳。

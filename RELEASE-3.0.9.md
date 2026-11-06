@@ -12,7 +12,7 @@
 - 跨区路径守卫：拒绝 `..`/绝对路径逃逸（会话导入 `invalid-workspace-key`，fork/merged/runtime home 越界返回 `path-escape`）；
 - 迁移指针 `~/.dsh/fang/fang-home.txt`：无需改环境变量即可切换数据根；
 - 迁移工具：`tools/migrate-to-fang-home.mjs`（dry-run 默认、自动备份、junction 感知、绝对路径结构化重写、运行态归口）；
-- 实测迁移 `C:\Users\fangw\.dsh\fang\desktop → D:\ToFuture`：元主 4、分身 8、会话 3 归口，0 残留。
+- 实测迁移 `%USERPROFILE%\.dsh\fang\desktop → D:\ToFuture`：元主 4、分身 8、会话 3 归口，0 残留。
 
 ### 2. 元主（原身/本尊）生命周期
 - 打开 = 起隔离实例 + 可选导入 1–5 个进行中会话（>5 拒绝、归档拒绝），合并 `workspace.json` 让分组显示名称；

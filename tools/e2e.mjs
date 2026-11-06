@@ -189,7 +189,7 @@ async function main() {
     const status = await api('/fang/api/status')
     console.log('mother config:', JSON.stringify(status.body?.mother))
     check('GET /fang/api/status 200', status.status === 200, `version=${status.body?.version}`)
-    check('status reports version 3.0.8', status.body?.version === '3.0.8')
+    check('status reports current package version', status.body?.version === JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version)
     check('status reports role=mother', status.body?.role === 'mother')
     const upgradeStatus = await api('/fang/api/upgrade/status')
     check('GET /fang/api/upgrade/status 200 + read-only shape',
