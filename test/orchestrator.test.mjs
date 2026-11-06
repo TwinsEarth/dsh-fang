@@ -897,6 +897,49 @@ test('orchestrator: 方案B 分支会话不被单会话守卫隔离；激活切�
   }
 })
 
+test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-default-'))
+  const pluginManager = {
+    async listPlugins() {
+      return [
+        { id: 'p-2xray', name: '@twinsearth/dsh-2xray' },
+        { id: 'p-market', name: 'dshmarket' },
+      ]
+    },
+  }
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer, pluginManager } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const preset = await mirror.defaultPreset()
+    assert.equal(preset.plan.groups.length, 2)
+    assert.equal(preset.plan.groups[0].plugins.find((item) => item.spec === '@twinsearth/dsh-2xray').installed, true)
+    assert.equal(preset.plan.groups[1].plugins.find((item) => item.spec === 'dshmarket').installed, true)
+
+    const dry = await mirror.ensureDefaultEssence({ apply: false })
+    assert.equal(dry.dryRun, true)
+    const made = await mirror.ensureDefaultEssence({ apply: true })
+    assert.equal(made.created, true)
+    const meta = mirror.listEssences().essences.find((item) => item.id === made.essenceId)
+    assert.equal(meta.name, '默认元宝')
+
+    const task = await svc.createTask({ title: '小白快速分身' })
+    assert.equal(task.ok, true)
+    const provision = forker.calls.provision.at(-1)
+    assert.match(String(provision.profileTemplate), /merged[\\/]profile$/s, '快速派生必须用默认元宝作模板')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

@@ -26,6 +26,7 @@ import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
 import { EssenceManager, OFFICIAL_ESSENCE_ID, VIP_QUOTAS } from '../lib/essence.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
+import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
@@ -50,6 +51,8 @@ export const Config = z.object({
     .description('分身 profile 模板目录；留空 = 当前 profile 目录（Forker 的 cleanTemplate 会覆盖）'),
   fangHome: z.string().default('')
     .description('三区数据根（相当于 FANG_HOME）；留空 = 自动（新装默认 D:\\ToFuture，已有旧数据沿用旧布局）'),
+  defaultEssenceAuto: z.boolean().default(true)
+    .description('新用户自动生成“默认元宝”（仅当没有任何用户元主、且默认插件已有安装时；失败不影响启动）'),
   cliPath: z.string().default('')
     .description('dsh 启动器路径；留空自动探测（PATH 上的 dsh / 安装目录 dsh.cmd）'),
   dataRoot: z.string().default('')
@@ -496,7 +499,6 @@ export function apply(ctx, config) {
     return { ok: true, kept: keep.sessionId, quarantined }
   }
 
-  // v3.0.9 原身墓碑：删除原身后记录 id，用于「不能再派生」与分身“原身已删除”标记。
   const tombstonesFile = path.join(layout.dataDir, 'deleted-essences.json')
   const loadTombstones = () => {
     try {
@@ -509,6 +511,23 @@ export function apply(ctx, config) {
     const ids = new Set(loadTombstones())
     ids.add(String(essenceId))
     writeJsonAtomic(tombstonesFile, { ids: [...ids], updatedAt: nowMs(), last: { id: String(essenceId), name: String(name ?? ''), at: nowMs() } })
+  }
+
+  // v3.0.9 默认元宝：新用户免创建，自动生成一个带默认插件清单的元主。
+  const defaultEssenceFile = path.join(layout.dataDir, 'default-essence.json')
+  const readDefaultEssenceId = () => {
+    try { return String(readJson(defaultEssenceFile, {})?.essenceId ?? '') } catch { return '' }
+  }
+  const writeDefaultEssenceId = (essenceId) => writeJsonAtomic(defaultEssenceFile, { essenceId: String(essenceId), at: nowMs() })
+  const listInstalledPlugins = async () => {
+    try {
+      const pm = safeGet('pluginManager')
+      if (!pm || typeof pm.listPlugins !== 'function') return null
+      const out = await pm.listPlugins()
+      if (Array.isArray(out)) return out
+      if (Array.isArray(out?.plugins)) return out.plugins
+      return null
+    } catch { return null }
   }
 
   const service = {
@@ -536,9 +555,15 @@ export function apply(ctx, config) {
       const homeDir = path.join(layout.forkHomesDir, taskId)
       const template = String(input.template ?? '').trim()
       // v3.0.9：从原身派生时，模板来源是该原身的 merged/profile（分身只生产，不回写原身）。
+      // v3.0.9：未指定来源时，若存在“默认元宝”，快速派生直接以它为模板（新用户小白路径）。
+      let essenceIdInput = String(input.essenceId ?? '').trim()
+      if (!essenceIdInput && !template) {
+        const presetId = readDefaultEssenceId()
+        if (presetId && essenceManager.getMeta(presetId)?.id) essenceIdInput = presetId
+      }
       let sourceEssence = null
-      if (input.essenceId) {
-        const essenceId = String(input.essenceId).trim()
+      if (essenceIdInput) {
+        const essenceId = essenceIdInput
         const meta = essenceManager.getMeta(essenceId)
         if (!meta || typeof meta.id !== 'string') {
           return { ok: false, error: isTombstoned(essenceId) ? 'essence-deleted' : 'unknown-essence' }
@@ -1590,6 +1615,41 @@ export function apply(ctx, config) {
       name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
       defaultPatchEntries: Array.isArray(input?.defaultPatchEntries) ? input.defaultPatchEntries : undefined,
     }),
+    defaultPreset: async () => {
+      const entries = await listInstalledPlugins()
+      const plan = planDefaultEssence(entries ?? [])
+      const existingId = readDefaultEssenceId()
+      const meta = existingId ? essenceManager.getMeta(existingId) : null
+      return { ok: true, pluginManager: Array.isArray(entries), plan, defaultEssenceId: meta?.id ? existingId : '', exists: Boolean(meta?.id) }
+    },
+    ensureDefaultEssence: async ({ apply = false, force = false } = {}) => {
+      const existingId = readDefaultEssenceId()
+      const existing = existingId ? essenceManager.getMeta(existingId) : null
+      if (existing?.id) return { ok: true, existed: true, created: false, essenceId: existingId }
+      const entries = await listInstalledPlugins()
+      const plan = planDefaultEssence(entries ?? [])
+      const userEssences = essenceManager.list().filter((meta) => meta.official !== true)
+      if (!force && userEssences.length > 0) return { ok: false, error: 'user-essence-exists', plan }
+      if (apply !== true) return { ok: true, dryRun: true, plan }
+      const patchEntries = []
+      const pending = []
+      for (const group of plan.groups) {
+        for (const plugin of group.plugins) {
+          if (!plugin.installed) { pending.push({ spec: plugin.spec, group: group.key }); continue }
+          patchEntries.push({ id: plugin.pluginId || plugin.spec, name: plugin.spec, disabled: group.enabled !== true })
+        }
+      }
+      if (patchEntries.length === 0) return { ok: false, error: 'no-installed-default-plugins', plan, pending }
+      const created = essenceManager.create({ name: DEFAULT_ESSENCE_NAME, tier: 'free', defaultPatchEntries: patchEntries })
+      writeDefaultEssenceId(created.id)
+      try {
+        writeJsonAtomic(path.join(essenceManager.essenceRoot(created.id), 'default-preset.json'), {
+          at: nowMs(), version: plan.version, groups: plan.groups, patchEntries, pending,
+        })
+      } catch { /* marker 失败不影响创建 */ }
+      audit('default-essence-created', { essenceId: created.id, installed: patchEntries.length, pending: pending.length })
+      return { ok: true, created: true, essenceId: created.id, plan, pending }
+    },
     renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
     archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
     deleteEssence: (essenceId) => {
@@ -2577,10 +2637,30 @@ export function apply(ctx, config) {
       // v3.0.8 contract: an unknown /fang/api/* path must be a JSON 404 under the
       // same Host/Origin/token gate — not an unauthenticated empty 404 from the host.
       // Exact routes above win because the webServer matches exact before prefix.
+      // 默认元宝（新用户免创建）：dry-run 计划 + 应用。
+      route('GET', `${prefix}/api/essence/default-preset`, async (req, res) => {
+        try { return json(res, 200, await mirrorService.defaultPreset()) } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/default`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = await mirrorService.ensureDefaultEssence({ apply: body?.apply === true, force: body?.force === true })
+          return json(res, out.ok === false ? 409 : 200, out)
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // 新用户延迟自动创建（不阻塞启动；无已装默认插件时不创建）。
+      if (cfg.defaultEssenceAuto !== false) {
+        const timer = setTimeout(() => { mirrorService.ensureDefaultEssence({ apply: true }).catch(() => {}) }, 8000)
+        if (typeof timer.unref === 'function') timer.unref()
+      }
+
       webServer.register({
         kind: 'prefix',
-        path: `${prefix}/api`,
-        handler: async (req, res) => {
+        path: `${prefix}/api`,        handler: async (req, res) => {
           const decision = checkRequestAuth(req, {
             token: authToken,
             publicRoute: authToken.length === 0,
