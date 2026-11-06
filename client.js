@@ -1463,7 +1463,15 @@ window.__ModuleLoader__.load({
         const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
         if (code === 'not-running') {
           notify('warn', '分身已停止，正在启动…')
-          const restored = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId }) })
+          let restored = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId }) })
+          // A stopped (but not archived) fork cannot be restored directly; archive it
+          // first (keeps home), then restore spawns from the same home.
+          if (restored.body?.error === 'not-archived' && String(task?.status || '') !== 'running') {
+            const archived = await api('/fang/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId }) })
+            if (archived.status === 200 && archived.body?.ok !== false) {
+              restored = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId }) })
+            }
+          }
           if (restored.status !== 200 || restored.body?.ok === false) {
             notify('bad', `启动分身失败：${restored.body?.error || 'restore-failed'}`)
             return
