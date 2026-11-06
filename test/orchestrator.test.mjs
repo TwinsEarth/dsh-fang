@@ -602,11 +602,17 @@ test('orchestrator: createTask({essenceId}) 用原身 merged 作模板，归档�
     const mirror = ctx.get(SERVICE.mirror)
     const svc = ctx.get(SERVICE.orchestrator)
     const essence = mirror.createEssence({ name: '分身来源原身', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+    const essenceRoot = path.join(dataRoot, 'essences', essence.id)
+    const overlayFile = path.join(essenceRoot, 'overlay', 'cordis.patch.yml')
+    const beforeStat = fs.statSync(overlayFile)
+    const beforeBytes = fs.readFileSync(overlayFile, 'utf8')
 
     const out = await svc.createTask({ title: '从原身派生', essenceId: essence.id })
     assert.equal(out.ok, true)
     const provision = forker.calls.provision.at(-1)
     assert.match(String(provision.profileTemplate), /essences[\\/]essence-.*[\\/]merged[\\/]profile$/s)
+    assert.equal(fs.readFileSync(overlayFile, 'utf8'), beforeBytes, '派生不得改写原身 overlay')
+    assert.equal(fs.statSync(overlayFile).mtimeMs, beforeStat.mtimeMs, '派生不得触碰原身文件 mtime')
 
     const task = svc.listTasks().find((item) => item.taskId === out.taskId)
     assert.equal(task.essenceId, essence.id, '任务必须记录来源原身')
@@ -755,10 +761,16 @@ test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档�
     const ok = await call({ essenceId: essence.id, sessionIds: [liveId] })
     assert.equal(ok.statusCode, 200)
     assert.equal(ok.json().importedSessions.length, 1)
+    const okBody = ok.json()
     assert.equal(
-      fs.existsSync(path.join(dataRoot, 'essences', essence.id, 'runtime', 'home', 'sessions', workspaceKey, liveId, 'session.v4.jsonl.zstd')),
+      fs.existsSync(path.join(okBody.sandboxHome, 'sessions', workspaceKey, liveId, 'session.v4.jsonl.zstd')),
       true,
       '会话目录必须复制进隔离 home',
+    )
+    assert.equal(
+      okBody.sandboxHome.includes(`${path.sep}essences${path.sep}`),
+      false,
+      '运行态 home 不得落在原身文件夹内',
     )
 
     const archived = await call({ essenceId: essence.id, sessionIds: [archivedId] })

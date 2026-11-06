@@ -1370,6 +1370,7 @@ export function apply(ctx, config) {
     },
     createEssence: (input = {}) => essenceManager.create({
       name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
+      defaultPatchEntries: Array.isArray(input?.defaultPatchEntries) ? input.defaultPatchEntries : undefined,
     }),
     renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
     archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
@@ -1413,7 +1414,13 @@ export function apply(ctx, config) {
         try { fs.symlinkSync(motherModules, link, 'junction') } catch { /* 已存在或权限不足时继续，forker 会再尝试 */ }
       }
       const forkId = runtimeForkId(id)
-      const homeDir = path.join(essenceManager.essenceRoot(id), 'runtime', 'home')
+      // v3.0.9 隔离：运行态 home 放在原身文件夹之外（essences/<id>/ 只放配置），
+      // 会话/项目/任务文件因此不落在原身目录里。
+      const homeDir = path.join(layout.dataDir, 'runtime', forkId, 'home')
+      const legacyHome = path.join(essenceManager.essenceRoot(id), 'runtime', 'home')
+      if (!exists(homeDir) && exists(legacyHome)) {
+        try { ensureDir(path.dirname(homeDir)); copyTree(legacyHome, homeDir) } catch { /* 迁移失败不阻塞 */ }
+      }
       const provisioned = await f.provision({
         forkId, taskTitle: `元主运行时 · ${String(meta.name ?? id)}`,
         homeDir, profile: 'essence-runtime', profileTemplate: merged,
