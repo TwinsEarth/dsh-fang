@@ -451,10 +451,9 @@ window.__ModuleLoader__.load({
           if (win) return
         } catch { /* popup blocked */ }
       }
+      // Web 端：母体 Web 就是当前 DSH 客户端，切回瓮城控制台视图即可。
       try {
-        window.dispatchEvent(new CustomEvent('fang:notice', {
-          detail: '母体 Web 就是当前 DSH 客户端：请在 DSH 桌面窗口中查看（/fang/panel 不是有效路由）。',
-        }))
+        window.dispatchEvent(new CustomEvent('fang:mother-portal'))
       } catch { /* ignore */ }
     }
 
@@ -1141,6 +1140,11 @@ window.__ModuleLoader__.load({
       const setNotice = (notice) => { S.notice = notice; render() }
       const onFangNotice = (event) => notify('warn', String(event?.detail || ''))
       window.addEventListener('fang:notice', onFangNotice)
+      const onMotherPortal = () => {
+        S.view = 'console'
+        setNotice({ tone: 'ok', title: '母体 Web', message: '母体 Web 就是当前 DSH 客户端，已切回瓮城控制台视图。' })
+      }
+      window.addEventListener('fang:mother-portal', onMotherPortal)
 
       // 渲染：整棵视图重建 + 焦点/滚动/光标恢复；编辑中挂起后台刷新，避免输入被重建。
       function render(force = false) {
@@ -1663,6 +1667,7 @@ window.__ModuleLoader__.load({
           if (toastTimer) window.clearTimeout(toastTimer)
           if (deriveTicker) window.clearInterval(deriveTicker)
           window.removeEventListener('fang:notice', onFangNotice)
+          window.removeEventListener('fang:mother-portal', onMotherPortal)
           unsubscribe()
           root.remove()
         },
@@ -3249,6 +3254,14 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
+        // 母体 Web = DSH 主会话视图；Web 端直接切回 conversation 面板。
+        const goMother = () => {
+          try {
+            if (ctx?.layout && typeof ctx.layout.selectPanel === 'function') ctx.layout.selectPanel('conversation')
+          } catch { /* fall back to panel notice */ }
+        }
+        window.addEventListener('fang:mother-portal', goMother)
+        disposers.push(() => window.removeEventListener('fang:mother-portal', goMother))
         // 左侧导航「瓮城」：图标组件即登记项组件（外壳只给 {size, active}）
         disposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
