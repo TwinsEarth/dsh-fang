@@ -360,6 +360,22 @@ test('essence manager: importBundle 整包往返（含引导/清单）且不覆�
   assert.equal(manager.getMeta(imported.essence.id).id, imported.essence.id, 'meta.json 不得被旧包覆盖')
 })
 
+test('essence manager: backup 只保留一份，restore 回填 overlay', async () => {
+  const { manager } = makeFixture()
+  const meta = manager.create({ name: '备份源', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+  const root = manager.essenceRoot(meta.id)
+  const first = manager.backup(meta.id)
+  assert.equal(first.ok, true)
+  assert.equal(fs.existsSync(path.join(root, 'Backup')), true)
+  await manager.update(meta.id, (overlay) => { overlay.patchEntries = [{ id: 'p2', name: '@x/p2' }] })
+  manager.restoreBackup(meta.id)
+  const restored = manager.loadOverlay(root)
+  assert.equal(restored.patchEntries[0].id, 'p1', '还原必须回填备份时的 overlay')
+  manager.backup(meta.id)
+  manager.backup(meta.id)
+  assert.equal(fs.readdirSync(root).filter((name) => name === 'Backup').length, 1, '只保留一份备份')
+})
+
 test('essence manager: recomputeAll 在镜像指纹变化后批量更新', async () => {
   const { manager, profileDir } = makeFixture()
   const first = manager.create({ name: '原身E' })

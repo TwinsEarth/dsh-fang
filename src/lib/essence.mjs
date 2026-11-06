@@ -888,7 +888,12 @@ export class EssenceManager {
     assertNotFrozen(this.getMeta(essenceId))
     const target = path.join(root, 'Backup')
     if (exists(target)) removeTree(target)
-    copyTree(root, target)
+    // 原子写可能留下 .meta.json.*.tmp：默认过滤点文件，避免备份时 EPERM/半成品。
+    copyTree(root, target, { filter: (name) => name !== 'meta.json' && !name.startsWith('.') })
+    const metaFile = path.join(root, 'meta.json')
+    if (exists(metaFile)) {
+      fs.writeFileSync(path.join(target, 'meta.json'), fs.readFileSync(metaFile))
+    }
     const nested = path.join(target, 'Backup')
     if (exists(nested)) removeTree(nested)
     let bytes = 0
@@ -910,7 +915,7 @@ export class EssenceManager {
     const backupDir = path.join(root, 'Backup')
     if (!exists(backupDir)) throw new Error('backup-missing')
     for (const entry of fs.readdirSync(backupDir, { withFileTypes: true })) {
-      if (entry.name === 'Backup' || entry.name === 'runtime') continue
+      if (entry.name === 'Backup' || entry.name === 'runtime' || entry.name === 'meta.json') continue
       const from = path.join(backupDir, entry.name)
       const to = path.join(root, entry.name)
       if (exists(to)) removeTree(to)

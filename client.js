@@ -2041,6 +2041,7 @@ window.__ModuleLoader__.load({
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
+        essenceBackup, essenceRestore,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2612,6 +2613,18 @@ window.__ModuleLoader__.load({
               title: essence.actions?.delete?.reason || '永久删除 essences/<id>（须先归档；不删会话）',
               disabled: essence.actions?.delete?.enabled === false,
               onClick: () => void app.deleteEssence(essence),
+            }),
+            button('备份', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-12',
+              title: essence.archived === true ? '元主已冻结，不能备份' : '在 essences/<id>/Backup 存档（只保留一份，旧备份覆盖）',
+              disabled: essence.archived === true,
+              onClick: () => void app.essenceBackup(essence),
+            }),
+            button('还原', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-13',
+              title: essence.archived === true ? '元主已冻结，不能还原' : '用最新 Backup 覆盖当前 overlay/merged（需二次确认）',
+              disabled: essence.archived === true,
+              onClick: () => void app.essenceRestore(essence),
             }),
             button('下载', {
               size: 'sm', variant: 'ghost', dataBtnId: 'E-10',
