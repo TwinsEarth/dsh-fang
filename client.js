@@ -3273,6 +3273,74 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ── 截图（内置客户端模块，不再作为独立子插件）──────────────────────────
+    async function captureScreenshot() {
+      if (typeof window.fangShell?.captureScreen === 'function') {
+        try {
+          const result = await window.fangShell.captureScreen()
+          notifyScreenshot(result?.ok ? '已截图并复制到剪贴板，可直接 Ctrl+V 粘贴' : '截图失败：未获取到屏幕图像')
+          return Boolean(result?.ok)
+        } catch (error) {
+          notifyScreenshot('截图失败：' + String(error?.message ?? error))
+          return false
+        }
+      }
+      let stream = null
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+        const video = document.createElement('video')
+        video.srcObject = stream
+        video.muted = true
+        await video.play()
+        await new Promise((resolve) => { if (video.videoWidth) resolve(); else video.onloadedmetadata = resolve })
+        const canvas = document.createElement('canvas')
+        canvas.width = video.videoWidth
+        canvas.height = video.videoHeight
+        canvas.getContext('2d').drawImage(video, 0, 0)
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+        if (!blob) throw new Error('empty-capture')
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+          notifyScreenshot('已截图并复制到剪贴板，可直接 Ctrl+V 粘贴')
+        } catch {
+          const link = document.createElement('a')
+          link.href = URL.createObjectURL(blob)
+          link.download = `wengcheng-${Date.now()}.png`
+          link.click()
+          notifyScreenshot('剪贴板不可用，已下载截图 PNG')
+        }
+        return true
+      } catch (error) {
+        notifyScreenshot('截图已取消或失败：' + String(error?.message ?? error))
+        return false
+      } finally {
+        for (const track of stream?.getTracks?.() ?? []) { try { track.stop() } catch { /* ignore */ } }
+      }
+    }
+
+    function notifyScreenshot(message) {
+      try { window.dispatchEvent(new CustomEvent('fang:notice', { detail: message })) } catch { /* ignore */ }
+    }
+
+    function isScreenshotShortcut(event) {
+      const key = String(event?.key || '').toLowerCase()
+      if (key !== 'x' || !event.ctrlKey || event.altKey || event.metaKey) return false
+      return true
+    }
+
+    function ScreenshotDock() {
+      return h('button', {
+        type: 'button',
+        'data-fang-entry': 'screenshot',
+        title: '截图并复制到剪贴板 (Ctrl+X / Ctrl+Shift+X)',
+        onClick: () => void captureScreenshot(),
+        style: {
+          height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer',
+          border: '1px solid rgba(127,127,127,.35)', background: 'transparent', color: 'inherit', fontSize: 12,
+        },
+      }, '截图 Ctrl+X / ⌘⇧X')
+    }
+
     // ── 插件入口 ──────────────────────────────────────────────────────────
     return {
       mountPanel,
@@ -3287,6 +3355,19 @@ window.__ModuleLoader__.load({
         }
         window.addEventListener('fang:mother-portal', goMother)
         disposers.push(() => window.removeEventListener('fang:mother-portal', goMother))
+        const onScreenshotKey = (event) => {
+          if (!isScreenshotShortcut(event)) return
+          event.preventDefault()
+          event.stopPropagation()
+          void captureScreenshot()
+        }
+        window.addEventListener('keydown', onScreenshotKey, true)
+        disposers.push(() => window.removeEventListener('keydown', onScreenshotKey, true))
+        disposers.push(ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+          name: 'conversation.composer.dock',
+          id: 'fang-screenshot',
+          order: 91,
+        }, ScreenshotDock)))
         // 左侧导航「瓮城」：图标组件即登记项组件（外壳只给 {size, active}）
         disposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
