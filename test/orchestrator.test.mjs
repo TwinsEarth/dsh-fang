@@ -860,6 +860,43 @@ test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归�
   }
 })
 
+test('orchestrator: 方案B 分支会话不被单会话守卫隔离；激活切换 active 分支', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-branch-b-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const out = await svc.createTask({ title: '多分支分身' })
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    const sessionsRoot = path.join(task.homeDir, 'sessions', '--ws--')
+    fs.mkdirSync(path.join(sessionsRoot, '11111111-1111-4111-8111-111111111111'), { recursive: true })
+    fs.mkdirSync(path.join(sessionsRoot, '22222222-2222-4222-8222-222222222222'), { recursive: true })
+
+    const store = new BranchStore(dataRoot)
+    store.bindSession(task.taskId, '11111111-1111-4111-8111-111111111111')
+    store.create(task.taskId, { branchId: 'b1', sessionId: '22222222-2222-4222-8222-222222222222' })
+
+    await svc.archiveTask(task.taskId)
+    const guard = svc.enforceSingleSession(task.taskId)
+    assert.equal(guard.ok, true)
+    assert.equal(guard.quarantined.length, 0, '登记过的分支会话不得被隔离')
+
+    const res = makeRes()
+    await webServer.find('POST', '/fang/api/tasks/branches/activate').handler(makeReq({ taskId: task.taskId, branchId: 'b1' }, 'POST'), res)
+    assert.equal(res.statusCode, 200)
+    const view = svc.listTasks().find((item) => item.taskId === task.taskId)
+    assert.equal(view.branch.activeBranchId, 'b1')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

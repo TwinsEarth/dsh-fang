@@ -367,6 +367,15 @@ export function apply(ctx, config) {
       essenceId: t.essenceId ?? null,
       // 来源原身已被删除：分身仍可运行/归档/还原/删除，但不能重新派生。
       essenceDeleted: Boolean(t.essenceId) && (t.essenceDeleted === true || isTombstoned(t.essenceId)),
+      // 方案 B：同一分身可挂多个分支会话，但同时只有一个 active。
+      branch: (() => {
+        try {
+          const store = branchStore.list(t.taskId)
+          return { activeBranchId: store.activeBranchId ?? t.activeBranchId ?? null, sessionId: store.sessionId ?? null, count: Array.isArray(store.branches) ? store.branches.length : 0 }
+        } catch {
+          return { activeBranchId: t.activeBranchId ?? null, sessionId: null, count: 0 }
+        }
+      })(),
       pid: live?.pid ?? t.pid ?? null,
       port: t.port ?? null,
       url: stripUrlToken(t.url),
@@ -457,6 +466,8 @@ export function apply(ctx, config) {
       for (const branch of branchStore.list(task.taskId).branches ?? []) {
         if (branch?.sessionId) branchSessionIds.add(String(branch.sessionId))
       }
+      const storeSession = branchStore.load?.(task.taskId)?.sessionId
+      if (storeSession) branchSessionIds.add(String(storeSession))
     } catch { /* 无分支库 */ }
     const sessions = scanForkSessions(task).filter((session) => !branchSessionIds.has(session.sessionId))
     const bindBranches = (keptId) => { try { branchStore?.bindSession?.(task.taskId, keptId) } catch { /* ignore */ } }
@@ -2474,7 +2485,15 @@ export function apply(ctx, config) {
         const checked = requireTask(body?.taskId)
         if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
         try {
-          return json(res, 200, branchStore.activate(checked.taskId, String(body?.branchId ?? '')))
+          const out = branchStore.activate(checked.taskId, String(body?.branchId ?? ''))
+          // 方案 B：激活即切换 active 分支会话（同一分身可有多个分支会话，但同时只有 1 个 active）。
+          const task = tasks.get(checked.taskId)
+          if (task) {
+            task.activeBranchId = out.activeBranchId
+            persist()
+          }
+          audit('fork-branch-activated', { taskId: checked.taskId, branchId: out.activeBranchId, childSessionId: out.branch?.sessionId ?? null })
+          return json(res, 200, out)
         } catch (error) {
           const code = String(error?.message ?? error)
           return json(res, branchErrorStatus(code), { ok: false, error: code, code })
