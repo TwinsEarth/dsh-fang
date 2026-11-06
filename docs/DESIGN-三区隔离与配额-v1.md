@@ -122,11 +122,24 @@ createTask({ essenceId })
 
 | # | 问题 | 选项 |
 |---|---|---|
-| Q1 | 原身运行态的会话目录：DSH 是否支持独立 sessions 根？ | 软链 `runtime/home/sessions → sessions/<essenceId>`（A） / patch DSH 配置（B） / 只能软限制（C） |
-| Q2 | 分身禁止装插件/改设置：在 fang 侧显示禁用，还是硬改宿主策略？ | UI 禁用（A，轻） / 宿主权限位（B，重） |
-| Q3 | 旧布局迁移（`~/.dsh/fang/<tag>` → `D:\ToFuture`） | 自动迁移（A） / 仅新装（B，当前行为） / 用户点击迁移（C） |
-| Q4 | 会话配额软限制还是硬限制 | 轮询软限制（A，先做） / 目录守卫硬限制（B，需 DSH 支持） |
-| Q5 | 子原身默认 5 与 VIP 档位：是否按当前 `VIP_QUOTAS` 直接生效？ | 是（A） / 另做等级配置（B） |
+| Q1 | 原身运行态的会话目录：DSH 是否支持独立 sessions 根？ | **已定（不软链）**：运行态整个 home 放 `runtimeRoot/<essenceId>/home`，DSH 的 `sessions/` 自然在内（已实现） |
+| Q2 | 分身禁止装插件/改设置：在 fang 侧显示禁用，还是硬改宿主策略？ | **已定（本版边界）**：组合层禁用 + 每次 spawn 重锁 + profile 配置文件只读；残留：node_modules 只读挂载需宿主权限位 |
+| Q3 | 旧布局迁移（`~/.dsh/fang/<tag>` → `D:\ToFuture`） | **已定（用户执行）**：`tools/migrate-to-fang-home.mjs`（dry-run 默认、自动备份、重写 tasks.json） |
+| Q4 | 会话配额软限制还是硬限制 | **已定（先软）**：满额拒绝再开实例 + `quota.sessions` 字段；目录守卫硬限制待 DSH 钩子 |
+| Q5 | 子原身默认 5 与 VIP 档位：是否按当前 `VIP_QUOTAS` 直接生效？ | **已定（是）**：直接用 `VIP_QUOTAS` |
+
+### 9.1 分身“生产盘”硬禁边界（本版已定）
+
+- **组合层禁用**：派生/启动时在分身 profile 的 `cordis.patch.yml` 写入
+  `plugin-manager`、`tool-plugin-manager`、`config-editor`、`ui-settings*`
+  的 `disabled: true`（id 经真实 `dsh --dump-config` 验证）；
+- **每次 spawn 重锁**：旧分身、重启、还原、`tasks/reset` 后都重新加锁；
+- **只读加固**：`profiles/<p>` 的 `package.json`、`cordis.yml`、`cordis.patch.yml`
+  设为 0444；重放配置前自动解锁、重放后再锁；
+- **现场隐藏**：设置页/插件安装入口在分身里不加载（不是灰按钮）；
+- **逃生开关**：`DSH_FANG_FORK_CONFIG_LOCK=0`（关组合锁）、`DSH_FANG_FORK_PROFILE_RO=0`（关只读）；
+- **残留风险（明确接受）**：文件系统层直接改 profile 或用管理员权限可绕过；`node_modules`
+  仍是母体 junction，真正的只读挂载需宿主权限位（Q2-B 剩余部分）。
 
 ## 10. 阶段与验收
 
