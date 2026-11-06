@@ -556,6 +556,9 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           profileTemplate,
+          // 从原身派生：配置必须真的来自原身 merged（不能被 clean template 覆盖），
+          // node_modules 仍 junction 到母体模块树。
+          ...(sourceEssence ? { cleanTemplate: false, nodeModulesSource: path.join(templateDir(), 'node_modules') } : {}),
         })
         if (provisioned && provisioned.ok === false) {
           task.status = TASK_STATUS.FAILED

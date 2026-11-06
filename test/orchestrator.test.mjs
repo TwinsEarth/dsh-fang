@@ -617,6 +617,8 @@ test('orchestrator: createTask({essenceId}) 用原身 merged 作模板，归档�
     assert.equal(out.ok, true)
     const provision = forker.calls.provision.at(-1)
     assert.match(String(provision.profileTemplate), /essences[\\/]essence-.*[\\/]merged[\\/]profile$/s)
+    assert.equal(provision.cleanTemplate, false, '从原身派生必须关闭 clean template，配置才真的来自原身')
+    assert.match(String(provision.nodeModulesSource ?? ''), /node_modules$/)
     assert.equal(fs.readFileSync(overlayFile, 'utf8'), beforeBytes, '派生不得改写原身 overlay')
     assert.equal(fs.statSync(overlayFile).mtimeMs, beforeStat.mtimeMs, '派生不得触碰原身文件 mtime')
 

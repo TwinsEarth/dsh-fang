@@ -746,11 +746,13 @@ export function apply(ctx, config) {
     ensureDir(profileDir)
 
     const warnings = []
-    const nodeModulesSource = path.join(sourceTemplateDir, 'node_modules')
+    // 显式 profileTemplate（例如原身 merged/profile）优先：此时不再用 clean template。
+    const useCleanTemplate = typeof opts.cleanTemplate === 'boolean' ? opts.cleanTemplate : cleanTemplate
+    const nodeModulesSource = String(opts.nodeModulesSource ?? '').trim() || path.join(sourceTemplateDir, 'node_modules')
     let template = sourceTemplateDir
     let cloned = []
 
-    if (cleanTemplate) {
+    if (useCleanTemplate) {
       // Forker-owned clean template: never written into the mother profile directory.
       const cleanDir = path.join(homeDir, 'templates', forkProfileTag)
       const ensured = ensureTemplate({
@@ -857,8 +859,6 @@ export function apply(ctx, config) {
 
     const collector = createTextTail(maxLogLines)
     const rec = previous ?? { forkId, createdAt: nowMs(), taskTitle: '' }
-    // v3.0.9 生产盘硬锁：每次启动/重启都确保 profile 关闭插件安装/设置（旧分身也生效）。
-    try { rec.configLock = applyForkConfigLock(path.join(path.resolve(homeDir), 'profiles', profile)) } catch { rec.configLock = { ok: false } }
     Object.assign(rec, {
       forkId,
       homeDir,
@@ -889,6 +889,24 @@ export function apply(ctx, config) {
       log: collector,
     })
     records.set(forkId, rec)
+    // v3.0.9 生产盘：每次打开/重启都从来源模板重放配置（原身 merged 或 clean template），
+    // 分身自己的改动不保存；sessions/storages/buffer 与 node_modules junction 保持不动。
+    const templateDirForRec = String(rec.template ?? '').trim()
+    if (templateDirForRec && exists(templateDirForRec) && exists(rec.profileDir)) {
+      try {
+        cloneProfileConfig(templateDirForRec, rec.profileDir)
+        const settingsSrc = path.join(templateDirForRec, 'settings')
+        if (exists(settingsSrc)) {
+          const settingsDst = path.join(rec.profileDir, 'settings')
+          if (exists(settingsDst)) removeTree(settingsDst)
+          copyTree(settingsSrc, settingsDst)
+        }
+        rec.configSync = { at: nowMs(), from: templateDirForRec }
+      } catch (e) {
+        rec.configSync = { at: nowMs(), ok: false, error: msgOf(e) }
+      }
+    }
+    try { rec.configLock = applyForkConfigLock(rec.profileDir) } catch { rec.configLock = { ok: false } }
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
     // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。
