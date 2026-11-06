@@ -109,6 +109,10 @@ function makeProfile(homeRoot) {
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
   fs.symlinkSync(ROOT, link, 'junction')
+  // The fang bundle now carries a client-side child plugin (queue journal).
+  const childLink = path.join(profileDir, 'node_modules', '@twinsearth', 'dsh-fang-queue-journal')
+  fs.mkdirSync(path.dirname(childLink), { recursive: true })
+  fs.symlinkSync(path.join(ROOT, 'queue-journal'), childLink, 'junction')
   return profileDir
 }
 
@@ -253,7 +257,7 @@ async function main() {
     // v3.0.7：client half 由宿主 Loader 对「bare 包名行」的 dsh.client 扫描发现，
     // 不能新增 `<pkg>/client` 行（子路径不是包根，会被当成坏插件）。
     const pkgDsh = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).dsh ?? {}
-    check('browser client half disabled (no dsh.client)', !pkgDsh.client)
+    check('browser client half enabled (dsh.client web)', pkgDsh.client?.platform === 'web')
     check('no inactive plugin entries', !/entry did not activate/.test(`${stdout}\n${stderr}`))
 
     // ── create a real task/fork ─────────────────────────────────────────
