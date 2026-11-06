@@ -1361,6 +1361,17 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(t))
   }
 
+  // v3.0.9：连接信息要的宿主服务（只有 Web 运行时才有；分身/无 Web 环境允许缺失）。
+  // 必须用 ctx.inject 取——直接 child.get 在插件上下文里拿不到这两个服务。
+  let connectionService = null
+  let webAppService = null
+  ctx.inject(['connection'], (child) => {
+    try { connectionService = child.get('connection') ?? child.connection ?? null } catch { connectionService = null }
+  })
+  ctx.inject(['webApp'], (child) => {
+    try { webAppService = child.get('webApp') ?? child.webApp ?? null } catch { webAppService = null }
+  })
+
   // ── HTTP 门户 ──────────────────────────────────────────────────────────
   if (cfg.routes?.enabled !== false) {
     ctx.inject(['webServer'], (child) => {
@@ -1472,12 +1483,6 @@ export function apply(ctx, config) {
 
       // 完整连接地址（带进程 token）：Web 端「连接信息」用它，不再依赖桌面壳。
       // 桌面壳缺失时也能给出可复制的真实登录地址；拿不到 token 时如实标 tokenized:false。
-      const connectionService = (() => {
-        try { return child.get('connection') ?? child.connection ?? null } catch { return null }
-      })()
-      const webAppService = (() => {
-        try { return child.get('webApp') ?? child.webApp ?? null } catch { return null }
-      })()
       route('GET', `${prefix}/api/connection`, (req, res) => {
         const advertised = (() => { try { return String(webAppService?.getAdvertisedUrl?.() ?? '') } catch { return '' } })()
         const origin = (() => { try { return String(webServer.getOrigin?.() ?? '') } catch { return '' } })()

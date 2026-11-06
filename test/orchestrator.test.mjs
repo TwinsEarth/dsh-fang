@@ -428,6 +428,38 @@ test('orchestrator: POST /fang/api/essence/capture 从母体 profile 生成元�
   }
 })
 
+test('orchestrator: GET /fang/api/connection 返回带进程 token 的地址', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-conn-'))
+  const ctx = makeCtx({
+    services: {
+      [SERVICE.forker]: makeFakeForker(),
+      webServer,
+      webApp: { getAdvertisedUrl: () => 'http://127.0.0.1:9999' },
+      connection: { authenticatedUrl: (base) => `${base}/?token=host-process-token` },
+    },
+  })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const handler = webServer.find('GET', '/fang/api/connection').handler
+    const res = makeRes()
+    await handler(makeReq(undefined, 'GET'), res)
+    const body = res.json()
+    assert.equal(res.statusCode, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.advertisedUrl, 'http://127.0.0.1:9999')
+    assert.equal(body.url, 'http://127.0.0.1:9999/?token=host-process-token')
+    assert.equal(body.tokenized, true)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders v2', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-http2-'))

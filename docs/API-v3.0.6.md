@@ -3,6 +3,12 @@
 > 状态：已实现（orchestrator 路由 + EssenceManager 方法）；鉴权沿用 v3.0.5 B1（`x-fang-auth`）。
 > 所有 POST 请求 `content-type: application/json`；错误统一 `{ ok:false, error }`，HTTP 400/404/409。
 
+## 0. 连接信息（v3.0.9）
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| GET | `/fang/api/connection` | — | `{ ok, url, origin, advertisedUrl, tokenized, available }`：`url` 由宿主 `connection.authenticatedUrl()` 生成（带本进程登录 token）；服务缺失时回退裸地址并如实返回 `tokenized:false` |
+
 ## 1. 元主（Essence）
 
 | 方法 | 路径 | 请求 | 响应 |
