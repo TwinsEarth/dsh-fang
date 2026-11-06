@@ -889,7 +889,10 @@ export class EssenceManager {
     const target = path.join(root, 'Backup')
     if (exists(target)) removeTree(target)
     // 原子写可能留下 .meta.json.*.tmp：默认过滤点文件，避免备份时 EPERM/半成品。
-    copyTree(root, target, { filter: (name) => name !== 'meta.json' && !name.startsWith('.') })
+    // runtime 是运行态进程目录（可能含 node_modules junction），不进入备份。
+    copyTree(root, target, {
+      filter: (name) => name !== 'meta.json' && name !== 'runtime' && !name.startsWith('.'),
+    })
     const metaFile = path.join(root, 'meta.json')
     if (exists(metaFile)) {
       fs.writeFileSync(path.join(target, 'meta.json'), fs.readFileSync(metaFile))
