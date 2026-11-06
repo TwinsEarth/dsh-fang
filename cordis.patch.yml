@@ -139,3 +139,6 @@
     # so the plugin is fully usable without the PC Electron client.
     - id: fang-queue-journal
       name: '@twinsearth/dsh-fang-queue-journal'
+
+    - id: fang-screenshot
+      name: '@twinsearth/dsh-fang-screenshot'

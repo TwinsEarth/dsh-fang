@@ -75,6 +75,7 @@
     "node": ">=22"
   },
   "optionalDependencies": {
-    "@twinsearth/dsh-fang-queue-journal": "0.1.0"
+    "@twinsearth/dsh-fang-queue-journal": "0.1.0",
+    "@twinsearth/dsh-fang-screenshot": "0.1.0"
   }
 }
