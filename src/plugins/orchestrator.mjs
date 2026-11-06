@@ -24,7 +24,7 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
-import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID, VIP_QUOTAS } from '../lib/essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
@@ -1297,6 +1297,24 @@ export function apply(ctx, config) {
   upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
   // 元主运行态的 forkId 命名（稳定、可用于 forker 记录与端口池）
   const runtimeForkId = (essenceId) => 'rt-' + String(essenceId).replace(/^essence-/, '').replace(/[^A-Za-z0-9-]/g, '-')
+  // v3.0.9 会话配额：数该元主运行态隔离 home 里的会话目录（归档数不再计入——归档目录由实例自管）。
+  const countEssenceSessions = (essenceId, meta) => {
+    const home = path.join(layout.dataDir, 'runtime', runtimeForkId(essenceId), 'home', 'sessions')
+    let used = 0
+    try {
+      for (const workspace of fs.readdirSync(home, { withFileTypes: true })) {
+        if (!workspace.isDirectory()) continue
+        const wsDir = path.join(home, workspace.name)
+        for (const session of fs.readdirSync(wsDir, { withFileTypes: true })) {
+          if (session.isDirectory()) used += 1
+        }
+      }
+    } catch { used = 0 }
+    const tier = String(meta?.tier ?? 'free')
+    const limit = Number(VIP_QUOTAS[tier]?.maxActiveSessions) || VIP_QUOTAS.free.maxActiveSessions
+    return { used, limit, over: used >= limit }
+  }
+
   // 打开元主时导入 1–5 个**进行中**会话（归档会话拒绝导入）。
   const importSessionsInto = (homeDir, sessionIds) => {
     const ids = [...new Set((Array.isArray(sessionIds) ? sessionIds : []).map((id) => String(id ?? '').trim()).filter(Boolean))]
@@ -1352,6 +1370,7 @@ export function apply(ctx, config) {
           official: meta.official === true,
           archived: meta.archived === true,
           stale,
+          sessions: countEssenceSessions(meta.id, meta),
           pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
           actions: ui.actions,
           blocks: ui.blocks,
@@ -1403,6 +1422,9 @@ export function apply(ctx, config) {
       const meta = essenceManager.getMeta(id)
       if (!meta || typeof meta.id !== 'string') throw new Error('unknown-essence')
       if (meta.archived === true) throw new Error('essence-archived')
+      // 进行中会话配额（默认 10；归档不限；达到上限拒绝再开实例）。
+      const sessionQuota = countEssenceSessions(id, meta)
+      if (sessionQuota.over) throw new Error(`session-quota-exceeded: ${sessionQuota.used}/${sessionQuota.limit}`)
       const f = forker()
       if (!f || typeof f.provision !== 'function' || typeof f.spawn !== 'function') throw new Error('forker-unavailable')
       await essenceManager.ensureFresh(id)
@@ -1499,6 +1521,7 @@ export function apply(ctx, config) {
         essenceId: id,
         meta,
         overlay: { patchEntries, settings: Object.keys(overlay.settings || {}) },
+        sessions: countEssenceSessions(id, meta),
         backup: exists(path.join(root, 'Backup')),
         runtime,
         logs,

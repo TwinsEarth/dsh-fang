@@ -3254,6 +3254,7 @@ window.__ModuleLoader__.load({
             ['插件条目', String(detail.overlay?.patchEntries?.length ?? 0)],
             ['设置项', (detail.overlay?.settings || []).join(', ') || '—'],
             ['备份', detail.backup ? '有（Backup/，只保留一份）' : '无'],
+            ['进行中会话', `${detail.sessions?.used ?? 0} / ${detail.sessions?.limit ?? 10}${detail.sessions?.over ? '（已满，归档后再开）' : ''}`],
             ['运行态', detail.runtime?.running ? `运行中 · :${detail.runtime.port ?? '—'} · pid ${detail.runtime.pid ?? '—'}` : '未运行'],
             ['镜像指纹', String(meta.lastMergedFingerprint ?? '—').slice(0, 16)],
             ['归档', meta.archived === true ? '已冻结（只能删除）' : '活跃'],

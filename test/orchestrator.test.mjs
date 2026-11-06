@@ -659,6 +659,35 @@ test('orchestrator: 分身配置可重置回来源原身（生产数据不动）
   }
 })
 
+test('orchestrator: 元主进行中会话配额（默认 10，超出拒绝再开实例）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-squota-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '配额元主', tier: 'free' })
+    const sessionsHome = path.join(dataRoot, 'runtime', `rt-${essence.id.replace(/^essence-/, '')}`, 'home', 'sessions', '--ws--')
+    for (let index = 0; index < 10; index += 1) {
+      fs.mkdirSync(path.join(sessionsHome, `session-${String(index).padStart(8, '0')}-0000-4000-8000-000000000000`), { recursive: true })
+    }
+    const listed = mirror.listEssences().essences.find((item) => item.id === essence.id)
+    assert.equal(listed.sessions.used, 10)
+    assert.equal(listed.sessions.limit, 10)
+    assert.equal(listed.sessions.over, true)
+    await assert.rejects(() => mirror.startEssenceRuntime(essence.id), /session-quota-exceeded/)
+    const detail = mirror.essenceDetail(essence.id)
+    assert.equal(detail.sessions.used, 10)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))
