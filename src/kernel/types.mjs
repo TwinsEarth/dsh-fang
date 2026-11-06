@@ -125,7 +125,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '3.0.8'
+export const FANG_VERSION = '3.0.9'
 
 /**
  * @typedef {object} ForkInfo
@@ -181,6 +181,7 @@ export const ADAPTER_OP = {
   APPROVALS: 'approvals',
   APPROVAL_DECIDE: 'approval-decide',
   ARCHIVE: 'archive',
+  FORK_SESSION: 'fork-session',
 }
 
 /** Adapter HTTP route suffixes (fork side). */

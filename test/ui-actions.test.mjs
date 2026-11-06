@@ -57,18 +57,29 @@ test('S1: 官方 locked 元主只允许派生/复制/下载', () => {
   assert.ok(blocks.some((b) => b.code === 'locked'))
 })
 
-test('S1: 归档元主禁止派生/配置，但允许复制/下载', () => {
+test('S1: 归档元主（冻结）只能还原（解冻）或删除', () => {
   const { actions, blocks } = buildEssenceActions({ locked: false, archived: true })
   assertShape(actions, ESSENCE_ACTION_IDS)
   assert.equal(actions.derive.enabled, false)
   assert.equal(actions.derive.code, 'archived')
   assert.equal(actions.configure.enabled, false)
-  assert.equal(actions.copy.enabled, true)
-  assert.equal(actions.download.enabled, true)
+  assert.equal(actions.copy.enabled, false)
+  assert.equal(actions.download.enabled, false)
+  assert.equal(actions.rename.enabled, false)
+  assert.equal(actions.archive.enabled, false)
+  assert.equal(actions.restore.enabled, true, '冻结后可以还原（解冻）')
+  assert.equal(actions.delete.enabled, true, '冻结后可以删除')
+  assert.equal(actions.delete.confirm, 'strong')
   assert.ok(blocks.some((b) => b.code === 'archived'))
+})
+
+test('S1: 未冻结元主的 restore（解冻）不可用', () => {
+  const { actions } = buildEssenceActions({ locked: false, archived: false })
+  assert.equal(actions.restore.enabled, false)
+  assert.equal(actions.restore.code, 'not-archived')
 })
 
 test('S1: 动作 id 与 data-btn-id 映射集合一致', () => {
   assert.deepEqual([...TASK_ACTION_IDS], ['open', 'rename', 'archive', 'copy', 'download', 'delete'])
-  assert.deepEqual([...ESSENCE_ACTION_IDS], ['derive', 'configure', 'rename', 'archive', 'copy', 'download', 'delete'])
+  assert.deepEqual([...ESSENCE_ACTION_IDS], ['derive', 'configure', 'rename', 'archive', 'restore', 'copy', 'download', 'delete'])
 })

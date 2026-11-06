@@ -86,6 +86,11 @@ function asObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
+/** v3.0.9：冻结（archived）的元主只能删除，其它操作一律拒绝。 */
+function assertNotFrozen(meta) {
+  if (meta && meta.archived === true) throw new Error(`essence ${meta.id} is archived/frozen（已冻结，只能删除）`)
+}
+
 /**
  * 原身（顶层）配额检查。
  * @param {string} tier VIP 等级
@@ -563,6 +568,105 @@ export class EssenceManager {
   }
 
   /**
+   * 从母体 profile 生成元主（v3.0.9）：把母体的**可写层**克隆成新元主的覆盖层。
+   *
+   * 克隆范围（只读母体）：
+   *   * `cordis.patch.yml` → overlay patch entries（插件安装/启用/配置）
+   *   * `package.json` → overlay 的 name/private/type/dsh/dependencies（可关）
+   *   * `settings/*.yaml` → overlay settings（可关）
+   * 绝不复制：credentials、sessions、storages、logs、node_modules（B8 边界）。
+   *
+   * @param {string} profileDir 母体 profile 目录（必须含 package.json）
+   * @param {{name?:string, tier?:string, parentId?:string|null, includeDependencies?:boolean,
+   *   includeSettings?:boolean, defaultPatchEntries?:Array<Record<string,unknown>>, skipQuota?:boolean}} [options]
+   * @returns {{meta:any, captured:Record<string,unknown>, conflicts:Conflict[], status:string}}
+   */
+  captureFromProfile(profileDir, options = {}) {
+    const dir = path.resolve(String(profileDir ?? '').trim())
+    if (dir.length === 0) throw new Error('capture: mother profile dir required')
+    const packageFile = path.join(dir, 'package.json')
+    if (!exists(packageFile)) throw new Error(`capture: mother profile has no package.json: ${dir}`)
+    // 元主自己的物化目录不能当母体（否则是自我叠加）。
+    const relative = path.relative(path.resolve(this.essencesRoot), dir)
+    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+      throw new Error('capture: refusing to clone from an essence directory')
+    }
+    const profilePkg = asObject(readJson(packageFile, {}))
+    const patchText = exists(path.join(dir, 'cordis.patch.yml'))
+      ? fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
+      : ''
+    const parsed = parsePatchEntries(patchText)
+    if (parsed.errors.length > 0) {
+      throw new Error(`capture: mother patch parse failed: ${parsed.errors.join('; ')}`)
+    }
+    const fallbackName = typeof profilePkg.name === 'string' && profilePkg.name.length > 0
+      ? `${profilePkg.name} 元主` : `${path.basename(dir)} 元主`
+    const name = String(options?.name ?? '').trim() || fallbackName
+
+    const created = this.create({
+      name,
+      tier: options?.tier,
+      parentId: options?.parentId ?? null,
+      skipQuota: options?.skipQuota === true,
+    })
+    const root = this.essenceRoot(created.id)
+    const overlay = this.loadOverlay(root)
+    const seedEntries = Array.isArray(options?.defaultPatchEntries)
+      ? options.defaultPatchEntries.map(entry => ({ ...entry })) : []
+    overlay.patchEntries = [...seedEntries, ...parsed.entries, ...overlay.patchEntries]
+    if (options?.includeDependencies !== false) {
+      overlay.packageJson = { ...this.selectProfilePackage(profilePkg), ...overlay.packageJson }
+    }
+    if (options?.includeSettings !== false) {
+      Object.assign(overlay.settings, this.readProfileSettings(dir))
+    }
+    this.saveOverlay(root, overlay)
+    const merge = this.recompute(created.id)
+    const bundles = asObject(profilePkg.dsh).profile?.bundles
+    const captured = {
+      profileDir: dir,
+      profileName: typeof profilePkg.name === 'string' ? profilePkg.name : null,
+      patchEntries: parsed.entries.length,
+      dependencies: Object.keys(asObject(overlay.packageJson.dependencies)).length,
+      bundles: Array.isArray(bundles) ? bundles.length : 0,
+      settings: Object.keys(overlay.settings).length,
+      credentialsCopied: false,
+    }
+    return { meta: this.getMeta(created.id), captured, conflicts: merge.conflicts, status: merge.status }
+  }
+
+  /** 提取可安全复制进元主 overlay 的 profile package.json 字段（不含 scripts/devDeps）。 */
+  selectProfilePackage(profilePkg) {
+    /** @type {Record<string, unknown>} */
+    const picked = {}
+    for (const key of ['name', 'private', 'type']) {
+      if (profilePkg?.[key] !== undefined) picked[key] = profilePkg[key]
+    }
+    const dsh = asObject(profilePkg?.dsh)
+    if (Object.keys(dsh).length > 0) picked.dsh = dsh
+    const deps = asObject(profilePkg?.dependencies)
+    if (Object.keys(deps).length > 0) picked.dependencies = deps
+    return picked
+  }
+
+  /** 读取母体 profile 的 settings/*.yaml（仅为覆盖层，不碰其他目录）。 */
+  readProfileSettings(profileDir) {
+    /** @type {Record<string, unknown>} */
+    const settings = {}
+    const settingsDir = path.join(String(profileDir), 'settings')
+    if (!exists(settingsDir)) return settings
+    for (const file of fs.readdirSync(settingsDir)) {
+      if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue
+      const text = fs.readFileSync(path.join(settingsDir, file), 'utf8')
+      const name = file.replace(/\.ya?ml$/, '')
+      try { settings[name] = JSON.parse(text) } catch {
+        settings[name] = parseYamlSubset(text).value
+      }
+    }
+    return settings
+  }
+
+  /**
    * 修改覆盖层并重算（mutator 直接改 overlay 对象；save 由 manager 完成）。
    * @param {string} essenceId
    * @param {(overlay: {patchEntries:Array<Record<string,unknown>>, packageJson:Record<string,unknown>, settings:Record<string,unknown>, credentialsPath:string}) => (void|Promise<void>)} mutator
@@ -572,6 +676,7 @@ export class EssenceManager {
     const root = this.essenceRoot(essenceId)
     const meta = this.readMeta(root)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不支持修改设置）`)
+    assertNotFrozen(meta)
     const overlay = this.loadOverlay(root)
     await mutator(overlay)
     this.saveOverlay(root, overlay)
@@ -587,6 +692,8 @@ export class EssenceManager {
   remove(essenceId) {
     const meta = this.getMeta(essenceId)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不可删除）`)
+    // v3.0.9 规则：先归档（冻结）才允许删除，删除本身不可撤销。
+    if (meta.archived !== true) throw new Error(`essence ${essenceId} is not archived; archive it before deleting`)
     if (meta.parentId === null) {
       const children = this.listChildren(essenceId)
       if (children.length > 0) throw new Error(`essence ${essenceId} has ${children.length} sub-essences; remove them first`)
@@ -600,6 +707,7 @@ export class EssenceManager {
     const root = this.essenceRoot(essenceId)
     const meta = this.readMeta(root)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身等级不可修改）`)
+    assertNotFrozen(meta)
     const next = { ...meta, tier: normalizeTier(tier), updatedAt: this.now() }
     this.writeMeta(root, next)
     return this.getMeta(essenceId)
@@ -613,6 +721,7 @@ export class EssenceManager {
     const root = this.essenceRoot(essenceId)
     const meta = this.readMeta(root)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不可重命名）`)
+    assertNotFrozen(meta)
     const next = { ...meta, name: trimmed, updatedAt: this.now() }
     this.writeMeta(root, next)
     return this.getMeta(essenceId)
@@ -659,6 +768,7 @@ export class EssenceManager {
    */
   copy(essenceId, options = {}) {
     const source = this.getMeta(essenceId)
+    assertNotFrozen(source)
     const sourceRoot = this.essenceRoot(essenceId)
     const name = String(options?.name ?? `${source.name} 副本`).trim()
     const created = this.create({
@@ -667,11 +777,35 @@ export class EssenceManager {
       parentId: source.parentId ?? null,
     })
     const nextRoot = this.essenceRoot(created.id)
-    const overlay = this.loadOverlay(sourceRoot)
-    overlay.credentialsPath = ''
-    this.saveOverlay(nextRoot, overlay)
+    // v3.0.9 深复制：整份沙箱目录（overlay + merged + 自定义数据）到新文件夹。
+    // 边界：不复制 credentials（B8）、不复制 runtime（运行态进程目录）、不复制 Backup、不覆盖新 meta。
+    const skip = new Set(['meta.json', 'credentials', 'runtime', 'Backup'])
+    let copiedFiles = 0
+    for (const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
+      if (skip.has(entry.name)) continue
+      const from = path.join(sourceRoot, entry.name)
+      const to = path.join(nextRoot, entry.name)
+      if (exists(to)) removeTree(to)
+      copyTree(from, to)
+      // overlay/credentials 属于登录态，必须剔除（B8）。
+      const copiedCredentials = path.join(to, 'credentials')
+      if (entry.name === 'overlay' && exists(copiedCredentials)) removeTree(copiedCredentials)
+      if (entry.isDirectory()) {
+        const walk = (dir) => {
+          for (const child of fs.readdirSync(dir, { withFileTypes: true })) {
+            const file = path.join(dir, child.name)
+            if (child.isDirectory()) walk(file)
+            else if (child.isFile()) copiedFiles += 1
+          }
+        }
+        walk(to)
+      } else if (entry.isFile()) copiedFiles += 1
+    }
+    // 凭据目录在新沙箱里保持为空（不继承任何登录态）。
+    ensureDir(path.join(nextRoot, 'overlay', 'credentials'))
     this.recompute(created.id)
-    return this.getMeta(created.id)
+    const meta = this.getMeta(created.id)
+    return { ...meta, copy: { sourceId: source.id, copiedFiles } }
   }
 
   /** 元主当前插件条目数（用于面板卡片）。 */
@@ -687,24 +821,137 @@ export class EssenceManager {
     const maxBytes = Math.max(1024, Math.floor(Number(options.maxBytes) || 32 * 1024 * 1024))
     const root = this.essenceRoot(essenceId)
     const meta = this.getMeta(essenceId)
-    const overlayRoot = path.join(root, 'overlay')
+    const full = options.full === true
+    const base = full ? root : path.join(root, 'overlay')
     const files = []
     let total = 0
+    // full=true：整包导出（跨机迁移）；跳过凭据、运行时 home 与备份目录。
+    const skip = new Set(full ? ['credentials', 'runtime', 'Backup'] : ['credentials'])
     const walk = (dir, relative) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.name === 'credentials') continue
-        const full = path.join(dir, entry.name)
+        if (skip.has(entry.name)) continue
+        // full=true：运行态只导出它的会话沙箱（runtime/home/sessions），不含进程/依赖目录。
+        if (full && entry.name === 'runtime') {
+          const sessionsDir = path.join(dir, 'runtime', 'home', 'sessions')
+          if (exists(sessionsDir)) walk(sessionsDir, 'runtime/home/sessions')
+          continue
+        }
+        const target = path.join(dir, entry.name)
         const rel = relative ? `${relative}/${entry.name}` : entry.name
-        if (entry.isDirectory()) { walk(full, rel); continue }
+        if (entry.isDirectory()) { walk(target, rel); continue }
         if (!entry.isFile()) continue
-        const bytes = fs.readFileSync(full)
+        const bytes = fs.readFileSync(target)
         total += bytes.length
         if (total > maxBytes) throw new Error('essence bundle too large')
-        files.push({ path: `overlay/${rel}`, base64: bytes.toString('base64') })
+        files.push({ path: full ? rel : `overlay/${rel}`, base64: bytes.toString('base64') })
       }
     }
-    if (exists(overlayRoot)) walk(overlayRoot, '')
-    return { ok: true, essenceId, meta, files, bytes: total, createdAt: this.now() }
+    if (exists(base)) walk(base, '')
+    if (full) {
+      // 迁移引导 + 清单，保证新 PC 拿到包就知道怎么导入。
+      const guide = [
+        '# dsh-Fang 元主导入引导',
+        '',
+        '1. 目标机器安装并启用 dsh-Fang（@local/dsh-fang）。',
+        '2. 打开瓮城面板 → 元主区 → 「导入」→ 选择本 JSON 文件（或 POST /fang/api/essence/import）。',
+        '3. 导入会生成新的 essences/<新id> 并自动重算；凭据不随包迁移，需要重新登录。',
+        '4. 打开前建议先执行「同步」，把该元主重放到目标机器当前的母体镜像。',
+        '',
+        `来源元主：${String(meta?.name ?? '')} (${essenceId})`,
+        `导出时间：${new Date(this.now()).toISOString()}`,
+        '包格式：dsh-fang-essence-bundle v1',
+      ].join('\n')
+      const manifest = JSON.stringify({
+        format: 'dsh-fang-essence-bundle',
+        version: 1,
+        createdAt: this.now(),
+        sourceId: essenceId,
+        name: meta?.name ?? null,
+        tier: meta?.tier ?? null,
+        files: files.length,
+      }, null, 2)
+      const appendText = (name, text) => {
+        const bytes = Buffer.from(text, 'utf8')
+        total += bytes.length
+        if (total > maxBytes) throw new Error('essence bundle too large')
+        files.push({ path: name, base64: bytes.toString('base64') })
+      }
+      appendText('IMPORT-GUIDE.md', guide)
+      appendText('manifest.json', manifest)
+    }
+    return { ok: true, essenceId, meta, files, bytes: total, full, createdAt: this.now() }
+  }
+
+  /** v3.0.9 备份：essences/<id>/Backup（固定一份，旧备份覆盖）。 */
+  backup(essenceId) {
+    const root = this.essenceRoot(essenceId)
+    assertNotFrozen(this.getMeta(essenceId))
+    const target = path.join(root, 'Backup')
+    if (exists(target)) removeTree(target)
+    // 原子写可能留下 .meta.json.*.tmp：默认过滤点文件，避免备份时 EPERM/半成品。
+    // runtime 是运行态进程目录（可能含 node_modules junction），不进入备份。
+    copyTree(root, target, {
+      filter: (name) => name !== 'meta.json' && name !== 'runtime' && !name.startsWith('.'),
+    })
+    const metaFile = path.join(root, 'meta.json')
+    if (exists(metaFile)) {
+      fs.writeFileSync(path.join(target, 'meta.json'), fs.readFileSync(metaFile))
+    }
+    const nested = path.join(target, 'Backup')
+    if (exists(nested)) removeTree(nested)
+    let bytes = 0
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(file)
+        else if (entry.isFile()) bytes += fs.statSync(file).size
+      }
+    }
+    walk(target)
+    return { ok: true, essenceId, backupDir: target, bytes, at: this.now() }
+  }
+
+  /** v3.0.9 还原：用 Backup 覆盖当前 overlay/merged/meta（Backup 保留一份）。 */
+  restoreBackup(essenceId) {
+    assertNotFrozen(this.getMeta(essenceId))
+    const root = this.essenceRoot(essenceId)
+    const backupDir = path.join(root, 'Backup')
+    if (!exists(backupDir)) throw new Error('backup-missing')
+    for (const entry of fs.readdirSync(backupDir, { withFileTypes: true })) {
+      if (entry.name === 'Backup' || entry.name === 'runtime' || entry.name === 'meta.json') continue
+      const from = path.join(backupDir, entry.name)
+      const to = path.join(root, entry.name)
+      if (exists(to)) removeTree(to)
+      copyTree(from, to)
+    }
+    this.recompute(essenceId)
+    return { ok: true, essenceId, restored: true, at: this.now() }
+  }
+
+  /** v3.0.9 导入：{meta, files:[{path,base64}]} → 新元主目录，可直接继续开发。 */
+  importBundle(doc, options = {}) {
+    const sourceMeta = asObject(doc?.meta)
+    const files = Array.isArray(doc?.files) ? doc.files : []
+    if (files.length === 0) throw new Error('bundle has no files')
+    const name = String(options?.name ?? sourceMeta.name ?? '导入的元主').trim() || '导入的元主'
+    const meta = this.create({
+      name,
+      tier: options?.tier ?? sourceMeta.tier,
+      parentId: options?.parentId ?? null,
+      skipQuota: options?.skipQuota === true,
+    })
+    const root = this.essenceRoot(meta.id)
+    for (const file of files) {
+      const rel = String(file?.path ?? '')
+      if (!rel || rel.includes('..') || path.isAbsolute(rel)) continue
+      // 包里的 meta.json / Backup 不能覆盖导入后新建的元数据。
+      if (rel === 'meta.json' || rel.startsWith('Backup/') || rel === 'Backup') continue
+      const target = path.join(root, rel)
+      ensureDir(path.dirname(target))
+      fs.writeFileSync(target, Buffer.from(String(file.base64 ?? ''), 'base64'))
+    }
+    this.recompute(meta.id)
+    return { ok: true, essence: this.getMeta(meta.id), files: files.length, sourceId: sourceMeta.id ?? null }
   }
 
   // ── 合并与物化 ──────────────────────────────────────────────────────────

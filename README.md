@@ -1,7 +1,7 @@
 [![CI](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml/badge.svg)](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE-CORE)
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
-[![npm](https://img.shields.io/badge/npm-dsh--fang-red.svg)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
+[![npm latest](https://img.shields.io/npm/v/@twinsearth/dsh-fang.svg?label=npm&color=red)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
 
 # 瓮城
 

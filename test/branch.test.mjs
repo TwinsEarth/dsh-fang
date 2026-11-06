@@ -6,13 +6,19 @@ import os from 'node:os'
 import path from 'node:path'
 import { acquireWriter, activateBranch, createBranch, createSession, setBranchStatus } from '../src/lib/branch.mjs'
 
+test('branch model: 物理分支记录子会话 sessionId', () => {
+  const s = createSession('s1')
+  const branch = createBranch(s, { branchId: 'exp-1', baseTurn: 3, sessionId: 'child-session-1' })
+  assert.equal(branch.sessionId, 'child-session-1')
+  assert.equal(branch.baseTurn, 3)
+})
+
 test('one session can hold independent branches', () => {
   const s = createSession('s1')
   createBranch(s, { branchId: 'b1' })
   createBranch(s, { branchId: 'b2', parentBranchId: 'b1' })
   assert.equal(s.branches.size, 3)
-  assert.equal(s.branches.get('b2').parentBranchId, 'b1')
-})
+  assert.equal(s.branches.get('b2').parentBranchId, 'b1')})
 
 test('active branch switch is a pointer move', () => {
   const s = createSession('s1')

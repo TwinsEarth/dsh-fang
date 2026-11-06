@@ -13,6 +13,7 @@ import zlib from 'node:zlib'
 import { makeCtx, makeWebServerStub, makeReq, makeRes, TEST_AUTH_TOKEN } from './helpers.mjs'
 import { SERVICE, FANG_VERSION } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
+import { BranchStore } from '../src/lib/branch-store.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
 const hasRemote = await import('../src/lib/remote.mjs').then(() => true).catch(() => false)
@@ -34,6 +35,8 @@ function makeFakeForker(overrides = {}) {
     },
     async spawn(args) {
       calls.spawn.push(args)
+      // 真实 forker 的 spawn 必须有 homeDir/profile：测试桩也照此拒绝，避免假绿。
+      if (!args.homeDir || !args.profile) return { ok: false, error: 'no-home-dir' }
       live.add(args.forkId)
       counter += 1
       const port = overrides.port ?? 18000 + counter
@@ -145,6 +148,11 @@ test('orchestrator: registers service; status exposes tasks, forks compat, comme
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
   assert.equal(st.tasks.max, 8)
+  // 显式 dataRoot 时不得自动跳到 FANG_HOME 默认目录（否则测试/独立部署会写进真实 D 盘）
+  assert.equal(st.layout.dataDir, dataRoot)
+  assert.equal(st.layout.essenceRoot, path.join(dataRoot, 'essences'))
+  assert.equal(st.layout.forkHomesDir, path.join(dataRoot, 'forks'))
+  assert.equal(st.layout.runtimeRoot, path.join(dataRoot, 'runtime'))
   assert.deepEqual(st.forks.list, [], 'v1 compat view')
   assert.equal(st.commercial.backup, false)
   assert.equal(st.services.forker, true)
@@ -378,6 +386,828 @@ test('orchestrator: promoteTask refuses low grade and non-sandbox routes', skipN
   } finally { await adapter.close() }
 })
 
+test('orchestrator: POST /fang/api/essence/capture 从母体 profile 生成元主', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-capture-'))
+  const motherProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-mother-'))
+  const previousProfileDir = process.env.DSH_PROFILE_DIR
+  delete process.env.DSH_PROFILE_DIR
+  // 母体模板必须“真的装了本 bundle”才会被 templateDir() 选中，否则测试会落到机器上的真实 profile。
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({
+    name: 'desktop',
+    private: true,
+    dsh: { profile: { bundles: ['@dsh/base', '@dsh/web-app'] } },
+    dependencies: { '@dsh/base': '^1.0.0' },
+  }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'),
+    '- insert:\n    - id: my-plugin\n      name: "@x/my-plugin"\n', 'utf8')
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      adapterTimeoutMs: 100,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const handler = webServer.find('POST', '/fang/api/essence/capture').handler
+    const res = makeRes()
+    await handler(makeReq({ name: '克隆元主' }, 'POST'), res)
+    const body = res.json()
+    assert.equal(res.statusCode, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.meta.name, '克隆元主')
+    assert.equal(body.captured.patchEntries, 1)
+    assert.equal(body.captured.bundles, 2)
+    assert.equal(body.captured.credentialsCopied, false)
+    assert.equal(body.status, 'ready')
+    // 未给名字时用 profile 名称兜底，而不是失败
+    const unnamed = makeRes()
+    await handler(makeReq({}, 'POST'), unnamed)
+    assert.equal(unnamed.statusCode, 200)
+    assert.match(String(unnamed.json()?.meta?.name), /元主$/)
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(motherProfile, { recursive: true, force: true })
+    if (previousProfileDir === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = previousProfileDir
+  }
+})
+
+test('orchestrator: GET /fang/api/connection 返回带进程 token 的地址', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-conn-'))
+  const ctx = makeCtx({
+    services: {
+      [SERVICE.forker]: makeFakeForker(),
+      webServer,
+      webApp: { getAdvertisedUrl: () => 'http://127.0.0.1:9999' },
+      connection: { authenticatedUrl: (base) => `${base}/?token=host-process-token` },
+    },
+  })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const handler = webServer.find('GET', '/fang/api/connection').handler
+    const res = makeRes()
+    await handler(makeReq(undefined, 'GET'), res)
+    const body = res.json()
+    assert.equal(res.statusCode, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.advertisedUrl, 'http://127.0.0.1:9999')
+    assert.equal(body.url, 'http://127.0.0.1:9999/?token=host-process-token')
+    assert.equal(body.tokenized, true)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: clone-profile → essence stale → sync 全链路', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-upgrade-'))
+  const motherProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-mother-up-'))
+  const previousProfileDir = process.env.DSH_PROFILE_DIR
+  delete process.env.DSH_PROFILE_DIR
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({
+    name: 'desktop', version: '9.9.9', dependencies: {},
+  }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'), '- id: ui-theme\n  config: {}\n', 'utf8')
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      adapterTimeoutMs: 100,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const clone = makeRes()
+    await webServer.find('POST', '/fang/api/mirror/clone-profile').handler(makeReq({}, 'POST'), clone)
+    assert.equal(clone.statusCode, 200)
+    assert.equal(clone.json().ok, true)
+    assert.equal(clone.json().version, '9.9.9')
+    assert.ok(clone.json().files.includes('package.json'))
+    const mirrorProfile = path.join(dataRoot, 'mirror', 'active', 'profile')
+    assert.equal(fs.existsSync(path.join(mirrorProfile, 'cordis.patch.yml')), true)
+
+    const list = makeRes()
+    await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), list)
+    const before = list.json()
+    assert.ok(String(before.mirrorFingerprint).length > 0)
+    const official = before.essences.find((item) => item.id === 'essence-official-dev')
+    assert.equal(official.stale, true, '镜像变化后官方元主必须标记为待同步')
+
+    const sync = makeRes()
+    await webServer.find('POST', '/fang/api/essence/sync').handler(makeReq({}, 'POST'), sync)
+    assert.equal(sync.statusCode, 200)
+    assert.equal(sync.json().ok, true)
+    assert.equal(sync.json().mode, 'all')
+
+    const list2 = makeRes()
+    await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), list2)
+    assert.equal(list2.json().staleCount, 0, '同步后不应再有 stale 元主')
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(motherProfile, { recursive: true, force: true })
+    if (previousProfileDir === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = previousProfileDir
+  }
+})
+
+test('orchestrator: GET /essence/detail 返回设置/插件/运行态摘要（无凭据）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-detail-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '详情元主' })
+    const handler = webServer.find('GET', '/fang/api/essence/detail').handler
+    const req = makeReq(undefined, 'GET')
+    req.url = `/fang/api/essence/detail?essenceId=${essence.id}`
+    const res = makeRes()
+    await handler(req, res)
+    const body = res.json()
+    assert.equal(res.statusCode, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.meta.id, essence.id)
+    assert.ok(Array.isArray(body.overlay.patchEntries))
+    assert.ok(Array.isArray(body.overlay.settings))
+    assert.equal(typeof body.backup, 'boolean')
+    assert.equal(JSON.stringify(body).includes('credentials'), false, '详情不得泄露凭据')
+
+    const badReq = makeReq(undefined, 'GET')
+    badReq.url = '/fang/api/essence/detail?essenceId=essence-nope'
+    const badRes = makeRes()
+    await handler(badReq, badRes)
+    assert.equal(badRes.statusCode, 400)
+    assert.equal(badRes.json().error, 'detail-failed')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 空白母体与自动同步间隔偏好', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-blank-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  const call = async (routePath, body) => {
+    const res = makeRes()
+    await webServer.find('POST', routePath).handler(makeReq(body, 'POST'), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const blank = await call('/fang/api/mirror/blank', {})
+    assert.equal(blank.statusCode, 200, JSON.stringify(blank.json()))
+    assert.equal(blank.json().version, 'blank')
+    assert.equal(fs.existsSync(path.join(dataRoot, 'mirror', 'active', 'profile')), true)
+
+    const prefs = await call('/fang/api/mirror/preferences/set', { syncIntervalHours: '6' })
+    assert.equal(prefs.statusCode, 200)
+    assert.equal(prefs.json().syncIntervalHours, '6')
+
+    const status = ctx.get(SERVICE.mirror).status()
+    assert.equal(status.preferences.syncIntervalHours, '6')
+    assert.equal(status.preferences.backupIntervalHours, undefined)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: createTask({essenceId}) 用原身 merged 作模板，归档原身拒绝派生', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-essfork-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '分身来源原身', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+    const essenceRoot = path.join(dataRoot, 'essences', essence.id)
+    const overlayFile = path.join(essenceRoot, 'overlay', 'cordis.patch.yml')
+    const beforeStat = fs.statSync(overlayFile)
+    const beforeBytes = fs.readFileSync(overlayFile, 'utf8')
+
+    const out = await svc.createTask({ title: '从原身派生', essenceId: essence.id })
+    assert.equal(out.ok, true)
+    const provision = forker.calls.provision.at(-1)
+    assert.match(String(provision.profileTemplate), /essences[\\/]essence-.*[\\/]merged[\\/]profile$/s)
+    assert.equal(provision.cleanTemplate, false, '从原身派生必须关闭 clean template，配置才真的来自原身')
+    assert.match(String(provision.nodeModulesSource ?? ''), /node_modules$/)
+    assert.equal(fs.readFileSync(overlayFile, 'utf8'), beforeBytes, '派生不得改写原身 overlay')
+    assert.equal(fs.statSync(overlayFile).mtimeMs, beforeStat.mtimeMs, '派生不得触碰原身文件 mtime')
+
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    assert.equal(task.essenceId, essence.id, '任务必须记录来源原身')
+
+    mirror.archiveEssence(essence.id, true)
+    const archived = await svc.createTask({ title: '冻结原身派生', essenceId: essence.id })
+    assert.equal(archived.ok, false)
+    assert.equal(archived.error, 'essence-archived')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 分身配置可重置回来源原身（生产数据不动）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-reset-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '重置来源', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+    const out = await svc.createTask({ title: '可重置分身', essenceId: essence.id })
+    assert.equal(out.ok, true)
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    const profileDir = path.join(task.homeDir, 'profiles', task.profile)
+    fs.writeFileSync(path.join(profileDir, 'package.json'), '{"name":"tampered"}', 'utf8')
+    fs.mkdirSync(path.join(task.homeDir, 'sessions', 'ws', 'session-x'), { recursive: true })
+    fs.writeFileSync(path.join(task.homeDir, 'sessions', 'ws', 'session-x', 'session.v4.jsonl.zstd'), 'prod', 'utf8')
+
+    const reset = await svc.resetForkConfig(task.taskId)
+    assert.equal(reset.ok, true)
+    const pkgText = fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8')
+    assert.notEqual(JSON.parse(pkgText).name, 'tampered', '配置必须回到原身版本')
+    assert.equal(fs.existsSync(path.join(task.homeDir, 'sessions', 'ws', 'session-x', 'session.v4.jsonl.zstd')), true, '生产数据不得被重置清掉')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 元主进行中会话配额（默认 10，超出拒绝再开实例）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-squota-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '配额元主', tier: 'free' })
+    const sessionsHome = path.join(dataRoot, 'runtime', essence.id, 'home', 'sessions', '--ws--')
+    for (let index = 0; index < 10; index += 1) {
+      fs.mkdirSync(path.join(sessionsHome, `session-${String(index).padStart(8, '0')}-0000-4000-8000-000000000000`), { recursive: true })
+    }
+    const listed = mirror.listEssences().essences.find((item) => item.id === essence.id)
+    assert.equal(listed.sessions.used, 10)
+    assert.equal(listed.sessions.limit, 10)
+    assert.equal(listed.sessions.over, true)
+    assert.equal(listed.quota.sessions.used, 10, '设计稿字段 quota.sessions 必须存在')
+    assert.equal(listed.quota.sessions.limit, 10)
+    await assert.rejects(() => mirror.startEssenceRuntime(essence.id), /session-quota-exceeded/)
+    const detail = mirror.essenceDetail(essence.id)
+    assert.equal(detail.sessions.used, 10)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 强制单会话（运行中拒绝；停止态隔离多余会话）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-single-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const out = await svc.createTask({ title: '单会话分身' })
+    assert.equal(out.ok, true)
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    const sessionsRoot = path.join(task.homeDir, 'sessions', '--ws--')
+    fs.mkdirSync(path.join(sessionsRoot, '11111111-1111-4111-8111-111111111111'), { recursive: true })
+    fs.mkdirSync(path.join(sessionsRoot, '22222222-2222-4222-8222-222222222222'), { recursive: true })
+
+    const runningGuard = svc.enforceSingleSession(task.taskId)
+    assert.equal(runningGuard.ok, false)
+    assert.equal(runningGuard.error, 'task-running')
+
+    await svc.archiveTask(task.taskId)
+    const stoppedGuard = svc.enforceSingleSession(task.taskId)
+    assert.equal(stoppedGuard.ok, true)
+    assert.ok(stoppedGuard.quarantined.length >= 1)
+    const remaining = fs.readdirSync(sessionsRoot).filter((name) => fs.statSync(path.join(sessionsRoot, name)).isDirectory())
+    assert.equal(remaining.length, 1, '只允许保留一个会话')
+    assert.equal(fs.existsSync(path.join(task.homeDir, 'quarantine-sessions')), true)
+
+    // #7：同一分身、同一会话可派生多个分支
+    const store = new BranchStore(dataRoot)
+    assert.equal(store.load(task.taskId).sessionId, stoppedGuard.kept, '分支库必须绑定到真实会话')
+    store.create(task.taskId, { branchId: 'exp-1' })
+    store.create(task.taskId, { branchId: 'exp-2' })
+    const listed = store.list(task.taskId)
+    assert.equal(listed.branches.length, 3, 'main + 两条新分支')
+    store.activate(task.taskId, 'exp-2')
+    assert.equal(store.list(task.taskId).activeBranchId, 'exp-2')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 复制元主时带走沙盒会话（运行态 sessions）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-copysess-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const source = mirror.createEssence({ name: '带会话的源元主' })
+    const srcForkId = source.id
+    const srcSessionFile = path.join(dataRoot, 'runtime', srcForkId, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')
+    fs.mkdirSync(path.dirname(srcSessionFile), { recursive: true })
+    fs.writeFileSync(srcSessionFile, 'conversation', 'utf8')
+
+    const copied = mirror.copyEssence(source.id, '带会话的副本')
+    assert.notEqual(copied.id, source.id)
+    assert.ok(copied.copy.sessionsCopied >= 1, '沙盒会话必须被复制')
+    const dstForkId = copied.id
+    assert.equal(
+      fs.existsSync(path.join(dataRoot, 'runtime', dstForkId, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')),
+      true,
+      '副本的运行态 sessions 必须可见',
+    )
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 删除原身不删会话；分身保留且不能再派生；母体不可删', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-del-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    const req = makeReq(body, method)
+    req.url = routePath
+    await webServer.find(method, routePath.split('?')[0]).handler(req, res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '将被删除的原身' })
+    const task = await svc.createTask({ title: '原身的旧分身', essenceId: essence.id })
+    assert.equal(task.ok, true)
+    // 旧布局运行态会话在 essences/<id>/runtime/home 下
+    const legacySession = path.join(dataRoot, 'essences', essence.id, 'runtime', 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')
+    fs.mkdirSync(path.dirname(legacySession), { recursive: true })
+    fs.writeFileSync(legacySession, 'conversation', 'utf8')
+
+    mirror.archiveEssence(essence.id, true)
+    const deleted = mirror.deleteEssence(essence.id)
+    assert.equal(deleted.removed, true)
+    assert.equal(fs.existsSync(path.join(dataRoot, 'essences', essence.id)), false, '配置/插件目录删除')
+    assert.equal(
+      fs.existsSync(path.join(dataRoot, 'runtime', essence.id, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')),
+      true,
+      '运行态会话必须保留',
+    )
+
+    const blocked = await svc.createTask({ title: '从已删原身派生', essenceId: essence.id })
+    assert.equal(blocked.ok, false)
+    assert.equal(blocked.error, 'essence-deleted')
+
+    const survivor = svc.listTasks().find((item) => item.taskId === task.taskId)
+    assert.ok(survivor, '已派生分身不受影响')
+    assert.equal(survivor.essenceDeleted, true, '分身必须标记“原身已删除”')
+
+    const mother = await call('POST', '/fang/api/mother/delete', {})
+    assert.equal(mother.statusCode, 403)
+    assert.equal(mother.json().error, 'mother-immutable')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归：no-home-dir）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-guard-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '运行态回归' })
+    const started = await mirror.startEssenceRuntime(essence.id)
+    assert.equal(started.ok, true)
+    const lastSpawn = forker.calls.spawn.at(-1)
+    assert.ok(lastSpawn, '必须调用 spawn')
+    assert.ok(String(lastSpawn.homeDir ?? '').length > 0, 'spawn 必须显式带 homeDir')
+    assert.equal(lastSpawn.profile, 'essence-runtime')
+    assert.equal(started.sandboxHome, lastSpawn.homeDir)
+    const running = mirror.listEssences().essences.find((item) => item.id === essence.id)
+    assert.equal(running.runtime.running, true, '运行中必须暴露 runtime.running=true（用于显示「停止」）')
+    mirror.stopEssenceRuntime(essence.id)
+    const stopped = mirror.listEssences().essences.find((item) => item.id === essence.id)
+    assert.equal(stopped.runtime.running, false, '停止后运行态必须回到 false（用于显示「打开」）')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 方案B 分支会话不被单会话守卫隔离；激活切换 active 分支', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-branch-b-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const out = await svc.createTask({ title: '多分支分身' })
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    const sessionsRoot = path.join(task.homeDir, 'sessions', '--ws--')
+    fs.mkdirSync(path.join(sessionsRoot, '11111111-1111-4111-8111-111111111111'), { recursive: true })
+    fs.mkdirSync(path.join(sessionsRoot, '22222222-2222-4222-8222-222222222222'), { recursive: true })
+
+    const store = new BranchStore(dataRoot)
+    store.bindSession(task.taskId, '11111111-1111-4111-8111-111111111111')
+    store.create(task.taskId, { branchId: 'b1', sessionId: '22222222-2222-4222-8222-222222222222' })
+
+    await svc.archiveTask(task.taskId)
+    const guard = svc.enforceSingleSession(task.taskId)
+    assert.equal(guard.ok, true)
+    assert.equal(guard.quarantined.length, 0, '登记过的分支会话不得被隔离')
+
+    const res = makeRes()
+    await webServer.find('POST', '/fang/api/tasks/branches/activate').handler(makeReq({ taskId: task.taskId, branchId: 'b1' }, 'POST'), res)
+    assert.equal(res.statusCode, 200)
+    const view = svc.listTasks().find((item) => item.taskId === task.taskId)
+    assert.equal(view.branch.activeBranchId, 'b1')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-default-'))
+  const pluginManager = {
+    async listPlugins() {
+      return [
+        { id: 'p-2xray', name: '@twinsearth/dsh-2xray' },
+        { id: 'p-market', name: 'dshmarket' },
+      ]
+    },
+  }
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer, pluginManager } })
+  const motherProfile = path.join(dataRoot, 'mother-profile')
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({ name: 'mother-probe', private: true }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'), [
+    '- id: ui-settings',
+    '  name: "@deepseek-ai/dsh-client-ui-settings"',
+    '  config:',
+    '    enabled: true',
+    '',
+  ].join('\n'), 'utf8')
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const preset = await mirror.defaultPreset()
+    assert.equal(preset.plan.groups.length, 2)
+    assert.equal(preset.plan.groups[0].plugins.find((item) => item.spec === '@twinsearth/dsh-2xray').installed, true)
+    assert.equal(preset.plan.groups[1].plugins.find((item) => item.spec === 'dshmarket').installed, true)
+
+    const dry = await mirror.ensureDefaultEssence({ apply: false })
+    assert.equal(dry.dryRun, true)
+    const made = await mirror.ensureDefaultEssence({ apply: true })
+    assert.equal(made.created, true)
+    const meta = mirror.listEssences().essences.find((item) => item.id === made.essenceId)
+    assert.equal(meta.name, '默认元宝')
+    assert.equal(made.mode, 'copy-local', '默认走“复制本机插件&设置”，不安装/不改母体')
+    const marker = JSON.parse(fs.readFileSync(path.join(dataRoot, 'essences', made.essenceId, 'default-preset.json'), 'utf8'))
+    assert.equal(marker.mode, 'copy-local')
+    assert.equal(marker.source, motherProfile)
+    const overlay = fs.readFileSync(path.join(dataRoot, 'essences', made.essenceId, 'overlay', 'cordis.patch.yml'), 'utf8')
+    assert.match(overlay, /ui-settings/, '本机插件/设置状态必须被复制进默认元宝')
+    const credDir = path.join(dataRoot, 'essences', made.essenceId, 'overlay', 'credentials')
+    const credFiles = fs.existsSync(credDir) ? fs.readdirSync(credDir).length : 0
+    assert.equal(credFiles, 0, '不得复制任何凭据/Token 文件（允许空目录）')
+    assert.equal(fs.existsSync(path.join(dataRoot, 'essences', made.essenceId, 'runtime')), false, '不得复制运行数据/会话')
+
+    const task = await svc.createTask({ title: '小白快速分身' })
+    assert.equal(task.ok, true)
+    const provision = forker.calls.provision.at(-1)
+    assert.match(String(provision.profileTemplate), /merged[\\/]profile$/s, '快速派生必须用默认元宝作模板')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 元主栏“派生”= essenceId 模板 + 复制一个现有会话进分身', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-derive-'))
+  const sessionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-derive-src-'))
+  const workspaceKey = '--E-GPT--'
+  const sessionId = '44444444-4444-4444-8444-444444444444'
+  fs.mkdirSync(path.join(sessionsRoot, workspaceKey, sessionId), { recursive: true })
+  fs.writeFileSync(path.join(sessionsRoot, workspaceKey, sessionId, 'session.v4.jsonl.zstd'), 'session', 'utf8')
+  const catalog = {
+    listSessions: () => ({
+      sessionsRoot,
+      sessions: [{ sessionId, workspaceKey, archived: false, title: '要复制的会话' }],
+    }),
+  }
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer, fangSessionCatalog: catalog } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '派生模板元主' })
+    const out = await svc.createTask({ title: '派生带会话', essenceId: essence.id, importSession: { sessionId } })
+    assert.equal(out.ok, true)
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    assert.equal(task.essenceId, essence.id)
+    assert.equal(task.importedSession?.ok, true)
+    assert.equal(
+      fs.existsSync(path.join(task.homeDir, 'sessions', workspaceKey, sessionId, 'session.v4.jsonl.zstd')),
+      true,
+      '选中的会话必须被复制进分身沙箱',
+    )
+    const provision = forker.calls.provision.at(-1)
+    assert.match(String(provision.profileTemplate), /merged[\\/]profile$/s)
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(sessionsRoot, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator: 启动时加载已有 tasks.json 不触发 scanForkSessions TDZ', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-load-'))
+  const seedTask = {
+    forkId: 'task_seed_loaded', taskId: 'task_seed_loaded', title: '旧任务', profile: 'fang-seed',
+    homeDir: path.join(dataRoot, 'forks', 'task_seed_loaded'), status: 'archived',
+    createdAt: Date.now(), adapter: { ok: false, error: 'archived' },
+  }
+  fs.writeFileSync(path.join(dataRoot, 'tasks.json'), JSON.stringify([seedTask]), 'utf8')
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    assert.doesNotThrow(() => orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: false },
+      authToken: TEST_AUTH_TOKEN,
+    }))
+    const svc = ctx.get(SERVICE.orchestrator)
+    const list = svc.listTasks()
+    assert.equal(list.length, 1)
+    assert.equal(list[0].taskId, 'task_seed_loaded')
+    assert.deepEqual(list[0].sessions, { count: 0, violation: false })
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    const handler = webServer.find(method, routePath).handler
+    await handler(makeReq(body, method), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const created = mirror.createEssence({ name: '路由测试元主' })
+    const essenceId = created.id
+
+    // 1) backup：生成 essences/<id>/Backup，重复调用仍只有一份
+    const first = await call('POST', '/fang/api/essence/backup', { essenceId })
+    assert.equal(first.statusCode, 200)
+    assert.equal(first.json().ok, true)
+    const backupDir = path.join(dataRoot, 'essences', essenceId, 'Backup')
+    assert.equal(fs.existsSync(backupDir), true)
+    await call('POST', '/fang/api/essence/backup', { essenceId })
+    const backups = fs.readdirSync(path.join(dataRoot, 'essences', essenceId)).filter((name) => name === 'Backup')
+    assert.equal(backups.length, 1, '只保留一份备份')
+
+    // 2) restore：有备份 → 200 restored
+    const restored = await call('POST', '/fang/api/essence/restore', { essenceId })
+    assert.equal(restored.statusCode, 200)
+    assert.equal(restored.json().ok, true)
+    assert.equal(restored.json().restored, true)
+
+    // 2b) restore：没有备份的元主 → 400 backup-failed detail backup-missing
+    const noBackup = mirror.createEssence({ name: '无备份元主' })
+    const missing = await call('POST', '/fang/api/essence/restore', { essenceId: noBackup.id })
+    assert.equal(missing.statusCode, 400)
+    assert.equal(missing.json().error, 'restore-failed')
+    assert.match(String(missing.json().detail), /backup-missing/)
+
+    // 3) import：整包 → 新元主
+    const bundle = mirror.downloadEssence(essenceId, { full: true })
+    assert.equal(bundle.full, true)
+    const imported = await call('POST', '/fang/api/essence/import', { bundle })
+    assert.equal(imported.statusCode, 200)
+    const importedBody = imported.json()
+    assert.equal(importedBody.ok, true)
+    assert.notEqual(importedBody.essence.id, essenceId)
+    assert.ok(importedBody.files > 0)
+
+    // 3b) import：空包 → 400 import-failed
+    const empty = await call('POST', '/fang/api/essence/import', { bundle: { files: [] } })
+    assert.equal(empty.statusCode, 400)
+    assert.equal(empty.json().error, 'import-failed')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档拒绝）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-'))
+  const sessionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-src-'))
+  const workspaceKey = '--E-GPT--'
+  // 母体工作区索引（供导入合并使用），测试期间把 DSH_HOME 指到临时目录
+  const previousDshHome = process.env.DSH_HOME
+  const dshHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-home-'))
+  fs.mkdirSync(path.join(dshHome, 'storages'), { recursive: true })
+  fs.writeFileSync(path.join(dshHome, 'storages', 'workspace.json'), JSON.stringify({
+    unit: { name: 'workspace', version: 2 },
+    global: { initialized: true, defaultWorkspaceId: 'ws-1', workspaceIds: ['ws-1'], archivedSessionIds: [], pinnedSessionIds: [] },
+    tables: { workspaces: { 'ws-1': { path: 'E:\\GPT', title: 'GPT 工作区', sessionIds: ['11111111-1111-4111-8111-111111111111'] } } },
+  }), 'utf8')
+  process.env.DSH_HOME = dshHome
+  const liveId = '11111111-1111-4111-8111-111111111111'
+  const archivedId = '22222222-2222-4222-8222-222222222222'
+  for (const id of [liveId, archivedId]) {
+    fs.mkdirSync(path.join(sessionsRoot, workspaceKey, id), { recursive: true })
+    fs.writeFileSync(path.join(sessionsRoot, workspaceKey, id, 'session.v4.jsonl.zstd'), 'x')
+  }
+  const catalog = {
+    listSessions: () => ({
+      sessionsRoot,
+      sessions: [
+        { sessionId: liveId, workspaceKey, archived: false, title: '进行中会话' },
+        { sessionId: archivedId, workspaceKey, archived: true, title: '归档会话' },
+        { sessionId: '33333333-3333-4333-8333-333333333333', workspaceKey: '..', archived: false, title: '越界会话' },
+      ],
+    }),
+  }
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer, fangSessionCatalog: catalog } })
+  const call = async (body) => {
+    const res = makeRes()
+    await webServer.find('POST', '/fang/api/essence/runtime').handler(makeReq(body, 'POST'), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '会话导入元主' })
+
+    const ok = await call({ essenceId: essence.id, sessionIds: [liveId] })
+    assert.equal(ok.statusCode, 200)
+    assert.equal(ok.json().importedSessions.length, 1)
+    const okBody = ok.json()
+    assert.equal(
+      fs.existsSync(path.join(okBody.sandboxHome, 'sessions', workspaceKey, liveId, 'session.v4.jsonl.zstd')),
+      true,
+      '会话目录必须复制进隔离 home',
+    )
+    assert.equal(
+      okBody.sandboxHome.includes(`${path.sep}essences${path.sep}`),
+      false,
+      '运行态 home 不得落在原身文件夹内',
+    )
+    // 工作区索引合并：分组应显示工作区名，而不是 --E-GPT-- key
+    const importedIndex = JSON.parse(fs.readFileSync(path.join(okBody.sandboxHome, 'storages', 'workspace.json'), 'utf8'))
+    const workspaceRecord = importedIndex.tables.workspaces['ws-1']
+    assert.equal(workspaceRecord.path, 'E:\\GPT')
+    assert.equal(workspaceRecord.title, 'GPT 工作区')
+    assert.ok(workspaceRecord.sessionIds.includes('11111111-1111-4111-8111-111111111111'))
+
+    const archived = await call({ essenceId: essence.id, sessionIds: [archivedId] })
+    assert.equal(archived.statusCode, 400)
+    assert.match(String(archived.json().detail), /archived-session-not-importable/)
+
+    const escaped = await call({ essenceId: essence.id, sessionIds: ['33333333-3333-4333-8333-333333333333'] })
+    assert.equal(escaped.statusCode, 400)
+    assert.match(String(escaped.json().detail), /invalid-workspace-key/)
+
+    const tooMany = await call({
+      essenceId: essence.id,
+      sessionIds: ['a', 'b', 'c', 'd', 'e', 'f'],
+    })
+    assert.equal(tooMany.statusCode, 400)
+    assert.match(String(tooMany.json().detail), /too-many-sessions/)
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(sessionsRoot, { recursive: true, force: true })
+    fs.rmSync(dshHome, { recursive: true, force: true })
+    if (previousDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousDshHome
+  }
+})
+
+test('orchestrator: 元主运行态路由对未知元主返回 400（不假装启动）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const handler = webServer.find('POST', '/fang/api/essence/runtime').handler
+    const res = makeRes()
+    await handler(makeReq({ action: 'start', essenceId: 'essence-does-not-exist' }, 'POST'), res)
+    assert.equal(res.statusCode, 400)
+    assert.equal(res.json().error, 'runtime-failed')
+    assert.match(String(res.json().detail), /unknown-essence/)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders v2', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-http2-'))
@@ -401,7 +1231,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/essence/list', '/fang/api/auth-token', '/fang/api/tasks/open-url',
     '/fang/api/essence/create', '/fang/api/essence/rename', '/fang/api/essence/archive',
     '/fang/api/essence/delete', '/fang/api/essence/copy', '/fang/api/essence/default',
-    '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
+    '/fang/api/essence/capture', '/fang/api/essence/sync', '/fang/api/essence/runtime', '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
     '/fang/api/tasks/download',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)

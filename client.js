@@ -117,6 +117,7 @@ window.__ModuleLoader__.load({
       'derive-failed': '派生请求失败。',
       'stop-failed': '分身进程未停止，归档没有生效；任务仍保留。',
       'derived-session-missing': '会话已不在目录中（可能刚被归档），请刷新。',
+      'capture-failed': '从母体生成元主失败：母体 profile 不可读或补丁解析失败（详情见下方）。',
     }
 
     // ── 通用工具 ──────────────────────────────────────────────────────────
@@ -185,6 +186,20 @@ window.__ModuleLoader__.load({
         if (typeof window === 'undefined' || !window.localStorage) return
         window.localStorage.setItem(key, value ? '1' : '0')
       } catch { /* 隐私模式：偏好只影响本次会话 */ }
+    }
+    function readNumberPref(key, fallback) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return fallback
+        const raw = window.localStorage.getItem(key)
+        const n = Number(raw)
+        return raw !== null && Number.isFinite(n) ? n : fallback
+      } catch { return fallback }
+    }
+    function writeNumberPref(key, value) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return
+        window.localStorage.setItem(key, String(value))
+      } catch { /* 隐私模式 */ }
     }
 
     // ── 标题降级：绝不把工作区名当会话标题 ────────────────────────────────
@@ -434,14 +449,27 @@ window.__ModuleLoader__.load({
       } catch { /* ignore */ }
       return ''
     }
-    function openMotherPortal() {
+    async function openMotherPortal() {
+      // 母体 Web 就是 DSH 客户端本身。Electron 壳优先把 DSH 桌面窗口置前，
+      // 而不是打开没有 token 的裸 HTTP URL（那会 401）。
+      if (window.fangShell?.focusMother) {
+        try {
+          const result = await window.fangShell.focusMother()
+          if (result?.ok) return
+        } catch { /* fall through */ }
+      }
+      const token = new URLSearchParams(location.search).get('token') || ''
       const origin = resolveMotherOrigin()
-      const url = origin ? `${origin}/fang/panel` : '/fang/panel'
+      if (!window.fangShell && token && origin) {
+        try {
+          const win = window.open(`${origin}/?token=${encodeURIComponent(token)}`, '_blank', 'noopener')
+          if (win) return
+        } catch { /* popup blocked */ }
+      }
+      // Web 端：母体 Web 就是当前 DSH 客户端，切回瓮城控制台视图即可。
       try {
-        const win = window.open(url, '_blank', 'noopener')
-        if (win) return
-      } catch { /* 弹窗被拦 → 同页打开 */ }
-      try { window.location.assign(url) } catch { /* ignore */ }
+        window.dispatchEvent(new CustomEvent('fang:mother-portal'))
+      } catch { /* ignore */ }
     }
 
     // ── DOM 构造器 h()：本文件唯一的视图原语 ──────────────────────────────
@@ -640,8 +668,14 @@ window.__ModuleLoader__.load({
 .chip--neutral{color:var(--f-text-3);background:var(--f-surface-2);border-color:var(--f-border)}
 
 /* layout */
-.fang-body{display:grid;grid-template-columns:minmax(300px,3fr) minmax(0,7fr);gap:16px;align-items:start;min-height:0;flex:1 1 auto}
-@media (max-width:1100px){.fang-body{grid-template-columns:1fr}}
+.fang-body{position:relative;display:grid;grid-template-columns:minmax(320px,50fr) minmax(0,50fr);gap:16px;align-items:start;min-height:0;flex:1 1 auto}
+.fang-body.is-resizing{cursor:col-resize;user-select:none}
+.fang-body.is-resizing *{user-select:none}
+.fang-split-handle{position:absolute;top:0;bottom:0;left:50%;width:10px;transform:translateX(-50%);cursor:col-resize;z-index:6;border-radius:6px;background:transparent;touch-action:none}
+.fang-split-handle::after{content:"";position:absolute;top:50%;left:50%;width:3px;height:46px;transform:translate(-50%,-50%);border-radius:3px;background:var(--f-border-strong,var(--f-border));opacity:.55;transition:opacity .15s,background .15s}
+.fang-split-handle:hover::after,.fang-split-handle:focus-visible::after,.fang-body.is-resizing .fang-split-handle::after{opacity:1;background:var(--f-blue,#3b82f6)}
+.fang-split-handle:focus-visible{outline:2px solid var(--f-blue,#3b82f6);outline-offset:2px}
+@media (max-width:1100px){.fang-body{grid-template-columns:1fr}.fang-split-handle{display:none}}
 .panel{background:var(--f-surface);border:1px solid var(--f-border);border-radius:var(--f-radius-panel);
   box-shadow:var(--f-shadow-card);display:flex;flex-direction:column;min-height:0;overflow:hidden;
   max-height:calc(100vh - 132px)}
@@ -909,8 +943,8 @@ window.__ModuleLoader__.load({
   .section-title{min-height:34px}
 }
 .btn--sm{min-height:34px}
-.expand-btn{width:34px;height:34px}
-.section-title{min-height:34px}
+.expand-btn{width:34px;height:34px;min-width:34px}
+.section-title{min-height:34px;min-width:34px}
 .fork-actions .btn,.fork-actions .text-action{min-height:34px}
 @media (prefers-reduced-motion:reduce){
   .fang-console *,.fang-console *::before,.fang-console *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
@@ -1064,7 +1098,21 @@ window.__ModuleLoader__.load({
         expanded: new Set(),
         collapsed: new Set(['temporary']),
         collapsedTasks: new Set(),
+        // 主工作区比例：元宝工作区 / 分身工作区，默认 50:50，可拖动中间手柄调整。
+        splitRatio: (() => {
+          const n = readNumberPref('fang.panel.split', 0.5)
+          return Math.min(0.75, Math.max(0.25, Number.isFinite(n) ? n : 0.5))
+        })(),
         showTemporary: readPref('fang.panel.showTemporary', true),
+        // 母体会话只读投影：默认只看最近 20 条，可切 50 / 全部（偏好存本机）。
+        sessionWindow: (() => {
+          try {
+            const raw = window?.localStorage?.getItem('fang.panel.sessionWindow')
+            if (raw === 'all') return 'all'
+            const size = Number(raw)
+            return Number.isFinite(size) && size >= 5 ? Math.min(200, Math.floor(size)) : 20
+          } catch { return 20 }
+        })(),
         view: 'console',
         busy: '',
         refreshing: false,
@@ -1125,6 +1173,13 @@ window.__ModuleLoader__.load({
         if (alive) render(true)
       }
       const setNotice = (notice) => { S.notice = notice; render() }
+      const onFangNotice = (event) => notify('warn', String(event?.detail || ''))
+      window.addEventListener('fang:notice', onFangNotice)
+      const onMotherPortal = () => {
+        S.view = 'console'
+        setNotice({ tone: 'ok', title: '母体 Web', message: '母体 Web 就是当前 DSH 客户端，已切回瓮城控制台视图。' })
+      }
+      window.addEventListener('fang:mother-portal', onMotherPortal)
 
       // 渲染：整棵视图重建 + 焦点/滚动/光标恢复；编辑中挂起后台刷新，避免输入被重建。
       function render(force = false) {
@@ -1217,7 +1272,7 @@ window.__ModuleLoader__.load({
           const [statusRes, tasksRes, sessionsRes, essenceRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
-            api('/fang/api/sessions').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? 1000 : S.sessionWindow}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/essence/list').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
           ])
           if (!alive || seq !== refreshSeq) return
@@ -1284,6 +1339,13 @@ window.__ModuleLoader__.load({
       // ── 动作 ────────────────────────────────────────────────────────────
       const isBusy = () => S.busy !== ''
 
+      function setSessionWindow(next) {
+        const normalized = next === 'all' ? 'all' : Math.max(5, Math.min(200, Math.floor(Number(next) || 20)))
+        S.sessionWindow = normalized
+        try { window.localStorage?.setItem('fang.panel.sessionWindow', String(normalized)) } catch { /* ignore */ }
+        void refresh({ manual: true })
+      }
+
       async function deriveTask(payload) {
         if (deriveStore.inflight) return
         deriveStore.lastGesture = Date.now()
@@ -1295,7 +1357,7 @@ window.__ModuleLoader__.load({
           setNotice({
             tone: 'ok', title: payload?.sessionId ? '已派发：从会话继续' : '已派生新分身',
             message: `${result.taskId}${result.port ? ' · 端口 ' + result.port : ''}${result.adapter?.ok ? ' · 适配器已就绪' : ' · 适配器尚未就绪，右栏会标出健康状态'}`,
-            actions: result.url ? [{ label: '打开分身', href: result.url }] : [],
+            actions: result.taskId ? [{ label: '打开分身', onClick: () => void openTask({ taskId: result.taskId }) }] : [],
           })
           await refresh()
         } else if (result) {
@@ -1378,7 +1440,7 @@ window.__ModuleLoader__.load({
             const body = result.body
             if (result.status === 200 && body?.ok) {
               S.view = 'console'
-              setNotice({ tone: 'ok', title: '已还原存档', message: `${task.title || task.taskId} 已重新启动 · 端口 ${body.port ?? '—'}`, actions: body.url ? [{ label: '打开分身', href: body.url }] : [] })
+              setNotice({ tone: 'ok', title: '已还原存档', message: `${task.title || task.taskId} 已重新启动 · 端口 ${body.port ?? '—'}`, actions: [{ label: '打开分身', onClick: () => void openTask({ taskId: task.taskId }) }] })
             } else {
               const code = body?.error || (result.status ? 'http-' + result.status : 'network')
               setNotice({ tone: 'bad', title: '还原失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
@@ -1433,16 +1495,557 @@ window.__ModuleLoader__.load({
         })
       }
 
+      function captureEssence() {
+        if (isBusy()) return
+        const profile = String(S.status?.data?.mother?.profile || 'desktop')
+        askPrompt({
+          title: '从母体生成元主',
+          label: '新元主名称',
+          value: `${profile} 元主`,
+          confirmLabel: '生成',
+          hint: '复制母体 profile 的可写层：插件补丁、依赖与设置；不复制凭据、会话和 node_modules。生成后可在元主区设为默认派生基底。',
+          onConfirm: async (name) => {
+            const trimmed = String(name ?? '').trim()
+            if (!trimmed) { S.modal.error = '请填写元主名称'; render(true); return false }
+            S.busy = 'essence:capture'
+            const result = await api('/fang/api/essence/capture', { method: 'POST', body: JSON.stringify({ name: trimmed }) })
+            S.busy = ''
+            const body = result.body
+            if (result.status === 200 && body?.ok) {
+              const status = String(body.status ?? '')
+              const conflicts = Array.isArray(body.conflicts) ? body.conflicts.length : 0
+              const captured = body.captured ?? {}
+              setNotice({
+                tone: status === 'ready' ? 'ok' : 'warn',
+                title: status === 'ready' ? '元主已生成' : '元主已生成（有冲突）',
+                message: `「${body.meta?.name || trimmed}」· 补丁 ${captured.patchEntries ?? 0} 条 · 依赖 ${captured.dependencies ?? 0} 个 · 设置 ${captured.settings ?? 0} 组 · 捆绑 ${captured.bundles ?? 0} 个`,
+                detail: conflicts > 0 ? `${conflicts} 条合并冲突：元主已物化，但需要人工处理后再用于派生。` : '',
+              })
+            } else {
+              const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+              setNotice({ tone: 'bad', title: '生成元主失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+            }
+            await refresh()
+          },
+        })
+      }
+
+      // 升级链路 2.1：克隆母体 profile 到镜像（先自动备份，克隆后元主待同步）。
+      function cloneMotherProfile() {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'info',
+          title: '克隆母体到镜像？',
+          confirm: 'clone-mother',
+          message: '读取本机母体 profile（package.json / cordis.patch.yml / cordis.yml / settings），覆盖镜像 active/profile，并先自动备份当前镜像。\n\n克隆后所有元主会变成「🔼 待同步」——不会自动改它们的配置。',
+          confirmLabel: '克隆母体',
+          onConfirm: async () => {
+            S.busy = 'mirror:clone'
+            const result = await api('/fang/api/mirror/clone-profile', { method: 'POST', body: JSON.stringify({}) })
+            S.busy = ''
+            const body = result.body
+            if (result.status === 200 && body?.ok) {
+              setNotice({
+                tone: 'ok', title: '母体已克隆到镜像',
+                message: `版本 ${body.version} · ${(body.files || []).length} 个文件 → active/profile`,
+                detail: body.backup ? `已自动备份：${body.backup.id}` : '',
+              })
+            } else {
+              const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+              setNotice({ tone: 'bad', title: '克隆母体失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+            }
+            await refresh()
+          },
+        })
+      }
+
+      // 升级链路 3：把元主 overlay 重放到当前镜像（配置不动）。
+      async function syncEssence(essenceId) {
+        if (isBusy()) return
+        S.busy = 'essence:sync:' + essenceId
+        const result = await api('/fang/api/essence/sync', { method: 'POST', body: JSON.stringify({ essenceId }) })
+        S.busy = ''
+        const body = result.body
+        if (result.status === 200 && body?.ok) {
+          setNotice({ tone: body.status === 'ready' ? 'ok' : 'warn', title: '元主已同步', message: `${essenceId} · ${body.status}${body.recomputed ? '（已重新物化）' : '（无需重算）'}` })
+        } else {
+          setNotice({ tone: 'bad', title: '元主同步失败', message: failureHint(body?.error || 'sync-failed'), detail: body?.detail || diagnosticText(result.diagnostic) })
+        }
+        await refresh()
+      }
+
+      async function syncEssences() {
+        if (isBusy()) return
+        S.busy = 'essence:sync:all'
+        const result = await api('/fang/api/essence/sync', { method: 'POST', body: JSON.stringify({}) })
+        S.busy = ''
+        const body = result.body
+        if (result.status === 200 && body?.ok) {
+          setNotice({
+            tone: (body.conflicted || []).length > 0 ? 'warn' : 'ok',
+            title: '元主批量同步完成',
+            message: `重算 ${(body.recomputed || []).length} · 跳过 ${(body.skipped || []).length} · 冲突 ${(body.conflicted || []).length} · 失败 ${(body.failed || []).length}`,
+            detail: (body.failed || []).length ? (body.failed || []).map((item) => `${item.id}: ${item.error}`).join('\n') : '',
+          })
+        } else {
+          setNotice({ tone: 'bad', title: '元主批量同步失败', message: failureHint(body?.error || 'sync-failed'), detail: body?.detail || diagnosticText(result.diagnostic) })
+        }
+        await refresh()
+      }
+
+      // 原身运行态：隔离 home 的配置态实例（不写母体 sessions）。
+      async function essenceRuntime(action, essenceId) {
+        if (isBusy()) return
+        S.busy = 'essence:runtime:' + essenceId
+        const result = await api('/fang/api/essence/runtime', { method: 'POST', body: JSON.stringify({ action, essenceId }) })
+        S.busy = ''
+        const body = result.body
+        if (result.status === 200 && body?.ok) {
+          setNotice({
+            tone: 'ok',
+            title: action === 'stop' ? '元主运行时已停止' : '元主运行时已启动',
+            message: action === 'stop'
+              ? '进程已停止（overlay 与数据保留）'
+              : `端口 ${body.port ?? '—'} · 隔离 home：${body.sandboxHome ?? '—'}`,
+          })
+        } else {
+          setNotice({ tone: 'bad', title: '元主运行态操作失败', message: failureHint(body?.error || 'runtime-failed'), detail: body?.detail || diagnosticText(result.diagnostic) })
+        }
+        await refresh()
+      }
+
+      // 打开前选会话：多选 1–5 个进行中会话（归档会话不出现）。
+      function showSessionPicker(sessions, onPick) {
+        const doc = document
+        const select = h('select', {
+          multiple: true, size: 8,
+          style: { width: '100%', minHeight: 160, marginTop: 10, font: '12px/1.4 inherit', borderRadius: 8, padding: 6 },
+        }, ...sessions.map((session) => h('option', { value: session.sessionId },
+          `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''}`)))
+        const hint = h('div', { style: { fontSize: 12, opacity: .7, marginTop: 6 } },
+          'Ctrl/⌘ 多选，最多 5 个**进行中**会话；归档会话不会出现在这里。')
+        const btn = (label, primary) => h('button', {
+          type: 'button',
+          style: {
+            height: 30, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+            border: primary ? '1px solid #17803D' : '1px solid rgba(255,255,255,.24)',
+            background: primary ? '#17803D' : 'transparent', color: '#fff',
+          },
+        }, label)
+        const startBtn = btn('启动并导入', true)
+        const skipBtn = btn('仅启动', false)
+        const cancelBtn = btn('取消', false)
+        const card = h('div', {
+          role: 'dialog', 'aria-modal': 'true',
+          style: { width: 'min(560px, 92vw)', padding: 18, borderRadius: 14, background: '#1D1D1F', color: '#fff' },
+        },
+        h('div', { style: { fontSize: 14, fontWeight: 600 } }, '打开元主 Web：导入进行中会话'),
+        hint,
+        select,
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, skipBtn, cancelBtn))
+        const backdrop = h('div', {
+          style: {
+            position: 'fixed', inset: 0, zIndex: 2147483000, display: 'flex',
+            alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,.55)',
+          },
+        }, card)
+        const close = () => backdrop.remove()
+        startBtn.addEventListener('click', () => {
+          const ids = [...(select.selectedOptions || [])].map((option) => option.value)
+          if (ids.length > 5) { hint.textContent = '最多选择 5 个会话'; return }
+          close()
+          onPick(ids)
+        })
+        skipBtn.addEventListener('click', () => { close(); onPick([]) })
+        cancelBtn.addEventListener('click', close)
+        backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close() })
+        doc.body.appendChild(backdrop)
+      }
+
+      function showDerivePicker(sessions, essenceName, onPick) {
+        const doc = document
+        const select = h('select', {
+          size: Math.min(8, Math.max(4, sessions.length)),
+          style: { width: '100%', minHeight: 150, marginTop: 10, font: '12px/1.4 inherit', borderRadius: 8, padding: 6 },
+        }, ...sessions.map((session) => h('option', { value: session.sessionId },
+          `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''}`)))
+        const hint = h('div', { style: { fontSize: 12, opacity: .7, marginTop: 6 } },
+          '选择一个进行中的 DSH 会话，整目录复制进新分身的沙箱（归档会话不列出）。')
+        const btn = (label, primary) => h('button', {
+          type: 'button',
+          style: {
+            height: 30, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+            border: primary ? '1px solid #17803D' : '1px solid rgba(255,255,255,.24)',
+            background: primary ? '#17803D' : 'transparent', color: '#fff',
+          },
+        }, label)
+        const startBtn = btn('派 生', true)
+        const cancelBtn = btn('取消', false)
+        const card = h('div', {
+          role: 'dialog', 'aria-modal': 'true',
+          style: { width: 'min(560px, 92vw)', padding: 18, borderRadius: 14, background: '#1D1D1F', color: '#fff' },
+        },
+        h('div', { style: { fontSize: 14, fontWeight: 600 } }, `派生分身 · 基于「${essenceName}」`),
+        hint,
+        select,
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, cancelBtn))
+        const backdrop = h('div', {
+          style: {
+            position: 'fixed', inset: 0, zIndex: 2147483000, display: 'flex',
+            alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,.55)',
+          },
+        }, card)
+        const close = () => backdrop.remove()
+        startBtn.addEventListener('click', () => {
+          const picked = String(select.value || '')
+          if (!picked) { hint.textContent = '请选择一个会话'; return }
+          close()
+          onPick(picked)
+        })
+        cancelBtn.addEventListener('click', close)
+        backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close() })
+        doc.body.appendChild(backdrop)
+      }
+
+      async function deriveFromEssence(essence) {
+        if (isBusy()) return
+        S.busy = 'essence:derive:' + essence.id
+        const res = await api('/fang/api/sessions?limit=200')
+        S.busy = ''
+        const sessions = Array.isArray(res.body?.sessions)
+          ? res.body.sessions.filter((session) => session.archived !== true)
+          : []
+        if (sessions.length === 0) {
+          setNotice({ tone: 'warn', title: '没有可复制的会话', message: '先在 DSH 里有一个进行中的会话，再派生。' })
+          return
+        }
+        showDerivePicker(sessions, essence.name || essence.id, async (sessionId) => {
+          const session = sessions.find((item) => String(item.sessionId) === String(sessionId))
+          const title = String(session?.title || essence.name || '派生分身').slice(0, 60)
+          S.busy = 'essence:derive:run:' + essence.id
+          const out = await api('/fang/api/tasks/create', {
+            method: 'POST',
+            body: JSON.stringify({ title, essenceId: essence.id, importSession: { sessionId } }),
+          })
+          S.busy = ''
+          if (out.status === 200 && out.body?.ok) {
+            setNotice({ tone: 'ok', title: '已派生分身', message: `模板「${essence.name || essence.id}」· 会话 ${short(String(sessionId), 8)}` })
+          } else {
+            setNotice({ tone: 'bad', title: '派生失败', message: failureHint(out.body?.error || 'http-' + out.status), detail: out.body?.detail || '' })
+          }
+          await refresh()
+        })
+      }
+
+      async function startEssenceRuntime(essenceId, sessionIds) {
+        S.busy = 'essence:start:' + essenceId
+        const started = await api('/fang/api/essence/runtime', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'start', essenceId, sessionIds }),
+        })
+        S.busy = ''
+        if (started.status === 200 && started.body?.ok) {
+          const imported = Array.isArray(started.body.importedSessions) ? started.body.importedSessions.length : 0
+          setNotice({ tone: 'ok', title: '元主 Web 已启动', message: `端口 ${started.body.port ?? '—'} · 导入会话 ${imported} 个` })
+          if (started.body.url) { try { window.open(String(started.body.url), '_blank', 'noopener') } catch { /* 弹层被拦 */ } }
+        } else {
+          setNotice({ tone: 'bad', title: '启动元主 Web 失败', message: failureHint(started.body?.error || 'runtime-failed'), detail: started.body?.detail || '' })
+        }
+        await refresh()
+      }
+
+      // 打开&设置：已在跑 → 直接开带 token 的 URL；没跑 → 选会话后启动再打开。
+      async function openEssence(essenceId) {
+        if (isBusy()) return
+        S.busy = 'essence:open:' + essenceId
+        const st = await api(`/fang/api/essence/runtime?essenceId=${encodeURIComponent(essenceId)}`)
+        const runtime = st.body?.runtime ?? null
+        const running = Boolean(runtime && (runtime.running === true || String(runtime.status) === 'running'))
+        S.busy = ''
+        if (running) {
+          const opened = await api(`/fang/api/essence/runtime/open?essenceId=${encodeURIComponent(essenceId)}`)
+          if (opened.status === 200 && opened.body?.url) { try { window.open(String(opened.body.url), '_blank', 'noopener') } catch { /* 弹层被拦 */ } }
+          else setNotice({ tone: 'bad', title: '无法打开元主 Web', message: '实例在跑但拿不到带 token 的地址' })
+          return
+        }
+        const candidates = await api('/fang/api/essence/open/candidates')
+        const sessions = Array.isArray(candidates.body?.sessions) ? candidates.body.sessions : []
+        showSessionPicker(sessions, (sessionIds) => void startEssenceRuntime(essenceId, sessionIds))
+      }
+
+      async function copyEssence(essence) {
+        if (isBusy()) return
+        askPrompt({
+          title: '复制元主', label: '新元主名称', value: `${essence.name || essence.id} 副本`, confirmLabel: '复制',
+          hint: '深复制该元主的整份沙盒目录（overlay + merged + 自定义数据）到新文件夹；不复制凭据、运行态与备份。',
+          onConfirm: async (name) => {
+            const trimmed = String(name ?? '').trim()
+            if (!trimmed) { S.modal.error = '请填写名称'; render(true); return false }
+            const result = await api('/fang/api/essence/copy', { method: 'POST', body: JSON.stringify({ essenceId: essence.id, name: trimmed }) })
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已复制', message: trimmed })
+            else setNotice({ tone: 'bad', title: '复制失败', message: failureHint(result.body?.error || 'http-' + result.status) })
+            await refresh()
+          },
+        })
+      }
+
+      function archiveEssence(essence) {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'info', title: '归档元主？', confirm: 'essence-archive',
+          message: `「${essence.name || essence.id}」将归档：只改元数据，不删目录；归档后不能派生/配置。`,
+          confirmLabel: '归档',
+          onConfirm: async () => {
+            const result = await api('/fang/api/essence/archive', { method: 'POST', body: JSON.stringify({ essenceId: essence.id, archived: true }) })
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已归档', message: essence.name || essence.id })
+            else setNotice({ tone: 'bad', title: '归档失败', message: failureHint(result.body?.error || 'http-' + result.status) })
+            await refresh()
+          },
+        })
+      }
+
+      async function stopEssenceRuntime(essence) {
+        if (isBusy()) return
+        S.busy = 'essence:stop'
+        const result = await api('/fang/api/essence/runtime', { method: 'POST', body: JSON.stringify({ action: 'stop', essenceId: essence.id }) })
+        S.busy = ''
+        if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '运行实例已停止', message: essence.name || essence.id })
+        else setNotice({ tone: 'bad', title: '停止失败', message: failureHint(result.body?.error || 'http-' + result.status), detail: result.body?.detail || '' })
+        await refresh()
+      }
+
+      async function openBranches(task) {
+        if (isBusy()) return
+        S.busy = 'branches:' + task.taskId
+        const res = await api('/fang/api/tasks/branches?taskId=' + encodeURIComponent(task.taskId))
+        S.busy = ''
+        const body = res.body ?? {}
+        S.modal = {
+          kind: 'branches',
+          taskId: task.taskId,
+          taskTitle: task.title || task.taskId,
+          sessionId: body.sessionId ?? '',
+          activeBranchId: body.activeBranchId ?? '',
+          branches: Array.isArray(body.branches) ? body.branches : [],
+          error: res.status === 200 && body.ok === true ? '' : failureHint(body.error || 'http-' + res.status),
+        }
+        render(true)
+      }
+
+      async function forkBranch(task) {
+        if (isBusy()) return
+        S.busy = 'branch-fork:' + task.taskId
+        const res = await api('/fang/api/tasks/branches/fork', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
+        S.busy = ''
+        if (res.status === 200 && res.body?.ok) {
+          setNotice({ tone: 'ok', title: '已派生分支', message: res.body.branch?.branchId || '' })
+          await openBranches(task)
+        } else {
+          setNotice({ tone: 'bad', title: '派生分支失败', message: failureHint(res.body?.error || 'http-' + res.status), detail: res.body?.detail || '' })
+          render(true)
+        }
+      }
+
+      async function activateBranch(task, branchId) {
+        if (isBusy()) return
+        S.busy = 'branch-activate:' + task.taskId
+        const res = await api('/fang/api/tasks/branches/activate', { method: 'POST', body: JSON.stringify({ taskId: task.taskId, branchId }) })
+        S.busy = ''
+        if (res.status === 200 && res.body?.ok) setNotice({ tone: 'ok', title: '已激活分支', message: branchId })
+        else setNotice({ tone: 'bad', title: '激活分支失败', message: failureHint(res.body?.error || 'http-' + res.status) })
+        await openBranches(task)
+      }
+
+      function unfreezeEssence(essence) {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'info', title: '还原（解冻）元主？', confirm: 'essence-unfreeze',
+          message: `「${essence.name || essence.id}」将从冻结态恢复为活跃：可打开/设置/派生；备份内容不变，删除仍可用。`,
+          confirmLabel: '还原',
+          onConfirm: async () => {
+            S.busy = 'essence:unfreeze'
+            const result = await api('/fang/api/essence/archive', { method: 'POST', body: JSON.stringify({ essenceId: essence.id, archived: false }) })
+            S.busy = ''
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已还原（解冻）', message: essence.name || essence.id })
+            else setNotice({ tone: 'bad', title: '还原失败', message: failureHint(result.body?.error || 'http-' + result.status), detail: result.body?.detail || '' })
+            await refresh()
+          },
+        })
+      }
+
+      function deleteEssence(essence) {
+        if (isBusy()) return
+        if (essence.archived !== true) {
+          setNotice({ tone: 'warn', title: '需先归档才能删除', message: '元主必须先归档（冻结）后，删除按钮才可用。' })
+          return
+        }
+        // 两次确认：第一次说明后果，第二次必须输入元主名称。
+        askConfirm({
+          tone: 'bad', title: '删除元主？', confirm: 'delete-once',
+          message: `「${essence.name || essence.id}」已冻结。删除会移除 essences/${essence.id}（overlay + merged），不可撤销，也不会删除会话。`,
+          confirmLabel: '继续',
+          onConfirm: () => {
+            askConfirm({
+              tone: 'bad', title: '再次确认：永久删除', confirm: 'delete', strong: true,
+              expected: String(essence.name || essence.id),
+              message: `最后一步：输入「${essence.name || essence.id}」以永久删除该元主。`,
+              confirmLabel: '永久删除',
+              onConfirm: async () => {
+                S.busy = 'essence:delete:' + essence.id
+                const result = await api('/fang/api/essence/delete', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
+                S.busy = ''
+                if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已删除', message: essence.name || essence.id })
+                else setNotice({ tone: 'bad', title: '删除元主失败', message: failureHint(result.body?.error || 'http-' + result.status), detail: result.body?.detail || '' })
+                await refresh()
+              },
+            })
+          },
+        })
+      }
+
+      async function saveBlob(blob, suggestedName) {
+        try {
+          if (typeof window.showSaveFilePicker === 'function') {
+            const handle = await window.showSaveFilePicker({
+              suggestedName,
+              types: [{ description: '元主整包', accept: { 'application/json': ['.json'] } }],
+            })
+            const writable = await handle.createWritable()
+            await writable.write(blob)
+            await writable.close()
+            return { ok: true, mode: 'picker' }
+          }
+        } catch (error) {
+          if (String(error?.name) === 'AbortError') return { ok: false, aborted: true }
+        }
+        const link = h('a', { href: URL.createObjectURL(blob), download: suggestedName })
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        return { ok: true, mode: 'download' }
+      }
+
+      async function downloadEssence(essence) {
+        try {
+          const token = await ensureFangAuthToken()
+          const res = await fetch(`/fang/api/essence/download?essenceId=${encodeURIComponent(essence.id)}&full=1`, {
+            headers: token ? { 'x-fang-auth': token } : {},
+          })
+          if (!res.ok) throw new Error('HTTP ' + res.status)
+          const blob = await res.blob()
+          const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+          const name = `essence-${String(essence.name || essence.id).replace(/[\\/:*?"<>|\s]+/g, '-')}-${stamp}.json`
+          const saved = await saveBlob(blob, name)
+          if (saved.aborted) return
+          setNotice({
+            tone: 'ok',
+            title: '元主整包已下载',
+            message: `${name}（${Math.round(blob.size / 1024)} KB）`,
+            detail: saved.mode === 'picker' ? '已保存到你选择的文件夹；包内含 IMPORT-GUIDE.md 与 manifest.json。' : '已保存到下载目录；包内含导入引导与清单。',
+          })
+        } catch (error) {
+          setNotice({ tone: 'bad', title: '下载元主失败', message: String(error?.message ?? error) })
+        }
+      }
+
+      async function essenceBackup(essence) {
+        const result = await api('/fang/api/essence/backup', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
+        if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已备份', message: `Backup/ · ${Math.round((result.body.bytes || 0) / 1024)} KB（只保留一份）` })
+        else setNotice({ tone: 'bad', title: '备份失败', message: failureHint(result.body?.error || 'backup-failed'), detail: result.body?.detail || '' })
+        await refresh()
+      }
+
+      async function essenceRestore(essence) {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'info', title: '还原最新备份？', confirm: 'essence-restore',
+          message: `用「${essence.name || essence.id}/Backup」覆盖当前 overlay 与 merged，还原后需重新同步/派生。`,
+          confirmLabel: '还原',
+          onConfirm: async () => {
+            const result = await api('/fang/api/essence/restore', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '已还原最新备份', message: essence.name || essence.id })
+            else setNotice({ tone: 'bad', title: '还原失败', message: failureHint(result.body?.error || 'restore-failed'), detail: result.body?.detail || '' })
+            await refresh()
+          },
+        })
+      }
+
+      function essenceImport() {
+        const input = h('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } })
+        input.addEventListener('change', async () => {
+          const file = input.files?.[0]
+          input.remove()
+          if (!file) return
+          try {
+            const bundle = JSON.parse(await file.text())
+            S.busy = 'essence:import'
+            const result = await api('/fang/api/essence/import', { method: 'POST', body: JSON.stringify({ bundle }) })
+            S.busy = ''
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已导入', message: `${result.body.essence?.name || '导入的元主'} · ${result.body.files} 个文件` })
+            else setNotice({ tone: 'bad', title: '导入失败', message: failureHint(result.body?.error || 'import-failed'), detail: result.body?.detail || '' })
+            await refresh()
+          } catch (error) {
+            S.busy = ''
+            setNotice({ tone: 'bad', title: '导入失败', message: String(error?.message ?? error) })
+          }
+        })
+        document.body.appendChild(input)
+        input.click()
+      }
+
+      // 单个元主详情页：设置 / 插件 / 运行日志 三个 tab。
+      async function loadEssenceDetail() {
+        const modal = S.modal
+        if (!modal || modal.kind !== 'essence') return
+        const result = await api(`/fang/api/essence/detail?essenceId=${encodeURIComponent(modal.essenceId)}`)
+        if (!S.modal || S.modal !== modal) return
+        modal.loading = false
+        if (result.status === 200 && result.body?.ok) modal.detail = result.body
+        else modal.error = result.body?.error || 'http-' + result.status
+        render(true)
+      }
+
+      function openEssenceDetail(essence) {
+        lockScroll()
+        S.modal = { kind: 'essence', essenceId: essence.id, tab: 'settings', detail: null, loading: true, error: '' }
+        render(true)
+        void loadEssenceDetail()
+      }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
-        if (taskId) {
-          const result = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
-          if (result.status === 200 && result.body?.url) {
-            try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
-          }
+        if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
+        const result = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+        if (result.status === 200 && result.body?.url) {
+          try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
         }
-        if (!task?.url) { notify('warn', '该分身没有可打开的 URL（可能已停止）；可归档回收。'); return }
-        try { window.open(task.url, '_blank', 'noopener') } catch { /* ignore */ }
+        const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
+        if (code === 'not-running') {
+          notify('warn', '分身已停止，正在启动…')
+          let restored = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId }) })
+          // A stopped (but not archived) fork cannot be restored directly; archive it
+          // first (keeps home), then restore spawns from the same home.
+          if (restored.body?.error === 'not-archived' && String(task?.status || '') !== 'running') {
+            const archived = await api('/fang/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId }) })
+            if (archived.status === 200 && archived.body?.ok !== false) {
+              restored = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId }) })
+            }
+          }
+          if (restored.status !== 200 || restored.body?.ok === false) {
+            notify('bad', `启动分身失败：${restored.body?.error || 'restore-failed'}`)
+            return
+          }
+          for (let i = 0; i < 20; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 800))
+            const retry = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+            if (retry.status === 200 && retry.body?.url) {
+              try { window.open(retry.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
+            }
+          }
+          notify('warn', '分身已启动，但 Web URL 尚未就绪；稍后点“打开”再试。')
+          return
+        }
+        notify('bad', `打开分身失败：${code}`)
       }
 
       async function copyText(text, label) {
@@ -1623,7 +2226,11 @@ window.__ModuleLoader__.load({
 
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
-        archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText,
+        archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
+        cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
+        openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
+        essenceBackup, essenceRestore, openEssenceDetail, unfreezeEssence, stopEssenceRuntime,
+        openBranches, forkBranch, activateBranch, deriveFromEssence,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -1647,6 +2254,8 @@ window.__ModuleLoader__.load({
           if (pollTimer) window.clearInterval(pollTimer)
           if (toastTimer) window.clearTimeout(toastTimer)
           if (deriveTicker) window.clearInterval(deriveTicker)
+          window.removeEventListener('fang:notice', onFangNotice)
+          window.removeEventListener('fang:mother-portal', onMotherPortal)
           unsubscribe()
           root.remove()
         },
@@ -2001,19 +2610,39 @@ window.__ModuleLoader__.load({
       const all = S.sessions.items
       const query = S.query.trim().toLowerCase()
       const filtered = query ? all.filter((session) => sessionSearchText(session).includes(query)) : all
-      const groups = groupMotherWorkspaces(filtered, S.aliases)
-      const split = classifyMotherSessions(filtered)
+      // 空会话（无用户消息）不进列表：它们没有任何内容可看。
+      const visible = filtered.filter((session) => session?.empty !== true)
+      const groups = groupMotherWorkspaces(visible, S.aliases)
+      const split = classifyMotherSessions(visible)
       const selected = all.find((session) => String(session.sessionId) === S.selectedSessionId) || null
       const countText = query
-        ? `${filtered.length}/${all.length}`
-        : `${all.length}${S.sessions.total > all.length ? '/' + S.sessions.total : ''}`
+        ? `${visible.length}/${all.length}`
+        : `${visible.length}${S.sessions.total > all.length ? '/' + S.sessions.total : ''}`
       const sessionState = S.sessions.state
 
       const head = h('div', { class: 'panel-head' },
         h('div', { class: 'panel-title-row' },
           h('h2', { class: 'panel-title' }, '母体'),
           h('span', { class: 'panel-sub' }, '元主 · 项目 & 会话'),
-          h('span', { class: 'panel-count', title: '已加载 / 宿主返回的会话总数' }, `${countText} 会话`)),
+          h('span', { class: 'panel-count', title: '已加载 / 宿主返回的会话总数' }, `${countText} 会话`),
+          (() => {
+            const stale = Number(S.essenceList?.data?.staleCount) || 0
+            const update = S.mirror?.data?.updateAvailable === true
+            const conflicted = (S.essenceList?.data?.essences || []).filter((item) => item.status === 'conflicted').length
+            const tone2 = (conflicted > 0) ? 'red' : (stale > 0 || update) ? 'yellow' : 'green'
+            const label2 = tone2 === 'red' ? '红灯' : tone2 === 'yellow' ? '黄灯' : '绿灯'
+            const reasons = []
+            if (update) reasons.push('母体有新版本')
+            if (stale > 0) reasons.push(`${stale} 个元主待同步`)
+            if (conflicted > 0) reasons.push(`${conflicted} 个元主冲突`)
+            return h('span', {
+              class: 'chip', 'data-lamp': tone2,
+              title: reasons.length ? reasons.join('；') : '母体 / 元主 / 分身状态正常',
+              style: { display: 'inline-flex', alignItems: 'center', gap: 6 },
+            },
+            h('span', { 'aria-hidden': 'true', style: { width: 8, height: 8, borderRadius: '50%', background: tone2 === 'red' ? '#C8102E' : tone2 === 'yellow' ? '#B45309' : '#17803D' } }),
+            label2)
+          })()),
         (() => {
           const data = S.status.data
           const tone = S.status.state === 'ready' ? 'ok' : data ? 'info' : 'neutral'
@@ -2026,6 +2655,11 @@ window.__ModuleLoader__.load({
                 chip(tone, label, { state: S.status.state === 'ready' ? 'running' : 'unknown' }),
                 data?.version ? h('span', { class: 'hint', style: { fontFamily: 'var(--f-mono)' } }, 'v' + String(data.version).replace(/^v/, '')) : null),
               h('div', { class: 'mother-control-sub' }, '只读访问：不写入、不改写母体会话')),
+            button('克隆母体', {
+              size: 'sm', variant: 'quiet', dataBtnId: 'M-07',
+              title: '把本机母体 profile（package.json / cordis.patch.yml / settings）克隆到镜像 active/，先自动备份；克隆后元主会黄灯待同步',
+              onClick: () => void app.cloneMotherProfile(),
+            }),
             button('打开门户', {
               size: 'sm', variant: 'quiet', icon: icon('globe', 12), dataBtnId: 'M-06',
               title: '在新窗口打开 /fang/panel 独立门户（不关闭母体）',
@@ -2047,8 +2681,26 @@ window.__ModuleLoader__.load({
         h('div', { class: 'panel-tools' },
           h('span', null, `进行中 ${split.active.length}`),
           h('span', { class: 'spacer' }),
-          h('span', null, `临时 ${split.temporary.length} · 归档 ${split.archived.length}`),
+          h('span', { class: 'session-window', 'data-zone': 'session-window', style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('span', { class: 'hint' }, '显示'),
+            ...[[20, '20'], [50, '50'], ['all', '全部']].map(([value, label]) => {
+              const on = S.sessionWindow === value
+              return h('button', {
+                type: 'button',
+                'data-window': String(value),
+                'aria-pressed': on ? 'true' : 'false',
+                title: value === 'all' ? '加载宿主返回的全部会话（只读投影）' : `只显示最近 ${label} 条会话`,
+                onClick: () => app.setSessionWindow(value),
+                style: {
+                  height: 22, padding: '0 7px', borderRadius: 6, cursor: 'pointer', fontSize: 11,
+                  border: '1px solid ' + (on ? 'rgba(127,127,127,.55)' : 'transparent'),
+                  background: on ? 'rgba(127,127,127,.16)' : 'transparent',
+                  color: 'inherit',
+                },
+              }, label)
+            })),
           h('span', { class: 'spacer' }),
+          h('span', null, `临时 ${split.temporary.length} · 归档 ${split.archived.length}`),
           h('span', { title: '没有写接口的动作会明确禁用并说明原因，不会假装成功' }, '只读')))
 
       const scroll = h('div', { class: 'panel-scroll', 'data-sk': 'left' })
@@ -2059,7 +2711,7 @@ window.__ModuleLoader__.load({
         scroll.append(emptyBlock('母体会话不可读', failureHint(S.sessions.error), [
           button('重试', { size: 'sm', variant: 'ghost', onClick: () => void app.refresh({ manual: true }) }),
         ]))
-      } else if (filtered.length === 0) {
+      } else if (visible.length === 0) {
         scroll.append(emptyBlock(
           query ? `没有匹配「${clampText(S.query, 20)}」的会话` : '还没有母体会话',
           query ? '搜索标题、会话 ID 或工作区名；Esc 清空搜索。' : '在本机开一个新对话后刷新，它会出现在这里。选择会话是只读元数据，母体会话不会被改写。',
@@ -2069,7 +2721,7 @@ window.__ModuleLoader__.load({
         // 元主工作区的新建/归档/删除/下载是宿主职责：DOM 中不出现这些控件（不是禁用）。
         scroll.append(h('div', { class: 'section-head' },
           h('span', { class: 'section-title', style: { cursor: 'default' } }, '元主'),
-          h('span', { class: 'section-sub' }, `${groups.length} 个工作区`),
+          h('span', { class: 'section-sub' }, `${groups.length} 个工作区 · ${visible.length} 条会话`),
           h('span', { class: 'spacer' }),
           h('span', { class: 'section-hint', title: '工作区 CRUD 属于 DSH 宿主；fang 不复制宿主职责' }, '宿主管理 · 只读')))
 
@@ -2083,18 +2735,112 @@ window.__ModuleLoader__.load({
       }
 
       const essences = Array.isArray(S.essenceList?.data?.essences) ? S.essenceList.data.essences : []
-      const essenceList = essences.length
-        ? h('div', { class: 'essence-list', 'data-zone': 'essence-list', style: { display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 8px' } },
-          ...essences.map((essence) => h('div', { class: 'essence-row', 'data-essence-id': essence.id, style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
-            essence.locked
-              ? h('span', { class: 'hint' }, essence.name || essence.id)
-              : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: essence.name || essence.id }),
-            essence.locked ? h('span', { class: 'chip' }, '锁定') : null)))
-        : null
+      const defaultEssenceId = String(S.essenceList?.data?.defaultId ?? '')
+      const staleCount = Number(S.essenceList?.data?.staleCount) || 0
+      const essenceHead = h('div', { class: 'section-head', 'data-zone': 'essence-head' },
+        h('span', { class: 'section-title', style: { cursor: 'default' } }, '元主'),
+        h('span', { class: 'section-sub' }, `${essences.length} 个 · 默认 ${defaultEssenceId ? short(defaultEssenceId, 18) : '—'}${staleCount > 0 ? ` · ${staleCount} 待同步` : ''}`),
+        h('span', { class: 'spacer' }),
+        staleCount > 0
+          ? button('全部同步', {
+            size: 'sm', variant: 'ghost', dataBtnId: 'E-02',
+            title: '把所有待同步元主重放到新母体：只重建底层，用户插件配置与设置保持不变',
+            onClick: () => void app.syncEssences(),
+          })
+          : null,
+        button('导入', {
+          size: 'sm', variant: 'ghost', dataBtnId: 'E-11',
+          title: '导入元主整包（自己或他人下载的 JSON）：生成新元主文件夹并重算，可直接继续开发',
+          onClick: () => void app.essenceImport(),
+        }),
+        button('从母体生成元主', {
+          size: 'sm', variant: 'ghost', dataBtnId: 'E-01',
+          title: '克隆母体 profile 的可写层（插件补丁/依赖/设置）生成新元主；不复制凭据与会话',
+          onClick: () => void app.captureEssence(),
+        }))
+      const essenceList = h('div', { class: 'essence-list', 'data-zone': 'essence-list', style: { display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 8px' } },
+        essences.length === 0
+          ? h('span', { class: 'hint' }, '还没有自定义元主；点上方「从母体生成元主」克隆当前母体配置。')
+          : null,
+        ...essences.map((essence) => h('div', { class: 'essence-row', 'data-essence-id': essence.id, style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+          essence.locked
+            ? h('span', { class: 'hint' }, essence.name || essence.id)
+            : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: essence.name || essence.id }),
+          essence.id === defaultEssenceId ? h('span', { class: 'chip' }, '默认') : null,
+          essence.locked ? h('span', { class: 'chip' }, '锁定') : null,
+          essence.stale ? h('span', { class: 'chip', title: '母体镜像已变化，此元主仍在旧镜像上' }, '🔼 待同步') : null,
+          essence.stale && essence.locked !== true
+            ? button('同步', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-03',
+              title: '重放该元主的插件/设置到新母体（配置不变）',
+              onClick: () => void app.syncEssence(essence.id),
+            })
+            : null,
+          essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null,
+          essence.archived === true ? h('span', { class: 'chip', title: '已归档（冻结）：只能还原或删除' }, '冻结') : null,
+          h('span', { style: { display: 'inline-flex', gap: 4 } },
+            essence.archived === true ? null : button('派生', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-05',
+              title: '派生：以该元主为模板创建分身（继承其插件&配置），可复制一个现有会话进分身沙箱',
+              onClick: () => void app.deriveFromEssence(essence),
+            }),
+            essence.archived === true
+              ? button('还原', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-15',
+                title: '解冻（恢复活跃态，可打开/设置/派生）；不还原备份内容',
+                onClick: () => void app.unfreezeEssence(essence),
+              })
+              : button(essence.runtime?.running === true ? '停止' : '打开', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-06',
+                title: essence.runtime?.running === true
+                  ? '停止该元主的运行实例（端口释放；会话/沙盒文件保留）'
+                  : '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
+                onClick: () => essence.runtime?.running === true ? void app.stopEssenceRuntime(essence) : void app.openEssence(essence.id),
+              }),
+            essence.runtime?.running === true && essence.archived !== true ? button('进入', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-21',
+              title: '在新标签打开运行中的实例（临时 token，不落盘）',
+              onClick: () => void app.openEssence(essence.id),
+            }) : null,
+            essence.archived === true ? null : button('复制', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-07',
+              title: essence.actions?.copy?.reason || '深复制整份沙盒到新文件夹（不含凭据/运行态/备份）',
+              disabled: essence.actions?.copy?.enabled === false,
+              onClick: () => void app.copyEssence(essence),
+            }),
+            essence.archived === true ? null : button('归档', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-08',
+              title: essence.actions?.archive?.reason || '归档元主（冻结，只改元数据）',
+              disabled: essence.actions?.archive?.enabled === false,
+              onClick: () => void app.archiveEssence(essence),
+            }),
+            button('删除', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-09',
+              title: essence.actions?.delete?.reason || '永久删除 essences/<id>（须先归档；不删会话）',
+              disabled: essence.actions?.delete?.enabled === false,
+              onClick: () => void app.deleteEssence(essence),
+            }),
+            essence.archived === true ? null : button('备份', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-12',
+              title: '在 essences/<id>/Backup 存档（只保留一份，旧备份覆盖）',
+              onClick: () => void app.essenceBackup(essence),
+            }),
+            essence.archived === true ? null : button('还原备份', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-13',
+              title: '用最新 Backup 覆盖当前 overlay/merged（需二次确认）',
+              onClick: () => void app.essenceRestore(essence),
+            }),
+            essence.archived === true ? null : button('下载', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-10',
+              title: essence.actions?.download?.reason || '下载元主整包 JSON（不含凭据）',
+              disabled: essence.actions?.download?.enabled === false,
+              onClick: () => void app.downloadEssence(essence),
+            })))))
 
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,
         h('div', { class: 'mother-slots' }, renderSlotStrip(projectCapacity(S.status.data, S.tasks.items))),
+        essenceHead,
         essenceList,
         scroll)
     }
@@ -2371,7 +3117,8 @@ window.__ModuleLoader__.load({
           h('div', { class: 'fork-chips' },
             chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
-            task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null)),
+            task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
+            task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
           archived
             ? [button('还原', {
@@ -2390,8 +3137,13 @@ window.__ModuleLoader__.load({
               onClick: () => void app.openTask(task),
               fk: 'open:' + taskId,
             }),
-            textAction('提升插件', {
-              title: '把分身里验证过的插件目录提升到母体（需目录名）', dataBtnId: 'C-02',
+            button('分支', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-06',
+              title: '物理分支：在分身内 fork 当前会话，挂回同一分身（可多分支、可激活）',
+              onClick: () => void app.openBranches(task),
+              fk: 'branches:' + taskId,
+            }),
+            textAction('提升插件', {              title: '把分身里验证过的插件目录提升到母体（需目录名）', dataBtnId: 'C-02',
               softDisabled: busyPromote, busy: busyPromote,
               onClick: () => app.promoteTask(task),
             }),
@@ -2515,6 +3267,8 @@ window.__ModuleLoader__.load({
           kv('官方最新', data.officialLatest == null ? '未配置官方源' : String(data.officialLatest)),
           kv('上次备份', meta.lastBackupAt ? fmtClock(meta.lastBackupAt) : '从未'),
           kv('下次备份', meta.nextBackupAt ? fmtClock(meta.nextBackupAt) : '未安排'),
+          kv('上次同步', data.sync?.lastSyncAt ? fmtClock(data.sync.lastSyncAt) : '从未'),
+          kv('自动同步', (() => { const v = String(data.preferences?.syncIntervalHours ?? 'off'); return v === 'off' ? '关闭' : `${v} 小时` })()),
           kv('磁盘占用', fmtBytes(Number(data.diskUsageBytes) || 0)),
           kv('自动备份', `${Number(meta.backupIntervalHours) || 24} 小时`)))
 
@@ -2536,6 +3290,22 @@ window.__ModuleLoader__.load({
               app.render(true)
             },
           }),
+          button('克隆母体', {
+            size: 'sm', variant: 'quiet', dataBtnId: 'M-07',
+            title: '把本机母体 profile（package.json / cordis.patch.yml / settings）克隆到镜像 active/profile，先自动备份',
+            onClick: () => void app.mirrorAction('clone', async () => (await api('/fang/api/mirror/clone-profile', { method: 'POST', body: '{}' })).body),
+          }),
+          button('空白母体', {
+            size: 'sm', variant: 'quiet', dataBtnId: 'M-08',
+            title: '重置为初始盘（清空 active/profile）；会先自动备份，需重新克隆或升级',
+            onClick: () => {
+              S.modal.pending = {
+                text: '把镜像重置为空白母体（初始盘）？会先自动备份；之后需要重新克隆或升级才能恢复基础配置。',
+                run: () => app.mirrorAction('blank', async () => (await api('/fang/api/mirror/blank', { method: 'POST', body: '{}' })).body),
+              }
+              app.render(true)
+            },
+          }),
           button('打开母体门户', {
             size: 'sm', variant: 'quiet', icon: icon('globe', 13),
             title: '在新窗口打开 /fang/panel 独立门户（桌面壳使用真实 HTTP 源）',
@@ -2547,6 +3317,13 @@ window.__ModuleLoader__.load({
             size: 'sm', variant: Number(meta.backupIntervalHours) === hours ? 'config' : 'quiet',
             title: `每 ${hours} 小时自动备份一次`,
             onClick: () => void app.mirrorAction('interval:' + hours, async () => (await api('/fang/api/mirror/backup-interval', { method: 'POST', body: JSON.stringify({ hours }) })).body),
+          })))))
+
+        section.append(h('div', { class: 'glass-section-title', style: { marginTop: '4px' } }, '母体自动同步',
+          ...(['off', '6', '12', '24'].map((value) => button(value === 'off' ? '关闭' : value + 'h', {
+            size: 'sm', variant: String(data.preferences?.syncIntervalHours ?? 'off') === value ? 'config' : 'quiet',
+            title: value === 'off' ? '关闭自动同步' : `每 ${value} 小时从本机母体 profile 同步到镜像（同步前自动备份）`,
+            onClick: () => void app.mirrorAction('sync:' + value, async () => (await api('/fang/api/mirror/preferences/set', { method: 'POST', body: JSON.stringify({ syncIntervalHours: value }) })).body),
           })))))
 
         if (pending) {
@@ -2642,6 +3419,78 @@ window.__ModuleLoader__.load({
       return section
     }
 
+    // 元主详情页（设置 / 插件 / 运行日志）
+    function renderEssenceModal(S, app) {
+      const modal = S.modal
+      const detail = modal.detail
+      const meta = detail?.meta ?? null
+      const tabs = [['settings', '设置'], ['plugins', '插件'], ['logs', '运行日志']]
+      const body = h('div', { class: 'glass-body' })
+      if (modal.loading) {
+        body.append(h('div', { class: 'loading-line' }, icon('spinner', 14), '读取元主详情…'))
+      } else if (modal.error) {
+        body.append(h('div', { class: 'notice notice--warn' }, h('div', { class: 'notice-main' },
+          h('div', { class: 'notice-title' }, icon('alert', 14), '读取失败'),
+          h('div', { class: 'notice-text' }, failureHint(modal.error) + ' · ' + modal.error))))
+      } else if (detail) {
+        if (modal.tab === 'settings') {
+          const rows = [
+            ['状态', String(meta.status ?? 'unknown')],
+            ['等级', String(meta.tier ?? '—')],
+            ['插件条目', String(detail.overlay?.patchEntries?.length ?? 0)],
+            ['设置项', (detail.overlay?.settings || []).join(', ') || '—'],
+            ['备份', detail.backup ? '有（Backup/，只保留一份）' : '无'],
+            ['进行中会话', `${detail.sessions?.used ?? 0} / ${detail.sessions?.limit ?? 10}${detail.sessions?.over ? '（已满，归档后再开）' : ''}`],
+            ['运行态', detail.runtime?.running ? `运行中 · :${detail.runtime.port ?? '—'} · pid ${detail.runtime.pid ?? '—'}` : '未运行'],
+            ['镜像指纹', String(meta.lastMergedFingerprint ?? '—').slice(0, 16)],
+            ['归档', meta.archived === true ? '已冻结（只能删除）' : '活跃'],
+          ]
+          body.append(h('div', { style: { display: 'grid', gap: 6, padding: '6px 2px' } },
+            ...rows.map(([key, value]) => h('div', { style: { display: 'flex', gap: 12 } },
+              h('span', { style: { width: 88, opacity: .65 } }, key),
+              h('span', null, value)))))
+        } else if (modal.tab === 'plugins') {
+          const entries = detail.overlay?.patchEntries || []
+          body.append(entries.length
+            ? h('div', null, ...entries.map((entry) => h('div', {
+              style: { display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0', borderBottom: '1px solid rgba(127,127,127,.15)' },
+            },
+            h('b', { style: { fontFamily: 'var(--f-mono)' } }, entry.id),
+            h('span', { class: 'hint' }, entry.name || ''),
+            entry.disabled ? h('span', { class: 'chip' }, '禁用') : null)))
+            : h('div', { class: 'hint' }, '该元主还没有插件补丁条目；在「打开」起的实例里安装插件后再同步。'))
+        } else {
+          body.append(h('pre', {
+            style: { maxHeight: '46vh', overflow: 'auto', fontSize: 11, lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0 },
+          }, detail.logs || '（暂无运行日志；先点「打开」启动该元主的隔离实例）'))
+        }
+      }
+      const tabBar = h('div', { class: 'panel-tools', style: { borderTop: 'none' } },
+        ...tabs.map(([id, label]) => button(label, {
+          size: 'sm', variant: modal.tab === id ? 'primary' : 'ghost',
+          onClick: () => { if (!S.modal || S.modal.kind !== 'essence') return; S.modal.tab = id; render(true) },
+        })))
+      const closeBtn = button('关闭', { size: 'sm', variant: 'quiet', onClick: () => app.closeModal() })
+      const id = modal.essenceId
+      return h('div', {
+        class: 'overlay', 'data-overlay': '1',
+        onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() },
+      },
+      h('div', { class: 'glass', role: 'dialog', 'aria-modal': 'true', style: { width: 'min(880px, 94vw)' } },
+        h('div', { class: 'glass-head' },
+          h('div', { class: 'glass-head-main' },
+            h('div', { class: 'glass-title', id: 'fang-essence-title' }, icon('gate', 16), meta?.name || id),
+            h('div', { class: 'glass-sub' }, `${id} · ${meta?.archived === true ? '冻结' : '活跃'}${meta?.locked === true ? ' · 官方锁定' : ''}`)),
+          closeBtn),
+        tabBar,
+        body,
+        h('div', { class: 'glass-foot' },
+          button('打开', { size: 'sm', variant: 'ghost', onClick: () => { app.closeModal(); void app.openEssence(id) } }),
+          button('同步', { size: 'sm', variant: 'ghost', onClick: () => { app.closeModal(); void app.syncEssence(id) } }),
+          button('备份', { size: 'sm', variant: 'ghost', onClick: () => { const name = S.modal?.detail?.meta?.name; app.closeModal(); void app.essenceBackup({ id, name }) } }),
+          button('下载', { size: 'sm', variant: 'ghost', onClick: () => { const name = S.modal?.detail?.meta?.name; app.closeModal(); void app.downloadEssence({ id, name }) } }))))
+    }
+
     function renderMotherModal(S, app) {
       const data = S.status.data
       const mirror = S.mirror.data
@@ -2693,10 +3542,17 @@ window.__ModuleLoader__.load({
     function renderConfirmModal(S, app) {
       const modal = S.modal
       const expected = String(modal.expected || '')
-      const matches = !modal.strong || String(modal.typed || '').trim() === expected
-      const level = modal.strong ? 'strong' : 'once'
       const inputId = 'fang-confirm-input'
       const reasonId = 'fang-confirm-reason'
+      // 输入框是就地改 DOM 的，点击时必须以输入框当前值为准，
+      // 否则首次渲染算出的 matches=false 会把「已输入正确名称」的点击吞掉。
+      const inputValue = () => {
+        if (!modal.strong) return ''
+        const node = app.view.querySelector('#' + inputId)
+        return String(node?.value ?? modal.typed ?? '').trim()
+      }
+      const confirmed = () => !modal.strong || inputValue() === expected
+      const level = modal.strong ? 'strong' : 'once'
       return h('div', { class: 'overlay', 'data-overlay': '1', onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() } },
         h('div', {
           class: 'glass glass--sm', role: 'alertdialog', 'aria-modal': 'true',
@@ -2747,10 +3603,15 @@ window.__ModuleLoader__.load({
             }),
             button(modal.confirmLabel || '确认', {
               size: 'sm', variant: modal.tone === 'info' ? 'info' : 'danger', fk: 'confirm-ok',
-              disabled: !matches,
+              disabled: modal.strong,
               describedBy: modal.strong ? reasonId : undefined,
               onClick: () => {
-                if (!matches) return
+                if (!confirmed()) {
+                  // 名称还没对上：把焦点送回输入框，别让点击静默丢失。
+                  const node = app.view.querySelector('#' + inputId)
+                  if (node) node.focus({ preventScroll: true })
+                  return
+                }
                 const run = modal.onConfirm
                 app.closeModal()
                 void run()
@@ -2759,6 +3620,48 @@ window.__ModuleLoader__.load({
           modal.strong
             ? h('span', { class: 'live', id: reasonId, role: 'status' }, '名称不匹配，删除按钮保持禁用。')
             : null))
+    }
+
+    function renderBranchModal(S, app) {
+      const modal = S.modal
+      const branches = Array.isArray(modal.branches) ? modal.branches : []
+      return h('div', { class: 'overlay', 'data-overlay': '1', onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() } },
+        h('div', { class: 'glass', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'fang-branch-title' },
+          h('div', { class: 'glass-head' },
+            h('div', { class: 'glass-head-main' },
+              h('div', { class: 'glass-title', id: 'fang-branch-title' }, '分支 · ' + (modal.taskTitle || '')),
+              h('div', { class: 'glass-sub' }, '会话 ' + (modal.sessionId || '—') + ' · 当前分支 ' + (modal.activeBranchId || '—'))),
+            button('', { variant: 'quiet', size: 'sm', iconOnly: true, icon: icon('close', 15), ariaLabel: '关闭', onClick: () => app.closeModal() })),
+          h('div', { class: 'glass-body' },
+            modal.error ? h('div', { class: 'hint', style: { color: 'var(--f-red)' }, role: 'alert' }, modal.error) : null,
+            h('div', { style: { display: 'flex', gap: 8, margin: '4px 0 12px' } },
+              button('派生分支', { size: 'sm', variant: 'primary', dataBtnId: 'B-01', onClick: () => void app.forkBranch({ taskId: modal.taskId, title: modal.taskTitle }) }),
+              button('刷新', { size: 'sm', variant: 'ghost', onClick: () => void app.openBranches({ taskId: modal.taskId, title: modal.taskTitle }) })),
+            branches.length === 0
+              ? h('p', { class: 'glass-sub' }, '还没有分支。派生分支会在分身内 fork 当前会话（物理分支，子会话挂回同一分身）。')
+              : h('div', { style: { display: 'grid', gap: 6 } },
+                branches.map((branch) => h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', border: '1px solid var(--f-border)', borderRadius: 10 } },
+                  h('span', null,
+                    String(branch.branchId) + ' · ' + String(branch.status ?? '')
+                    + (branch.sessionId ? ' · ' + short(String(branch.sessionId), 8) : '')
+                    + (branch.branchId === modal.activeBranchId ? ' · 当前' : '')),
+                  branch.branchId !== modal.activeBranchId && branch.status === 'active'
+                    ? button('激活', { size: 'sm', variant: 'ghost', onClick: () => void app.activateBranch({ taskId: modal.taskId, title: modal.taskTitle }, branch.branchId) })
+                    : null,
+                  button('打开分身', {
+                    size: 'sm', variant: 'ghost', title: '打开分身 Web UI（DSH 暂不支持会话深链，子会话在左侧会话列表中）',
+                    onClick: () => void app.openTask({ taskId: modal.taskId, title: modal.taskTitle }),
+                  }),
+                  branch.sessionId ? button('复制会话 ID', {
+                    size: 'sm', variant: 'ghost', title: branch.sessionId,
+                    onClick: () => {
+                      const text = String(branch.sessionId || '')
+                      const done = () => setNotice({ tone: 'ok', title: '已复制会话 ID', message: short(text, 12) })
+                      try { void navigator.clipboard.writeText(text).then(done, done) } catch { done() }
+                    },
+                  }) : null)))),
+          h('div', { class: 'glass-foot' },
+            button('关闭', { size: 'sm', variant: 'ghost', onClick: () => app.closeModal() }))))
     }
 
     function renderPromptModal(S, app) {
@@ -2838,9 +3741,63 @@ window.__ModuleLoader__.load({
       for (const node of renderNotices(S, app)) frag.append(node)
 
       if (S.role.value === 'mother') {
-        frag.append(h('div', { class: 'fang-body', 'aria-busy': S.refreshing ? 'true' : undefined },
-          renderMotherPanel(S, app),
-          renderForkPanel(S, app)))
+        const body = h('div', { class: 'fang-body', 'aria-busy': S.refreshing ? 'true' : undefined })
+        body.append(renderMotherPanel(S, app), renderForkPanel(S, app))
+        // 中间拖动手柄：默认 50:50，可拖动/键盘方向键调整，双击恢复 50:50（偏好存本机）。
+        const handle = h('div', {
+          class: 'fang-split-handle',
+          role: 'separator',
+          'aria-orientation': 'vertical',
+          'aria-label': '调整元宝工作区与分身工作区比例',
+          'aria-valuemin': '25',
+          'aria-valuemax': '75',
+          tabindex: '0',
+          title: '拖动调整比例；双击恢复 50:50',
+        })
+        const applyRatio = (ratio, persist = false) => {
+          const clamped = Math.min(0.75, Math.max(0.25, Number.isFinite(ratio) ? ratio : 0.5))
+          S.splitRatio = clamped
+          const left = (clamped * 100).toFixed(2)
+          const right = ((1 - clamped) * 100).toFixed(2)
+          // fr 会先扣除 gap 再按比例分配，避免 50% + gap 溢出。
+          body.style.gridTemplateColumns = `minmax(320px, ${left}fr) minmax(0, ${right}fr)`
+          handle.style.left = left + '%'
+          handle.setAttribute('aria-valuenow', String(Math.round(clamped * 100)))
+          if (persist) writeNumberPref('fang.panel.split', clamped)
+        }
+        applyRatio(S.splitRatio)
+        const onMove = (event) => {
+          const x = event.touches ? event.touches[0]?.clientX : event.clientX
+          if (typeof x !== 'number') return
+          const rect = body.getBoundingClientRect()
+          if (rect.width > 0) applyRatio((x - rect.left) / rect.width)
+        }
+        const stop = () => {
+          body.classList.remove('is-resizing')
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('touchmove', onMove)
+          document.removeEventListener('mouseup', stop)
+          document.removeEventListener('touchend', stop)
+          writeNumberPref('fang.panel.split', S.splitRatio)
+        }
+        const start = (event) => {
+          event.preventDefault()
+          body.classList.add('is-resizing')
+          document.addEventListener('mousemove', onMove)
+          document.addEventListener('touchmove', onMove, { passive: false })
+          document.addEventListener('mouseup', stop, { once: true })
+          document.addEventListener('touchend', stop, { once: true })
+        }
+        handle.addEventListener('mousedown', start)
+        handle.addEventListener('touchstart', start, { passive: false })
+        handle.addEventListener('dblclick', () => applyRatio(0.5, true))
+        handle.addEventListener('keydown', (event) => {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+          event.preventDefault()
+          applyRatio(S.splitRatio + (event.key === 'ArrowLeft' ? -0.02 : 0.02), true)
+        })
+        body.append(handle)
+        frag.append(body)
         frag.append(renderFooter(S, app))
       } else if (S.role.value === 'fork') {
         frag.append(renderHostNotice(S, app))
@@ -2858,6 +3815,8 @@ window.__ModuleLoader__.load({
           }
         }
         if (S.modal.kind === 'mother') frag.append(renderMotherModal(S, app))
+          else if (S.modal.kind === 'essence') frag.append(renderEssenceModal(S, app))
+        else if (S.modal.kind === 'branches') frag.append(renderBranchModal(S, app))
         else if (S.modal.kind === 'confirm') frag.append(renderConfirmModal(S, app))
         else if (S.modal.kind === 'prompt') frag.append(renderPromptModal(S, app))
       }
@@ -2879,15 +3838,17 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { ref, className: 'fang-mount', style: props.style || { display: 'block', minWidth: 0 } })
     }
 
-    function mountDiagnostics(app) {
-      const doc = document
+    function mountDiagnostics(app, host) {
+      const doc = host?.ownerDocument ?? document
+      const parent = host ?? doc.body
+      if (host) { host.style.position = host.style.position || 'relative' }
       const btn = doc.createElement('button')
       btn.id = 'fang-diag-btn'
       btn.setAttribute('data-btn-id', 'LOG-01')
       btn.type = 'button'
       btn.textContent = '日志'
       Object.assign(btn.style, {
-        position: 'fixed', right: '16px', bottom: '16px', zIndex: '9999',
+        position: 'absolute', right: '16px', bottom: '16px', zIndex: '9999',
         height: '34px', padding: '0 12px', borderRadius: '10px',
         border: '1px solid rgba(127,127,127,.4)', background: '#fff', color: '#111',
         font: '600 13px/1 system-ui, sans-serif', cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,.18)',
@@ -2896,7 +3857,7 @@ window.__ModuleLoader__.load({
       overlay.id = 'fang-diag-panel'
       overlay.hidden = true
       Object.assign(overlay.style, {
-        position: 'fixed', right: '16px', bottom: '58px', zIndex: '9999',
+        position: 'absolute', right: '16px', bottom: '58px', zIndex: '9999',
         width: 'min(520px, calc(100vw - 32px))', maxHeight: '60vh', overflow: 'auto',
         background: '#fff', color: '#111', border: '1px solid rgba(127,127,127,.35)',
         borderRadius: '12px', boxShadow: '0 12px 40px rgba(0,0,0,.25)', padding: '10px',
@@ -2970,7 +3931,7 @@ window.__ModuleLoader__.load({
       window.addEventListener('fang:diag', onDiag)
       window.addEventListener('error', onError)
       window.addEventListener('unhandledrejection', onRejection)
-      doc.body.append(btn, overlay)
+      parent.append(btn, overlay)
       renderLogs()
       return () => {
         window.removeEventListener('fang:diag', onDiag)
@@ -2981,15 +3942,17 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function mountConnectionInfo(app) {
-      const doc = document
+    function mountConnectionInfo(app, host) {
+      const doc = host?.ownerDocument ?? document
+      const parent = host ?? doc.body
+      if (host) { host.style.position = host.style.position || 'relative' }
       const trigger = doc.createElement('button')
       trigger.id = 'fang-conn-trigger'
       trigger.type = 'button'
       trigger.setAttribute('data-btn-id', 'CONN-00')
       trigger.textContent = '连接信息'
       Object.assign(trigger.style, {
-        position: 'fixed', left: '16px', bottom: '16px', zIndex: '9999',
+        position: 'absolute', left: '16px', bottom: '16px', zIndex: '9999',
         height: '34px', padding: '0 12px', borderRadius: '10px',
         border: '1px solid rgba(127,127,127,.4)', background: '#fff', color: '#111',
         font: '600 13px/1 system-ui, sans-serif', cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,.18)',
@@ -2998,7 +3961,7 @@ window.__ModuleLoader__.load({
       popup.id = 'fang-conn-popup'
       popup.hidden = true
       Object.assign(popup.style, {
-        position: 'fixed', left: '16px', bottom: '58px', zIndex: '9999',
+        position: 'absolute', left: '16px', bottom: '58px', zIndex: '9999',
         display: 'none', alignItems: 'center', gap: '6px', maxWidth: 'calc(100vw - 32px)',
         padding: '6px 8px', borderRadius: '10px', background: '#fff', color: '#111',
         border: '1px solid rgba(127,127,127,.35)', boxShadow: '0 4px 14px rgba(0,0,0,.14)',
@@ -3007,6 +3970,10 @@ window.__ModuleLoader__.load({
       const label = doc.createElement('span')
       label.id = 'fang-conn-url'
       label.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42vw'
+      // Web 模式需要第二行显示安装 token；桌面模式保持原来的单行样子。
+      const labelWrap = doc.createElement('div')
+      labelWrap.style.cssText = 'display:flex;flex-direction:column;gap:2px;min-width:0'
+      labelWrap.append(label)
       const eye = doc.createElement('button')
       eye.type = 'button'
       eye.setAttribute('data-btn-id', 'CONN-01')
@@ -3024,6 +3991,9 @@ window.__ModuleLoader__.load({
       }
       let full = ''
       let baseUrl = ''
+      let tokenValue = ''
+      let tokenLabel = null
+      let copyToken = null
       let revealed = false
       let opened = false
       let loaded = false
@@ -3033,12 +4003,42 @@ window.__ModuleLoader__.load({
           return String(url).replace(/([?&]token=)[^&]*/, (_, prefix) => prefix + '•'.repeat(Math.min(16, token.length || 8)))
         } catch { return url }
       }
+      // 桌面壳里 token 由主进程保管；纯 Web 里没有 fangShell，
+      // 连接地址就是当前页面地址本身（同源打开，token 已在地址栏里）。
+      const isDesktopShell = () => typeof window !== 'undefined' && typeof window.fangShell?.revealToken === 'function'
+      const resolveFull = async () => {
+        if (full) return full
+        if (isDesktopShell()) {
+          try {
+            const info = await window.fangShell.revealToken()
+            if (info?.token) { full = baseUrl + '/?token=' + encodeURIComponent(String(info.token)); return full }
+          } catch { /* 主进程拒绝就退回页面地址 */ }
+        }
+        try {
+          const result = await api('/fang/api/connection')
+          const url = result?.body?.url
+          if (typeof url === 'string' && url) { full = url; return full }
+        } catch { /* 宿主没这个路由时继续兜底 */ }
+        if (typeof location !== 'undefined' && location.href) full = String(location.href)
+        return full
+      }
+      const maskedText = () => {
+        if (full) return mask(full)
+        if (baseUrl) return baseUrl + '/?token=••••••••'
+        return '连接信息加载中…'
+      }
       const render = () => {
         popup.hidden = !opened
         popup.style.display = opened ? 'flex' : 'none'
-        if (!opened) { label.textContent = ''; label.title = ''; return }
-        label.textContent = full && revealed ? full : (baseUrl ? baseUrl + '/?token=••••••••' : '连接信息加载中…')
+        if (!opened) { label.textContent = ''; label.title = ''; if (tokenLabel) { tokenLabel.textContent = ''; tokenLabel.title = '' } return }
+        label.textContent = full && revealed ? full : maskedText()
         label.title = revealed ? full : ''
+        if (tokenLabel) {
+          tokenLabel.textContent = tokenValue
+            ? (revealed ? tokenValue : 'Token ' + '•'.repeat(Math.min(16, tokenValue.length)))
+            : 'Token 未获取（宿主未就绪）'
+          tokenLabel.title = revealed ? tokenValue : ''
+        }
         eye.textContent = revealed ? '隐藏' : '显示'
       }
       const load = async () => {
@@ -3049,6 +4049,51 @@ window.__ModuleLoader__.load({
           if (info?.upstream) baseUrl = String(info.upstream).replace(/\/+$/, '')
         } catch { /* ignore */ }
         if (!baseUrl) baseUrl = String(location.origin || '')
+        // 宿主侧 /fang/api/connection 给出带进程 token 的完整地址；
+        // 拿不到就用当前页面地址兜底（同源，能用就能复制）。
+        try {
+          const result = await api('/fang/api/connection')
+          const url = result?.body?.url
+          if (typeof url === 'string' && url) full = url
+        } catch { /* ignore */ }
+        if (!isDesktopShell()) {
+          // 纯 Web：宿主没有桌面壳桥，token 走同源的 /fang/api/auth-token。
+          try {
+            const result = await api('/fang/api/auth-token')
+            const token = result?.body?.token
+            if (typeof token === 'string' && token) tokenValue = token
+          } catch { /* ignore */ }
+          tokenLabel = doc.createElement('span')
+          tokenLabel.id = 'fang-conn-token'
+          tokenLabel.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42vw;color:#6E6E73'
+          labelWrap.append(tokenLabel)
+          copyToken = doc.createElement('button')
+          copyToken.type = 'button'
+          copyToken.setAttribute('data-btn-id', 'CONN-04')
+          copyToken.textContent = '复制 Token'
+          copyToken.style.cssText = 'height:28px;padding:0 8px;border-radius:8px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;cursor:pointer;font:inherit'
+          copyToken.onclick = async () => {
+            if (!tokenValue) { app.notify('warn', '还没拿到 Token：宿主可能未就绪'); return }
+            const ok = await writeClipboard(tokenValue)
+            app.notify(ok ? 'ok' : 'warn', ok ? '已复制 Token' : '复制失败：浏览器未授权剪贴板')
+          }
+          popup.insertBefore(copyToken, close)
+          if (!full && typeof location !== 'undefined' && location.href) full = String(location.href)
+        }
+      }
+      // 老 Electron / 无剪贴板权限时退回 execCommand。
+      const writeClipboard = async (text) => {
+        try { await navigator.clipboard.writeText(text); return true } catch { /* fall through */ }
+        try {
+          const area = doc.createElement('textarea')
+          area.value = text
+          area.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'
+          doc.body.appendChild(area)
+          area.select()
+          const ok = doc.execCommand('copy')
+          area.remove()
+          return Boolean(ok)
+        } catch { return false }
       }
       trigger.onclick = async () => {
         opened = !opened
@@ -3058,20 +4103,21 @@ window.__ModuleLoader__.load({
       }
       eye.onclick = async () => {
         if (!revealed) {
-          try {
-            const info = await window.fangShell?.revealToken?.()
-            if (info?.token) full = baseUrl + '/?token=' + encodeURIComponent(String(info.token))
-          } catch { /* ignore */ }
+          const text = await resolveFull()
+          if (!text) { app.notify('warn', '还没拿到连接地址：宿主可能未就绪'); return }
         }
         revealed = !revealed
         render()
       }
       copy.onclick = async () => {
-        try { await navigator.clipboard.writeText(full); app.notify('ok', '已复制连接地址') } catch { app.notify('warn', '复制失败：浏览器未授权剪贴板') }
+        const text = await resolveFull()
+        if (!text) { app.notify('warn', '还没拿到连接地址：宿主可能未就绪'); return }
+        const ok = await writeClipboard(text)
+        app.notify(ok ? 'ok' : 'warn', ok ? '已复制连接地址' : '复制失败：浏览器未授权剪贴板')
       }
       close.onclick = () => { opened = false; revealed = false; render() }
-      popup.append(label, eye, copy, close)
-      doc.body.append(trigger, popup)
+      popup.append(labelWrap, eye, copy, close)
+      parent.append(trigger, popup)
       render()
       return () => { trigger.remove(); popup.remove() }
     }
@@ -3106,8 +4152,8 @@ window.__ModuleLoader__.load({
         window.__fangUiLog.push({ at: Date.now(), kind: 'panel-mount' })
       } catch { /* 宿主无 window 时忽略 */ }
       const app = createConsole(host)
-      const unmountDiagnostics = mountDiagnostics(app)
-      const unmountConnection = mountConnectionInfo(app)
+      const unmountDiagnostics = mountDiagnostics(app, host)
+      const unmountConnection = mountConnectionInfo(app, host)
       try { host.ownerDocument?.getElementById('fang-fallback')?.remove() } catch { /* ignore */ }
       return () => { unmountConnection(); unmountDiagnostics(); app.destroy() }
     }
@@ -3150,7 +4196,11 @@ window.__ModuleLoader__.load({
           const layout = ctx?.layout
           if (layout && typeof layout.selectPanel === 'function') { layout.selectPanel('fang'); return }
         } catch { /* fall through */ }
-        try { window.open('/fang/panel', '_blank', 'noopener') } catch { /* ignore */ }
+        try {
+          window.dispatchEvent(new CustomEvent('fang:notice', {
+            detail: '瓮城面板未在当前视图打开；请从 DSH 左侧栏「瓮城」进入，或使用 PC 端。',
+          }))
+        } catch { /* ignore */ }
       }
       label.addEventListener('click', openPanel)
       label.addEventListener('dblclick', (event) => {
@@ -3223,12 +4273,310 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ── 截图（内置客户端模块，不再作为独立子插件）──────────────────────────
+    // 结果一律落在一个 body 级预览层里：看得见、能复制、说得清失败原因。
+    // 面板未挂载时 fang:notice 没有监听者，所以失败提示不能只靠事件。
+    const SHOT_NAME = () => `wengcheng-${Date.now()}.png`
+    let shotOverlay = null
+
+    function closeShotOverlay() {
+      if (!shotOverlay) return
+      try { shotOverlay.off() } catch { /* ignore */ }
+      try { shotOverlay.node.remove() } catch { /* ignore */ }
+      try { URL.revokeObjectURL(shotOverlay.url) } catch { /* ignore */ }
+      shotOverlay = null
+    }
+
+    function showShotOverlay({ blob = null, message = '', hint = '', extraActions = [] } = {}) {
+      closeShotOverlay()
+      const doc = typeof document !== 'undefined' ? document : null
+      if (!doc?.body) return
+      const url = blob ? URL.createObjectURL(blob) : ''
+      const status = h('div', {
+        style: { fontSize: 13, lineHeight: 1.5, color: '#EFEFEF', whiteSpace: 'pre-wrap' },
+        text: message,
+      })
+      const actions = h('div', { style: { display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' } })
+      const mkBtn = (label, primary) => h('button', {
+        type: 'button',
+        style: {
+          height: 30, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+          border: primary ? '1px solid #17803D' : '1px solid rgba(255,255,255,.24)',
+          background: primary ? '#17803D' : 'transparent', color: '#fff',
+        },
+      }, label)
+      if (blob) {
+        const copyBtn = mkBtn('复制到剪贴板', true)
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+            copyBtn.textContent = '已复制 ✓'
+            status.textContent = '已复制到剪贴板，在输入框里 Ctrl+V 即可粘贴图片。'
+          } catch (error) {
+            status.textContent = '复制失败：' + String(error?.message ?? error) + '\n可点「下载 PNG」，或右键预览图选「复制图片」。'
+          }
+        })
+        const dlBtn = mkBtn('下载 PNG', false)
+        dlBtn.addEventListener('click', () => {
+          const link = h('a', { href: url, download: SHOT_NAME() })
+          doc.body.appendChild(link)
+          link.click()
+          link.remove()
+          status.textContent = '已下载 PNG，去浏览器的下载目录取文件。'
+        })
+        actions.append(copyBtn, dlBtn)
+      }
+      for (const extra of Array.isArray(extraActions) ? extraActions : []) {
+        if (!extra || typeof extra.onClick !== 'function') continue
+        const btn = mkBtn(String(extra.label ?? '操作'), extra.primary === true)
+        btn.setAttribute('data-fang-shot-action', String(extra.label ?? 'action'))
+        btn.addEventListener('click', () => { try { extra.onClick() } catch { /* ignore */ } })
+        actions.append(btn)
+      }
+      const closeBtn = mkBtn('关闭', false)
+      actions.append(closeBtn)
+      const preview = blob ? h('img', {
+        src: url,
+        alt: '截图预览',
+        style: { display: 'block', width: '100%', maxHeight: '58vh', objectFit: 'contain', borderRadius: 10, background: '#111', marginTop: 12 },
+      }) : null
+      const parts = [
+        h('div', { style: { fontSize: 14, fontWeight: 600, color: '#fff', marginBottom: 8 } }, '瓮城截图'),
+        status,
+      ]
+      if (preview) parts.push(preview)
+      if (hint) parts.push(h('div', { style: { marginTop: 8, fontSize: 12, color: '#9A9AA0' }, text: hint }))
+      parts.push(actions)
+      const card = h('div', {
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': '瓮城截图',
+        style: {
+          width: 'min(760px, 92vw)', padding: 18, borderRadius: 14, background: '#1D1D1F',
+          boxShadow: '0 24px 64px -12px rgba(0,0,0,.6)', pointerEvents: 'auto',
+        },
+      }, parts)
+      const backdrop = h('div', {
+        style: {
+          position: 'fixed', inset: 0, zIndex: 2147483000, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 24,
+          background: 'rgba(0,0,0,.55)', pointerEvents: 'auto',
+        },
+      }, card)
+      backdrop.addEventListener('click', (event) => { if (event.target === backdrop) closeShotOverlay() })
+      closeBtn.addEventListener('click', () => closeShotOverlay())
+      const onKey = (event) => { if (event.key === 'Escape') { event.preventDefault(); closeShotOverlay() } }
+      doc.addEventListener('keydown', onKey, true)
+      doc.body.appendChild(backdrop)
+      shotOverlay = { node: backdrop, url, off: () => doc.removeEventListener('keydown', onKey, true) }
+    }
+
+    // DSH 桌面端的渲染进程是 Electron：没有 setDisplayMediaRequestHandler 时
+    // getDisplayMedia 会直接 reject，用户看到的就是「没有选择共享内容」。
+    // 第一次 getDisplayMedia 被拒后记住：这个窗口没有共享选择器，之后直接走系统截图。
+    let webCaptureBlocked = false
+    const isEmbeddedDesktop = () => {
+      try { return /Electron\//i.test(String(navigator?.userAgent ?? '')) } catch { return false }
+    }
+
+    /** 调 Windows「屏幕截图」URI（与 Win+Shift+S 同一入口）；被拦截时返回 false。 */
+    function requestSystemSnip() {
+      try {
+        const link = h('a', { href: 'ms-screenclip:', rel: 'noopener', style: { display: 'none' } })
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        return true
+      } catch { return false }
+    }
+
+    async function readClipboardImage() {
+      try {
+        if (!navigator.clipboard?.read) return { ok: false, error: '当前环境不支持读取剪贴板图片' }
+        const items = await navigator.clipboard.read()
+        for (const item of items) {
+          const type = (item.types || []).find((candidate) => String(candidate).startsWith('image/'))
+          if (type) return { ok: true, blob: await item.getType(type) }
+        }
+        return { ok: false, error: '剪贴板里还没有图片（先按 Win+Shift+S 截图）' }
+      } catch (error) {
+        return { ok: false, error: String(error?.message ?? error) }
+      }
+    }
+
+    async function readClipboardIntoOverlay() {
+      const result = await readClipboardImage()
+      if (!result.ok) {
+        showShotOverlay({
+          message: '读取剪贴板失败：' + result.error,
+          hint: '先按 Win+Shift+S 拖选区域截图，再回来点「读取剪贴板」；也可以直接 Ctrl+V 粘贴。',
+        })
+        return
+      }
+      showShotOverlay({
+        blob: result.blob,
+        message: '已从剪贴板读到截图：直接 Ctrl+V 就能粘贴到输入框。',
+        hint: '要换一张，再按一次 Win+Shift+S。',
+      })
+    }
+
+    function showSnipGuidance(reason) {
+      showShotOverlay({
+        message: reason || '这个窗口不提供网页屏幕共享选择器，浏览器抓屏不可用。',
+        hint: '按 Win+Shift+S 拖选区域，截图会直接进剪贴板，然后 Ctrl+V 粘贴；也可以点下面的按钮。',
+        extraActions: [
+          {
+            label: '打开系统截图', primary: true,
+            onClick: () => {
+              const ok = requestSystemSnip()
+              showShotOverlay({
+                message: ok ? '已请求打开 Windows 截图：拖选区域后点「读取剪贴板」。' : '系统截图没有打开：请直接按 Win+Shift+S。',
+                hint: ok ? '截完图直接 Ctrl+V 粘贴；或点「读取剪贴板」先预览。' : '',
+                extraActions: [{ label: '读取剪贴板', primary: true, onClick: () => void readClipboardIntoOverlay() }],
+              })
+            },
+          },
+          { label: '读取剪贴板', onClick: () => void readClipboardIntoOverlay() },
+        ],
+      })
+    }
+
+    async function captureScreenshot() {
+      if (typeof window.fangShell?.captureScreen === 'function') {
+        try {
+          const result = await window.fangShell.captureScreen()
+          if (result?.ok) notifyScreenshot('已截图并复制到剪贴板，可直接 Ctrl+V 粘贴')
+          else showShotOverlay({ message: '桌面端没有拿到屏幕图像。', hint: '可改用 Win+Shift+S 截图后粘贴。' })
+          return Boolean(result?.ok)
+        } catch (error) {
+          showShotOverlay({ message: '截图失败：' + String(error?.message ?? error) })
+          return false
+        }
+      }
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
+        showSnipGuidance('当前页面不支持网页截屏。')
+        return false
+      }
+      // Electron 宿主不会弹共享选择器：先走系统截图（Ctrl+X ≈ Win+Shift+S），别再让用户看失败框。
+      if (isEmbeddedDesktop() || webCaptureBlocked) {
+        const requested = requestSystemSnip()
+        showShotOverlay({
+          message: requested
+            ? '已请求 Windows 系统截图（等同 Win+Shift+S）：拖选区域后，直接 Ctrl+V 粘贴。'
+            : '这个窗口不能网页抓屏。请按 Win+Shift+S 截图。',
+          hint: 'DSH 桌面端不提供屏幕共享选择器，所以浏览器抓屏会直接失败；系统截图走的是 Windows 自己的剪贴板。',
+          extraActions: requested
+            ? [{ label: '读取剪贴板', primary: true, onClick: () => void readClipboardIntoOverlay() }]
+            : [{ label: '打开系统截图', primary: true, onClick: () => { requestSystemSnip() } }, { label: '读取剪贴板', onClick: () => void readClipboardIntoOverlay() }],
+        })
+        return requested
+      }
+      let stream = null
+      try {
+        // 浏览器会弹一次「选择要共享的内容」，选当前标签页/窗口/屏幕均可。
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+        const video = document.createElement('video')
+        video.srcObject = stream
+        video.muted = true
+        await video.play()
+        await new Promise((resolve) => { if (video.videoWidth) resolve(); else video.onloadedmetadata = resolve })
+        const canvas = document.createElement('canvas')
+        canvas.width = video.videoWidth
+        canvas.height = video.videoHeight
+        canvas.getContext('2d').drawImage(video, 0, 0)
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+        if (!blob) throw new Error('截图内容为空')
+        webCaptureBlocked = false
+        let copied = false
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+          copied = true
+        } catch { /* 预览层里还有手动复制按钮 */ }
+        showShotOverlay({
+          blob,
+          message: copied
+            ? '已截图并复制到剪贴板，在输入框里 Ctrl+V 即可粘贴。'
+            : '已截到图，但浏览器拒绝了自动写入剪贴板，请点下面的「复制到剪贴板」。',
+          hint: copied ? '' : '也可以点「下载 PNG」，或右键预览图选「复制图片」。',
+        })
+        return true
+      } catch (error) {
+        const name = String(error?.name ?? '')
+        if (name === 'NotAllowedError') {
+          webCaptureBlocked = true
+          showSnipGuidance('浏览器拒绝了屏幕捕获：这个窗口没有共享选择器。')
+        } else if (name === 'AbortError') {
+          showShotOverlay({
+            message: '截图已取消（没有选择共享内容）。',
+            hint: '再按一次 Ctrl+X 重试，或改用 Win+Shift+S 截图后 Ctrl+V 粘贴。',
+          })
+        } else {
+          showShotOverlay({ message: '截图失败：' + String(error?.message ?? error), hint: '可以改用 Win+Shift+S 截图后 Ctrl+V 粘贴。' })
+        }
+        return false
+      } finally {
+        for (const track of stream?.getTracks?.() ?? []) { try { track.stop() } catch { /* ignore */ } }
+      }
+    }
+
+    function notifyScreenshot(message) {
+      try { window.dispatchEvent(new CustomEvent('fang:notice', { detail: message })) } catch { /* ignore */ }
+    }
+
+    function isScreenshotShortcut(event) {
+      const key = String(event?.key || '').toLowerCase()
+      if (key !== 'x' || !event.ctrlKey || event.altKey || event.metaKey) return false
+      return true
+    }
+
+    // 插槽返回的必须是 React 元素；直接返回 DOM 节点会让宿主判为异常而关掉该项。
+    function ScreenshotDock() {
+      return React.createElement(DomMount, {
+        style: { display: 'inline-flex', alignItems: 'center' },
+        mount: (host) => {
+          const btn = h('button', {
+            type: 'button',
+            'data-fang-entry': 'screenshot',
+            title: '截图并复制到剪贴板：Ctrl+X（桌面端走 Windows 系统截图，浏览器走屏幕共享）',
+            style: {
+              height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer',
+              border: '1px solid rgba(127,127,127,.35)', background: 'transparent', color: 'inherit', fontSize: 12,
+            },
+          }, '截图 Ctrl+X')
+          btn.addEventListener('click', () => { void captureScreenshot() })
+          host.replaceChildren(btn)
+          return () => { host.replaceChildren() }
+        },
+      })
+    }
+
     // ── 插件入口 ──────────────────────────────────────────────────────────
     return {
       mountPanel,
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
+        // 母体 Web = DSH 主会话视图；Web 端直接切回 conversation 面板。
+        const goMother = () => {
+          try {
+            if (ctx?.layout && typeof ctx.layout.selectPanel === 'function') ctx.layout.selectPanel('conversation')
+          } catch { /* fall back to panel notice */ }
+        }
+        window.addEventListener('fang:mother-portal', goMother)
+        disposers.push(() => window.removeEventListener('fang:mother-portal', goMother))
+        const onScreenshotKey = (event) => {
+          if (!isScreenshotShortcut(event)) return
+          event.preventDefault()
+          event.stopPropagation()
+          void captureScreenshot()
+        }
+        window.addEventListener('keydown', onScreenshotKey, true)
+        disposers.push(() => window.removeEventListener('keydown', onScreenshotKey, true))
+        disposers.push(ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+          name: 'conversation.composer.dock',
+          id: 'fang-screenshot-inline',
+          order: 91,
+        }, ScreenshotDock)))
         // 左侧导航「瓮城」：图标组件即登记项组件（外壳只给 {size, active}）
         disposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',

@@ -1,15 +1,26 @@
 {
   "name": "@twinsearth/dsh-fang-web-entry",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
+  "private": false,
   "type": "module",
+  "description": "DSH Web sidebar/config entry for dsh-Fang (Wengcheng); opens the PC Electron panel via dsh-fang://open.",
+  "license": "AGPL-3.0-or-later",
+  "author": {
+    "name": "dsh-Fang contributors"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
   },
-  "files": ["index.js", "client.js", "cordis.patch.yml"],
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,

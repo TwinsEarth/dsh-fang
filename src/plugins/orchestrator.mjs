@@ -12,7 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import {
-  z, roleGate, resolveFangLayout, resolveProfileDir,
+  z, roleGate, resolveFangLayout, resolveProfileDir, resolveSessionsLayout,
   SERVICE, AUDIT, TASK_STATUS, FORK_STATUS, FANG_VERSION, ADAPTER_OP,
   exists, ensureDir, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree,
   newId, iso, nowMs, bus, sleep, parseWebUrl, probeWebUrl,
@@ -24,13 +24,16 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
-import { EssenceManager, OFFICIAL_ESSENCE_ID } from '../lib/essence.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID, VIP_QUOTAS } from '../lib/essence.mjs'
+import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
+import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
+import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -46,6 +49,10 @@ export const Config = z.object({
     .description('母体 profile 名；留空 = 当前 profile（分身模板来源）'),
   profileTemplate: z.string().default('')
     .description('分身 profile 模板目录；留空 = 当前 profile 目录（Forker 的 cleanTemplate 会覆盖）'),
+  fangHome: z.string().default('')
+    .description('三区数据根（相当于 FANG_HOME）；留空 = 自动（新装默认 D:\\ToFuture，已有旧数据沿用旧布局）'),
+  defaultEssenceAuto: z.boolean().default(true)
+    .description('新用户自动生成“默认元宝”（仅当没有任何用户元主、且默认插件已有安装时；失败不影响启动）'),
   cliPath: z.string().default('')
     .description('dsh 启动器路径；留空自动探测（PATH 上的 dsh / 安装目录 dsh.cmd）'),
   dataRoot: z.string().default('')
@@ -152,8 +159,9 @@ export function apply(ctx, config) {
   if (!gate.active) return
   const role = gate.role
 
-  const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot })
+  const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
   const branchStore = new BranchStore(layout.dataDir)
+  const composerJournal = new ComposerJournal(layout.dataDir)
   // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
   const authToken = cfg.authEnabled === false
     ? ''
@@ -228,6 +236,8 @@ export function apply(ctx, config) {
       adapter: f.adapter ?? { ok: false, error: 'not-handshaked' },
       collaborators: Array.isArray(f.collaborators) ? f.collaborators : [],
       template: f.template ?? '',
+      essenceId: f.essenceId ?? null,
+      sourceEssence: f.sourceEssence ?? null,
     }
   }
 
@@ -357,6 +367,19 @@ export function apply(ctx, config) {
       updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
       projectBytes: t.projectBytes ?? 0,
       essenceId: t.essenceId ?? null,
+      // 视图层才扫描会话（normalizeTask 在 apply 早期执行，不能引用后声明的 scanForkSessions）。
+      sessions: (() => { const list = scanForkSessions(t); return { count: list.length, violation: list.length > 1 } })(),
+      // 来源原身已被删除：分身仍可运行/归档/还原/删除，但不能重新派生。
+      essenceDeleted: Boolean(t.essenceId) && (t.essenceDeleted === true || isTombstoned(t.essenceId)),
+      // 方案 B：同一分身可挂多个分支会话，但同时只有一个 active。
+      branch: (() => {
+        try {
+          const store = branchStore.list(t.taskId)
+          return { activeBranchId: store.activeBranchId ?? t.activeBranchId ?? null, sessionId: store.sessionId ?? null, count: Array.isArray(store.branches) ? store.branches.length : 0 }
+        } catch {
+          return { activeBranchId: t.activeBranchId ?? null, sessionId: null, count: 0 }
+        }
+      })(),
       pid: live?.pid ?? t.pid ?? null,
       port: t.port ?? null,
       url: stripUrlToken(t.url),
@@ -421,6 +444,93 @@ export function apply(ctx, config) {
     return { ok: true, bytes, sessionId, workspacePath, workspaceKey, workspaceTitle, indexFile }
   }
 
+  // v3.0.9 单会话强制：扫分身自己的 sessions，保留最新一个，其余移到 quarantine-sessions/。
+  const scanForkSessions = (task) => {
+    const root = path.join(String(task?.homeDir ?? ''), 'sessions')
+    const out = []
+    try {
+      for (const workspace of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!workspace.isDirectory()) continue
+        const wsDir = path.join(root, workspace.name)
+        for (const session of fs.readdirSync(wsDir, { withFileTypes: true })) {
+          if (!session.isDirectory()) continue
+          const full = path.join(wsDir, session.name)
+          let mtime = 0
+          try { mtime = fs.statSync(full).mtimeMs } catch { mtime = 0 }
+          out.push({ workspaceKey: workspace.name, sessionId: session.name, path: full, mtime })
+        }
+      }
+    } catch { /* 没有 sessions 目录 */ }
+    return out.sort((a, b) => b.mtime - a.mtime)
+  }
+  const applySingleSessionGuard = (task) => {
+    // 受管的分支子会话不参与“单会话”隔离（它们由分支库登记，属于同一分身的合法分支）。
+    const branchSessionIds = new Set()
+    try {
+      for (const branch of branchStore.list(task.taskId).branches ?? []) {
+        if (branch?.sessionId) branchSessionIds.add(String(branch.sessionId))
+      }
+      const storeSession = branchStore.load?.(task.taskId)?.sessionId
+      if (storeSession) branchSessionIds.add(String(storeSession))
+    } catch { /* 无分支库 */ }
+    const sessions = scanForkSessions(task).filter((session) => !branchSessionIds.has(session.sessionId))
+    const bindBranches = (keptId) => { try { branchStore?.bindSession?.(task.taskId, keptId) } catch { /* ignore */ } }
+    if (sessions.length <= 1) {
+      const kept = sessions[0]?.sessionId ?? null
+      bindBranches(kept)
+      return { ok: true, kept, quarantined: [] }
+    }
+    const [keep, ...rest] = sessions
+    const stamp = String(nowMs())
+    const quarantined = []
+    for (const session of rest) {
+      const target = path.join(task.homeDir, 'quarantine-sessions', stamp, session.workspaceKey, session.sessionId)
+      try {
+        ensureDir(path.dirname(target))
+        try { fs.renameSync(session.path, target) } catch { copyTree(session.path, target); removeTree(session.path) }
+        quarantined.push({ workspaceKey: session.workspaceKey, sessionId: session.sessionId, movedTo: target, at: nowMs() })
+      } catch { /* 移动失败保留原样，不破坏数据 */ }
+    }
+    if (quarantined.length > 0) {
+      task.quarantinedSessions = (Array.isArray(task.quarantinedSessions) ? task.quarantinedSessions : []).concat(quarantined)
+      persist()
+      audit('fork-session-quarantined', { taskId: task.taskId, kept: keep.sessionId, moved: quarantined.length })
+    }
+    bindBranches(keep.sessionId)
+    return { ok: true, kept: keep.sessionId, quarantined }
+  }
+
+  const tombstonesFile = path.join(layout.dataDir, 'deleted-essences.json')
+  const loadTombstones = () => {
+    try {
+      const doc = readJson(tombstonesFile, {})
+      return Array.isArray(doc?.ids) ? doc.ids.map(String) : []
+    } catch { return [] }
+  }
+  const isTombstoned = (essenceId) => loadTombstones().includes(String(essenceId ?? ''))
+  const addTombstone = (essenceId, name) => {
+    const ids = new Set(loadTombstones())
+    ids.add(String(essenceId))
+    writeJsonAtomic(tombstonesFile, { ids: [...ids], updatedAt: nowMs(), last: { id: String(essenceId), name: String(name ?? ''), at: nowMs() } })
+  }
+
+  // v3.0.9 默认元宝：新用户免创建，自动生成一个带默认插件清单的元主。
+  const defaultEssenceFile = path.join(layout.dataDir, 'default-essence.json')
+  const readDefaultEssenceId = () => {
+    try { return String(readJson(defaultEssenceFile, {})?.essenceId ?? '') } catch { return '' }
+  }
+  const writeDefaultEssenceId = (essenceId) => writeJsonAtomic(defaultEssenceFile, { essenceId: String(essenceId), at: nowMs() })
+  const listInstalledPlugins = async () => {
+    try {
+      const pm = safeGet('pluginManager')
+      if (!pm || typeof pm.listPlugins !== 'function') return null
+      const out = await pm.listPlugins()
+      if (Array.isArray(out)) return out
+      if (Array.isArray(out?.plugins)) return out.plugins
+      return null
+    } catch { return null }
+  }
+
   const service = {
     role,
     version: FANG_VERSION,
@@ -445,6 +555,28 @@ export function apply(ctx, config) {
       const profile = `fang-${taskId.replace(/^task_/, '').slice(0, 12)}`
       const homeDir = path.join(layout.forkHomesDir, taskId)
       const template = String(input.template ?? '').trim()
+      // v3.0.9：从原身派生时，模板来源是该原身的 merged/profile（分身只生产，不回写原身）。
+      // v3.0.9：未指定来源时，若存在“默认元宝”，快速派生直接以它为模板（新用户小白路径）。
+      let essenceIdInput = String(input.essenceId ?? '').trim()
+      if (!essenceIdInput && !template) {
+        const presetId = readDefaultEssenceId()
+        if (presetId && essenceManager.getMeta(presetId)?.id) essenceIdInput = presetId
+      }
+      let sourceEssence = null
+      if (essenceIdInput) {
+        const essenceId = essenceIdInput
+        const meta = essenceManager.getMeta(essenceId)
+        if (!meta || typeof meta.id !== 'string') {
+          return { ok: false, error: isTombstoned(essenceId) ? 'essence-deleted' : 'unknown-essence' }
+        }
+        if (meta.archived === true) return { ok: false, error: 'essence-archived' }
+        await essenceManager.ensureFresh(essenceId)
+        const fresh = essenceManager.getMeta(essenceId)
+        sourceEssence = { id: essenceId, name: meta.name, fingerprint: fresh?.lastMergedFingerprint ?? null }
+      }
+      const profileTemplate = sourceEssence
+        ? essenceManager.mergedProfileDir(sourceEssence.id)
+        : (template || templateDir())
       const task = normalizeTask({
         taskId,
         title,
@@ -454,6 +586,8 @@ export function apply(ctx, config) {
         createdAt: nowMs(),
         collaborators: Array.isArray(input.collaborators) ? input.collaborators : [],
         template,
+        essenceId: sourceEssence?.id ?? null,
+        sourceEssence,
         adapter: { ok: false, error: 'handshaking' },
       })
       tasks.set(taskId, task)
@@ -465,7 +599,10 @@ export function apply(ctx, config) {
           taskTitle: title,
           homeDir,
           profile,
-          profileTemplate: template || templateDir(),
+          profileTemplate,
+          // 从原身派生：配置必须真的来自原身 merged（不能被 clean template 覆盖），
+          // node_modules 仍 junction 到母体模块树。
+          ...(sourceEssence ? { cleanTemplate: false, nodeModulesSource: path.join(templateDir(), 'node_modules') } : {}),
         })
         if (provisioned && provisioned.ok === false) {
           task.status = TASK_STATUS.FAILED
@@ -513,14 +650,28 @@ export function apply(ctx, config) {
         }
 
         if (input.importSession && typeof input.importSession === 'object') {
-          try {
-            task.importedSession = importSessionIntoFork(homeDir, input.importSession)
-            audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
-          } catch (e) {
-            task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
-            audit(AUDIT.FORK_CRASHED + '-import', { taskId, error: task.importedSession.error })
+          const importSpec = input.importSession
+          // 新入口：只给 sessionId（元主栏“派生”按钮）→ 由会话目录整目录复制进分身。
+          if (importSpec.sessionId && !importSpec.sourceFile) {
+            try {
+              const imported = importSessionsInto(homeDir, [importSpec.sessionId])
+              task.importedSession = imported[0] ? { ok: true, ...imported[0] } : { ok: false, reason: 'not-imported' }
+              audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
+            } catch (e) {
+              task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
+              audit(AUDIT.FORK_CRASHED + '-import', { taskId, error: task.importedSession.error })
+            }
+            persist()
+          } else {
+            try {
+              task.importedSession = importSessionIntoFork(homeDir, importSpec)
+              audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
+            } catch (e) {
+              task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
+              audit(AUDIT.FORK_CRASHED + '-import', { taskId, error: task.importedSession.error })
+            }
+            persist()
           }
-          persist()
         }
 
         const started = await f.spawn({
@@ -1013,6 +1164,54 @@ export function apply(ctx, config) {
     },
 
     /** 还原存档：用原 home/profile 重新 spawn（新端口 + 新 token），再握手。 */
+    /** 分身配置重置：把来源原身的 merged/profile 重新覆盖到分身 profile（保留 node_modules 与会话）。 */
+    async resetForkConfig(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (!task.essenceId) return { ok: false, error: 'no-source-essence' }
+      const meta = essenceManager.getMeta(task.essenceId)
+      if (!meta || typeof meta.id !== 'string') return { ok: false, error: 'source-essence-missing' }
+      if (meta.archived === true) return { ok: false, error: 'source-essence-archived' }
+      await essenceManager.ensureFresh(task.essenceId)
+      const source = essenceManager.mergedProfileDir(task.essenceId)
+      const target = path.join(task.homeDir, 'profiles', task.profile)
+      if (!exists(target)) return { ok: false, error: 'fork-profile-missing' }
+      setProfileConfigReadonly(target, false)
+      const picked = []
+      for (const rel of ['package.json', 'cordis.patch.yml', 'cordis.yml']) {
+        const from = path.join(source, rel)
+        if (!exists(from)) continue
+        fs.copyFileSync(from, path.join(target, rel))
+        picked.push(rel)
+      }
+      const settings = path.join(source, 'settings')
+      if (exists(settings)) {
+        const to = path.join(target, 'settings')
+        if (exists(to)) removeTree(to)
+        copyTree(settings, to)
+        picked.push('settings/')
+      }
+      // 重置后重新加回“生产盘”锁（插件安装/设置入口仍禁用），并把配置设回只读。
+      const configLock = applyForkConfigLock(target)
+      const profileReadonly = setProfileConfigReadonly(target, true)
+      task.configSyncedAt = nowMs()
+      task.configSyncedFrom = task.essenceId
+      persist()
+      audit('fork-config-reset', { taskId: id, essenceId: task.essenceId, files: picked, configLock, profileReadonly })
+      return { ok: true, taskId: id, essenceId: task.essenceId, files: picked, configLock, profileReadonly }
+    },
+
+    /** 强制单会话：运行中拒绝；停止/归档态把多余会话移到 quarantine-sessions/。 */
+    enforceSingleSession(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      const live = forker()?.status?.(id)
+      if (live?.running) return { ok: false, error: 'task-running', taskId: id }
+      return { ...applySingleSessionGuard(task), taskId: id }
+    },
+
     async restoreTask(taskId) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
@@ -1021,6 +1220,9 @@ export function apply(ctx, config) {
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }
+      try { assertInside(layout.forkHomesDir, task.homeDir, 'fork-home') } catch (error) {
+        return { ok: false, error: 'path-escape', taskId: id, detail: String(error?.message ?? error) }
+      }
       const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
       const forkBundle = path.join(forkProfileDir, 'node_modules', '@local', 'dsh-fang')
       if (!exists(forkBundle)) {
@@ -1028,6 +1230,16 @@ export function apply(ctx, config) {
       }
       const f = forker()
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
+      let configReset = null
+      if (task.essenceId) {
+        try { configReset = await service.resetForkConfig(id) } catch (error) {
+          configReset = { ok: false, error: String(error?.message ?? error) }
+        }
+      }
+      // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
+      let sessionGuard = null
+      try { sessionGuard = applySingleSessionGuard(task) } catch { sessionGuard = { ok: false } }
       const started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
@@ -1054,7 +1266,7 @@ export function apply(ctx, config) {
       persist()
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
-      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter }
+      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard }
     },
 
     /** 永久删除存档：reap（杀进程 + 删 home + 删记录）；forker 记录已丢时按 home 兜底清理。 */
@@ -1121,6 +1333,15 @@ export function apply(ctx, config) {
         role,
         profileTag: layout.profileTag,
         dataDir: layout.dataDir,
+        // 三区路径（无需 D: 访问即可在面板/接口核对目录是否已迁移）
+        layout: {
+          fangHome: layout.fangHome || '',
+          dataDir: layout.dataDir,
+          essenceRoot: layout.essenceRoot,
+          forkHomesDir: layout.forkHomesDir,
+          runtimeRoot: layout.runtimeRoot,
+          sessionsRoot: layout.sessionsRoot || '',
+        },
         mother: { profile: motherProfile, cliPath: cliPath(), template: templateDir() },
         tasks: { total: list.length, ready, running, max: cfg.maxForks, list },
         // v1 兼容视图：Client 徽标与旧调用方仍读 forks.*
@@ -1222,7 +1443,7 @@ export function apply(ctx, config) {
   const preferencesStore = new PreferencesStore({ mirrorRoot, logger: ctx.logger ?? {} })
   preferencesStore.load()
   const essenceManager = new EssenceManager({
-    essencesRoot: path.join(layout.dataDir, 'essences'),
+    essencesRoot: layout.essenceRoot,
     mirrorRoot,
     logger: ctx.logger ?? {},
   })
@@ -1234,19 +1455,161 @@ export function apply(ctx, config) {
     ctx.logger?.warn?.('[essence] official essence seed failed', { error: String(error?.message ?? error) })
   }
   upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
+  // 元主运行态的 forkId 命名（稳定、可用于 forker 记录与端口池）
+  const runtimeForkId = (essenceId) => 'rt-' + String(essenceId).replace(/^essence-/, '').replace(/[^A-Za-z0-9-]/g, '-')
+  // v3.0.9 三区口径：运行态 home 统一在 runtimeRoot（FANG_HOME 下是 sessions/<essenceId>/home）。
+  const runtimeHomeFor = (essenceId) => path.join(layout.runtimeRoot, String(essenceId), 'home')
+  // 路径守卫：任何拼接出来的目标必须落在给定根内（拒绝 .. / 绝对路径逃逸）。
+  const assertInside = (root, target, label) => {
+    const resolvedRoot = path.resolve(String(root))
+    const resolved = path.resolve(String(target))
+    if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
+      throw new Error(`path-escape: ${label} (${resolved} not under ${resolvedRoot})`)
+    }
+    return resolved
+  }
+  // v3.0.9 会话配额：数该元主运行态隔离 home 里的会话目录（归档数不再计入——归档目录由实例自管）。
+  const countEssenceSessions = (essenceId, meta) => {
+    const home = path.join(runtimeHomeFor(essenceId), 'sessions')
+    let used = 0
+    try {
+      for (const workspace of fs.readdirSync(home, { withFileTypes: true })) {
+        if (!workspace.isDirectory()) continue
+        const wsDir = path.join(home, workspace.name)
+        for (const session of fs.readdirSync(wsDir, { withFileTypes: true })) {
+          if (session.isDirectory()) used += 1
+        }
+      }
+    } catch { used = 0 }
+    const tier = String(meta?.tier ?? 'free')
+    const limit = Number(VIP_QUOTAS[tier]?.maxActiveSessions) || VIP_QUOTAS.free.maxActiveSessions
+    return { used, limit, over: used >= limit }
+  }
+
+  // 把母体的工作区索引按“被导入的会话”过滤后合并进隔离 home，界面上按工作区名分组而不是 key。
+  const mergeWorkspaceIndexFor = (homeDir, importedSessions) => {
+    try {
+      const motherLayout = resolveSessionsLayout()
+      const motherRaw = exists(motherLayout.workspaceFile) ? fs.readFileSync(motherLayout.workspaceFile, 'utf8') : ''
+      const mother = parseWorkspaceIndex(motherRaw)
+      const keys = new Set(importedSessions.map((session) => String(session.workspaceKey)))
+      const ids = new Set(importedSessions.map((session) => String(session.sessionId)))
+      const targetFile = path.join(homeDir, 'storages', 'workspace.json')
+      const existing = exists(targetFile) ? parseWorkspaceIndex(fs.readFileSync(targetFile, 'utf8')) : { workspaces: [], global: { archivedSessionIds: [], pinnedSessionIds: [] } }
+      const byPath = new Map(existing.workspaces.map((workspace) => [workspace.path, workspace]))
+      for (const workspace of mother.workspaces) {
+        if (!keys.has(encodeWorkspaceKey(workspace.path))) continue
+        const previous = byPath.get(workspace.path)
+        const sessionIds = [...new Set([...(previous?.sessionIds ?? []), ...workspace.sessionIds.filter((id) => ids.has(id))])]
+        byPath.set(workspace.path, { ...workspace, sessionIds })
+      }
+      const workspaces = [...byPath.values()]
+      const archivedSessionIds = [...new Set([
+        ...(existing.global?.archivedSessionIds ?? []),
+        ...mother.global.archivedSessionIds.filter((id) => ids.has(id)),
+      ])]
+      const pinnedSessionIds = [...new Set([
+        ...(existing.global?.pinnedSessionIds ?? []),
+        ...mother.global.pinnedSessionIds.filter((id) => ids.has(id)),
+      ])]
+      const tables = {}
+      for (const workspace of workspaces) {
+        tables[workspace.id] = {
+          path: workspace.path, title: workspace.title, sessionIds: workspace.sessionIds,
+          createdAt: workspace.createdAt, updatedAt: workspace.updatedAt,
+        }
+      }
+      ensureDir(path.dirname(targetFile))
+      writeJsonAtomic(targetFile, {
+        unit: { name: 'workspace', version: 2 },
+        global: {
+          initialized: true,
+          defaultWorkspaceId: workspaces[0]?.id ?? null,
+          workspaceIds: workspaces.map((workspace) => workspace.id),
+          archivedSessionIds,
+          pinnedSessionIds,
+        },
+        tables: { workspaces: tables },
+      })
+      return { ok: true, workspaces: workspaces.length }
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) }
+    }
+  }
+
+  const importSessionsInto = (homeDir, sessionIds) => {
+    const ids = [...new Set((Array.isArray(sessionIds) ? sessionIds : []).map((id) => String(id ?? '').trim()).filter(Boolean))]
+    if (ids.length === 0) return []
+    if (ids.length > 5) throw new Error('too-many-sessions (max 5)')
+    const catalog = safeGet(SERVICE.sessionCatalog)
+    if (!catalog || typeof catalog.listSessions !== 'function') throw new Error('session-catalog-unavailable')
+    const listed = catalog.listSessions({ limit: 500, includeArchived: false })
+    const rows = Array.isArray(listed?.sessions) ? listed.sessions : []
+    const sessionsRoot = String(listed?.sessionsRoot ?? '')
+    if (!sessionsRoot) throw new Error('sessions-root-missing')
+    const byId = new Map(rows.map((row) => [String(row.sessionId), row]))
+    const imported = []
+    for (const id of ids) {
+      const row = byId.get(id)
+      if (!row) throw new Error('unknown-session: ' + id)
+      if (row.archived === true) throw new Error('archived-session-not-importable: ' + id)
+      const workspaceKey = String(row.workspaceKey ?? '')
+      if (!workspaceKey || workspaceKey.includes('..') || workspaceKey.includes('/') || workspaceKey.includes('\\')) {
+        throw new Error('invalid-workspace-key: ' + workspaceKey)
+      }
+      const source = path.join(sessionsRoot, workspaceKey, id)
+      if (!exists(source)) throw new Error('session-dir-missing: ' + id)
+      const target = assertInside(homeDir, path.join(homeDir, 'sessions', workspaceKey, id), 'session-import')
+      ensureDir(path.dirname(target))
+      if (exists(target)) removeTree(target)
+      copyTree(source, target)
+      imported.push({ sessionId: id, title: row.title ?? null, workspaceKey })
+    }
+    // 工作区索引合并：让实例按工作区名分组，而不是显示 --E-GPT-- 这样的 key。
+    const index = mergeWorkspaceIndexFor(homeDir, imported)
+    if (index.ok === false) {
+      try { audit('workspace-index-merge-failed', { homeDir, error: index.error }) } catch { /* ignore */ }
+    }
+    return imported
+  }
+
   const mirrorService = {
-    status: () => mirrorManager.getStatus(),
+    status: () => {
+      const status = mirrorManager.getStatus()
+      let preferences = null
+      let sync = null
+      try { preferences = preferencesStore.get() } catch { preferences = null }
+      try { sync = readJson(path.join(mirrorRoot, 'sync-state.json'), null) } catch { sync = null }
+      return { ...status, preferences, sync }
+    },
     getPreferences: () => preferencesStore.get(),
     setPreferences: (patch = {}) => preferencesStore.update(patch),
     listEssences: () => {
       const defaultEssence = essenceManager.getDefault()
+      // 元主是否落后于母体镜像：lastMergedFingerprint !== 当前镜像指纹。
+      let mirrorFingerprint = ''
+      try { mirrorFingerprint = String(essenceManager.loadMirror().fingerprint ?? '') } catch { /* mirror 不可读时全部标 stale=false */ }
       const essences = essenceManager.list().map((meta) => {
         const ui = buildEssenceActions({ locked: meta.locked === true, archived: meta.archived === true })
+        const stale = mirrorFingerprint.length > 0 && meta.archived !== true
+          && String(meta.lastMergedFingerprint ?? '') !== mirrorFingerprint
+        const sessionQuota = countEssenceSessions(meta.id, meta)
         return {
           ...meta,
           locked: meta.locked === true,
           official: meta.official === true,
           archived: meta.archived === true,
+          stale,
+          sessions: sessionQuota,
+          // 设计稿字段：quota.sessions = { used, limit, over }
+          quota: { sessions: sessionQuota },
+          // 运行态：面板据此把「打开」切换成「停止」。
+          runtime: (() => {
+            try {
+              const live = forker()?.status?.(runtimeForkId(meta.id))
+              return live ? { running: live.running === true, pid: live.pid ?? null, port: live.port ?? null } : { running: false, pid: null, port: null }
+            } catch { return { running: false, pid: null, port: null } }
+          })(),
           pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
           actions: ui.actions,
           blocks: ui.blocks,
@@ -1258,18 +1621,377 @@ export function apply(ctx, config) {
         defaultId: defaultEssence.essenceId,
         defaultEssence,
         essences,
+        mirrorFingerprint,
+        staleCount: essences.filter(item => item.stale === true).length,
         capacity: { slots: 7, defaultLimit: 5, used: essences.filter(item => item.archived !== true).length },
       }
     },
     createEssence: (input = {}) => essenceManager.create({
       name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
+      defaultPatchEntries: Array.isArray(input?.defaultPatchEntries) ? input.defaultPatchEntries : undefined,
     }),
+    defaultPreset: async () => {
+      const entries = await listInstalledPlugins()
+      const plan = planDefaultEssence(entries ?? [])
+      const existingId = readDefaultEssenceId()
+      const meta = existingId ? essenceManager.getMeta(existingId) : null
+      return { ok: true, pluginManager: Array.isArray(entries), plan, defaultEssenceId: meta?.id ? existingId : '', exists: Boolean(meta?.id) }
+    },
+    ensureDefaultEssence: async ({ apply = false, force = false, mode = 'copy-local' } = {}) => {
+      const existingId = readDefaultEssenceId()
+      const existing = existingId ? essenceManager.getMeta(existingId) : null
+      if (existing?.id) return { ok: true, existed: true, created: false, essenceId: existingId, mode }
+      const entries = await listInstalledPlugins()
+      const plan = planDefaultEssence(entries ?? [])
+      const userEssences = essenceManager.list().filter((meta) => meta.official !== true)
+      if (!force && userEssences.length > 0) return { ok: false, error: 'user-essence-exists', plan, mode }
+      if (apply !== true) return { ok: true, dryRun: true, plan, mode }
+      if (mode === 'preset') {
+        const patchEntries = []
+        const pending = []
+        for (const group of plan.groups) {
+          for (const plugin of group.plugins) {
+            if (!plugin.installed) { pending.push({ spec: plugin.spec, group: group.key }); continue }
+            patchEntries.push({ id: plugin.pluginId || plugin.spec, name: plugin.spec, disabled: group.enabled !== true })
+          }
+        }
+        if (patchEntries.length === 0) return { ok: false, error: 'no-installed-default-plugins', plan, pending, mode }
+        const created = essenceManager.create({ name: DEFAULT_ESSENCE_NAME, tier: 'free', defaultPatchEntries: patchEntries })
+        writeDefaultEssenceId(created.id)
+        try {
+          writeJsonAtomic(path.join(essenceManager.essenceRoot(created.id), 'default-preset.json'), {
+            at: nowMs(), mode, version: plan.version, groups: plan.groups, patchEntries, pending,
+          })
+        } catch { /* marker 失败不影响创建 */ }
+        audit('default-essence-created', { essenceId: created.id, mode, installed: patchEntries.length, pending: pending.length })
+        return { ok: true, created: true, mode, essenceId: created.id, plan, pending }
+      }
+      // copy-local（默认）：只复制本机插件的启用/禁用 + 设置；不复制任何会话/数据/代码/凭据。
+      let captured
+      try {
+        captured = essenceManager.captureFromProfile(templateDir(), { name: DEFAULT_ESSENCE_NAME, tier: 'free' })
+      } catch (error) {
+        return { ok: false, error: 'capture-failed', detail: String(error?.message ?? error), plan, mode }
+      }
+      const created = captured.meta ?? captured
+      writeDefaultEssenceId(created.id)
+      try {
+        writeJsonAtomic(path.join(essenceManager.essenceRoot(created.id), 'default-preset.json'), {
+          at: nowMs(), mode, source: templateDir(),
+          captured: captured.captured ?? null,
+          conflicts: captured.conflicts ?? [],
+          note: '只复制插件启用状态与设置；未复制会话/项目/凭据/Token',
+        })
+      } catch { /* marker 失败不影响创建 */ }
+      audit('default-essence-created', { essenceId: created.id, mode, source: templateDir() })
+      return { ok: true, created: true, mode, essenceId: created.id, plan, captured: captured.captured ?? null, conflicts: captured.conflicts ?? [] }
+    },
     renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
     archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
-    deleteEssence: (essenceId) => essenceManager.remove(essenceId),
-    copyEssence: (essenceId, name) => essenceManager.copy(essenceId, { name }),
+    deleteEssence: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const meta = essenceManager.getMeta(id)
+      // 删除配置/插件目录，但**保留运行态会话**：旧布局把运行时 home 放在原身目录里，先搬出去。
+      const legacyHome = path.join(essenceManager.essenceRoot(id), 'runtime', 'home')
+      const preserved = runtimeHomeFor(id)
+      try {
+        if (exists(legacyHome) && !exists(preserved)) {
+          ensureDir(path.dirname(preserved))
+          copyTree(legacyHome, preserved)
+        }
+      } catch { /* 保留失败不阻塞删除，如实返回 */ }
+      const removed = essenceManager.remove(id)
+      addTombstone(id, meta?.name)
+      return { ...removed, essenceId: id, tombstone: true, sessionsPreserved: exists(preserved) }
+    },
+    copyEssence: (essenceId, name) => {
+      const result = essenceManager.copy(essenceId, { name })
+      // v3.0.9：沙盒会话（运行态隔离 home 里的 sessions）随副本一起复制，副本可继续开发。
+      const candidates = [
+        path.join(runtimeHomeFor(String(essenceId)), 'sessions'),
+        path.join(essenceManager.essenceRoot(String(essenceId)), 'runtime', 'home', 'sessions'),
+        path.join(layout.dataDir, 'runtime', runtimeForkId(String(essenceId)), 'home', 'sessions'),
+      ]
+      const source = candidates.find((dir) => exists(dir))
+      let sessionsCopied = 0
+      if (source) {
+        const target = path.join(runtimeHomeFor(result.id), 'sessions')
+        try {
+          copyTree(source, target)
+          const walk = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const file = path.join(dir, entry.name)
+              if (entry.isDirectory()) walk(file)
+              else if (entry.isFile()) sessionsCopied += 1
+            }
+          }
+          walk(target)
+        } catch { /* 会话复制失败不阻塞配置副本，如实返回 0 */ }
+        // 工作区索引也随副本走，否则副本里会话会按 workspace key 显示。
+        const sourceIndex = path.join(path.dirname(path.dirname(source)), 'storages', 'workspace.json')
+        if (exists(sourceIndex)) {
+          const targetIndex = path.join(runtimeHomeFor(result.id), 'storages', 'workspace.json')
+          try { ensureDir(path.dirname(targetIndex)); fs.copyFileSync(sourceIndex, targetIndex) } catch { /* ignore */ }
+        }
+      }
+      return { ...result, copy: { ...(result.copy ?? {}), sessionsCopied } }
+    },
+    // v3.0.9 母体 → 元主：克隆母体 profile 的可写层（patch/依赖/设置），不带凭据与会话。
+    captureEssence: (input = {}) => {
+      const result = essenceManager.captureFromProfile(templateDir(), {
+        name: input?.name,
+        tier: input?.tier,
+        parentId: input?.parentId ?? null,
+        includeDependencies: input?.includeDependencies !== false,
+        includeSettings: input?.includeSettings !== false,
+      })
+      const defaultEssence = input?.setDefault === true ? essenceManager.setDefault(result.meta.id) : null
+      return { ...result, default: defaultEssence }
+    },
     setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
-    downloadEssence: (essenceId) => essenceManager.downloadBundle(essenceId),
+    downloadEssence: (essenceId, options = {}) => {
+      const bundle = essenceManager.downloadBundle(essenceId, { full: options?.full === true })
+      if (bundle.full !== true) return bundle
+      // 整包迁移还要带走运行态沙盒：会话 + 工作区索引（运行态 home 在原身文件夹之外）。
+      const id = String(essenceId)
+      const home = runtimeHomeFor(id)
+      const addFile = (relative, file) => {
+        try {
+          const bytes = fs.readFileSync(file)
+          bundle.files.push({ path: relative, base64: bytes.toString('base64') })
+          bundle.bytes += bytes.length
+        } catch { /* 读失败跳过，不阻塞导出 */ }
+      }
+      const indexFile = path.join(home, 'storages', 'workspace.json')
+      if (exists(indexFile)) addFile('runtime/home/storages/workspace.json', indexFile)
+      const sessionsDir = path.join(home, 'sessions')
+      if (exists(sessionsDir)) {
+        const walk = (dir, rel) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fullPath = path.join(dir, entry.name)
+            const nextRel = rel ? rel + '/' + entry.name : entry.name
+            if (entry.isDirectory()) walk(fullPath, nextRel)
+            else if (entry.isFile()) addFile('runtime/home/sessions/' + nextRel, fullPath)
+          }
+        }
+        walk(sessionsDir, '')
+      }
+      return bundle
+    },
+    backupEssence: (essenceId) => essenceManager.backup(essenceId),
+    restoreEssence: (essenceId) => essenceManager.restoreBackup(essenceId),
+    importEssence: (input = {}) => essenceManager.importBundle(input?.bundle ?? input, {
+      name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
+    }),
+    // v3.0.9 原身运行态：用元主 merged/profile 起一个**隔离 home** 的配置态实例。
+    // 隔离边界：DSH_HOME = essences/<id>/runtime/home（自己的 sessions/storages），
+    // 不写母体 sessions；node_modules 通过 junction 指向母体模块树（不复制）。
+    startEssenceRuntime: async (essenceId, input = {}) => {
+      const id = String(essenceId ?? '').trim()
+      const meta = essenceManager.getMeta(id)
+      if (!meta || typeof meta.id !== 'string') throw new Error('unknown-essence')
+      if (meta.archived === true) throw new Error('essence-archived')
+      // 进行中会话配额（默认 10；归档不限；达到上限拒绝再开实例）。
+      const sessionQuota = countEssenceSessions(id, meta)
+      if (sessionQuota.over) throw new Error(`session-quota-exceeded: ${sessionQuota.used}/${sessionQuota.limit}`)
+      const f = forker()
+      if (!f || typeof f.provision !== 'function' || typeof f.spawn !== 'function') throw new Error('forker-unavailable')
+      await essenceManager.ensureFresh(id)
+      const merged = essenceManager.mergedProfileDir(id)
+      if (!exists(merged)) throw new Error('merged-profile-missing')
+      assertInside(layout.essenceRoot, merged, 'essence-merged')
+      const motherModules = path.join(templateDir(), 'node_modules')
+      const link = path.join(merged, 'node_modules')
+      if (exists(motherModules) && !exists(link)) {
+        try { fs.symlinkSync(motherModules, link, 'junction') } catch { /* 已存在或权限不足时继续，forker 会再尝试 */ }
+      }
+      const forkId = runtimeForkId(id)
+      // v3.0.9 三区：运行态 home 在 runtimeRoot 下（FANG_HOME 时是 sessions/<essenceId>/home），
+      // 原身文件夹只保留配置，项目/会话/任务文件不落原身目录。
+      const homeDir = runtimeHomeFor(id)
+      assertInside(layout.runtimeRoot, homeDir, 'runtime-home')
+      const legacyHomes = [
+        path.join(layout.dataDir, 'runtime', forkId, 'home'),
+        path.join(essenceManager.essenceRoot(id), 'runtime', 'home'),
+      ]
+      if (!exists(homeDir)) {
+        const legacyHome = legacyHomes.find((dir) => exists(dir))
+        if (legacyHome) {
+          try { ensureDir(path.dirname(homeDir)); copyTree(legacyHome, homeDir) } catch { /* 迁移失败不阻塞 */ }
+        }
+      }
+      const provisioned = await f.provision({
+        forkId, taskTitle: `元主运行时 · ${String(meta.name ?? id)}`,
+        homeDir, profile: 'essence-runtime', profileTemplate: merged,
+      })
+      if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
+      // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
+      const importedSessions = importSessionsInto(homeDir, input?.sessionIds)
+      // 注意：forker.spawn 需要显式 homeDir/profile（它不从 provision 记录里猜）。
+      const started = await f.spawn({
+        forkId,
+        homeDir,
+        profile: 'essence-runtime',
+        cliPath: cliPath(),
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId },
+      })
+      if (!started.ok) throw new Error(`runtime-spawn-failed: ${started.error ?? 'unknown'} (forkId=${forkId}, homeDir=${homeDir}, profile=essence-runtime)`)
+      return {
+        ok: true, essenceId: id, forkId,
+        url: started.url, port: started.port, pid: started.pid,
+        sandboxHome: homeDir,
+        importedSessions,
+      }
+    },
+    stopEssenceRuntime: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const f = forker()
+      if (!f || typeof f.stop !== 'function') return { ok: false, error: 'forker-unavailable' }
+      const forkId = runtimeForkId(id)
+      const out = f.stop(forkId)
+      return { ok: true, essenceId: id, forkId, stopped: out?.ok !== false }
+    },
+    essenceRuntimeStatus: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const f = forker()
+      if (!f || typeof f.status !== 'function') return { ok: false, error: 'forker-unavailable' }
+      const forkId = runtimeForkId(id)
+      let runtime = null
+      try { runtime = f.status(forkId) ?? null } catch { runtime = null }
+      return { ok: true, essenceId: id, forkId, runtime }
+    },
+    /** 打开前可选导入的「进行中」会话（最多 50 条给选择器，提交时服务端再限 5 条）。 */
+    essenceOpenCandidates: () => {
+      const catalog = safeGet(SERVICE.sessionCatalog)
+      if (!catalog || typeof catalog.listSessions !== 'function') return { ok: false, error: 'session-catalog-unavailable' }
+      const listed = catalog.listSessions({ limit: 200, includeArchived: false })
+      const sessions = (Array.isArray(listed?.sessions) ? listed.sessions : [])
+        .filter((row) => row?.archived !== true)
+        .slice(0, 50)
+        .map((row) => ({
+          sessionId: row.sessionId,
+          title: row.title ?? null,
+          workspaceTitle: row.workspaceTitle ?? null,
+          updatedAt: row.updatedAt ?? 0,
+        }))
+      return { ok: true, sessions, total: sessions.length }
+    },
+    /** 元主详情页数据：元数据 + overlay 插件条目 + 设置项 + 备份/运行态/日志（不含凭据）。 */
+    essenceDetail: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const meta = essenceManager.getMeta(id)
+      if (!meta || typeof meta.id !== 'string') throw new Error('unknown-essence')
+      const root = essenceManager.essenceRoot(id)
+      const overlay = essenceManager.loadOverlay(root)
+      const patchEntries = (overlay.patchEntries || []).map((entry) => ({
+        id: String(entry?.id ?? ''),
+        name: String(entry?.name ?? ''),
+        disabled: entry?.disabled === true,
+      }))
+      const f = forker()
+      let runtime = null
+      let logs = ''
+      try { runtime = f?.status?.(runtimeForkId(id)) ?? null } catch { runtime = null }
+      try { logs = String(f?.logs?.(runtimeForkId(id), 120) || '') } catch { logs = '' }
+      return {
+        ok: true,
+        essenceId: id,
+        meta,
+        overlay: { patchEntries, settings: Object.keys(overlay.settings || {}) },
+        sessions: countEssenceSessions(id, meta),
+        backup: exists(path.join(root, 'Backup')),
+        runtime,
+        logs,
+      }
+    },
+    /** 打开运行态：返回带临时 token 的 URL（仅内存，不落盘）。 */    openEssenceRuntime: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const f = forker()
+      if (!f || typeof f.openUrl !== 'function') return { ok: false, error: 'forker-unavailable' }
+      const out = f.openUrl(runtimeForkId(id))
+      if (!out || out.ok === false) return { ok: false, error: out?.error ?? 'not-running' }
+      return { ok: true, essenceId: id, url: out.url, port: out.port ?? null }
+    },
+    // v3.0.9 升级链路 2.1：把本机母体 profile（PC 客户端那份）克隆成镜像基础层。
+    cloneMotherProfile: (input = {}) => {
+      const sourceDir = path.resolve(String(input?.sourceDir || templateDir()))
+      const packageFile = path.join(sourceDir, 'package.json')
+      if (!exists(packageFile)) throw new Error('mother profile has no package.json: ' + sourceDir)
+      const activeProfile = path.join(mirrorRoot, 'active', 'profile')
+      const relative = path.relative(path.resolve(mirrorRoot), sourceDir)
+      if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+        throw new Error('clone: source is already inside the mirror')
+      }
+      let backup = null
+      try { backup = mirrorManager.backup({ label: '克隆母体前自动备份' }) } catch { /* 首次克隆没有可备份内容 */ }
+      if (exists(activeProfile)) removeTree(activeProfile)
+      ensureDir(activeProfile)
+      const picked = []
+      for (const rel of ['package.json', 'cordis.patch.yml', 'cordis.yml']) {
+        const from = path.join(sourceDir, rel)
+        if (!exists(from)) continue
+        fs.copyFileSync(from, path.join(activeProfile, rel))
+        picked.push(rel)
+      }
+      const settingsDir = path.join(sourceDir, 'settings')
+      if (exists(settingsDir)) { copyTree(settingsDir, path.join(activeProfile, 'settings')); picked.push('settings/') }
+      let version = ''
+      try { version = String(readJson(packageFile, {})?.version ?? '') } catch { version = '' }
+      const meta = mirrorManager.readMeta()
+      mirrorManager.writeMeta({
+        ...meta,
+        version: version || meta.version || 'unknown',
+        installedAt: nowMs(),
+        lastBackupAt: backup?.createdAt ?? meta.lastBackupAt,
+      })
+      writeJsonAtomic(path.join(mirrorRoot, 'sync-state.json'), { lastSyncAt: nowMs(), sourceDir })
+      return {
+        ok: true,
+        sourceDir,
+        target: activeProfile,
+        files: picked,
+        version: version || meta.version || 'unknown',
+        backup: backup ? { id: backup.id, bucket: backup.bucket, createdAt: backup.createdAt } : null,
+      }
+    },
+    /** 空白母体（初始盘）：备份当前 → 清空 active/profile → 版本标记 blank。 */
+    blankMother: () => {
+      const activeProfile = path.join(mirrorRoot, 'active', 'profile')
+      let backup = null
+      try { backup = mirrorManager.backup({ label: '空白母体前自动备份' }) } catch { /* 首次为空 */ }
+      if (exists(activeProfile)) removeTree(activeProfile)
+      ensureDir(activeProfile)
+      const meta = mirrorManager.readMeta()
+      mirrorManager.writeMeta({
+        ...meta,
+        version: 'blank',
+        installedAt: nowMs(),
+        lastBackupAt: backup?.createdAt ?? meta.lastBackupAt,
+      })
+      return {
+        ok: true,
+        version: 'blank',
+        target: activeProfile,
+        backup: backup ? { id: backup.id, bucket: backup.bucket, createdAt: backup.createdAt } : null,
+      }
+    },
+    // v3.0.9 升级链路 3：母体变化后，元主按 overlay 重放到新镜像（配置不动）。
+    syncEssences: async (input = {}) => {
+      const essenceId = String(input?.essenceId ?? '').trim()
+      if (!essenceId) {
+        const out = await essenceManager.recomputeAll({ concurrency: Number(input?.concurrency) || 2 })
+        return { ok: true, mode: 'all', ...out }
+      }
+      const meta = essenceManager.getMeta(essenceId)
+      if (meta.locked === true) return { ok: false, error: 'locked', essenceId }
+      if (meta.archived === true) return { ok: false, error: 'archived', essenceId }
+      const fresh = await essenceManager.ensureFresh(essenceId)
+      return {
+        ok: true, mode: 'one', essenceId,
+        recomputed: fresh.recomputed === true,
+        status: fresh.meta?.status ?? 'unknown',
+      }
+    },
     backup: (input = {}) => mirrorManager.backup({
       label: input?.label, bucket: input?.bucket === 'restore' ? 'restore' : 'backup',
     }),
@@ -1295,6 +2017,21 @@ export function apply(ctx, config) {
       const status = mirrorService.status()
       if (status.meta?.nextBackupAt !== null && Date.now() >= status.meta.nextBackupAt) {
         mirrorManager.maybeAutoBackup()
+      }
+      // 母体自动同步：按偏好 6/12/24h 从本机 profile 克隆到镜像（关闭时不跑）。
+      const prefs = preferencesStore.get()
+      const syncHours = Number(prefs?.syncIntervalHours)
+      if (Number.isFinite(syncHours) && syncHours > 0) {
+        let last = 0
+        try { last = Number(readJson(path.join(mirrorRoot, 'sync-state.json'), {})?.lastSyncAt) || 0 } catch { last = 0 }
+        if (Date.now() - last >= syncHours * 3_600_000) {
+          try {
+            mirrorService.cloneMotherProfile({})
+            ctx.logger?.info?.('[mirror] auto-sync completed', { hours: syncHours })
+          } catch (error) {
+            ctx.logger?.warn?.('[mirror] auto-sync failed', { error: String(error?.message ?? error) })
+          }
+        }
       }
     } catch (error) {
       ctx.logger?.warn?.('[mirror] auto backup tick failed', { error: String(error?.message ?? error) })
@@ -1347,12 +2084,32 @@ export function apply(ctx, config) {
     ctx.effect(() => () => clearInterval(t))
   }
 
+  // v3.0.9：连接信息要的宿主服务（只有 Web 运行时才有；分身/无 Web 环境允许缺失）。
+  // 必须用 ctx.inject 取——直接 child.get 在插件上下文里拿不到这两个服务。
+  let connectionService = null
+  let webAppService = null
+  ctx.inject(['connection'], (child) => {
+    try { connectionService = child.get('connection') ?? child.connection ?? null } catch { connectionService = null }
+  })
+  ctx.inject(['webApp'], (child) => {
+    try { webAppService = child.get('webApp') ?? child.webApp ?? null } catch { webAppService = null }
+  })
+
   // ── HTTP 门户 ──────────────────────────────────────────────────────────
   if (cfg.routes?.enabled !== false) {
     ctx.inject(['webServer'], (child) => {
       const webServer = child.get('webServer') ?? child.webServer
       if (!webServer || typeof webServer.register !== 'function') return
       compatWebServer = webServer
+      // v3.0.8：把当前宿主 origin 写到 dataDir/endpoint.json，供 Electron 面板发现，
+      // 避免桌面宿主端口每次变化后必须手工设置 FANG_UPSTREAM。
+      try {
+        const origin = typeof webServer.getOrigin === 'function' ? webServer.getOrigin() : ''
+        if (origin) {
+          fs.mkdirSync(layout.dataDir, { recursive: true })
+          fs.writeFileSync(path.join(layout.dataDir, 'endpoint.json'), JSON.stringify({ url: origin, updatedAt: new Date().toISOString() }) + '\n')
+        }
+      } catch { /* endpoint discovery is best-effort */ }
       const prefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
 
       const json = (res, code, obj) => {
@@ -1447,19 +2204,46 @@ export function apply(ctx, config) {
         ok: true, token: authToken,
       }), { public: true })
 
+      // 母体不可删除：即使有人直接打接口也返回 403，而不是“没有这个路由”。
+      // 仅 POST（allow-list 只允许 GET/POST；DELETE 语义由该 403 表达）。
+      route('POST', `${prefix}/api/mother/delete`, (req, res) => json(res, 403, { ok: false, error: 'mother-immutable' }))
+
+      // 完整连接地址（带进程 token）：Web 端「连接信息」用它，不再依赖桌面壳。
+      // 桌面壳缺失时也能给出可复制的真实登录地址；拿不到 token 时如实标 tokenized:false。
+      route('GET', `${prefix}/api/connection`, (req, res) => {
+        const advertised = (() => { try { return String(webAppService?.getAdvertisedUrl?.() ?? '') } catch { return '' } })()
+        const origin = (() => { try { return String(webServer.getOrigin?.() ?? '') } catch { return '' } })()
+        const base = advertised || origin
+        let url = base
+        let tokenized = false
+        try {
+          if (base && typeof connectionService?.authenticatedUrl === 'function') {
+            const next = connectionService.authenticatedUrl(base)
+            if (next) { url = String(next); tokenized = url !== base }
+          }
+        } catch { /* 无 connection 服务时退回裸地址，不假装成功 */ }
+        return json(res, 200, {
+          ok: true, url, origin, advertisedUrl: advertised, tokenized, available: Boolean(url),
+        })
+      })
+
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
       route('GET', `${prefix}/api/upgrade/status`, (req, res) => {
         let mirror = null
         let essences = []
-        try { mirror = service.status()?.mirror ?? null } catch { /* empty */ }
-        try { essences = service.listEssences?.() ?? [] } catch { /* empty */ }
-        return json(res, 200, buildUpgradeStatus({ version: FANG_VERSION, mirror, essences }))
+        let compat = null
+        try { mirror = mirrorService.status() } catch { /* empty */ }
+        try { essences = mirrorService.listEssences()?.essences ?? [] } catch { /* empty */ }
+        try { compat = readCompatStatus(layout.dataDir) } catch { /* empty */ }
+        let failedTasks = 0
+        try { failedTasks = [...tasks.values()].filter(task => task.status === TASK_STATUS.FAILED).length } catch { /* empty */ }
+        return json(res, 200, buildUpgradeStatus({ version: FANG_VERSION, mirror, essences, compat, tasks: { failed: failedTasks } }))
       })
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
         try {
-          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators })
+          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators, essenceId: body?.essenceId })
           return json(res, out.ok ? 200 : 409, out)
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) })
@@ -1487,6 +2271,21 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         const out = await service.restoreTask(String(body?.taskId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
+      })
+      // v3.0.9：强制单会话（运行中拒绝；停止/归档态把多余会话隔离到 quarantine-sessions/）
+      route('POST', `${prefix}/api/tasks/sessions/enforce`, async (req, res) => {
+        const body = await readBody(req)
+        const out = service.enforceSingleSession(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('POST', `${prefix}/api/tasks/reset`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = await service.resetForkConfig(String(body?.taskId ?? ''))
+          return json(res, out.ok ? 200 : 409, out)
+        } catch (error) {
+          return json(res, 500, { ok: false, error: 'reset-failed', detail: String(error?.message ?? error) })
+        }
       })
       route('POST', `${prefix}/api/tasks/archive/delete`, async (req, res) => {
         const body = await readBody(req)
@@ -1579,12 +2378,29 @@ export function apply(ctx, config) {
         const out = mirrorService.setBackupInterval(body?.hours)
         return json(res, out.ok ? 200 : 400, out)
       })
+      // v3.0.9 升级链路 2.1：从本机母体 profile 克隆镜像基础层（先自动备份）。
+      route('POST', `${prefix}/api/mirror/clone-profile`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.cloneMotherProfile(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'clone-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      // 空白母体（初始盘）：备份当前 → active/profile 清空 → 版本 blank
+      route('POST', `${prefix}/api/mirror/blank`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.blankMother(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'blank-failed', detail: String(error?.message ?? error) })
+        }
+      })
       // v3.0.8 镜像偏好：对话框交互超时 15/30/60s（宿主侧持久化）
       route('GET', `${prefix}/api/mirror/preferences`, (req, res) => json(res, 200, mirrorService.getPreferences()))
       route('POST', `${prefix}/api/mirror/preferences/set`, async (req, res) => {
         const body = await readBody(req)
         try {
-          const preferences = mirrorService.setPreferences({ activeIdleTimeoutMs: body?.activeIdleTimeoutMs })
+          const patch = {}
+          if (body?.activeIdleTimeoutMs !== undefined) patch.activeIdleTimeoutMs = body.activeIdleTimeoutMs
+          if (body?.syncIntervalHours !== undefined) patch.syncIntervalHours = body.syncIntervalHours
+          const preferences = mirrorService.setPreferences(patch)
           return json(res, 200, preferences)
         } catch (error) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) })
@@ -1598,6 +2414,68 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         try { return json(res, 200, { ok: true, essence: mirrorService.createEssence(body) }) } catch (error) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.9 母体 → 元主：从当前母体 profile 的可写层生成一个可配置元主。
+      route('POST', `${prefix}/api/essence/capture`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.captureEssence(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'capture-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.9 升级链路 3：把元主 overlay 重放到当前镜像（单个或全部）。
+      route('POST', `${prefix}/api/essence/sync`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...(await mirrorService.syncEssences(body)) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'sync-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.9 原身运行态：start / stop（隔离 home 的配置态实例）
+      // 注意：DSH webServer 按 path 键路由，GET+POST 必须走 routeMethods 一次注册，
+      // 否则第二次 register 抛出，后面的路由会静默丢失（实测踩过）。
+      routeMethods(`${prefix}/api/essence/runtime`, {
+        GET: (req, res) => {
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          return json(res, 200, mirrorService.essenceRuntimeStatus(query.get('essenceId')))
+        },
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const action = String(body?.action ?? 'start')
+          try {
+            if (action === 'stop') return json(res, 200, mirrorService.stopEssenceRuntime(body?.essenceId))
+            return json(res, 200, await mirrorService.startEssenceRuntime(body?.essenceId, body))
+          } catch (error) {
+            return json(res, 400, { ok: false, error: 'runtime-failed', detail: String(error?.message ?? error) })
+          }
+        },
+      })
+      route('GET', `${prefix}/api/essence/detail`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        try { return json(res, 200, mirrorService.essenceDetail(query.get('essenceId'))) } catch (error) {
+          return json(res, 400, { ok: false, error: 'detail-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      route('GET', `${prefix}/api/essence/open/candidates`, (req, res) => json(res, 200, mirrorService.essenceOpenCandidates()))
+      route('GET', `${prefix}/api/essence/runtime/open`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        return json(res, 200, mirrorService.openEssenceRuntime(query.get('essenceId')))
+      })
+      route('POST', `${prefix}/api/essence/backup`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.backupEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'backup-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/restore`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.restoreEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'restore-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/import`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.importEssence(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'import-failed', detail: String(error?.message ?? error) })
         }
       })
       route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
@@ -1633,7 +2511,8 @@ export function apply(ctx, config) {
       route('GET', `${prefix}/api/essence/download`, (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         try {
-          const bundle = mirrorService.downloadEssence(String(query.get('essenceId') ?? ''))
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          const bundle = mirrorService.downloadEssence(String(query.get('essenceId') ?? ''), { full: query.get('full') === '1' })
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
             'content-disposition': `attachment; filename="essence-${bundle.essenceId}.json"`,
@@ -1702,7 +2581,15 @@ export function apply(ctx, config) {
         const checked = requireTask(body?.taskId)
         if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
         try {
-          return json(res, 200, branchStore.activate(checked.taskId, String(body?.branchId ?? '')))
+          const out = branchStore.activate(checked.taskId, String(body?.branchId ?? ''))
+          // 方案 B：激活即切换 active 分支会话（同一分身可有多个分支会话，但同时只有 1 个 active）。
+          const task = tasks.get(checked.taskId)
+          if (task) {
+            task.activeBranchId = out.activeBranchId
+            persist()
+          }
+          audit('fork-branch-activated', { taskId: checked.taskId, branchId: out.activeBranchId, childSessionId: out.branch?.sessionId ?? null })
+          return json(res, 200, out)
         } catch (error) {
           const code = String(error?.message ?? error)
           return json(res, branchErrorStatus(code), { ok: false, error: code, code })
@@ -1714,6 +2601,37 @@ export function apply(ctx, config) {
         if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
         try {
           return json(res, 200, branchStore.setStatus(checked.taskId, String(body?.branchId ?? ''), String(body?.status ?? '')))
+        } catch (error) {
+          const code = String(error?.message ?? error)
+          return json(res, branchErrorStatus(code), { ok: false, error: code, code })
+        }
+      })
+      // 方案 A：物理分支——在分身自己的宿主里 sessions.fork，子会话挂回同一分身。
+      route('POST', `${prefix}/api/tasks/branches/fork`, async (req, res) => {
+        const body = await readBody(req)
+        const checked = requireTask(body?.taskId)
+        if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+        const task = tasks.get(checked.taskId)
+        if (!task) return json(res, 404, { ok: false, error: 'unknown-task' })
+        if (task.status === TASK_STATUS.ARCHIVED) return json(res, 409, { ok: false, error: 'task-archived' })
+        const client = await remoteFor(task)
+        if (!client || typeof client.command !== 'function') return json(res, 502, { ok: false, error: 'adapter-unavailable' })
+        const current = branchStore.list(checked.taskId)
+        const sourceSessionId = String(body?.sessionId ?? current.sessionId ?? '').trim()
+        if (!sourceSessionId) return json(res, 409, { ok: false, error: 'no-session' })
+        const branchId = String(body?.branchId ?? '').trim() || `b${Date.now().toString(36)}`
+        const baseTurn = Number.isFinite(Number(body?.baseTurn)) ? Number(body.baseTurn) : 0
+        try {
+          const out = await client.command('fork-session', { sessionId: sourceSessionId, boundary: baseTurn || undefined })
+          const result = out?.data?.result ?? out?.data ?? null
+          if (!out?.ok || result?.ok === false) {
+            const code = String(result?.code ?? result?.error ?? out?.error ?? 'fork-failed')
+            return json(res, 502, { ok: false, error: code, detail: result })
+          }
+          const childSessionId = result?.childSessionId ?? result?.id ?? null
+          const branch = branchStore.create(checked.taskId, { branchId, baseTurn, sessionId: childSessionId })
+          audit('fork-branch-created', { taskId: checked.taskId, branchId, childSessionId })
+          return json(res, 200, { ok: true, branch: branch.branch, childSessionId, sourceSessionId })
         } catch (error) {
           const code = String(error?.message ?? error)
           return json(res, branchErrorStatus(code), { ok: false, error: code, code })
@@ -1732,13 +2650,53 @@ export function apply(ctx, config) {
         merge: false,
       }))
 
+      // v3.0.9 composer journal: persist unsent drafts and a read-only queue mirror
+      // so a restart/crash can offer recovery. Nothing is auto-sent.
+      routeMethods(`${prefix}/api/composer/journal`, {
+        GET: (req, res) => {
+          const key = new URL(String(req.url ?? '/'), 'http://x').searchParams.get('key') || ''
+          if (!key) return json(res, 400, { ok: false, error: 'journal-key-required' })
+          return json(res, 200, { ok: true, entry: composerJournal.get(key) })
+        },
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const key = String(body?.key ?? '')
+          if (!key) return json(res, 400, { ok: false, error: 'journal-key-required' })
+          try {
+            return json(res, 200, { ok: true, entry: composerJournal.save(key, body) })
+          } catch (error) {
+            return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+          }
+        },
+      })
+
       // v3.0.8 contract: an unknown /fang/api/* path must be a JSON 404 under the
       // same Host/Origin/token gate — not an unauthenticated empty 404 from the host.
       // Exact routes above win because the webServer matches exact before prefix.
+      // 默认元宝（新用户免创建）：dry-run 计划 + 应用。
+      route('GET', `${prefix}/api/essence/default-preset`, async (req, res) => {
+        try { return json(res, 200, await mirrorService.defaultPreset()) } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/default`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = await mirrorService.ensureDefaultEssence({ apply: body?.apply === true, force: body?.force === true, mode: body?.mode === 'preset' ? 'preset' : 'copy-local' })
+          return json(res, out.ok === false ? 409 : 200, out)
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // 新用户延迟自动创建（不阻塞启动；无已装默认插件时不创建）。
+      if (cfg.defaultEssenceAuto !== false) {
+        const timer = setTimeout(() => { mirrorService.ensureDefaultEssence({ apply: true, mode: 'copy-local' }).catch(() => {}) }, 8000)
+        if (typeof timer.unref === 'function') timer.unref()
+      }
+
       webServer.register({
         kind: 'prefix',
-        path: `${prefix}/api`,
-        handler: async (req, res) => {
+        path: `${prefix}/api`,        handler: async (req, res) => {
           const decision = checkRequestAuth(req, {
             token: authToken,
             publicRoute: authToken.length === 0,

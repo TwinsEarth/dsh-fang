@@ -284,9 +284,117 @@ test('essence manager: 子原身规则（两级上限、父级删除保护）', 
   const child = manager.create({ name: '子原身', tier: 'vip10', parentId: parent.id })
   assert.equal(manager.listChildren(parent.id).length, 1)
   assert.throws(() => manager.create({ name: '孙原身', parentId: child.id }), /只允许两级原身/)
+  manager.archive(parent.id)
+  manager.archive(child.id)
   assert.throws(() => manager.remove(parent.id), /sub-essences/)
   manager.remove(child.id)
   assert.deepEqual(manager.remove(parent.id), { removed: true })
+})
+
+test('essence manager: captureFromProfile 克隆母体可写层（patch/依赖/设置），不复制凭据', () => {
+  const { manager, root } = makeFixture()
+  const mother = path.join(root, 'mother-profile')
+  fs.mkdirSync(path.join(mother, 'settings'), { recursive: true })
+  fs.mkdirSync(path.join(mother, 'credentials'), { recursive: true })
+  fs.writeFileSync(path.join(mother, 'cordis.patch.yml'), `- insert:
+    - id: my-plugin
+      name: "@x/my-plugin"
+      config: { a: 1 }
+`, 'utf8')
+  fs.writeFileSync(path.join(mother, 'package.json'), JSON.stringify({
+    name: 'desktop',
+    private: true,
+    dsh: { profile: { bundles: ['@dsh/base', '@dsh/web-app'] } },
+    dependencies: { '@dsh/base': '^1.0.0', 'my-plugin': '^2.0.0' },
+    scripts: { build: 'echo should-not-copy' },
+  }), 'utf8')
+  fs.writeFileSync(path.join(mother, 'settings', 'ui.yaml'), JSON.stringify({ theme: 'dark' }), 'utf8')
+  fs.writeFileSync(path.join(mother, 'credentials', 'mother-secret.json'), '{"leak":true}', 'utf8')
+
+  const out = manager.captureFromProfile(mother, { name: '母体克隆' })
+  assert.equal(out.meta.status, ESSENCE_STATUS.READY)
+  assert.equal(out.captured.patchEntries, 1)
+  assert.equal(out.captured.dependencies, 2)
+  assert.equal(out.captured.bundles, 2)
+  assert.equal(out.captured.settings, 1)
+  assert.equal(out.captured.credentialsCopied, false)
+
+  const overlayRoot = path.join(manager.essenceRoot(out.meta.id), 'overlay')
+  const patch = parsePatchEntries(fs.readFileSync(path.join(overlayRoot, 'cordis.patch.yml'), 'utf8'))
+  assert.equal(patch.entries.some(entry => entry.id === 'my-plugin'), true)
+  const pkg = JSON.parse(fs.readFileSync(path.join(overlayRoot, 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dependencies, { '@dsh/base': '^1.0.0', 'my-plugin': '^2.0.0' })
+  assert.equal(pkg.scripts, undefined, 'scripts 不进元主 overlay')
+  assert.equal(Array.isArray(pkg.dsh?.profile?.bundles), true)
+  const settings = JSON.parse(fs.readFileSync(path.join(overlayRoot, 'settings', 'ui.yaml'), 'utf8'))
+  assert.deepEqual(settings, { theme: 'dark' })
+  // 母体凭据既不进 overlay，也不进物化 profile（B8）
+  const overlayCredentials = fs.readdirSync(path.join(overlayRoot, 'credentials'))
+  assert.deepEqual(overlayCredentials, [])
+  assert.equal(fs.existsSync(path.join(manager.mergedProfileDir(out.meta.id), 'credentials')), false)
+})
+
+test('essence manager: captureFromProfile 拒绝把元主目录当母体', () => {
+  const { manager } = makeFixture()
+  const meta = manager.create({ name: '原身G' })
+  assert.throws(
+    () => manager.captureFromProfile(manager.mergedProfileDir(meta.id), { name: '克隆失败' }),
+    /refusing to clone from an essence directory/,
+  )
+  assert.throws(() => manager.captureFromProfile(path.join(manager.essencesRoot, 'missing'), {}), /no package.json/)
+})
+
+test('essence manager: importBundle 整包往返（含引导/清单）且不覆盖新 meta', () => {
+  const { manager } = makeFixture()
+  const source = manager.create({ name: '源元主', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+  const bundle = manager.downloadBundle(source.id, { full: true })
+  assert.equal(bundle.full, true)
+  assert.ok(bundle.files.some((file) => file.path === 'IMPORT-GUIDE.md'))
+  assert.ok(bundle.files.some((file) => file.path === 'manifest.json'))
+  const imported = manager.importBundle(bundle, { name: '导入元主' })
+  assert.equal(imported.ok, true)
+  assert.notEqual(imported.essence.id, source.id)
+  assert.equal(imported.essence.name, '导入元主')
+  const importedPatch = path.join(manager.essenceRoot(imported.essence.id), 'overlay', 'cordis.patch.yml')
+  assert.equal(fs.existsSync(importedPatch), true, '导入后 overlay 必须存在')
+  assert.equal(manager.getMeta(imported.essence.id).id, imported.essence.id, 'meta.json 不得被旧包覆盖')
+})
+
+test('essence manager: backup 只保留一份，restore 回填 overlay', async () => {
+  const { manager } = makeFixture()
+  const meta = manager.create({ name: '备份源', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+  const root = manager.essenceRoot(meta.id)
+  const first = manager.backup(meta.id)
+  assert.equal(first.ok, true)
+  assert.equal(fs.existsSync(path.join(root, 'Backup')), true)
+  await manager.update(meta.id, (overlay) => { overlay.patchEntries = [{ id: 'p2', name: '@x/p2' }] })
+  manager.restoreBackup(meta.id)
+  const restored = manager.loadOverlay(root)
+  assert.equal(restored.patchEntries[0].id, 'p1', '还原必须回填备份时的 overlay')
+  manager.backup(meta.id)
+  manager.backup(meta.id)
+  assert.equal(fs.readdirSync(root).filter((name) => name === 'Backup').length, 1, '只保留一份备份')
+})
+
+test('essence manager: copy 深拷贝沙箱目录（排除 runtime/Backup/凭据）', () => {
+  const { manager } = makeFixture()
+  const source = manager.create({ name: '深拷贝源', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+  const root = manager.essenceRoot(source.id)
+  fs.mkdirSync(path.join(root, 'sandbox'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'sandbox', 'data.txt'), 'hello', 'utf8')
+  fs.mkdirSync(path.join(root, 'runtime', 'home'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'runtime', 'home', 'x.txt'), 'runtime', 'utf8')
+  fs.mkdirSync(path.join(root, 'Backup'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'Backup', 'b.txt'), 'backup', 'utf8')
+  fs.writeFileSync(path.join(root, 'overlay', 'credentials', 'c.json'), '{}', 'utf8')
+
+  const copied = manager.copy(source.id, { name: '深拷贝副本' })
+  const copiedRoot = manager.essenceRoot(copied.id)
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'sandbox', 'data.txt')), true, '自定义沙箱目录必须被复制')
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'runtime')), false, '运行态目录不复制')
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'Backup')), false, '备份目录不复制')
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'overlay', 'credentials', 'c.json')), false, '凭据不复制')
+  assert.ok(copied.copy.copiedFiles > 0)
 })
 
 test('essence manager: recomputeAll 在镜像指纹变化后批量更新', async () => {

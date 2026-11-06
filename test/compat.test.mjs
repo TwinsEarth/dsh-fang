@@ -58,7 +58,7 @@ test('compat: 全部模块可导入且路由契约满足 → ok', async () => {
     '/fang/api/tasks/open-url', '/fang/api/essence/create', '/fang/api/tasks/rename',
     '/fang/api/upgrade/status', '/fang/api/tasks/branches',
     '/fang/api/tasks/branches/activate', '/fang/api/tasks/branches/status',
-    '/fang/api/reflow/policy', '/other',
+    '/fang/api/reflow/policy', '/fang/api/composer/journal', '/other',
   ]
   const result = await runCompatGate({
     rootDir: root,
@@ -97,6 +97,20 @@ test('compat: 路由数量不匹配 / 必需路由缺失 → 失败', async () =
   assert.equal(result.ok, false)
   assert.ok(result.findings.some(f => f.code === 'route-count-mismatch'))
   assert.ok(result.findings.some(f => f.code === 'route-missing'))
+})
+
+test('compat: 路由数量增长只记 warning，不关闭子插件', async () => {
+  const root = makeFakeRoot()
+  const result = await runCompatGate({
+    rootDir: root,
+    expectedRouteCount: 2,
+    routePaths: ['/fang/api/status', '/fang/api/auth-token', '/fang/api/connection'],
+    requiredRoutes: ['/fang/api/status', '/fang/api/auth-token'],
+    importModule: fakeImporter(),
+  })
+  assert.equal(result.ok, true)
+  assert.ok(result.findings.some(f => f.code === 'route-count-growth' && f.severity === 'warning'))
+  assert.equal(result.findings.filter(item => item.severity === 'error').length, 0)
 })
 
 test('compat: 内核导入失败 → 失败', async () => {

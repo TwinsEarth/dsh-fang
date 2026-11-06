@@ -3,7 +3,7 @@
 // 服务端返回后，UI 只做投影，不再自行推断禁用原因；data-btn-id 与 id 一一对应。
 
 export const TASK_ACTION_IDS = Object.freeze(['open', 'rename', 'archive', 'copy', 'download', 'delete'])
-export const ESSENCE_ACTION_IDS = Object.freeze(['derive', 'configure', 'rename', 'archive', 'copy', 'download', 'delete'])
+export const ESSENCE_ACTION_IDS = Object.freeze(['derive', 'configure', 'rename', 'archive', 'restore', 'copy', 'download', 'delete'])
 
 const item = (id, enabled, code, reason, confirm = 'none') => ({
   id,
@@ -29,22 +29,25 @@ export function buildTaskActions({ running = false, archived = false } = {}) {
   return { actions, blocks }
 }
 
-/** 元主动作矩阵：官方 locked 只允许派生/复制/下载；归档后禁止派生/配置。 */
+/** 元主动作矩阵：冻结（archived）后只能删除；官方 locked 只允许派生/复制/下载。 */
 export function buildEssenceActions({ locked = false, archived = false } = {}) {
-  const mutable = locked !== true && archived !== true
+  const frozen = archived === true
+  const mutable = locked !== true && frozen !== true
   const actions = {
-    derive: item('derive', archived !== true, 'archived', '已归档的元主不可派生'),
-    configure: item('configure', mutable, locked ? 'locked' : 'archived', locked ? '官方推荐元主不支持修改设置' : '已归档的元主不可配置'),
-    rename: item('rename', locked !== true, 'locked', '官方推荐元主不可重命名'),
-    archive: item('archive', locked !== true && archived !== true, locked ? 'locked' : 'archived', locked ? '官方推荐元主不可归档' : '已归档', 'once'),
-    copy: item('copy', true, 'ok', ''),
-    download: item('download', true, 'ok', ''),
-    delete: item('delete', locked !== true, 'locked', '官方推荐元主不可删除', 'strong'),
+    derive: item('derive', frozen !== true, 'archived', '已归档（冻结）的元主不可派生'),
+    configure: item('configure', mutable, locked ? 'locked' : 'archived', locked ? '官方推荐元主不支持修改设置' : '已冻结的元主不可配置'),
+    rename: item('rename', mutable, locked ? 'locked' : 'archived', locked ? '官方推荐元主不可重命名' : '已冻结的元主不可重命名'),
+    archive: item('archive', mutable, locked ? 'locked' : 'archived', locked ? '官方推荐元主不可归档' : '已归档（冻结）', 'once'),
+    // 冻结态唯一可做的两件事：还原（解冻）或删除。
+    restore: item('restore', frozen === true && locked !== true, locked ? 'locked' : 'not-archived', locked ? '官方推荐元主不可操作' : '未冻结，无需还原（备份回滚请用「还原备份」）'),
+    copy: item('copy', frozen !== true, 'archived', '已冻结的元主不可复制'),
+    download: item('download', frozen !== true, 'archived', '已冻结的元主不可下载'),
+    delete: item('delete', frozen === true && locked !== true, locked ? 'locked' : 'archived-required', locked ? '官方推荐元主不可删除' : '需先归档（冻结）才能删除', 'strong'),
   }
   const blocks = locked === true
     ? [{ code: 'locked', reason: '官方推荐元主不支持修改设置' }]
-    : archived === true
-      ? [{ code: 'archived', reason: '元主已归档' }]
+    : frozen
+      ? [{ code: 'archived', reason: '元主已归档（冻结）：只能删除' }]
       : []
   return { actions, blocks }
 }

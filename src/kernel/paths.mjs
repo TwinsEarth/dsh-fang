@@ -7,6 +7,7 @@
 // Forks: every fork owns its own $DSH_HOME, so the same rule isolates it from the mother.
 import os from 'node:os'
 import path from 'node:path'
+import fs from 'node:fs'
 
 /** `--profile name` > `--profile=name` > $DSH_PROFILE > .../profiles/<name> > 'default' */
 export function detectProfileTag(argv = process.argv, env = process.env) {
@@ -37,10 +38,28 @@ export function resolveProfileDir(profileTag, env = process.env) {
   return path.join(resolveDshHome(env), 'profiles', profileTag)
 }
 
-/** 用户级数据根：$FANG_HOME（默认由安装器设为 D:\fang；未设置时保持旧布局）。 */
+/** 用户级数据根：$FANG_HOME 优先；未设置时新装默认 D:\ToFuture（旧布局有数据则继续用旧布局）。 */
 export function resolveFangHome(env = process.env) {
   const raw = env && env.FANG_HOME
   if (typeof raw === 'string' && raw.trim()) return path.resolve(raw.trim())
+  // 迁移指针：<DSH_HOME>/fang/fang-home.txt 第一行写明数据根（无需改环境变量/配置即可切换）。
+  try {
+    const pointer = path.join(resolveDshHome(env), 'fang', 'fang-home.txt')
+    if (fs.existsSync(pointer)) {
+      const first = fs.readFileSync(pointer, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)[0].trim()
+      if (first && path.isAbsolute(first)) return path.resolve(first)
+    }
+  } catch { /* ignore */ }
+  // 兼容：已有 $DSH_HOME/fang/<tag> 数据的安装不搬家，继续旧布局。
+  try {
+    if (fs.existsSync(path.join(resolveDshHome(env), 'fang'))) return ''
+  } catch { /* ignore */ }
+  // 新装默认主文件夹（Windows：D:\ToFuture）——只对“真正的默认安装”生效：
+  // 显式设置 DSH_HOME（e2e/测试/便携安装）时不得跳盘，否则会写进真实 D: 数据根。
+  const explicitDshHome = Boolean(env && String(env.DSH_HOME ?? '').trim())
+  if (!explicitDshHome && process.platform === 'win32') {
+    try { if (fs.existsSync('D:\\')) return 'D:\\ToFuture' } catch { /* ignore */ }
+  }
   return ''
 }
 
@@ -61,13 +80,23 @@ export function resolveFangLayout(options = {}) {
   } = options
   const profileTag = detectProfileTag(argv, env)
   const dshHome = resolveDshHome(env)
-  const resolvedFangHome = fangHome ? path.resolve(fangHome) : resolveFangHome(env)
+  // 显式传入 dataRoot/forksRoot（测试、独立部署）时不要自动跳到 FANG_HOME 默认值，
+  // 否则临时目录测试会写进真实的 D:\ToFuture。
+  const explicitRoots = Boolean(String(dataRoot ?? '').trim() || String(forksRoot ?? '').trim() || String(bufferRoot ?? '').trim())
+  const hasEnvFangHome = Boolean(String(env?.FANG_HOME ?? '').trim())
+  const resolvedFangHome = fangHome
+    ? path.resolve(fangHome)
+    : (explicitRoots && !hasEnvFangHome ? '' : resolveFangHome(env))
   const dataDir = dataRoot
     ? path.resolve(dataRoot)
     : (resolvedFangHome ? path.join(resolvedFangHome, 'mirror', profileTag) : path.join(dshHome, 'fang', profileTag))
+  // 三区分离：母体=mirror/<tag>，原身=essence/，分身=forks/，会话/运行态=sessions/。
+  const essenceRoot = resolvedFangHome ? path.join(resolvedFangHome, 'essence') : path.join(dataDir, 'essences')
   const forkHomesDir = forksRoot
     ? path.resolve(forksRoot)
-    : (resolvedFangHome ? path.join(resolvedFangHome, 'essence') : path.join(dataDir, 'forks'))
+    : (resolvedFangHome ? path.join(resolvedFangHome, 'forks') : path.join(dataDir, 'forks'))
+  const sessionsRoot = resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : ''
+  const runtimeRoot = resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : path.join(dataDir, 'runtime')
   return {
     dataDir,
     profileTag,
@@ -83,8 +112,9 @@ export function resolveFangLayout(options = {}) {
     roundsDir: path.join(dataDir, 'rounds'),
     runDir: path.join(dataDir, 'run'),
     forkHomesDir,
-    essenceRoot: forkHomesDir,
-    sessionsRoot: resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : '',
+    essenceRoot,
+    runtimeRoot,
+    sessionsRoot,
   }
 }
 

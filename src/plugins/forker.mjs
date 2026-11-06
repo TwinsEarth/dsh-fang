@@ -57,6 +57,7 @@ import {
   z,
 } from '../kernel/index.mjs'
 import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
+import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 
 export const name = 'fang-forker'
 export const inject = []
@@ -745,11 +746,13 @@ export function apply(ctx, config) {
     ensureDir(profileDir)
 
     const warnings = []
-    const nodeModulesSource = path.join(sourceTemplateDir, 'node_modules')
+    // 显式 profileTemplate（例如原身 merged/profile）优先：此时不再用 clean template。
+    const useCleanTemplate = typeof opts.cleanTemplate === 'boolean' ? opts.cleanTemplate : cleanTemplate
+    const nodeModulesSource = String(opts.nodeModulesSource ?? '').trim() || path.join(sourceTemplateDir, 'node_modules')
     let template = sourceTemplateDir
     let cloned = []
 
-    if (cleanTemplate) {
+    if (useCleanTemplate) {
       // Forker-owned clean template: never written into the mother profile directory.
       const cleanDir = path.join(homeDir, 'templates', forkProfileTag)
       const ensured = ensureTemplate({
@@ -770,6 +773,11 @@ export function apply(ctx, config) {
     } else {
       cloned = cloneProfileConfig(sourceTemplateDir, profileDir)
     }
+    // 生产盘锁定：关闭插件安装 / 设置 UI（派生时写入 profile patch）。
+    const configLock = applyForkConfigLock(profileDir)
+    if (configLock.ok !== true) warnings.push('fork-config-lock-failed')
+    // 配置文件只读：防误写（DSH_FANG_FORK_PROFILE_RO=0 可关）。
+    const profileReadonly = setProfileConfigReadonly(profileDir, true)
 
     // node_modules junction in the fork profile (always to the mother's module tree).
     let nodeModules = null
@@ -810,7 +818,7 @@ export function apply(ctx, config) {
     records.set(forkId, rec)
     persist()
     audit(AUDIT.FORK_CREATED, { forkId, homeDir, profile, taskTitle: rec.taskTitle, cloned, warnings, template })
-    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, warnings }
+    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, warnings, configLock, profileReadonly }
   }
 
   // ───────────────────────────── spawn ─────────────────────────────
@@ -883,6 +891,27 @@ export function apply(ctx, config) {
       log: collector,
     })
     records.set(forkId, rec)
+    // v3.0.9 生产盘：每次打开/重启都从来源模板重放配置（原身 merged 或 clean template），
+    // 分身自己的改动不保存；sessions/storages/buffer 与 node_modules junction 保持不动。
+    const templateDirForRec = String(rec.template ?? '').trim()
+    if (templateDirForRec && exists(templateDirForRec) && exists(rec.profileDir)) {
+      try {
+        // 重放前先解锁，否则复制会因只读失败。
+        setProfileConfigReadonly(rec.profileDir, false)
+        cloneProfileConfig(templateDirForRec, rec.profileDir)
+        const settingsSrc = path.join(templateDirForRec, 'settings')
+        if (exists(settingsSrc)) {
+          const settingsDst = path.join(rec.profileDir, 'settings')
+          if (exists(settingsDst)) removeTree(settingsDst)
+          copyTree(settingsSrc, settingsDst)
+        }
+        rec.configSync = { at: nowMs(), from: templateDirForRec }
+      } catch (e) {
+        rec.configSync = { at: nowMs(), ok: false, error: msgOf(e) }
+      }
+    }
+    try { rec.configLock = applyForkConfigLock(rec.profileDir) } catch { rec.configLock = { ok: false } }
+    try { rec.profileReadonly = setProfileConfigReadonly(rec.profileDir, true) } catch { rec.profileReadonly = { ok: false } }
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
     // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。

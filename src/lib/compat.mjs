@@ -33,8 +33,9 @@ export const REQUIRED_ROUTE_PATHS = Object.freeze([
   '/fang/api/upgrade/status',
   '/fang/api/tasks/branches',
   '/fang/api/reflow/policy',
+  '/fang/api/composer/journal',
 ])
-export const DEFAULT_EXPECTED_ROUTE_COUNT = 67
+export const DEFAULT_EXPECTED_ROUTE_COUNT = 69
 
 /**
  * 列出需要做导入检查的插件模块文件（排序稳定）。
@@ -101,10 +102,17 @@ export async function runCompatGate(options) {
 
   // 3) 路由契约：数量 + 必需路径
   const routeCount = routePaths === null ? expectedRouteCount : routePaths.length
-  if (routePaths !== null && routeCount !== expectedRouteCount) {
+  // 只把「路由凭空少了」当错误：新增路由（例如带进程 token 的连接信息）不应
+  // 让整个子插件集被关掉；数量增长记一条 warning，保持可见但不拦。
+  if (routePaths !== null && routeCount < expectedRouteCount) {
     findings.push({
       code: 'route-count-mismatch', severity: 'error',
-      message: `路由数量 ${routeCount} != 期望 ${expectedRouteCount}`,
+      message: `路由数量 ${routeCount} < 期望 ${expectedRouteCount}`,
+    })
+  } else if (routePaths !== null && routeCount > expectedRouteCount) {
+    findings.push({
+      code: 'route-count-growth', severity: 'warning',
+      message: `路由数量 ${routeCount} > 期望 ${expectedRouteCount}（新增路由，非错误）`,
     })
   }
   if (routePaths !== null) {

@@ -13,16 +13,16 @@ test('web entry manifest declares a client half only', () => {
   assert.equal(pkg.exports['./client'], './client.js')
 })
 
-test('web entry links to dsh-fang://open and renders no fang panel', () => {
+test('web entry registers only the plugin-config link and backup action', () => {
   const source = fs.readFileSync(path.join(root, 'client.js'), 'utf8')
   assert.match(source, /dsh-fang:\/\/open/)
   assert.match(source, /plugins\.bundle\.config/)
-  assert.match(source, /sidebar\.panellist/)
-  assert.equal(source.includes('/fang/api/'), false)
+  assert.equal(source.includes('sidebar.panellist'), false)
+  assert.equal(source.includes("name: 'main'"), false)
   assert.equal(source.includes('mountPanel'), false)
 })
 
-test('client half registers the sidebar entry and the plugin-config entry', () => {
+test('client half renders the link and backup button', () => {
   const source = fs.readFileSync(path.join(root, 'client.js'), 'utf8')
   let loaded = null
   vm.runInNewContext(source, {
@@ -31,25 +31,19 @@ test('client half registers the sidebar entry and the plugin-config entry', () =
   })
   assert.ok(loaded)
   assert.equal(loaded.id, '@twinsearth/dsh-fang-web-entry')
-  const React = { createElement: (type, props, ...children) => ({ type, props: props || {}, children }), useEffect: (fn) => fn() }
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useEffect: (fn) => fn(),
+    useState: (initial) => [initial, () => {}],
+  }
   const mod = loaded.factory((name) => { assert.equal(name, 'react'); return React })
   const registrations = []
-  const ctx = {
-    slots: {
-      inject: (slot, callback) => callback(),
-      register: (options, component) => { registrations.push({ options, component }) },
-    },
-  }
+  const ctx = { slots: { inject: (slot, cb) => cb(), register: (options, component) => { registrations.push({ options, component }) } } }
   mod.apply(ctx)
-  const sidebar = registrations.find((r) => r.options.name === 'sidebar.panellist')
-  const main = registrations.find((r) => r.options.name === 'main')
-  const config = registrations.find((r) => r.options.name === 'plugins.bundle.config')
-  assert.ok(sidebar)
-  assert.equal(sidebar.options.id, 'fang-sidebar-entry')
-  assert.ok(main)
-  assert.equal(main.options.key, 'fang-sidebar-entry')
-  assert.equal(JSON.stringify(main.component()).includes('正在打开瓮城桌面'), true)
-  assert.ok(config)
-  assert.equal(config.options.key, '@twinsearth/dsh-fang')
-  assert.equal(JSON.stringify(config.component()).includes('打开瓮城控制台'), true)
+  assert.equal(registrations.length, 1)
+  assert.equal(registrations[0].options.name, 'plugins.bundle.config')
+  assert.equal(registrations[0].options.key, '@twinsearth/dsh-fang')
+  const tree = JSON.stringify(registrations[0].component())
+  assert.equal(tree.includes('打开瓮城桌面'), true)
+  assert.equal(tree.includes('备份母体'), true)
 })

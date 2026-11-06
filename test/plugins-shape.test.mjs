@@ -123,11 +123,11 @@ test('compose mode mounts every plugin of the current role through one row', asy
 test('package exports + bundle patch reference every row (install preflight)', async () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.name, '@local/dsh-fang')
-  assert.equal(pkg.version, '3.0.8')
+  assert.equal(pkg.version, '3.0.9')
   assert.ok(pkg.dsh?.bundle?.patch, 'dsh.bundle.patch is required to be a bundle')
   assert.ok(fs.existsSync(path.join(ROOT, pkg.dsh.bundle.patch)), 'bundle patch file exists')
-  assert.equal(pkg.dsh?.client, undefined, '浏览器 client half 必须禁用（A2：桌面壳承载）')
-  assert.ok(pkg.exports['./client'], 'client 入口保留给桌面壳')
+  assert.equal(pkg.dsh?.client?.platform, 'web', '浏览器 client half 必须启用（插件可脱离桌面端使用）')
+  assert.ok(pkg.exports['./client'], 'client 入口供 DSH Web 加载')
 
   for (const [sub, target] of Object.entries(pkg.exports)) {
     const rel = typeof target === 'string' ? target : target.default ?? target.browser

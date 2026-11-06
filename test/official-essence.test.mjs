@@ -77,6 +77,7 @@ test('official essence: 普通原身不受锁定影响', async () => {
   await manager.update(normal.id, (overlay) => { overlay.patchEntries.push({ id: 'x', name: '/x.ts' }) })
   manager.setTier(normal.id, 'vip30')
   assert.equal(manager.getMeta(normal.id).tier, 'vip30')
+  manager.archive(normal.id)
   assert.equal(manager.remove(normal.id).removed, true)
 })
 

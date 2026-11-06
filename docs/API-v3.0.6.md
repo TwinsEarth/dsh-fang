@@ -3,6 +3,29 @@
 > 状态：已实现（orchestrator 路由 + EssenceManager 方法）；鉴权沿用 v3.0.5 B1（`x-fang-auth`）。
 > 所有 POST 请求 `content-type: application/json`；错误统一 `{ ok:false, error }`，HTTP 400/404/409。
 
+## 0. 连接信息（v3.0.9）
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| GET | `/fang/api/connection` | — | `{ ok, url, origin, advertisedUrl, tokenized, available }`：`url` 由宿主 `connection.authenticatedUrl()` 生成（带本进程登录 token）；服务缺失时回退裸地址并如实返回 `tokenized:false` |
+
+## 0.1 升级链路（v3.0.9）
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| POST | `/fang/api/mirror/clone-profile` | `{ sourceDir? }` | `{ ok, sourceDir, target, files[], version, backup }`：把本机母体 profile 克隆成镜像基础层（先自动备份；不复制 node_modules/sessions/logs/credentials） |
+| POST | `/fang/api/essence/sync` | `{ essenceId?, concurrency? }` | 无 id：`{ ok, mode:'all', recomputed[], skipped[], conflicted[], failed[], durationMs }`；有 id：`{ ok, mode:'one', recomputed, status }`；locked 400 |
+
+`GET /fang/api/essence/list` 每项新增 `stale`，顶层新增 `mirrorFingerprint` / `staleCount`。
+`GET /fang/api/upgrade/status` 新增 `light:{tone:'green'|'yellow'|'red', reasons:[{code,text}]}` 与 `staleCount/conflicted/failedTasks`。
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| POST | `/fang/api/essence/runtime` | `{ essenceId, action:'start'\|'stop' }` | start：`{ ok, essenceId, forkId, url, port, pid, sandboxHome }`；stop：`{ ok, stopped }`；未知元主/已归档/forker 缺失 → 400 `runtime-failed` |
+| GET | `/fang/api/essence/runtime?essenceId=` | — | `{ ok, essenceId, forkId, runtime }`（runtime 为 forker 公共状态，不含 token） |
+
+> 运行态隔离：`DSH_HOME = essences/<id>/runtime/home`，自己的 sessions/storages；node_modules 用 junction 指向母体模块树，**不写母体 sessions**。
+
 ## 1. 元主（Essence）
 
 | 方法 | 路径 | 请求 | 响应 |
@@ -15,6 +38,7 @@
 | POST | `/fang/api/essence/copy` | `{ essenceId, name? }` | `{ ok, essence }`（复制 overlay/settings，**不复制 credentials**） |
 | POST | `/fang/api/essence/default` | `{ essenceId }` | `{ ok, default:{essenceId,name} }` |
 | GET | `/fang/api/essence/download?essenceId=` | — | JSON 附件 `{ ok, essenceId, meta, files:[{path,base64}], bytes }`（不含 credentials；>32MB 拒绝） |
+| POST | `/fang/api/essence/capture` | `{ name?, tier?, parentId?, includeDependencies?, includeSettings?, setDefault? }` | `{ ok, meta, captured, conflicts[], status, default }`（v3.0.9：从母体 profile 生成元主；不复制 credentials/sessions/node_modules） |
 
 `essence` 对象新增字段：`locked/official/archived/archivedAt/pluginCount/createdAt/updatedAt`。
 配额：默认 5、物理槽位 7（`capacity` 为契约值，配额执行将在 v3.0.6 后续提交接入）。

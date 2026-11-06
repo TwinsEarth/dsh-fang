@@ -133,3 +133,12 @@
         routes:
           enabled: true
           prefix: /fang
+
+    # Child plugin of the fang bundle: composer draft/queue journal (client half).
+    # The main Web panel is the fang client half itself (package.json dsh.client),
+    # so the plugin is fully usable without the PC Electron client.
+    - id: fang-web-entry
+      name: '@twinsearth/dsh-fang-web-entry'
+
+    - id: fang-queue-journal
+      name: '@twinsearth/dsh-fang-queue-journal'
