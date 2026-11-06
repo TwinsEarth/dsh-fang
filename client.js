@@ -654,7 +654,7 @@ window.__ModuleLoader__.load({
 .chip--neutral{color:var(--f-text-3);background:var(--f-surface-2);border-color:var(--f-border)}
 
 /* layout */
-.fang-body{display:grid;grid-template-columns:minmax(300px,37fr) minmax(0,63fr);gap:16px;align-items:start;min-height:0;flex:1 1 auto}
+.fang-body{display:grid;grid-template-columns:minmax(320px,1fr) minmax(0,1fr);gap:16px;align-items:start;min-height:0;flex:1 1 auto}
 @media (max-width:1100px){.fang-body{grid-template-columns:1fr}}
 .panel{background:var(--f-surface);border:1px solid var(--f-border);border-radius:var(--f-radius-panel);
   box-shadow:var(--f-shadow-card);display:flex;flex-direction:column;min-height:0;overflow:hidden;
