@@ -827,6 +827,32 @@ test('orchestrator: 删除原身不删会话；分身保留且不能再派生；
   }
 })
 
+test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归：no-home-dir）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-guard-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '运行态回归' })
+    const started = await mirror.startEssenceRuntime(essence.id)
+    assert.equal(started.ok, true)
+    const lastSpawn = forker.calls.spawn.at(-1)
+    assert.ok(lastSpawn, '必须调用 spawn')
+    assert.ok(String(lastSpawn.homeDir ?? '').length > 0, 'spawn 必须显式带 homeDir')
+    assert.equal(lastSpawn.profile, 'essence-runtime')
+    assert.equal(started.sandboxHome, lastSpawn.homeDir)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

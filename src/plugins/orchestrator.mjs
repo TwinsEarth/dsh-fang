@@ -1709,7 +1709,7 @@ export function apply(ctx, config) {
         cliPath: cliPath(),
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId },
       })
-      if (!started.ok) throw new Error(String(started.error ?? 'runtime-spawn-failed'))
+      if (!started.ok) throw new Error(`runtime-spawn-failed: ${started.error ?? 'unknown'} (forkId=${forkId}, homeDir=${homeDir}, profile=essence-runtime)`)
       return {
         ok: true, essenceId: id, forkId,
         url: started.url, port: started.port, pid: started.pid,
