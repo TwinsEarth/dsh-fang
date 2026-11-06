@@ -1589,26 +1589,88 @@ window.__ModuleLoader__.load({
         await refresh()
       }
 
-      // 打开&设置：未运行则先起隔离实例，再开带 token 的 URL。
+      // 打开前选会话：多选 1–5 个进行中会话（归档会话不出现）。
+      function showSessionPicker(sessions, onPick) {
+        const doc = document
+        const select = h('select', {
+          multiple: true, size: 8,
+          style: { width: '100%', minHeight: 160, marginTop: 10, font: '12px/1.4 inherit', borderRadius: 8, padding: 6 },
+        }, ...sessions.map((session) => h('option', { value: session.sessionId },
+          `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''}`)))
+        const hint = h('div', { style: { fontSize: 12, opacity: .7, marginTop: 6 } },
+          'Ctrl/⌘ 多选，最多 5 个**进行中**会话；归档会话不会出现在这里。')
+        const btn = (label, primary) => h('button', {
+          type: 'button',
+          style: {
+            height: 30, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+            border: primary ? '1px solid #17803D' : '1px solid rgba(255,255,255,.24)',
+            background: primary ? '#17803D' : 'transparent', color: '#fff',
+          },
+        }, label)
+        const startBtn = btn('启动并导入', true)
+        const skipBtn = btn('仅启动', false)
+        const cancelBtn = btn('取消', false)
+        const card = h('div', {
+          role: 'dialog', 'aria-modal': 'true',
+          style: { width: 'min(560px, 92vw)', padding: 18, borderRadius: 14, background: '#1D1D1F', color: '#fff' },
+        },
+        h('div', { style: { fontSize: 14, fontWeight: 600 } }, '打开元主 Web：导入进行中会话'),
+        hint,
+        select,
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, skipBtn, cancelBtn))
+        const backdrop = h('div', {
+          style: {
+            position: 'fixed', inset: 0, zIndex: 2147483000, display: 'flex',
+            alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,.55)',
+          },
+        }, card)
+        const close = () => backdrop.remove()
+        startBtn.addEventListener('click', () => {
+          const ids = [...(select.selectedOptions || [])].map((option) => option.value)
+          if (ids.length > 5) { hint.textContent = '最多选择 5 个会话'; return }
+          close()
+          onPick(ids)
+        })
+        skipBtn.addEventListener('click', () => { close(); onPick([]) })
+        cancelBtn.addEventListener('click', close)
+        backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close() })
+        doc.body.appendChild(backdrop)
+      }
+
+      async function startEssenceRuntime(essenceId, sessionIds) {
+        S.busy = 'essence:start:' + essenceId
+        const started = await api('/fang/api/essence/runtime', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'start', essenceId, sessionIds }),
+        })
+        S.busy = ''
+        if (started.status === 200 && started.body?.ok) {
+          const imported = Array.isArray(started.body.importedSessions) ? started.body.importedSessions.length : 0
+          setNotice({ tone: 'ok', title: '元主 Web 已启动', message: `端口 ${started.body.port ?? '—'} · 导入会话 ${imported} 个` })
+          if (started.body.url) { try { window.open(String(started.body.url), '_blank', 'noopener') } catch { /* 弹层被拦 */ } }
+        } else {
+          setNotice({ tone: 'bad', title: '启动元主 Web 失败', message: failureHint(started.body?.error || 'runtime-failed'), detail: started.body?.detail || '' })
+        }
+        await refresh()
+      }
+
+      // 打开&设置：已在跑 → 直接开带 token 的 URL；没跑 → 选会话后启动再打开。
       async function openEssence(essenceId) {
         if (isBusy()) return
         S.busy = 'essence:open:' + essenceId
         const st = await api(`/fang/api/essence/runtime?essenceId=${encodeURIComponent(essenceId)}`)
         const runtime = st.body?.runtime ?? null
         const running = Boolean(runtime && (runtime.running === true || String(runtime.status) === 'running'))
-        let url = ''
-        if (!running) {
-          const started = await api('/fang/api/essence/runtime', { method: 'POST', body: JSON.stringify({ action: 'start', essenceId }) })
-          if (started.status === 200 && started.body?.ok) url = String(started.body.url || '')
-          else setNotice({ tone: 'bad', title: '元主运行态启动失败', message: failureHint(started.body?.error || 'runtime-failed'), detail: started.body?.detail || '' })
-        } else {
-          const opened = await api(`/fang/api/essence/runtime/open?essenceId=${encodeURIComponent(essenceId)}`)
-          if (opened.status === 200 && opened.body?.url) url = String(opened.body.url)
-        }
         S.busy = ''
-        if (url) { try { window.open(url, '_blank', 'noopener') } catch { /* 弹层被拦 */ } }
-        else if (running) setNotice({ tone: 'bad', title: '无法打开元主运行实例', message: '实例在跑但拿不到带 token 的地址' })
-        await refresh()
+        if (running) {
+          const opened = await api(`/fang/api/essence/runtime/open?essenceId=${encodeURIComponent(essenceId)}`)
+          if (opened.status === 200 && opened.body?.url) { try { window.open(String(opened.body.url), '_blank', 'noopener') } catch { /* 弹层被拦 */ } }
+          else setNotice({ tone: 'bad', title: '无法打开元主 Web', message: '实例在跑但拿不到带 token 的地址' })
+          return
+        }
+        const candidates = await api('/fang/api/essence/open/candidates')
+        const sessions = Array.isArray(candidates.body?.sessions) ? candidates.body.sessions : []
+        showSessionPicker(sessions, (sessionIds) => void startEssenceRuntime(essenceId, sessionIds))
       }
 
       async function copyEssence(essence) {

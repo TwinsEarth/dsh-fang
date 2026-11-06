@@ -1238,6 +1238,35 @@ export function apply(ctx, config) {
   upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
   // 元主运行态的 forkId 命名（稳定、可用于 forker 记录与端口池）
   const runtimeForkId = (essenceId) => 'rt-' + String(essenceId).replace(/^essence-/, '').replace(/[^A-Za-z0-9-]/g, '-')
+  // 打开元主时导入 1–5 个**进行中**会话（归档会话拒绝导入）。
+  const importSessionsInto = (homeDir, sessionIds) => {
+    const ids = [...new Set((Array.isArray(sessionIds) ? sessionIds : []).map((id) => String(id ?? '').trim()).filter(Boolean))]
+    if (ids.length === 0) return []
+    if (ids.length > 5) throw new Error('too-many-sessions (max 5)')
+    const catalog = safeGet(SERVICE.sessionCatalog)
+    if (!catalog || typeof catalog.listSessions !== 'function') throw new Error('session-catalog-unavailable')
+    const listed = catalog.listSessions({ limit: 500, includeArchived: false })
+    const rows = Array.isArray(listed?.sessions) ? listed.sessions : []
+    const sessionsRoot = String(listed?.sessionsRoot ?? '')
+    if (!sessionsRoot) throw new Error('sessions-root-missing')
+    const byId = new Map(rows.map((row) => [String(row.sessionId), row]))
+    const imported = []
+    for (const id of ids) {
+      const row = byId.get(id)
+      if (!row) throw new Error('unknown-session: ' + id)
+      if (row.archived === true) throw new Error('archived-session-not-importable: ' + id)
+      const workspaceKey = String(row.workspaceKey ?? '')
+      const source = path.join(sessionsRoot, workspaceKey, id)
+      if (!exists(source)) throw new Error('session-dir-missing: ' + id)
+      const target = path.join(homeDir, 'sessions', workspaceKey, id)
+      ensureDir(path.dirname(target))
+      if (exists(target)) removeTree(target)
+      copyTree(source, target)
+      imported.push({ sessionId: id, title: row.title ?? null, workspaceKey })
+    }
+    return imported
+  }
+
   const mirrorService = {
     status: () => mirrorManager.getStatus(),
     getPreferences: () => preferencesStore.get(),
@@ -1302,7 +1331,7 @@ export function apply(ctx, config) {
     // v3.0.9 原身运行态：用元主 merged/profile 起一个**隔离 home** 的配置态实例。
     // 隔离边界：DSH_HOME = essences/<id>/runtime/home（自己的 sessions/storages），
     // 不写母体 sessions；node_modules 通过 junction 指向母体模块树（不复制）。
-    startEssenceRuntime: async (essenceId) => {
+    startEssenceRuntime: async (essenceId, input = {}) => {
       const id = String(essenceId ?? '').trim()
       const meta = essenceManager.getMeta(id)
       if (!meta || typeof meta.id !== 'string') throw new Error('unknown-essence')
@@ -1324,12 +1353,15 @@ export function apply(ctx, config) {
         homeDir, profile: 'essence-runtime', profileTemplate: merged,
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
+      // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
+      const importedSessions = importSessionsInto(homeDir, input?.sessionIds)
       const started = await f.spawn({ forkId })
       if (!started.ok) throw new Error(String(started.error ?? 'runtime-spawn-failed'))
       return {
         ok: true, essenceId: id, forkId,
         url: started.url, port: started.port, pid: started.pid,
         sandboxHome: homeDir,
+        importedSessions,
       }
     },
     stopEssenceRuntime: (essenceId) => {
@@ -1349,8 +1381,23 @@ export function apply(ctx, config) {
       try { runtime = f.status(forkId) ?? null } catch { runtime = null }
       return { ok: true, essenceId: id, forkId, runtime }
     },
-    /** 打开运行态：返回带临时 token 的 URL（仅内存，不落盘）。 */
-    openEssenceRuntime: (essenceId) => {
+    /** 打开前可选导入的「进行中」会话（最多 50 条给选择器，提交时服务端再限 5 条）。 */
+    essenceOpenCandidates: () => {
+      const catalog = safeGet(SERVICE.sessionCatalog)
+      if (!catalog || typeof catalog.listSessions !== 'function') return { ok: false, error: 'session-catalog-unavailable' }
+      const listed = catalog.listSessions({ limit: 200, includeArchived: false })
+      const sessions = (Array.isArray(listed?.sessions) ? listed.sessions : [])
+        .filter((row) => row?.archived !== true)
+        .slice(0, 50)
+        .map((row) => ({
+          sessionId: row.sessionId,
+          title: row.title ?? null,
+          workspaceTitle: row.workspaceTitle ?? null,
+          updatedAt: row.updatedAt ?? 0,
+        }))
+      return { ok: true, sessions, total: sessions.length }
+    },
+    /** 打开运行态：返回带临时 token 的 URL（仅内存，不落盘）。 */    openEssenceRuntime: (essenceId) => {
       const id = String(essenceId ?? '').trim()
       const f = forker()
       if (!f || typeof f.openUrl !== 'function') return { ok: false, error: 'forker-unavailable' }
@@ -1822,12 +1869,13 @@ export function apply(ctx, config) {
           const action = String(body?.action ?? 'start')
           try {
             if (action === 'stop') return json(res, 200, mirrorService.stopEssenceRuntime(body?.essenceId))
-            return json(res, 200, await mirrorService.startEssenceRuntime(body?.essenceId))
+            return json(res, 200, await mirrorService.startEssenceRuntime(body?.essenceId, body))
           } catch (error) {
             return json(res, 400, { ok: false, error: 'runtime-failed', detail: String(error?.message ?? error) })
           }
         },
       })
+      route('GET', `${prefix}/api/essence/open/candidates`, (req, res) => json(res, 200, mirrorService.essenceOpenCandidates()))
       route('GET', `${prefix}/api/essence/runtime/open`, (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         return json(res, 200, mirrorService.openEssenceRuntime(query.get('essenceId')))
