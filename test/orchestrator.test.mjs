@@ -686,6 +686,8 @@ test('orchestrator: 元主进行中会话配额（默认 10，超出拒绝再开
     assert.equal(listed.sessions.used, 10)
     assert.equal(listed.sessions.limit, 10)
     assert.equal(listed.sessions.over, true)
+    assert.equal(listed.quota.sessions.used, 10, '设计稿字段 quota.sessions 必须存在')
+    assert.equal(listed.quota.sessions.limit, 10)
     await assert.rejects(() => mirror.startEssenceRuntime(essence.id), /session-quota-exceeded/)
     const detail = mirror.essenceDetail(essence.id)
     assert.equal(detail.sessions.used, 10)

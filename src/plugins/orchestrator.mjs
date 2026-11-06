@@ -1530,13 +1530,16 @@ export function apply(ctx, config) {
         const ui = buildEssenceActions({ locked: meta.locked === true, archived: meta.archived === true })
         const stale = mirrorFingerprint.length > 0 && meta.archived !== true
           && String(meta.lastMergedFingerprint ?? '') !== mirrorFingerprint
+        const sessionQuota = countEssenceSessions(meta.id, meta)
         return {
           ...meta,
           locked: meta.locked === true,
           official: meta.official === true,
           archived: meta.archived === true,
           stale,
-          sessions: countEssenceSessions(meta.id, meta),
+          sessions: sessionQuota,
+          // 设计稿字段：quota.sessions = { used, limit, over }
+          quota: { sessions: sessionQuota },
           pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
           actions: ui.actions,
           blocks: ui.blocks,
