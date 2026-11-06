@@ -47,6 +47,8 @@ export const Config = z.object({
     .description('母体 profile 名；留空 = 当前 profile（分身模板来源）'),
   profileTemplate: z.string().default('')
     .description('分身 profile 模板目录；留空 = 当前 profile 目录（Forker 的 cleanTemplate 会覆盖）'),
+  fangHome: z.string().default('')
+    .description('三区数据根（相当于 FANG_HOME）；留空 = 自动（新装默认 D:\\ToFuture，已有旧数据沿用旧布局）'),
   cliPath: z.string().default('')
     .description('dsh 启动器路径；留空自动探测（PATH 上的 dsh / 安装目录 dsh.cmd）'),
   dataRoot: z.string().default('')
@@ -153,7 +155,7 @@ export function apply(ctx, config) {
   if (!gate.active) return
   const role = gate.role
 
-  const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot })
+  const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
   const branchStore = new BranchStore(layout.dataDir)
   const composerJournal = new ComposerJournal(layout.dataDir)
   // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
@@ -1243,6 +1245,15 @@ export function apply(ctx, config) {
         role,
         profileTag: layout.profileTag,
         dataDir: layout.dataDir,
+        // 三区路径（无需 D: 访问即可在面板/接口核对目录是否已迁移）
+        layout: {
+          fangHome: layout.fangHome || '',
+          dataDir: layout.dataDir,
+          essenceRoot: layout.essenceRoot,
+          forkHomesDir: layout.forkHomesDir,
+          runtimeRoot: layout.runtimeRoot,
+          sessionsRoot: layout.sessionsRoot || '',
+        },
         mother: { profile: motherProfile, cliPath: cliPath(), template: templateDir() },
         tasks: { total: list.length, ready, running, max: cfg.maxForks, list },
         // v1 兼容视图：Client 徽标与旧调用方仍读 forks.*

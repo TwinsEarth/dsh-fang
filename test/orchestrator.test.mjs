@@ -148,6 +148,11 @@ test('orchestrator: registers service; status exposes tasks, forks compat, comme
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
   assert.equal(st.tasks.max, 8)
+  // 显式 dataRoot 时不得自动跳到 FANG_HOME 默认目录（否则测试/独立部署会写进真实 D 盘）
+  assert.equal(st.layout.dataDir, dataRoot)
+  assert.equal(st.layout.essenceRoot, path.join(dataRoot, 'essences'))
+  assert.equal(st.layout.forkHomesDir, path.join(dataRoot, 'forks'))
+  assert.equal(st.layout.runtimeRoot, path.join(dataRoot, 'runtime'))
   assert.deepEqual(st.forks.list, [], 'v1 compat view')
   assert.equal(st.commercial.backup, false)
   assert.equal(st.services.forker, true)

@@ -70,7 +70,13 @@ export function resolveFangLayout(options = {}) {
   } = options
   const profileTag = detectProfileTag(argv, env)
   const dshHome = resolveDshHome(env)
-  const resolvedFangHome = fangHome ? path.resolve(fangHome) : resolveFangHome(env)
+  // 显式传入 dataRoot/forksRoot（测试、独立部署）时不要自动跳到 FANG_HOME 默认值，
+  // 否则临时目录测试会写进真实的 D:\ToFuture。
+  const explicitRoots = Boolean(String(dataRoot ?? '').trim() || String(forksRoot ?? '').trim() || String(bufferRoot ?? '').trim())
+  const hasEnvFangHome = Boolean(String(env?.FANG_HOME ?? '').trim())
+  const resolvedFangHome = fangHome
+    ? path.resolve(fangHome)
+    : (explicitRoots && !hasEnvFangHome ? '' : resolveFangHome(env))
   const dataDir = dataRoot
     ? path.resolve(dataRoot)
     : (resolvedFangHome ? path.join(resolvedFangHome, 'mirror', profileTag) : path.join(dshHome, 'fang', profileTag))
