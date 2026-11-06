@@ -3,7 +3,7 @@
 // composer queue, persist them through the fang HTTP API, and offer recovery
 // only after an explicit user click. This plugin never sends a message.
 window.__ModuleLoader__.load({
-  id: '@local/dsh-fang-queue-journal',
+  id: '@twinsearth/dsh-fang-queue-journal',
   factory(require) {
     const React = require('react')
     const h = React.createElement
