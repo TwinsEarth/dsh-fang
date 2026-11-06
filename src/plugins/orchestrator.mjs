@@ -1622,33 +1622,54 @@ export function apply(ctx, config) {
       const meta = existingId ? essenceManager.getMeta(existingId) : null
       return { ok: true, pluginManager: Array.isArray(entries), plan, defaultEssenceId: meta?.id ? existingId : '', exists: Boolean(meta?.id) }
     },
-    ensureDefaultEssence: async ({ apply = false, force = false } = {}) => {
+    ensureDefaultEssence: async ({ apply = false, force = false, mode = 'copy-local' } = {}) => {
       const existingId = readDefaultEssenceId()
       const existing = existingId ? essenceManager.getMeta(existingId) : null
-      if (existing?.id) return { ok: true, existed: true, created: false, essenceId: existingId }
+      if (existing?.id) return { ok: true, existed: true, created: false, essenceId: existingId, mode }
       const entries = await listInstalledPlugins()
       const plan = planDefaultEssence(entries ?? [])
       const userEssences = essenceManager.list().filter((meta) => meta.official !== true)
-      if (!force && userEssences.length > 0) return { ok: false, error: 'user-essence-exists', plan }
-      if (apply !== true) return { ok: true, dryRun: true, plan }
-      const patchEntries = []
-      const pending = []
-      for (const group of plan.groups) {
-        for (const plugin of group.plugins) {
-          if (!plugin.installed) { pending.push({ spec: plugin.spec, group: group.key }); continue }
-          patchEntries.push({ id: plugin.pluginId || plugin.spec, name: plugin.spec, disabled: group.enabled !== true })
+      if (!force && userEssences.length > 0) return { ok: false, error: 'user-essence-exists', plan, mode }
+      if (apply !== true) return { ok: true, dryRun: true, plan, mode }
+      if (mode === 'preset') {
+        const patchEntries = []
+        const pending = []
+        for (const group of plan.groups) {
+          for (const plugin of group.plugins) {
+            if (!plugin.installed) { pending.push({ spec: plugin.spec, group: group.key }); continue }
+            patchEntries.push({ id: plugin.pluginId || plugin.spec, name: plugin.spec, disabled: group.enabled !== true })
+          }
         }
+        if (patchEntries.length === 0) return { ok: false, error: 'no-installed-default-plugins', plan, pending, mode }
+        const created = essenceManager.create({ name: DEFAULT_ESSENCE_NAME, tier: 'free', defaultPatchEntries: patchEntries })
+        writeDefaultEssenceId(created.id)
+        try {
+          writeJsonAtomic(path.join(essenceManager.essenceRoot(created.id), 'default-preset.json'), {
+            at: nowMs(), mode, version: plan.version, groups: plan.groups, patchEntries, pending,
+          })
+        } catch { /* marker 失败不影响创建 */ }
+        audit('default-essence-created', { essenceId: created.id, mode, installed: patchEntries.length, pending: pending.length })
+        return { ok: true, created: true, mode, essenceId: created.id, plan, pending }
       }
-      if (patchEntries.length === 0) return { ok: false, error: 'no-installed-default-plugins', plan, pending }
-      const created = essenceManager.create({ name: DEFAULT_ESSENCE_NAME, tier: 'free', defaultPatchEntries: patchEntries })
+      // copy-local（默认）：只复制本机插件的启用/禁用 + 设置；不复制任何会话/数据/代码/凭据。
+      let captured
+      try {
+        captured = essenceManager.captureFromProfile(templateDir(), { name: DEFAULT_ESSENCE_NAME, tier: 'free' })
+      } catch (error) {
+        return { ok: false, error: 'capture-failed', detail: String(error?.message ?? error), plan, mode }
+      }
+      const created = captured.meta ?? captured
       writeDefaultEssenceId(created.id)
       try {
         writeJsonAtomic(path.join(essenceManager.essenceRoot(created.id), 'default-preset.json'), {
-          at: nowMs(), version: plan.version, groups: plan.groups, patchEntries, pending,
+          at: nowMs(), mode, source: templateDir(),
+          captured: captured.captured ?? null,
+          conflicts: captured.conflicts ?? [],
+          note: '只复制插件启用状态与设置；未复制会话/项目/凭据/Token',
         })
       } catch { /* marker 失败不影响创建 */ }
-      audit('default-essence-created', { essenceId: created.id, installed: patchEntries.length, pending: pending.length })
-      return { ok: true, created: true, essenceId: created.id, plan, pending }
+      audit('default-essence-created', { essenceId: created.id, mode, source: templateDir() })
+      return { ok: true, created: true, mode, essenceId: created.id, plan, captured: captured.captured ?? null, conflicts: captured.conflicts ?? [] }
     },
     renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
     archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
@@ -2646,7 +2667,7 @@ export function apply(ctx, config) {
       route('POST', `${prefix}/api/essence/default`, async (req, res) => {
         const body = await readBody(req)
         try {
-          const out = await mirrorService.ensureDefaultEssence({ apply: body?.apply === true, force: body?.force === true })
+          const out = await mirrorService.ensureDefaultEssence({ apply: body?.apply === true, force: body?.force === true, mode: body?.mode === 'preset' ? 'preset' : 'copy-local' })
           return json(res, out.ok === false ? 409 : 200, out)
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) })
@@ -2654,7 +2675,7 @@ export function apply(ctx, config) {
       })
       // 新用户延迟自动创建（不阻塞启动；无已装默认插件时不创建）。
       if (cfg.defaultEssenceAuto !== false) {
-        const timer = setTimeout(() => { mirrorService.ensureDefaultEssence({ apply: true }).catch(() => {}) }, 8000)
+        const timer = setTimeout(() => { mirrorService.ensureDefaultEssence({ apply: true, mode: 'copy-local' }).catch(() => {}) }, 8000)
         if (typeof timer.unref === 'function') timer.unref()
       }
 

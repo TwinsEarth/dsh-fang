@@ -910,10 +910,21 @@ test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）'
   }
   const forker = makeFakeForker()
   const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer, pluginManager } })
+  const motherProfile = path.join(dataRoot, 'mother-profile')
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({ name: 'mother-probe', private: true }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'), [
+    '- id: ui-settings',
+    '  name: "@deepseek-ai/dsh-client-ui-settings"',
+    '  config:',
+    '    enabled: true',
+    '',
+  ].join('\n'), 'utf8')
   try {
     orchestrator.apply(ctx, {
       dataRoot,
       forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
     })
@@ -930,6 +941,16 @@ test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）'
     assert.equal(made.created, true)
     const meta = mirror.listEssences().essences.find((item) => item.id === made.essenceId)
     assert.equal(meta.name, '默认元宝')
+    assert.equal(made.mode, 'copy-local', '默认走“复制本机插件&设置”，不安装/不改母体')
+    const marker = JSON.parse(fs.readFileSync(path.join(dataRoot, 'essences', made.essenceId, 'default-preset.json'), 'utf8'))
+    assert.equal(marker.mode, 'copy-local')
+    assert.equal(marker.source, motherProfile)
+    const overlay = fs.readFileSync(path.join(dataRoot, 'essences', made.essenceId, 'overlay', 'cordis.patch.yml'), 'utf8')
+    assert.match(overlay, /ui-settings/, '本机插件/设置状态必须被复制进默认元宝')
+    const credDir = path.join(dataRoot, 'essences', made.essenceId, 'overlay', 'credentials')
+    const credFiles = fs.existsSync(credDir) ? fs.readdirSync(credDir).length : 0
+    assert.equal(credFiles, 0, '不得复制任何凭据/Token 文件（允许空目录）')
+    assert.equal(fs.existsSync(path.join(dataRoot, 'essences', made.essenceId, 'runtime')), false, '不得复制运行数据/会话')
 
     const task = await svc.createTask({ title: '小白快速分身' })
     assert.equal(task.ok, true)

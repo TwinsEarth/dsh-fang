@@ -39,6 +39,8 @@ const size = (dir) => {
   const walk = (d) => {
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
       const p = path.join(d, entry.name)
+      // 不跟随 junction/symlink：node_modules 只是链接，展开会复制出几十 GB。
+      try { if (fs.readlinkSync(p)) continue } catch { /* 普通文件/目录 */ }
       if (entry.isDirectory()) walk(p)
       else if (entry.isFile()) total += fs.statSync(p).size
     }
@@ -47,7 +49,32 @@ const size = (dir) => {
   return total
 }
 const exists = (p) => { try { return fs.existsSync(p) } catch { return false } }
-const cp = (from, to) => { fs.mkdirSync(path.dirname(to), { recursive: true }); fs.cpSync(from, to, { recursive: true, force: true }) }
+// junction 感知复制：目录递归、文件复制、symlink/junction 原样重建（不展开目标）。
+const cp = (from, to) => {
+  const stack = [[from, to]]
+  while (stack.length > 0) {
+    const [src, dst] = stack.pop()
+    let st
+    try { st = fs.lstatSync(src) } catch { continue }
+    let isLink = false
+    try { isLink = Boolean(fs.readlinkSync(src)) } catch { isLink = false }
+    if (isLink) {
+      fs.mkdirSync(path.dirname(dst), { recursive: true })
+      try {
+        const target = fs.readlinkSync(src)
+        fs.symlinkSync(target, dst, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch { /* 链接无法重建则跳过（不展开） */ }
+      continue
+    }
+    if (st.isDirectory()) {
+      fs.mkdirSync(dst, { recursive: true })
+      for (const entry of fs.readdirSync(src)) stack.push([path.join(src, entry), path.join(dst, entry)])
+      continue
+    }
+    fs.mkdirSync(path.dirname(dst), { recursive: true })
+    fs.copyFileSync(src, dst)
+  }
+}
 
 if (!exists(legacyDir)) {
   console.error(`[migrate] 旧数据目录不存在: ${legacyDir}`)
@@ -90,14 +117,31 @@ for (const item of plan) {
   cp(item.from, item.to)
 }
 
-// tasks.json / forks.json 里的绝对 homeDir 从旧 forks 根改到新 forks 根
+// tasks.json / forks.json 里的绝对 homeDir 从旧 forks 根改到新 forks 根（结构化解码，兼容 JSON 转义）
 const rewrite = (file) => {
   if (!exists(file)) return
-  const text = fs.readFileSync(file, 'utf8')
+  let doc
+  try { doc = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return }
   const oldForks = path.join(legacyDir, 'forks')
-  if (!text.includes(oldForks)) return
-  fs.writeFileSync(file, text.split(oldForks).join(paths.forks), 'utf8')
-  console.log(`[migrate] 重写路径: ${file}`)
+  let changed = 0
+  const walk = (node) => {
+    if (Array.isArray(node)) { for (const item of node) walk(item); return }
+    if (!node || typeof node !== 'object') return
+    for (const key of Object.keys(node)) {
+      const value = node[key]
+      if (typeof value === 'string' && value.startsWith(oldForks)) {
+        node[key] = paths.forks + value.slice(oldForks.length)
+        changed += 1
+      } else {
+        walk(value)
+      }
+    }
+  }
+  walk(doc)
+  if (changed > 0) {
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2) + '\n', 'utf8')
+    console.log(`[migrate] 重写路径: ${file} (${changed} 处)`)
+  }
 }
 rewrite(path.join(paths.dataDir, 'tasks.json'))
 rewrite(path.join(paths.dataDir, 'forks.json'))
