@@ -1637,6 +1637,81 @@ window.__ModuleLoader__.load({
         doc.body.appendChild(backdrop)
       }
 
+      function showDerivePicker(sessions, essenceName, onPick) {
+        const doc = document
+        const select = h('select', {
+          size: Math.min(8, Math.max(4, sessions.length)),
+          style: { width: '100%', minHeight: 150, marginTop: 10, font: '12px/1.4 inherit', borderRadius: 8, padding: 6 },
+        }, ...sessions.map((session) => h('option', { value: session.sessionId },
+          `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''}`)))
+        const hint = h('div', { style: { fontSize: 12, opacity: .7, marginTop: 6 } },
+          '选择一个进行中的 DSH 会话，整目录复制进新分身的沙箱（归档会话不列出）。')
+        const btn = (label, primary) => h('button', {
+          type: 'button',
+          style: {
+            height: 30, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+            border: primary ? '1px solid #17803D' : '1px solid rgba(255,255,255,.24)',
+            background: primary ? '#17803D' : 'transparent', color: '#fff',
+          },
+        }, label)
+        const startBtn = btn('派 生', true)
+        const cancelBtn = btn('取消', false)
+        const card = h('div', {
+          role: 'dialog', 'aria-modal': 'true',
+          style: { width: 'min(560px, 92vw)', padding: 18, borderRadius: 14, background: '#1D1D1F', color: '#fff' },
+        },
+        h('div', { style: { fontSize: 14, fontWeight: 600 } }, `派生分身 · 基于「${essenceName}」`),
+        hint,
+        select,
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, cancelBtn))
+        const backdrop = h('div', {
+          style: {
+            position: 'fixed', inset: 0, zIndex: 2147483000, display: 'flex',
+            alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,.55)',
+          },
+        }, card)
+        const close = () => backdrop.remove()
+        startBtn.addEventListener('click', () => {
+          const picked = String(select.value || '')
+          if (!picked) { hint.textContent = '请选择一个会话'; return }
+          close()
+          onPick(picked)
+        })
+        cancelBtn.addEventListener('click', close)
+        backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close() })
+        doc.body.appendChild(backdrop)
+      }
+
+      async function deriveFromEssence(essence) {
+        if (isBusy()) return
+        S.busy = 'essence:derive:' + essence.id
+        const res = await api('/fang/api/sessions?limit=200')
+        S.busy = ''
+        const sessions = Array.isArray(res.body?.sessions)
+          ? res.body.sessions.filter((session) => session.archived !== true)
+          : []
+        if (sessions.length === 0) {
+          setNotice({ tone: 'warn', title: '没有可复制的会话', message: '先在 DSH 里有一个进行中的会话，再派生。' })
+          return
+        }
+        showDerivePicker(sessions, essence.name || essence.id, async (sessionId) => {
+          const session = sessions.find((item) => String(item.sessionId) === String(sessionId))
+          const title = String(session?.title || essence.name || '派生分身').slice(0, 60)
+          S.busy = 'essence:derive:run:' + essence.id
+          const out = await api('/fang/api/tasks/create', {
+            method: 'POST',
+            body: JSON.stringify({ title, essenceId: essence.id, importSession: { sessionId } }),
+          })
+          S.busy = ''
+          if (out.status === 200 && out.body?.ok) {
+            setNotice({ tone: 'ok', title: '已派生分身', message: `模板「${essence.name || essence.id}」· 会话 ${short(String(sessionId), 8)}` })
+          } else {
+            setNotice({ tone: 'bad', title: '派生失败', message: failureHint(out.body?.error || 'http-' + out.status), detail: out.body?.detail || '' })
+          }
+          await refresh()
+        })
+      }
+
       async function startEssenceRuntime(essenceId, sessionIds) {
         S.busy = 'essence:start:' + essenceId
         const started = await api('/fang/api/essence/runtime', {
@@ -2130,7 +2205,7 @@ window.__ModuleLoader__.load({
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
         essenceBackup, essenceRestore, openEssenceDetail, unfreezeEssence, stopEssenceRuntime,
-        openBranches, forkBranch, activateBranch,
+        openBranches, forkBranch, activateBranch, deriveFromEssence,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2679,10 +2754,10 @@ window.__ModuleLoader__.load({
           essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null,
           essence.archived === true ? h('span', { class: 'chip', title: '已归档（冻结）：只能还原或删除' }, '冻结') : null,
           h('span', { style: { display: 'inline-flex', gap: 4 } },
-            button('详情', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-14',
-              title: '打开该元主详情：设置 / 插件 / 运行日志（只读）',
-              onClick: () => void app.openEssenceDetail(essence),
+            essence.archived === true ? null : button('派生', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-05',
+              title: '派生：以该元主为模板创建分身（继承其插件&配置），可复制一个现有会话进分身沙箱',
+              onClick: () => void app.deriveFromEssence(essence),
             }),
             essence.archived === true
               ? button('还原', {

@@ -961,6 +961,50 @@ test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）'
   }
 })
 
+test('orchestrator: 元主栏“派生”= essenceId 模板 + 复制一个现有会话进分身', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-derive-'))
+  const sessionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-derive-src-'))
+  const workspaceKey = '--E-GPT--'
+  const sessionId = '44444444-4444-4444-8444-444444444444'
+  fs.mkdirSync(path.join(sessionsRoot, workspaceKey, sessionId), { recursive: true })
+  fs.writeFileSync(path.join(sessionsRoot, workspaceKey, sessionId, 'session.v4.jsonl.zstd'), 'session', 'utf8')
+  const catalog = {
+    listSessions: () => ({
+      sessionsRoot,
+      sessions: [{ sessionId, workspaceKey, archived: false, title: '要复制的会话' }],
+    }),
+  }
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer, fangSessionCatalog: catalog } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '派生模板元主' })
+    const out = await svc.createTask({ title: '派生带会话', essenceId: essence.id, importSession: { sessionId } })
+    assert.equal(out.ok, true)
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    assert.equal(task.essenceId, essence.id)
+    assert.equal(task.importedSession?.ok, true)
+    assert.equal(
+      fs.existsSync(path.join(task.homeDir, 'sessions', workspaceKey, sessionId, 'session.v4.jsonl.zstd')),
+      true,
+      '选中的会话必须被复制进分身沙箱',
+    )
+    const provision = forker.calls.provision.at(-1)
+    assert.match(String(provision.profileTemplate), /merged[\\/]profile$/s)
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(sessionsRoot, { recursive: true, force: true })
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

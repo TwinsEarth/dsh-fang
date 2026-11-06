@@ -649,14 +649,28 @@ export function apply(ctx, config) {
         }
 
         if (input.importSession && typeof input.importSession === 'object') {
-          try {
-            task.importedSession = importSessionIntoFork(homeDir, input.importSession)
-            audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
-          } catch (e) {
-            task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
-            audit(AUDIT.FORK_CRASHED + '-import', { taskId, error: task.importedSession.error })
+          const importSpec = input.importSession
+          // 新入口：只给 sessionId（元主栏“派生”按钮）→ 由会话目录整目录复制进分身。
+          if (importSpec.sessionId && !importSpec.sourceFile) {
+            try {
+              const imported = importSessionsInto(homeDir, [importSpec.sessionId])
+              task.importedSession = imported[0] ? { ok: true, ...imported[0] } : { ok: false, reason: 'not-imported' }
+              audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
+            } catch (e) {
+              task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
+              audit(AUDIT.FORK_CRASHED + '-import', { taskId, error: task.importedSession.error })
+            }
+            persist()
+          } else {
+            try {
+              task.importedSession = importSessionIntoFork(homeDir, importSpec)
+              audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
+            } catch (e) {
+              task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
+              audit(AUDIT.FORK_CRASHED + '-import', { taskId, error: task.importedSession.error })
+            }
+            persist()
           }
-          persist()
         }
 
         const started = await f.spawn({
