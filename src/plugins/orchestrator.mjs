@@ -25,6 +25,7 @@ import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
 import { EssenceManager, OFFICIAL_ESSENCE_ID, VIP_QUOTAS } from '../lib/essence.mjs'
+import { applyForkConfigLock } from '../lib/fork-config-lock.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
@@ -1129,11 +1130,13 @@ export function apply(ctx, config) {
         copyTree(settings, to)
         picked.push('settings/')
       }
+      // 重置后重新加回“生产盘”锁（插件安装/设置入口仍禁用）。
+      const configLock = applyForkConfigLock(target)
       task.configSyncedAt = nowMs()
       task.configSyncedFrom = task.essenceId
       persist()
-      audit('fork-config-reset', { taskId: id, essenceId: task.essenceId, files: picked })
-      return { ok: true, taskId: id, essenceId: task.essenceId, files: picked }
+      audit('fork-config-reset', { taskId: id, essenceId: task.essenceId, files: picked, configLock })
+      return { ok: true, taskId: id, essenceId: task.essenceId, files: picked, configLock }
     },
 
     /** 强制单会话：运行中拒绝；停止/归档态把多余会话移到 quarantine-sessions/。 */

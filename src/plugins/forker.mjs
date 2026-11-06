@@ -57,6 +57,7 @@ import {
   z,
 } from '../kernel/index.mjs'
 import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
+import { applyForkConfigLock } from '../lib/fork-config-lock.mjs'
 
 export const name = 'fang-forker'
 export const inject = []
@@ -770,6 +771,9 @@ export function apply(ctx, config) {
     } else {
       cloned = cloneProfileConfig(sourceTemplateDir, profileDir)
     }
+    // 生产盘锁定：关闭插件安装 / 设置 UI（派生时写入 profile patch）。
+    const configLock = applyForkConfigLock(profileDir)
+    if (configLock.ok !== true) warnings.push('fork-config-lock-failed')
 
     // node_modules junction in the fork profile (always to the mother's module tree).
     let nodeModules = null
@@ -810,7 +814,7 @@ export function apply(ctx, config) {
     records.set(forkId, rec)
     persist()
     audit(AUDIT.FORK_CREATED, { forkId, homeDir, profile, taskTitle: rec.taskTitle, cloned, warnings, template })
-    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, warnings }
+    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, warnings, configLock }
   }
 
   // ───────────────────────────── spawn ─────────────────────────────
