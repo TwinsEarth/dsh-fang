@@ -10,9 +10,12 @@ window.__ModuleLoader__.load({
     const DEBOUNCE_MS = 400
 
     function sessionKey() {
-      const m = /\/sessions?\/([^/?#]+)/.exec(location.pathname)
+      const hash = String(location.hash || '').replace(/^#/, '')
+      const fromHash = /sessions?\/([^/?#]+)/.exec(hash)
+      const fromPath = /sessions?\/([^/?#]+)/.exec(location.pathname)
       const q = new URLSearchParams(location.search).get('session')
-      return String(q || m?.[1] || location.pathname).slice(0, 200)
+      const value = String(q || fromHash?.[1] || fromPath?.[1] || hash || location.pathname || '/')
+      return value.slice(0, 200)
     }
 
     let tokenCache = { at: 0, token: '' }
@@ -26,13 +29,14 @@ window.__ModuleLoader__.load({
       return tokenCache.token
     }
 
-    async function journalRequest(method, entry) {
+    async function journalRequest(method, entry, keyOverride) {
       const token = await fangToken()
       if (!token) return null
-      const res = await fetch(method === 'POST' ? '/fang/api/composer/journal' : '/fang/api/composer/journal?key=' + encodeURIComponent(sessionKey()), {
+      const key = keyOverride || sessionKey()
+      const res = await fetch(method === 'POST' ? '/fang/api/composer/journal' : '/fang/api/composer/journal?key=' + encodeURIComponent(key), {
         method,
         headers: { 'content-type': 'application/json', 'x-fang-auth': token },
-        body: method === 'POST' ? JSON.stringify({ key: sessionKey(), path: location.pathname, ...entry }) : undefined,
+        body: method === 'POST' ? JSON.stringify({ key, path: location.hash || location.pathname, ...entry }) : undefined,
       })
       if (!res.ok) return null
       return res.json()
@@ -41,10 +45,16 @@ window.__ModuleLoader__.load({
     function findComposer() {
       const nodes = [...document.querySelectorAll('textarea, [contenteditable="true"]')]
         .filter((el) => {
+          if (el.closest?.('[data-fang-entry]')) return false
           const r = el.getBoundingClientRect()
-          return r.width > 80 && r.height > 20
+          return r.width > 80 && r.height > 16
         })
-      return nodes[nodes.length - 1] || null
+      // Prefer the largest (the main composer), not a hidden side field.
+      return nodes.sort((a, b) => {
+        const ra = a.getBoundingClientRect()
+        const rb = b.getBoundingClientRect()
+        return (rb.width * rb.height) - (ra.width * ra.height)
+      })[0] || null
     }
 
     function readComposer(el) {
@@ -55,15 +65,22 @@ window.__ModuleLoader__.load({
     function writeComposer(text) {
       const el = findComposer()
       if (!el) return false
+      el.focus()
       if (el.tagName === 'TEXTAREA') {
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
         if (setter) setter.call(el, text)
         else el.value = text
+        el.dispatchEvent(new Event('input', { bubbles: true }))
       } else {
-        el.focus()
-        el.textContent = text
+        try {
+          document.execCommand('selectAll', false, null)
+          document.execCommand('insertText', false, text)
+        } catch { /* fall back */ }
+        if (!String(el.innerText || '').includes(text.slice(0, 20))) {
+          el.textContent = text
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }))
+        }
       }
-      el.dispatchEvent(new Event('input', { bubbles: true }))
       el.focus()
       return true
     }
@@ -71,7 +88,7 @@ window.__ModuleLoader__.load({
     function scanQueue() {
       const seen = new Set()
       const out = []
-      const nodes = document.querySelectorAll('[class*="queue" i], [data-testid*="queue" i], [aria-label*="queue" i], [class*="pending" i]')
+      const nodes = document.querySelectorAll('[class*="queue" i], [data-testid*="queue" i], [aria-label*="queue" i], [class*="pending" i], [data-testid*="pending" i], [aria-label*="排队"], [title*="排队"]')
       for (const el of nodes) {
         const text = String(el.innerText || '').trim()
         if (!text || text.length > 4000 || seen.has(text)) continue
@@ -86,7 +103,15 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = React.useState('')
       React.useEffect(() => {
         let alive = true
-        journalRequest('GET').then((body) => { if (alive) setEntry(body?.entry ?? null) }).catch(() => {})
+        journalRequest('GET').then(async (body) => {
+          let found = body?.entry ?? null
+          // Migration: older builds keyed everything under "/".
+          if (!found && sessionKey() !== '/') {
+            const legacy = await journalRequest('GET', null, '/').catch(() => null)
+            found = legacy?.entry ?? null
+          }
+          if (alive) setEntry(found)
+        }).catch(() => {})
         return () => { alive = false }
       }, [])
       if (!entry || (!entry.draft && !(entry.queue || []).length)) return null

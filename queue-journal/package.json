@@ -1,6 +1,6 @@
 {
   "name": "@twinsearth/dsh-fang-queue-journal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "type": "module",
   "description": "Composer draft/queue journal for dsh-Fang: persist unsent input and a read-only queue mirror; recovery is always user-confirmed.",
@@ -12,9 +12,15 @@
     ".": "./index.js",
     "./client": "./client.js"
   },
-  "files": ["index.js", "client.js", "cordis.patch.yml"],
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
