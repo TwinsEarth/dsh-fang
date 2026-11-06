@@ -18,13 +18,14 @@ function makeStore() {
   return { mirrorRoot, store: new PreferencesStore({ mirrorRoot }) }
 }
 
-test('preferences schema: 6 个字段与默认值', () => {
+test('preferences schema: 字段与默认值', () => {
   assert.deepEqual([...PREFERENCES_KEYS].sort(), [
     'activeIdleTimeoutMs', 'backupRetentionDays', 'idleDowngradeNotification',
-    'idlePollIntervalMs', 'pollIntervalMs', 'strictConflictMode',
+    'idlePollIntervalMs', 'pollIntervalMs', 'strictConflictMode', 'syncIntervalHours',
   ])
   const defaults = buildDefaultPreferences()
   assert.equal(defaults.activeIdleTimeoutMs, 30_000)
+  assert.equal(defaults.syncIntervalHours, 'off')
   assert.equal(defaults.pollIntervalMs, 5_000)
   assert.equal(defaults.idlePollIntervalMs, 60_000)
   assert.equal(defaults.backupRetentionDays, 30)

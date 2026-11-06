@@ -1268,7 +1268,14 @@ export function apply(ctx, config) {
   }
 
   const mirrorService = {
-    status: () => mirrorManager.getStatus(),
+    status: () => {
+      const status = mirrorManager.getStatus()
+      let preferences = null
+      let sync = null
+      try { preferences = preferencesStore.get() } catch { preferences = null }
+      try { sync = readJson(path.join(mirrorRoot, 'sync-state.json'), null) } catch { sync = null }
+      return { ...status, preferences, sync }
+    },
     getPreferences: () => preferencesStore.get(),
     setPreferences: (patch = {}) => preferencesStore.update(patch),
     listEssences: () => {
@@ -1471,12 +1478,34 @@ export function apply(ctx, config) {
         installedAt: nowMs(),
         lastBackupAt: backup?.createdAt ?? meta.lastBackupAt,
       })
+      writeJsonAtomic(path.join(mirrorRoot, 'sync-state.json'), { lastSyncAt: nowMs(), sourceDir })
       return {
         ok: true,
         sourceDir,
         target: activeProfile,
         files: picked,
         version: version || meta.version || 'unknown',
+        backup: backup ? { id: backup.id, bucket: backup.bucket, createdAt: backup.createdAt } : null,
+      }
+    },
+    /** 空白母体（初始盘）：备份当前 → 清空 active/profile → 版本标记 blank。 */
+    blankMother: () => {
+      const activeProfile = path.join(mirrorRoot, 'active', 'profile')
+      let backup = null
+      try { backup = mirrorManager.backup({ label: '空白母体前自动备份' }) } catch { /* 首次为空 */ }
+      if (exists(activeProfile)) removeTree(activeProfile)
+      ensureDir(activeProfile)
+      const meta = mirrorManager.readMeta()
+      mirrorManager.writeMeta({
+        ...meta,
+        version: 'blank',
+        installedAt: nowMs(),
+        lastBackupAt: backup?.createdAt ?? meta.lastBackupAt,
+      })
+      return {
+        ok: true,
+        version: 'blank',
+        target: activeProfile,
         backup: backup ? { id: backup.id, bucket: backup.bucket, createdAt: backup.createdAt } : null,
       }
     },
@@ -1522,6 +1551,21 @@ export function apply(ctx, config) {
       const status = mirrorService.status()
       if (status.meta?.nextBackupAt !== null && Date.now() >= status.meta.nextBackupAt) {
         mirrorManager.maybeAutoBackup()
+      }
+      // 母体自动同步：按偏好 6/12/24h 从本机 profile 克隆到镜像（关闭时不跑）。
+      const prefs = preferencesStore.get()
+      const syncHours = Number(prefs?.syncIntervalHours)
+      if (Number.isFinite(syncHours) && syncHours > 0) {
+        let last = 0
+        try { last = Number(readJson(path.join(mirrorRoot, 'sync-state.json'), {})?.lastSyncAt) || 0 } catch { last = 0 }
+        if (Date.now() - last >= syncHours * 3_600_000) {
+          try {
+            mirrorService.cloneMotherProfile({})
+            ctx.logger?.info?.('[mirror] auto-sync completed', { hours: syncHours })
+          } catch (error) {
+            ctx.logger?.warn?.('[mirror] auto-sync failed', { error: String(error?.message ?? error) })
+          }
+        }
       }
     } catch (error) {
       ctx.logger?.warn?.('[mirror] auto backup tick failed', { error: String(error?.message ?? error) })
@@ -1856,12 +1900,22 @@ export function apply(ctx, config) {
           return json(res, 400, { ok: false, error: 'clone-failed', detail: String(error?.message ?? error) })
         }
       })
+      // 空白母体（初始盘）：备份当前 → active/profile 清空 → 版本 blank
+      route('POST', `${prefix}/api/mirror/blank`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.blankMother(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'blank-failed', detail: String(error?.message ?? error) })
+        }
+      })
       // v3.0.8 镜像偏好：对话框交互超时 15/30/60s（宿主侧持久化）
       route('GET', `${prefix}/api/mirror/preferences`, (req, res) => json(res, 200, mirrorService.getPreferences()))
       route('POST', `${prefix}/api/mirror/preferences/set`, async (req, res) => {
         const body = await readBody(req)
         try {
-          const preferences = mirrorService.setPreferences({ activeIdleTimeoutMs: body?.activeIdleTimeoutMs })
+          const patch = {}
+          if (body?.activeIdleTimeoutMs !== undefined) patch.activeIdleTimeoutMs = body.activeIdleTimeoutMs
+          if (body?.syncIntervalHours !== undefined) patch.syncIntervalHours = body.syncIntervalHours
+          const preferences = mirrorService.setPreferences(patch)
           return json(res, 200, preferences)
         } catch (error) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) })

@@ -554,6 +554,39 @@ test('orchestrator: GET /essence/detail 返回设置/插件/运行态摘要（�
   }
 })
 
+test('orchestrator: 空白母体与自动同步间隔偏好', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-blank-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  const call = async (routePath, body) => {
+    const res = makeRes()
+    await webServer.find('POST', routePath).handler(makeReq(body, 'POST'), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const blank = await call('/fang/api/mirror/blank', {})
+    assert.equal(blank.statusCode, 200, JSON.stringify(blank.json()))
+    assert.equal(blank.json().version, 'blank')
+    assert.equal(fs.existsSync(path.join(dataRoot, 'mirror', 'active', 'profile')), true)
+
+    const prefs = await call('/fang/api/mirror/preferences/set', { syncIntervalHours: '6' })
+    assert.equal(prefs.statusCode, 200)
+    assert.equal(prefs.json().syncIntervalHours, '6')
+
+    const status = ctx.get(SERVICE.mirror).status()
+    assert.equal(status.preferences.syncIntervalHours, '6')
+    assert.equal(status.preferences.backupIntervalHours, undefined)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

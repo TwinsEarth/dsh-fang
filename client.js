@@ -3081,6 +3081,8 @@ window.__ModuleLoader__.load({
           kv('官方最新', data.officialLatest == null ? '未配置官方源' : String(data.officialLatest)),
           kv('上次备份', meta.lastBackupAt ? fmtClock(meta.lastBackupAt) : '从未'),
           kv('下次备份', meta.nextBackupAt ? fmtClock(meta.nextBackupAt) : '未安排'),
+          kv('上次同步', data.sync?.lastSyncAt ? fmtClock(data.sync.lastSyncAt) : '从未'),
+          kv('自动同步', (() => { const v = String(data.preferences?.syncIntervalHours ?? 'off'); return v === 'off' ? '关闭' : `${v} 小时` })()),
           kv('磁盘占用', fmtBytes(Number(data.diskUsageBytes) || 0)),
           kv('自动备份', `${Number(meta.backupIntervalHours) || 24} 小时`)))
 
@@ -3102,6 +3104,22 @@ window.__ModuleLoader__.load({
               app.render(true)
             },
           }),
+          button('克隆母体', {
+            size: 'sm', variant: 'quiet', dataBtnId: 'M-07',
+            title: '把本机母体 profile（package.json / cordis.patch.yml / settings）克隆到镜像 active/profile，先自动备份',
+            onClick: () => void app.mirrorAction('clone', async () => (await api('/fang/api/mirror/clone-profile', { method: 'POST', body: '{}' })).body),
+          }),
+          button('空白母体', {
+            size: 'sm', variant: 'quiet', dataBtnId: 'M-08',
+            title: '重置为初始盘（清空 active/profile）；会先自动备份，需重新克隆或升级',
+            onClick: () => {
+              S.modal.pending = {
+                text: '把镜像重置为空白母体（初始盘）？会先自动备份；之后需要重新克隆或升级才能恢复基础配置。',
+                run: () => app.mirrorAction('blank', async () => (await api('/fang/api/mirror/blank', { method: 'POST', body: '{}' })).body),
+              }
+              app.render(true)
+            },
+          }),
           button('打开母体门户', {
             size: 'sm', variant: 'quiet', icon: icon('globe', 13),
             title: '在新窗口打开 /fang/panel 独立门户（桌面壳使用真实 HTTP 源）',
@@ -3113,6 +3131,13 @@ window.__ModuleLoader__.load({
             size: 'sm', variant: Number(meta.backupIntervalHours) === hours ? 'config' : 'quiet',
             title: `每 ${hours} 小时自动备份一次`,
             onClick: () => void app.mirrorAction('interval:' + hours, async () => (await api('/fang/api/mirror/backup-interval', { method: 'POST', body: JSON.stringify({ hours }) })).body),
+          })))))
+
+        section.append(h('div', { class: 'glass-section-title', style: { marginTop: '4px' } }, '母体自动同步',
+          ...(['off', '6', '12', '24'].map((value) => button(value === 'off' ? '关闭' : value + 'h', {
+            size: 'sm', variant: String(data.preferences?.syncIntervalHours ?? 'off') === value ? 'config' : 'quiet',
+            title: value === 'off' ? '关闭自动同步' : `每 ${value} 小时从本机母体 profile 同步到镜像（同步前自动备份）`,
+            onClick: () => void app.mirrorAction('sync:' + value, async () => (await api('/fang/api/mirror/preferences/set', { method: 'POST', body: JSON.stringify({ syncIntervalHours: value }) })).body),
           })))))
 
         if (pending) {

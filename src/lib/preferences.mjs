@@ -57,6 +57,17 @@ export const PREFERENCES_SCHEMA = Object.freeze({
     description: '开启后任何原身冲突都会阻止派生，而不是自动跳过',
     defaultValue: false,
   }),
+  syncIntervalHours: Object.freeze({
+    kind: 'enum', label: '母体自动同步间隔',
+    description: '每隔多久从本机母体 profile 克隆到镜像（off = 关闭；同步前自动备份）',
+    defaultValue: 'off',
+    options: Object.freeze([
+      { value: 'off', label: '关闭' },
+      { value: '6', label: '6 小时' },
+      { value: '12', label: '12 小时' },
+      { value: '24', label: '24 小时' },
+    ]),
+  }),
 })
 
 export const PREFERENCES_KEYS = Object.freeze(Object.keys(PREFERENCES_SCHEMA))
