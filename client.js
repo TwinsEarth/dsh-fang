@@ -1311,7 +1311,7 @@ window.__ModuleLoader__.load({
           setNotice({
             tone: 'ok', title: payload?.sessionId ? '已派发：从会话继续' : '已派生新分身',
             message: `${result.taskId}${result.port ? ' · 端口 ' + result.port : ''}${result.adapter?.ok ? ' · 适配器已就绪' : ' · 适配器尚未就绪，右栏会标出健康状态'}`,
-            actions: result.url ? [{ label: '打开分身', href: result.url }] : [],
+            actions: result.taskId ? [{ label: '打开分身', onClick: () => void openTask({ taskId: result.taskId }) }] : [],
           })
           await refresh()
         } else if (result) {
@@ -1394,7 +1394,7 @@ window.__ModuleLoader__.load({
             const body = result.body
             if (result.status === 200 && body?.ok) {
               S.view = 'console'
-              setNotice({ tone: 'ok', title: '已还原存档', message: `${task.title || task.taskId} 已重新启动 · 端口 ${body.port ?? '—'}`, actions: body.url ? [{ label: '打开分身', href: body.url }] : [] })
+              setNotice({ tone: 'ok', title: '已还原存档', message: `${task.title || task.taskId} 已重新启动 · 端口 ${body.port ?? '—'}`, actions: [{ label: '打开分身', onClick: () => void openTask({ taskId: task.taskId }) }] })
             } else {
               const code = body?.error || (result.status ? 'http-' + result.status : 'network')
               setNotice({ tone: 'bad', title: '还原失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
@@ -1451,14 +1451,13 @@ window.__ModuleLoader__.load({
 
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
-        if (taskId) {
-          const result = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
-          if (result.status === 200 && result.body?.url) {
-            try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
-          }
+        if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
+        const result = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+        if (result.status === 200 && result.body?.url) {
+          try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
         }
-        if (!task?.url) { notify('warn', '该分身没有可打开的 URL（可能已停止）；可归档回收。'); return }
-        try { window.open(task.url, '_blank', 'noopener') } catch { /* ignore */ }
+        const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
+        notify('bad', `打开分身失败：${code}（不会打开无 token 的裸 URL）`)
       }
 
       async function copyText(text, label) {
@@ -3167,7 +3166,11 @@ window.__ModuleLoader__.load({
           const layout = ctx?.layout
           if (layout && typeof layout.selectPanel === 'function') { layout.selectPanel('fang'); return }
         } catch { /* fall through */ }
-        try { window.open('/fang/panel', '_blank', 'noopener') } catch { /* ignore */ }
+        try {
+          window.dispatchEvent(new CustomEvent('fang:notice', {
+            detail: '瓮城面板未在当前视图打开；请从 DSH 左侧栏「瓮城」进入，或使用 PC 端。',
+          }))
+        } catch { /* ignore */ }
       }
       label.addEventListener('click', openPanel)
       label.addEventListener('dblclick', (event) => {
