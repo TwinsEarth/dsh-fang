@@ -1677,7 +1677,7 @@ window.__ModuleLoader__.load({
         if (isBusy()) return
         askPrompt({
           title: '复制元主', label: '新元主名称', value: `${essence.name || essence.id} 副本`, confirmLabel: '复制',
-          hint: '复制 overlay（插件补丁/设置/依赖），不复制凭据。',
+          hint: '深复制该元主的整份沙盒目录（overlay + merged + 自定义数据）到新文件夹；不复制凭据、运行态与备份。',
           onConfirm: async (name) => {
             const trimmed = String(name ?? '').trim()
             if (!trimmed) { S.modal.error = '请填写名称'; render(true); return false }

@@ -768,11 +768,35 @@ export class EssenceManager {
       parentId: source.parentId ?? null,
     })
     const nextRoot = this.essenceRoot(created.id)
-    const overlay = this.loadOverlay(sourceRoot)
-    overlay.credentialsPath = ''
-    this.saveOverlay(nextRoot, overlay)
+    // v3.0.9 深复制：整份沙箱目录（overlay + merged + 自定义数据）到新文件夹。
+    // 边界：不复制 credentials（B8）、不复制 runtime（运行态进程目录）、不复制 Backup、不覆盖新 meta。
+    const skip = new Set(['meta.json', 'credentials', 'runtime', 'Backup'])
+    let copiedFiles = 0
+    for (const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
+      if (skip.has(entry.name)) continue
+      const from = path.join(sourceRoot, entry.name)
+      const to = path.join(nextRoot, entry.name)
+      if (exists(to)) removeTree(to)
+      copyTree(from, to)
+      // overlay/credentials 属于登录态，必须剔除（B8）。
+      const copiedCredentials = path.join(to, 'credentials')
+      if (entry.name === 'overlay' && exists(copiedCredentials)) removeTree(copiedCredentials)
+      if (entry.isDirectory()) {
+        const walk = (dir) => {
+          for (const child of fs.readdirSync(dir, { withFileTypes: true })) {
+            const file = path.join(dir, child.name)
+            if (child.isDirectory()) walk(file)
+            else if (child.isFile()) copiedFiles += 1
+          }
+        }
+        walk(to)
+      } else if (entry.isFile()) copiedFiles += 1
+    }
+    // 凭据目录在新沙箱里保持为空（不继承任何登录态）。
+    ensureDir(path.join(nextRoot, 'overlay', 'credentials'))
     this.recompute(created.id)
-    return this.getMeta(created.id)
+    const meta = this.getMeta(created.id)
+    return { ...meta, copy: { sourceId: source.id, copiedFiles } }
   }
 
   /** 元主当前插件条目数（用于面板卡片）。 */
