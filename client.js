@@ -3369,7 +3369,7 @@ window.__ModuleLoader__.load({
         disposers.push(() => window.removeEventListener('keydown', onScreenshotKey, true))
         disposers.push(ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
           name: 'conversation.composer.dock',
-          id: 'fang-screenshot',
+          id: 'fang-screenshot-inline',
           order: 91,
         }, ScreenshotDock)))
         // 左侧导航「瓮城」：图标组件即登记项组件（外壳只给 {size, active}）
