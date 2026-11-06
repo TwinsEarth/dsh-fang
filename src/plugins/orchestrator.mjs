@@ -232,6 +232,7 @@ export function apply(ctx, config) {
       template: f.template ?? '',
       essenceId: f.essenceId ?? null,
       sourceEssence: f.sourceEssence ?? null,
+      sessions: (() => { const list = scanForkSessions(f); return { count: list.length, violation: list.length > 1 } })(),
     }
   }
 
@@ -423,6 +424,47 @@ export function apply(ctx, config) {
     doc.global.initialized = true
     writeJsonAtomic(indexFile, doc)
     return { ok: true, bytes, sessionId, workspacePath, workspaceKey, workspaceTitle, indexFile }
+  }
+
+  // v3.0.9 单会话强制：扫分身自己的 sessions，保留最新一个，其余移到 quarantine-sessions/。
+  const scanForkSessions = (task) => {
+    const root = path.join(String(task?.homeDir ?? ''), 'sessions')
+    const out = []
+    try {
+      for (const workspace of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!workspace.isDirectory()) continue
+        const wsDir = path.join(root, workspace.name)
+        for (const session of fs.readdirSync(wsDir, { withFileTypes: true })) {
+          if (!session.isDirectory()) continue
+          const full = path.join(wsDir, session.name)
+          let mtime = 0
+          try { mtime = fs.statSync(full).mtimeMs } catch { mtime = 0 }
+          out.push({ workspaceKey: workspace.name, sessionId: session.name, path: full, mtime })
+        }
+      }
+    } catch { /* 没有 sessions 目录 */ }
+    return out.sort((a, b) => b.mtime - a.mtime)
+  }
+  const applySingleSessionGuard = (task) => {
+    const sessions = scanForkSessions(task)
+    if (sessions.length <= 1) return { ok: true, kept: sessions[0]?.sessionId ?? null, quarantined: [] }
+    const [keep, ...rest] = sessions
+    const stamp = String(nowMs())
+    const quarantined = []
+    for (const session of rest) {
+      const target = path.join(task.homeDir, 'quarantine-sessions', stamp, session.workspaceKey, session.sessionId)
+      try {
+        ensureDir(path.dirname(target))
+        try { fs.renameSync(session.path, target) } catch { copyTree(session.path, target); removeTree(session.path) }
+        quarantined.push({ workspaceKey: session.workspaceKey, sessionId: session.sessionId, movedTo: target, at: nowMs() })
+      } catch { /* 移动失败保留原样，不破坏数据 */ }
+    }
+    if (quarantined.length > 0) {
+      task.quarantinedSessions = (Array.isArray(task.quarantinedSessions) ? task.quarantinedSessions : []).concat(quarantined)
+      persist()
+      audit('fork-session-quarantined', { taskId: task.taskId, kept: keep.sessionId, moved: quarantined.length })
+    }
+    return { ok: true, kept: keep.sessionId, quarantined }
   }
 
   const service = {
@@ -1067,6 +1109,16 @@ export function apply(ctx, config) {
       return { ok: true, taskId: id, essenceId: task.essenceId, files: picked }
     },
 
+    /** 强制单会话：运行中拒绝；停止/归档态把多余会话移到 quarantine-sessions/。 */
+    enforceSingleSession(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      const live = forker()?.status?.(id)
+      if (live?.running) return { ok: false, error: 'task-running', taskId: id }
+      return { ...applySingleSessionGuard(task), taskId: id }
+    },
+
     async restoreTask(taskId) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
@@ -1089,6 +1141,9 @@ export function apply(ctx, config) {
           configReset = { ok: false, error: String(error?.message ?? error) }
         }
       }
+      // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
+      let sessionGuard = null
+      try { sessionGuard = applySingleSessionGuard(task) } catch { sessionGuard = { ok: false } }
       const started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
@@ -1115,7 +1170,7 @@ export function apply(ctx, config) {
       persist()
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
-      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset }
+      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard }
     },
 
     /** 永久删除存档：reap（杀进程 + 删 home + 删记录）；forker 记录已丢时按 home 兜底清理。 */
@@ -1891,7 +1946,12 @@ export function apply(ctx, config) {
         const out = await service.restoreTask(String(body?.taskId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
       })
-      // v3.0.9：把分身配置重置回来源原身（分身只生产，不保留插件/设置改动）。
+      // v3.0.9：强制单会话（运行中拒绝；停止/归档态把多余会话隔离到 quarantine-sessions/）
+      route('POST', `${prefix}/api/tasks/sessions/enforce`, async (req, res) => {
+        const body = await readBody(req)
+        const out = service.enforceSingleSession(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
       route('POST', `${prefix}/api/tasks/reset`, async (req, res) => {
         const body = await readBody(req)
         try {

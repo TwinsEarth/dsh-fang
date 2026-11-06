@@ -688,6 +688,41 @@ test('orchestrator: 元主进行中会话配额（默认 10，超出拒绝再开
   }
 })
 
+test('orchestrator: 强制单会话（运行中拒绝；停止态隔离多余会话）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-single-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const out = await svc.createTask({ title: '单会话分身' })
+    assert.equal(out.ok, true)
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    const sessionsRoot = path.join(task.homeDir, 'sessions', '--ws--')
+    fs.mkdirSync(path.join(sessionsRoot, '11111111-1111-4111-8111-111111111111'), { recursive: true })
+    fs.mkdirSync(path.join(sessionsRoot, '22222222-2222-4222-8222-222222222222'), { recursive: true })
+
+    const runningGuard = svc.enforceSingleSession(task.taskId)
+    assert.equal(runningGuard.ok, false)
+    assert.equal(runningGuard.error, 'task-running')
+
+    await svc.archiveTask(task.taskId)
+    const stoppedGuard = svc.enforceSingleSession(task.taskId)
+    assert.equal(stoppedGuard.ok, true)
+    assert.ok(stoppedGuard.quarantined.length >= 1)
+    const remaining = fs.readdirSync(sessionsRoot).filter((name) => fs.statSync(path.join(sessionsRoot, name)).isDirectory())
+    assert.equal(remaining.length, 1, '只允许保留一个会话')
+    assert.equal(fs.existsSync(path.join(task.homeDir, 'quarantine-sessions')), true)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))
