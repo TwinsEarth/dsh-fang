@@ -24,12 +24,15 @@ export function createSession(sessionId) {
   return { sessionId, activeBranchId: 'main', branches: new Map([['main', main]]) }
 }
 
-export function createBranch(session, { branchId, parentBranchId = session.activeBranchId, baseTurn = 0 }) {
+export function createBranch(session, { branchId, parentBranchId = session.activeBranchId, baseTurn = 0, sessionId = null }) {
   const id = assertBranchId(branchId)
   if (id === 'main') throw new Error('invalid-branch-id')
   if (session.branches.has(id)) throw new Error('branch-exists')
   if (!session.branches.has(parentBranchId)) throw new Error('parent-missing')
-  session.branches.set(id, { branchId: id, parentBranchId, baseTurn, status: 'active', createdAt: Date.now() })
+  session.branches.set(id, {
+    branchId: id, parentBranchId, baseTurn, status: 'active', createdAt: Date.now(),
+    sessionId: typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null,
+  })
   return session.branches.get(id)
 }
 

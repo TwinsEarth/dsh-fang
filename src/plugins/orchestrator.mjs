@@ -451,7 +451,14 @@ export function apply(ctx, config) {
     return out.sort((a, b) => b.mtime - a.mtime)
   }
   const applySingleSessionGuard = (task) => {
-    const sessions = scanForkSessions(task)
+    // 受管的分支子会话不参与“单会话”隔离（它们由分支库登记，属于同一分身的合法分支）。
+    const branchSessionIds = new Set()
+    try {
+      for (const branch of branchStore.list(task.taskId).branches ?? []) {
+        if (branch?.sessionId) branchSessionIds.add(String(branch.sessionId))
+      }
+    } catch { /* 无分支库 */ }
+    const sessions = scanForkSessions(task).filter((session) => !branchSessionIds.has(session.sessionId))
     const bindBranches = (keptId) => { try { branchStore?.bindSession?.(task.taskId, keptId) } catch { /* ignore */ } }
     if (sessions.length <= 1) {
       const kept = sessions[0]?.sessionId ?? null
@@ -2479,6 +2486,37 @@ export function apply(ctx, config) {
         if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
         try {
           return json(res, 200, branchStore.setStatus(checked.taskId, String(body?.branchId ?? ''), String(body?.status ?? '')))
+        } catch (error) {
+          const code = String(error?.message ?? error)
+          return json(res, branchErrorStatus(code), { ok: false, error: code, code })
+        }
+      })
+      // 方案 A：物理分支——在分身自己的宿主里 sessions.fork，子会话挂回同一分身。
+      route('POST', `${prefix}/api/tasks/branches/fork`, async (req, res) => {
+        const body = await readBody(req)
+        const checked = requireTask(body?.taskId)
+        if (!checked.ok) return json(res, checked.status, { ok: false, error: checked.error, code: checked.error })
+        const task = tasks.get(checked.taskId)
+        if (!task) return json(res, 404, { ok: false, error: 'unknown-task' })
+        if (task.status === TASK_STATUS.ARCHIVED) return json(res, 409, { ok: false, error: 'task-archived' })
+        const client = await remoteFor(task)
+        if (!client || typeof client.command !== 'function') return json(res, 502, { ok: false, error: 'adapter-unavailable' })
+        const current = branchStore.list(checked.taskId)
+        const sourceSessionId = String(body?.sessionId ?? current.sessionId ?? '').trim()
+        if (!sourceSessionId) return json(res, 409, { ok: false, error: 'no-session' })
+        const branchId = String(body?.branchId ?? '').trim() || `b${Date.now().toString(36)}`
+        const baseTurn = Number.isFinite(Number(body?.baseTurn)) ? Number(body.baseTurn) : 0
+        try {
+          const out = await client.command('fork-session', { sessionId: sourceSessionId, boundary: baseTurn || undefined })
+          const result = out?.data?.result ?? out?.data ?? null
+          if (!out?.ok || result?.ok === false) {
+            const code = String(result?.code ?? result?.error ?? out?.error ?? 'fork-failed')
+            return json(res, 502, { ok: false, error: code, detail: result })
+          }
+          const childSessionId = result?.childSessionId ?? result?.id ?? null
+          const branch = branchStore.create(checked.taskId, { branchId, baseTurn, sessionId: childSessionId })
+          audit('fork-branch-created', { taskId: checked.taskId, branchId, childSessionId })
+          return json(res, 200, { ok: true, branch: branch.branch, childSessionId, sourceSessionId })
         } catch (error) {
           const code = String(error?.message ?? error)
           return json(res, branchErrorStatus(code), { ok: false, error: code, code })

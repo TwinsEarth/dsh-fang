@@ -1714,6 +1714,48 @@ window.__ModuleLoader__.load({
         await refresh()
       }
 
+      async function openBranches(task) {
+        if (isBusy()) return
+        S.busy = 'branches:' + task.taskId
+        const res = await api('/fang/api/tasks/branches?taskId=' + encodeURIComponent(task.taskId))
+        S.busy = ''
+        const body = res.body ?? {}
+        S.modal = {
+          kind: 'branches',
+          taskId: task.taskId,
+          taskTitle: task.title || task.taskId,
+          sessionId: body.sessionId ?? '',
+          activeBranchId: body.activeBranchId ?? '',
+          branches: Array.isArray(body.branches) ? body.branches : [],
+          error: res.status === 200 && body.ok === true ? '' : failureHint(body.error || 'http-' + res.status),
+        }
+        render(true)
+      }
+
+      async function forkBranch(task) {
+        if (isBusy()) return
+        S.busy = 'branch-fork:' + task.taskId
+        const res = await api('/fang/api/tasks/branches/fork', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
+        S.busy = ''
+        if (res.status === 200 && res.body?.ok) {
+          setNotice({ tone: 'ok', title: '已派生分支', message: res.body.branch?.branchId || '' })
+          await openBranches(task)
+        } else {
+          setNotice({ tone: 'bad', title: '派生分支失败', message: failureHint(res.body?.error || 'http-' + res.status), detail: res.body?.detail || '' })
+          render(true)
+        }
+      }
+
+      async function activateBranch(task, branchId) {
+        if (isBusy()) return
+        S.busy = 'branch-activate:' + task.taskId
+        const res = await api('/fang/api/tasks/branches/activate', { method: 'POST', body: JSON.stringify({ taskId: task.taskId, branchId }) })
+        S.busy = ''
+        if (res.status === 200 && res.body?.ok) setNotice({ tone: 'ok', title: '已激活分支', message: branchId })
+        else setNotice({ tone: 'bad', title: '激活分支失败', message: failureHint(res.body?.error || 'http-' + res.status) })
+        await openBranches(task)
+      }
+
       function unfreezeEssence(essence) {
         if (isBusy()) return
         askConfirm({
@@ -2088,6 +2130,7 @@ window.__ModuleLoader__.load({
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
         essenceBackup, essenceRestore, openEssenceDetail, unfreezeEssence, stopEssenceRuntime,
+        openBranches, forkBranch, activateBranch,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2994,8 +3037,13 @@ window.__ModuleLoader__.load({
               onClick: () => void app.openTask(task),
               fk: 'open:' + taskId,
             }),
-            textAction('提升插件', {
-              title: '把分身里验证过的插件目录提升到母体（需目录名）', dataBtnId: 'C-02',
+            button('分支', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-06',
+              title: '物理分支：在分身内 fork 当前会话，挂回同一分身（可多分支、可激活）',
+              onClick: () => void app.openBranches(task),
+              fk: 'branches:' + taskId,
+            }),
+            textAction('提升插件', {              title: '把分身里验证过的插件目录提升到母体（需目录名）', dataBtnId: 'C-02',
               softDisabled: busyPromote, busy: busyPromote,
               onClick: () => app.promoteTask(task),
             }),
@@ -3474,6 +3522,36 @@ window.__ModuleLoader__.load({
             : null))
     }
 
+    function renderBranchModal(S, app) {
+      const modal = S.modal
+      const branches = Array.isArray(modal.branches) ? modal.branches : []
+      return h('div', { class: 'overlay', 'data-overlay': '1', onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() } },
+        h('div', { class: 'glass', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'fang-branch-title' },
+          h('div', { class: 'glass-head' },
+            h('div', { class: 'glass-head-main' },
+              h('div', { class: 'glass-title', id: 'fang-branch-title' }, '分支 · ' + (modal.taskTitle || '')),
+              h('div', { class: 'glass-sub' }, '会话 ' + (modal.sessionId || '—') + ' · 当前分支 ' + (modal.activeBranchId || '—'))),
+            button('', { variant: 'quiet', size: 'sm', iconOnly: true, icon: icon('close', 15), ariaLabel: '关闭', onClick: () => app.closeModal() })),
+          h('div', { class: 'glass-body' },
+            modal.error ? h('div', { class: 'hint', style: { color: 'var(--f-red)' }, role: 'alert' }, modal.error) : null,
+            h('div', { style: { display: 'flex', gap: 8, margin: '4px 0 12px' } },
+              button('派生分支', { size: 'sm', variant: 'primary', dataBtnId: 'B-01', onClick: () => void app.forkBranch({ taskId: modal.taskId, title: modal.taskTitle }) }),
+              button('刷新', { size: 'sm', variant: 'ghost', onClick: () => void app.openBranches({ taskId: modal.taskId, title: modal.taskTitle }) })),
+            branches.length === 0
+              ? h('p', { class: 'glass-sub' }, '还没有分支。派生分支会在分身内 fork 当前会话（物理分支，子会话挂回同一分身）。')
+              : h('div', { style: { display: 'grid', gap: 6 } },
+                branches.map((branch) => h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', border: '1px solid var(--f-border)', borderRadius: 10 } },
+                  h('span', null,
+                    String(branch.branchId) + ' · ' + String(branch.status ?? '')
+                    + (branch.sessionId ? ' · ' + short(String(branch.sessionId), 8) : '')
+                    + (branch.branchId === modal.activeBranchId ? ' · 当前' : '')),
+                  branch.branchId !== modal.activeBranchId && branch.status === 'active'
+                    ? button('激活', { size: 'sm', variant: 'ghost', onClick: () => void app.activateBranch({ taskId: modal.taskId, title: modal.taskTitle }, branch.branchId) })
+                    : null)))),
+          h('div', { class: 'glass-foot' },
+            button('关闭', { size: 'sm', variant: 'ghost', onClick: () => app.closeModal() }))))
+    }
+
     function renderPromptModal(S, app) {
       const modal = S.modal
       const submit = () => {
@@ -3572,6 +3650,7 @@ window.__ModuleLoader__.load({
         }
         if (S.modal.kind === 'mother') frag.append(renderMotherModal(S, app))
           else if (S.modal.kind === 'essence') frag.append(renderEssenceModal(S, app))
+        else if (S.modal.kind === 'branches') frag.append(renderBranchModal(S, app))
         else if (S.modal.kind === 'confirm') frag.append(renderConfirmModal(S, app))
         else if (S.modal.kind === 'prompt') frag.append(renderPromptModal(S, app))
       }

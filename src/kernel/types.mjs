@@ -181,6 +181,7 @@ export const ADAPTER_OP = {
   APPROVALS: 'approvals',
   APPROVAL_DECIDE: 'approval-decide',
   ARCHIVE: 'archive',
+  FORK_SESSION: 'fork-session',
 }
 
 /** Adapter HTTP route suffixes (fork side). */

@@ -826,6 +826,29 @@ export function apply(ctx, config) {
         flushed: Array.isArray(flushed?.flushed) ? flushed.flushed : [],
       }
     }],
+
+    // 方案 A：物理分支。分身会话只存在分身自己的 DSH 进程里，母体侧够不到，
+    // 所以在分身宿主内调用 sessions.fork，把子会话挂回同一分身。
+    [ADAPTER_OP.FORK_SESSION, async (payload) => {
+      const sessions = safeGet('sessions')
+      if (!sessions || typeof sessions.fork !== 'function') {
+        return { ok: false, code: 'sessions-service-unavailable', error: 'sessions.fork unavailable in this instance' }
+      }
+      const sourceSessionId = String(payload?.sessionId ?? '').trim()
+      if (!sourceSessionId) return { ok: false, code: 'bad-session-id' }
+      const boundary = payload?.boundary
+      const childSessionId = String(payload?.childSessionId ?? '').trim()
+      try {
+        const child = childSessionId
+          ? await sessions.fork(sourceSessionId, boundary, childSessionId)
+          : await sessions.fork(sourceSessionId, boundary)
+        const id = typeof child === 'string' ? child : (child?.id ?? child?.sessionId ?? childSessionId ?? null)
+        appendAudit('fork-session', { sourceSessionId, childSessionId: id, boundary: boundary ?? null })
+        return { ok: true, sourceSessionId, childSessionId: id }
+      } catch (error) {
+        return { ok: false, code: 'fork-failed', error: String(error?.message ?? error) }
+      }
+    }],
   ])
 
   /**
