@@ -1706,16 +1706,30 @@ window.__ModuleLoader__.load({
 
       function deleteEssence(essence) {
         if (isBusy()) return
+        if (essence.archived !== true) {
+          setNotice({ tone: 'warn', title: '需先归档才能删除', message: '元主必须先归档（冻结）后，删除按钮才可用。' })
+          return
+        }
+        // 两次确认：第一次说明后果，第二次必须输入元主名称。
         askConfirm({
-          tone: 'bad', title: '永久删除元主？', confirm: 'delete', strong: true,
-          expected: String(essence.name || essence.id),
-          message: `将删除 essences/${essence.id}（overlay + merged），不删会话；此操作不可撤销。`,
-          confirmLabel: '永久删除',
-          onConfirm: async () => {
-            const result = await api('/fang/api/essence/delete', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
-            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已删除', message: essence.name || essence.id })
-            else setNotice({ tone: 'bad', title: '删除元主失败', message: failureHint(result.body?.error || 'http-' + result.status), detail: result.body?.detail || '' })
-            await refresh()
+          tone: 'bad', title: '删除元主？', confirm: 'delete-once',
+          message: `「${essence.name || essence.id}」已冻结。删除会移除 essences/${essence.id}（overlay + merged），不可撤销，也不会删除会话。`,
+          confirmLabel: '继续',
+          onConfirm: () => {
+            askConfirm({
+              tone: 'bad', title: '再次确认：永久删除', confirm: 'delete', strong: true,
+              expected: String(essence.name || essence.id),
+              message: `最后一步：输入「${essence.name || essence.id}」以永久删除该元主。`,
+              confirmLabel: '永久删除',
+              onConfirm: async () => {
+                S.busy = 'essence:delete:' + essence.id
+                const result = await api('/fang/api/essence/delete', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
+                S.busy = ''
+                if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已删除', message: essence.name || essence.id })
+                else setNotice({ tone: 'bad', title: '删除元主失败', message: failureHint(result.body?.error || 'http-' + result.status), detail: result.body?.detail || '' })
+                await refresh()
+              },
+            })
           },
         })
       }
