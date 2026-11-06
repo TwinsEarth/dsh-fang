@@ -3547,7 +3547,19 @@ window.__ModuleLoader__.load({
                     + (branch.branchId === modal.activeBranchId ? ' · 当前' : '')),
                   branch.branchId !== modal.activeBranchId && branch.status === 'active'
                     ? button('激活', { size: 'sm', variant: 'ghost', onClick: () => void app.activateBranch({ taskId: modal.taskId, title: modal.taskTitle }, branch.branchId) })
-                    : null)))),
+                    : null,
+                  button('打开分身', {
+                    size: 'sm', variant: 'ghost', title: '打开分身 Web UI（DSH 暂不支持会话深链，子会话在左侧会话列表中）',
+                    onClick: () => void app.openTask({ taskId: modal.taskId, title: modal.taskTitle }),
+                  }),
+                  branch.sessionId ? button('复制会话 ID', {
+                    size: 'sm', variant: 'ghost', title: branch.sessionId,
+                    onClick: () => {
+                      const text = String(branch.sessionId || '')
+                      const done = () => setNotice({ tone: 'ok', title: '已复制会话 ID', message: short(text, 12) })
+                      try { void navigator.clipboard.writeText(text).then(done, done) } catch { done() }
+                    },
+                  }) : null)))),
           h('div', { class: 'glass-foot' },
             button('关闭', { size: 'sm', variant: 'ghost', onClick: () => app.closeModal() }))))
     }
