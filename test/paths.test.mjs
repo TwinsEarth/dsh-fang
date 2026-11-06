@@ -17,6 +17,17 @@ test('FANG_HOME gives D:/fang mirror/essence/sessions layout', () => {
   assert.equal(layout.forksFile, path.join(layout.dataDir, 'forks.json'))
 })
 
+test('fang-home.txt 迁移指针优先于旧布局（无需改环境变量）', () => {
+  const home = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fang-ptr-')), '.dsh')
+  const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fang-ptr-target-')), 'Future')
+  fs.mkdirSync(path.join(home, 'fang'), { recursive: true })
+  fs.writeFileSync(path.join(home, 'fang', 'fang-home.txt'), target + '\n', 'utf8')
+  const layout = resolveFangLayout({ env: { DSH_HOME: home, DSH_PROFILE: 'desktop' }, argv: [] })
+  assert.equal(layout.fangHome, path.resolve(target))
+  assert.equal(layout.dataDir, path.join(path.resolve(target), 'mirror', 'desktop'))
+  assert.equal(layout.essenceRoot, path.join(path.resolve(target), 'essence'))
+})
+
 test('without FANG_HOME: legacy data keeps legacy layout, fresh install defaults to D:/ToFuture', () => {
   // 旧布局已有数据 → 不搬家
   const legacyHome = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fang-legacy-')), '.dsh')

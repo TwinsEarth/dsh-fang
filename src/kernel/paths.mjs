@@ -42,6 +42,14 @@ export function resolveProfileDir(profileTag, env = process.env) {
 export function resolveFangHome(env = process.env) {
   const raw = env && env.FANG_HOME
   if (typeof raw === 'string' && raw.trim()) return path.resolve(raw.trim())
+  // 迁移指针：<DSH_HOME>/fang/fang-home.txt 第一行写明数据根（无需改环境变量/配置即可切换）。
+  try {
+    const pointer = path.join(resolveDshHome(env), 'fang', 'fang-home.txt')
+    if (fs.existsSync(pointer)) {
+      const first = fs.readFileSync(pointer, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)[0].trim()
+      if (first && path.isAbsolute(first)) return path.resolve(first)
+    }
+  } catch { /* ignore */ }
   // 兼容：已有 $DSH_HOME/fang/<tag> 数据的安装不搬家，继续旧布局。
   try {
     if (fs.existsSync(path.join(resolveDshHome(env), 'fang'))) return ''
