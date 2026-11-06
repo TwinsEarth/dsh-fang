@@ -2925,15 +2925,17 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { ref, className: 'fang-mount', style: props.style || { display: 'block', minWidth: 0 } })
     }
 
-    function mountDiagnostics(app) {
-      const doc = document
+    function mountDiagnostics(app, host) {
+      const doc = host?.ownerDocument ?? document
+      const parent = host ?? doc.body
+      if (host) { host.style.position = host.style.position || 'relative' }
       const btn = doc.createElement('button')
       btn.id = 'fang-diag-btn'
       btn.setAttribute('data-btn-id', 'LOG-01')
       btn.type = 'button'
       btn.textContent = '日志'
       Object.assign(btn.style, {
-        position: 'fixed', right: '16px', bottom: '16px', zIndex: '9999',
+        position: 'absolute', right: '16px', bottom: '16px', zIndex: '9999',
         height: '34px', padding: '0 12px', borderRadius: '10px',
         border: '1px solid rgba(127,127,127,.4)', background: '#fff', color: '#111',
         font: '600 13px/1 system-ui, sans-serif', cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,.18)',
@@ -2942,7 +2944,7 @@ window.__ModuleLoader__.load({
       overlay.id = 'fang-diag-panel'
       overlay.hidden = true
       Object.assign(overlay.style, {
-        position: 'fixed', right: '16px', bottom: '58px', zIndex: '9999',
+        position: 'absolute', right: '16px', bottom: '58px', zIndex: '9999',
         width: 'min(520px, calc(100vw - 32px))', maxHeight: '60vh', overflow: 'auto',
         background: '#fff', color: '#111', border: '1px solid rgba(127,127,127,.35)',
         borderRadius: '12px', boxShadow: '0 12px 40px rgba(0,0,0,.25)', padding: '10px',
@@ -3016,7 +3018,7 @@ window.__ModuleLoader__.load({
       window.addEventListener('fang:diag', onDiag)
       window.addEventListener('error', onError)
       window.addEventListener('unhandledrejection', onRejection)
-      doc.body.append(btn, overlay)
+      parent.append(btn, overlay)
       renderLogs()
       return () => {
         window.removeEventListener('fang:diag', onDiag)
@@ -3027,15 +3029,17 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function mountConnectionInfo(app) {
-      const doc = document
+    function mountConnectionInfo(app, host) {
+      const doc = host?.ownerDocument ?? document
+      const parent = host ?? doc.body
+      if (host) { host.style.position = host.style.position || 'relative' }
       const trigger = doc.createElement('button')
       trigger.id = 'fang-conn-trigger'
       trigger.type = 'button'
       trigger.setAttribute('data-btn-id', 'CONN-00')
       trigger.textContent = '连接信息'
       Object.assign(trigger.style, {
-        position: 'fixed', left: '16px', bottom: '16px', zIndex: '9999',
+        position: 'absolute', left: '16px', bottom: '16px', zIndex: '9999',
         height: '34px', padding: '0 12px', borderRadius: '10px',
         border: '1px solid rgba(127,127,127,.4)', background: '#fff', color: '#111',
         font: '600 13px/1 system-ui, sans-serif', cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,.18)',
@@ -3044,7 +3048,7 @@ window.__ModuleLoader__.load({
       popup.id = 'fang-conn-popup'
       popup.hidden = true
       Object.assign(popup.style, {
-        position: 'fixed', left: '16px', bottom: '58px', zIndex: '9999',
+        position: 'absolute', left: '16px', bottom: '58px', zIndex: '9999',
         display: 'none', alignItems: 'center', gap: '6px', maxWidth: 'calc(100vw - 32px)',
         padding: '6px 8px', borderRadius: '10px', background: '#fff', color: '#111',
         border: '1px solid rgba(127,127,127,.35)', boxShadow: '0 4px 14px rgba(0,0,0,.14)',
@@ -3117,7 +3121,7 @@ window.__ModuleLoader__.load({
       }
       close.onclick = () => { opened = false; revealed = false; render() }
       popup.append(label, eye, copy, close)
-      doc.body.append(trigger, popup)
+      parent.append(trigger, popup)
       render()
       return () => { trigger.remove(); popup.remove() }
     }
@@ -3152,8 +3156,8 @@ window.__ModuleLoader__.load({
         window.__fangUiLog.push({ at: Date.now(), kind: 'panel-mount' })
       } catch { /* 宿主无 window 时忽略 */ }
       const app = createConsole(host)
-      const unmountDiagnostics = mountDiagnostics(app)
-      const unmountConnection = mountConnectionInfo(app)
+      const unmountDiagnostics = mountDiagnostics(app, host)
+      const unmountConnection = mountConnectionInfo(app, host)
       try { host.ownerDocument?.getElementById('fang-fallback')?.remove() } catch { /* ignore */ }
       return () => { unmountConnection(); unmountDiagnostics(); app.destroy() }
     }
