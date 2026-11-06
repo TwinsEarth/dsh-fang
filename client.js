@@ -1824,6 +1824,25 @@ window.__ModuleLoader__.load({
         input.click()
       }
 
+      // 单个元主详情页：设置 / 插件 / 运行日志 三个 tab。
+      async function loadEssenceDetail() {
+        const modal = S.modal
+        if (!modal || modal.kind !== 'essence') return
+        const result = await api(`/fang/api/essence/detail?essenceId=${encodeURIComponent(modal.essenceId)}`)
+        if (!S.modal || S.modal !== modal) return
+        modal.loading = false
+        if (result.status === 200 && result.body?.ok) modal.detail = result.body
+        else modal.error = result.body?.error || 'http-' + result.status
+        render(true)
+      }
+
+      function openEssenceDetail(essence) {
+        lockScroll()
+        S.modal = { kind: 'essence', essenceId: essence.id, tab: 'settings', detail: null, loading: true, error: '' }
+        render(true)
+        void loadEssenceDetail()
+      }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
@@ -2041,7 +2060,7 @@ window.__ModuleLoader__.load({
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
-        essenceBackup, essenceRestore,
+        essenceBackup, essenceRestore, openEssenceDetail,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2590,6 +2609,11 @@ window.__ModuleLoader__.load({
           essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null,
           essence.archived === true ? h('span', { class: 'chip', title: '已归档（冻结）：只能删除' }, '冻结') : null,
           h('span', { style: { display: 'inline-flex', gap: 4 } },
+            button('详情', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-14',
+              title: '打开该元主详情：设置 / 插件 / 运行日志',
+              onClick: () => void app.openEssenceDetail(essence),
+            }),
             button('打开', {
               size: 'sm', variant: 'ghost', dataBtnId: 'E-06',
               title: essence.archived === true ? '元主已冻结，不能打开' : '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
@@ -3184,6 +3208,77 @@ window.__ModuleLoader__.load({
       return section
     }
 
+    // 元主详情页（设置 / 插件 / 运行日志）
+    function renderEssenceModal(S, app) {
+      const modal = S.modal
+      const detail = modal.detail
+      const meta = detail?.meta ?? null
+      const tabs = [['settings', '设置'], ['plugins', '插件'], ['logs', '运行日志']]
+      const body = h('div', { class: 'glass-body' })
+      if (modal.loading) {
+        body.append(h('div', { class: 'loading-line' }, icon('spinner', 14), '读取元主详情…'))
+      } else if (modal.error) {
+        body.append(h('div', { class: 'notice notice--warn' }, h('div', { class: 'notice-main' },
+          h('div', { class: 'notice-title' }, icon('alert', 14), '读取失败'),
+          h('div', { class: 'notice-text' }, failureHint(modal.error) + ' · ' + modal.error))))
+      } else if (detail) {
+        if (modal.tab === 'settings') {
+          const rows = [
+            ['状态', String(meta.status ?? 'unknown')],
+            ['等级', String(meta.tier ?? '—')],
+            ['插件条目', String(detail.overlay?.patchEntries?.length ?? 0)],
+            ['设置项', (detail.overlay?.settings || []).join(', ') || '—'],
+            ['备份', detail.backup ? '有（Backup/，只保留一份）' : '无'],
+            ['运行态', detail.runtime?.running ? `运行中 · :${detail.runtime.port ?? '—'} · pid ${detail.runtime.pid ?? '—'}` : '未运行'],
+            ['镜像指纹', String(meta.lastMergedFingerprint ?? '—').slice(0, 16)],
+            ['归档', meta.archived === true ? '已冻结（只能删除）' : '活跃'],
+          ]
+          body.append(h('div', { style: { display: 'grid', gap: 6, padding: '6px 2px' } },
+            ...rows.map(([key, value]) => h('div', { style: { display: 'flex', gap: 12 } },
+              h('span', { style: { width: 88, opacity: .65 } }, key),
+              h('span', null, value)))))
+        } else if (modal.tab === 'plugins') {
+          const entries = detail.overlay?.patchEntries || []
+          body.append(entries.length
+            ? h('div', null, ...entries.map((entry) => h('div', {
+              style: { display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0', borderBottom: '1px solid rgba(127,127,127,.15)' },
+            },
+            h('b', { style: { fontFamily: 'var(--f-mono)' } }, entry.id),
+            h('span', { class: 'hint' }, entry.name || ''),
+            entry.disabled ? h('span', { class: 'chip' }, '禁用') : null)))
+            : h('div', { class: 'hint' }, '该元主还没有插件补丁条目；在「打开」起的实例里安装插件后再同步。'))
+        } else {
+          body.append(h('pre', {
+            style: { maxHeight: '46vh', overflow: 'auto', fontSize: 11, lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0 },
+          }, detail.logs || '（暂无运行日志；先点「打开」启动该元主的隔离实例）'))
+        }
+      }
+      const tabBar = h('div', { class: 'panel-tools', style: { borderTop: 'none' } },
+        ...tabs.map(([id, label]) => button(label, {
+          size: 'sm', variant: modal.tab === id ? 'primary' : 'ghost',
+          onClick: () => { if (!S.modal || S.modal.kind !== 'essence') return; S.modal.tab = id; render(true) },
+        })))
+      const closeBtn = button('关闭', { size: 'sm', variant: 'quiet', onClick: () => app.closeModal() })
+      const id = modal.essenceId
+      return h('div', {
+        class: 'overlay', 'data-overlay': '1',
+        onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() },
+      },
+      h('div', { class: 'glass', role: 'dialog', 'aria-modal': 'true', style: { width: 'min(880px, 94vw)' } },
+        h('div', { class: 'glass-head' },
+          h('div', { class: 'glass-head-main' },
+            h('div', { class: 'glass-title', id: 'fang-essence-title' }, icon('gate', 16), meta?.name || id),
+            h('div', { class: 'glass-sub' }, `${id} · ${meta?.archived === true ? '冻结' : '活跃'}${meta?.locked === true ? ' · 官方锁定' : ''}`)),
+          closeBtn),
+        tabBar,
+        body,
+        h('div', { class: 'glass-foot' },
+          button('打开', { size: 'sm', variant: 'ghost', onClick: () => { app.closeModal(); void app.openEssence(id) } }),
+          button('同步', { size: 'sm', variant: 'ghost', onClick: () => { app.closeModal(); void app.syncEssence(id) } }),
+          button('备份', { size: 'sm', variant: 'ghost', onClick: () => { const name = S.modal?.detail?.meta?.name; app.closeModal(); void app.essenceBackup({ id, name }) } }),
+          button('下载', { size: 'sm', variant: 'ghost', onClick: () => { const name = S.modal?.detail?.meta?.name; app.closeModal(); void app.downloadEssence({ id, name }) } }))))
+    }
+
     function renderMotherModal(S, app) {
       const data = S.status.data
       const mirror = S.mirror.data
@@ -3412,6 +3507,7 @@ window.__ModuleLoader__.load({
           }
         }
         if (S.modal.kind === 'mother') frag.append(renderMotherModal(S, app))
+          else if (S.modal.kind === 'essence') frag.append(renderEssenceModal(S, app))
         else if (S.modal.kind === 'confirm') frag.append(renderConfirmModal(S, app))
         else if (S.modal.kind === 'prompt') frag.append(renderPromptModal(S, app))
       }

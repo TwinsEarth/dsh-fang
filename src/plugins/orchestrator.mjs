@@ -1404,6 +1404,33 @@ export function apply(ctx, config) {
         }))
       return { ok: true, sessions, total: sessions.length }
     },
+    /** 元主详情页数据：元数据 + overlay 插件条目 + 设置项 + 备份/运行态/日志（不含凭据）。 */
+    essenceDetail: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const meta = essenceManager.getMeta(id)
+      if (!meta || typeof meta.id !== 'string') throw new Error('unknown-essence')
+      const root = essenceManager.essenceRoot(id)
+      const overlay = essenceManager.loadOverlay(root)
+      const patchEntries = (overlay.patchEntries || []).map((entry) => ({
+        id: String(entry?.id ?? ''),
+        name: String(entry?.name ?? ''),
+        disabled: entry?.disabled === true,
+      }))
+      const f = forker()
+      let runtime = null
+      let logs = ''
+      try { runtime = f?.status?.(runtimeForkId(id)) ?? null } catch { runtime = null }
+      try { logs = String(f?.logs?.(runtimeForkId(id), 120) || '') } catch { logs = '' }
+      return {
+        ok: true,
+        essenceId: id,
+        meta,
+        overlay: { patchEntries, settings: Object.keys(overlay.settings || {}) },
+        backup: exists(path.join(root, 'Backup')),
+        runtime,
+        logs,
+      }
+    },
     /** 打开运行态：返回带临时 token 的 URL（仅内存，不落盘）。 */    openEssenceRuntime: (essenceId) => {
       const id = String(essenceId ?? '').trim()
       const f = forker()
@@ -1882,6 +1909,12 @@ export function apply(ctx, config) {
             return json(res, 400, { ok: false, error: 'runtime-failed', detail: String(error?.message ?? error) })
           }
         },
+      })
+      route('GET', `${prefix}/api/essence/detail`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        try { return json(res, 200, mirrorService.essenceDetail(query.get('essenceId'))) } catch (error) {
+          return json(res, 400, { ok: false, error: 'detail-failed', detail: String(error?.message ?? error) })
+        }
       })
       route('GET', `${prefix}/api/essence/open/candidates`, (req, res) => json(res, 200, mirrorService.essenceOpenCandidates()))
       route('GET', `${prefix}/api/essence/runtime/open`, (req, res) => {

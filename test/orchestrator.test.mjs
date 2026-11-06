@@ -516,6 +516,44 @@ test('orchestrator: clone-profile → essence stale → sync 全链路', async (
   }
 })
 
+test('orchestrator: GET /essence/detail 返回设置/插件/运行态摘要（无凭据）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-detail-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '详情元主' })
+    const handler = webServer.find('GET', '/fang/api/essence/detail').handler
+    const req = makeReq(undefined, 'GET')
+    req.url = `/fang/api/essence/detail?essenceId=${essence.id}`
+    const res = makeRes()
+    await handler(req, res)
+    const body = res.json()
+    assert.equal(res.statusCode, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.meta.id, essence.id)
+    assert.ok(Array.isArray(body.overlay.patchEntries))
+    assert.ok(Array.isArray(body.overlay.settings))
+    assert.equal(typeof body.backup, 'boolean')
+    assert.equal(JSON.stringify(body).includes('credentials'), false, '详情不得泄露凭据')
+
+    const badReq = makeReq(undefined, 'GET')
+    badReq.url = '/fang/api/essence/detail?essenceId=essence-nope'
+    const badRes = makeRes()
+    await handler(badReq, badRes)
+    assert.equal(badRes.statusCode, 400)
+    assert.equal(badRes.json().error, 'detail-failed')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))
