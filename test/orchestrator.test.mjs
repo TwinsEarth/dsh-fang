@@ -771,6 +771,60 @@ test('orchestrator: 复制元主时带走沙盒会话（运行态 sessions）', 
   }
 })
 
+test('orchestrator: 删除原身不删会话；分身保留且不能再派生；母体不可删', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-del-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    const req = makeReq(body, method)
+    req.url = routePath
+    await webServer.find(method, routePath.split('?')[0]).handler(req, res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '将被删除的原身' })
+    const task = await svc.createTask({ title: '原身的旧分身', essenceId: essence.id })
+    assert.equal(task.ok, true)
+    // 旧布局运行态会话在 essences/<id>/runtime/home 下
+    const legacySession = path.join(dataRoot, 'essences', essence.id, 'runtime', 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')
+    fs.mkdirSync(path.dirname(legacySession), { recursive: true })
+    fs.writeFileSync(legacySession, 'conversation', 'utf8')
+
+    mirror.archiveEssence(essence.id, true)
+    const deleted = mirror.deleteEssence(essence.id)
+    assert.equal(deleted.removed, true)
+    assert.equal(fs.existsSync(path.join(dataRoot, 'essences', essence.id)), false, '配置/插件目录删除')
+    assert.equal(
+      fs.existsSync(path.join(dataRoot, 'runtime', essence.id, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')),
+      true,
+      '运行态会话必须保留',
+    )
+
+    const blocked = await svc.createTask({ title: '从已删原身派生', essenceId: essence.id })
+    assert.equal(blocked.ok, false)
+    assert.equal(blocked.error, 'essence-deleted')
+
+    const survivor = svc.listTasks().find((item) => item.taskId === task.taskId)
+    assert.ok(survivor, '已派生分身不受影响')
+    assert.equal(survivor.essenceDeleted, true, '分身必须标记“原身已删除”')
+
+    const mother = await call('POST', '/fang/api/mother/delete', {})
+    assert.equal(mother.statusCode, 403)
+    assert.equal(mother.json().error, 'mother-immutable')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

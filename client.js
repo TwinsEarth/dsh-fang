@@ -2957,7 +2957,8 @@ window.__ModuleLoader__.load({
           h('div', { class: 'fork-chips' },
             chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
-            task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null)),
+            task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
+            task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
           archived
             ? [button('还原', {

@@ -364,6 +364,8 @@ export function apply(ctx, config) {
       updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
       projectBytes: t.projectBytes ?? 0,
       essenceId: t.essenceId ?? null,
+      // 来源原身已被删除：分身仍可运行/归档/还原/删除，但不能重新派生。
+      essenceDeleted: Boolean(t.essenceId) && (t.essenceDeleted === true || isTombstoned(t.essenceId)),
       pid: live?.pid ?? t.pid ?? null,
       port: t.port ?? null,
       url: stripUrlToken(t.url),
@@ -475,6 +477,21 @@ export function apply(ctx, config) {
     return { ok: true, kept: keep.sessionId, quarantined }
   }
 
+  // v3.0.9 原身墓碑：删除原身后记录 id，用于「不能再派生」与分身“原身已删除”标记。
+  const tombstonesFile = path.join(layout.dataDir, 'deleted-essences.json')
+  const loadTombstones = () => {
+    try {
+      const doc = readJson(tombstonesFile, {})
+      return Array.isArray(doc?.ids) ? doc.ids.map(String) : []
+    } catch { return [] }
+  }
+  const isTombstoned = (essenceId) => loadTombstones().includes(String(essenceId ?? ''))
+  const addTombstone = (essenceId, name) => {
+    const ids = new Set(loadTombstones())
+    ids.add(String(essenceId))
+    writeJsonAtomic(tombstonesFile, { ids: [...ids], updatedAt: nowMs(), last: { id: String(essenceId), name: String(name ?? ''), at: nowMs() } })
+  }
+
   const service = {
     role,
     version: FANG_VERSION,
@@ -504,7 +521,9 @@ export function apply(ctx, config) {
       if (input.essenceId) {
         const essenceId = String(input.essenceId).trim()
         const meta = essenceManager.getMeta(essenceId)
-        if (!meta || typeof meta.id !== 'string') return { ok: false, error: 'unknown-essence' }
+        if (!meta || typeof meta.id !== 'string') {
+          return { ok: false, error: isTombstoned(essenceId) ? 'essence-deleted' : 'unknown-essence' }
+        }
         if (meta.archived === true) return { ok: false, error: 'essence-archived' }
         await essenceManager.ensureFresh(essenceId)
         const fresh = essenceManager.getMeta(essenceId)
@@ -1537,7 +1556,22 @@ export function apply(ctx, config) {
     }),
     renameEssence: (essenceId, name) => essenceManager.rename(essenceId, name),
     archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
-    deleteEssence: (essenceId) => essenceManager.remove(essenceId),
+    deleteEssence: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const meta = essenceManager.getMeta(id)
+      // 删除配置/插件目录，但**保留运行态会话**：旧布局把运行时 home 放在原身目录里，先搬出去。
+      const legacyHome = path.join(essenceManager.essenceRoot(id), 'runtime', 'home')
+      const preserved = runtimeHomeFor(id)
+      try {
+        if (exists(legacyHome) && !exists(preserved)) {
+          ensureDir(path.dirname(preserved))
+          copyTree(legacyHome, preserved)
+        }
+      } catch { /* 保留失败不阻塞删除，如实返回 */ }
+      const removed = essenceManager.remove(id)
+      addTombstone(id, meta?.name)
+      return { ...removed, essenceId: id, tombstone: true, sessionsPreserved: exists(preserved) }
+    },
     copyEssence: (essenceId, name) => {
       const result = essenceManager.copy(essenceId, { name })
       // v3.0.9：沙盒会话（运行态隔离 home 里的 sessions）随副本一起复制，副本可继续开发。
@@ -2037,6 +2071,10 @@ export function apply(ctx, config) {
       route('GET', `${prefix}/api/auth-token`, (req, res) => json(res, 200, {
         ok: true, token: authToken,
       }), { public: true })
+
+      // 母体不可删除：即使有人直接打接口也返回 403，而不是“没有这个路由”。
+      route('DELETE', `${prefix}/api/mother`, (req, res) => json(res, 403, { ok: false, error: 'mother-immutable' }))
+      route('POST', `${prefix}/api/mother/delete`, (req, res) => json(res, 403, { ok: false, error: 'mother-immutable' }))
 
       // 完整连接地址（带进程 token）：Web 端「连接信息」用它，不再依赖桌面壳。
       // 桌面壳缺失时也能给出可复制的真实登录地址；拿不到 token 时如实标 tokenized:false。
