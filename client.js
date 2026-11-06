@@ -1661,7 +1661,7 @@ window.__ModuleLoader__.load({
       async function downloadEssence(essence) {
         try {
           const token = await ensureFangAuthToken()
-          const res = await fetch(`/fang/api/essence/download?essenceId=${encodeURIComponent(essence.id)}`, {
+          const res = await fetch(`/fang/api/essence/download?essenceId=${encodeURIComponent(essence.id)}&full=1`, {
             headers: token ? { 'x-fang-auth': token } : {},
           })
           if (!res.ok) throw new Error('HTTP ' + res.status)
@@ -1674,6 +1674,51 @@ window.__ModuleLoader__.load({
         } catch (error) {
           setNotice({ tone: 'bad', title: '下载元主失败', message: String(error?.message ?? error) })
         }
+      }
+
+      async function essenceBackup(essence) {
+        const result = await api('/fang/api/essence/backup', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
+        if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已备份', message: `Backup/ · ${Math.round((result.body.bytes || 0) / 1024)} KB（只保留一份）` })
+        else setNotice({ tone: 'bad', title: '备份失败', message: failureHint(result.body?.error || 'backup-failed'), detail: result.body?.detail || '' })
+        await refresh()
+      }
+
+      async function essenceRestore(essence) {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'info', title: '还原最新备份？', confirm: 'essence-restore',
+          message: `用「${essence.name || essence.id}/Backup」覆盖当前 overlay 与 merged，还原后需重新同步/派生。`,
+          confirmLabel: '还原',
+          onConfirm: async () => {
+            const result = await api('/fang/api/essence/restore', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '已还原最新备份', message: essence.name || essence.id })
+            else setNotice({ tone: 'bad', title: '还原失败', message: failureHint(result.body?.error || 'restore-failed'), detail: result.body?.detail || '' })
+            await refresh()
+          },
+        })
+      }
+
+      function essenceImport() {
+        const input = h('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' } })
+        input.addEventListener('change', async () => {
+          const file = input.files?.[0]
+          input.remove()
+          if (!file) return
+          try {
+            const bundle = JSON.parse(await file.text())
+            S.busy = 'essence:import'
+            const result = await api('/fang/api/essence/import', { method: 'POST', body: JSON.stringify({ bundle }) })
+            S.busy = ''
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已导入', message: `${result.body.essence?.name || '导入的元主'} · ${result.body.files} 个文件` })
+            else setNotice({ tone: 'bad', title: '导入失败', message: failureHint(result.body?.error || 'import-failed'), detail: result.body?.detail || '' })
+            await refresh()
+          } catch (error) {
+            S.busy = ''
+            setNotice({ tone: 'bad', title: '导入失败', message: String(error?.message ?? error) })
+          }
+        })
+        document.body.appendChild(input)
+        input.click()
       }
 
       async function openTask(task) {

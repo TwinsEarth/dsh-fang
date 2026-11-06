@@ -686,6 +686,8 @@ export class EssenceManager {
   remove(essenceId) {
     const meta = this.getMeta(essenceId)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不可删除）`)
+    // v3.0.9 规则：先归档（冻结）才允许删除，删除本身不可撤销。
+    if (meta.archived !== true) throw new Error(`essence ${essenceId} is not archived; archive it before deleting`)
     if (meta.parentId === null) {
       const children = this.listChildren(essenceId)
       if (children.length > 0) throw new Error(`essence ${essenceId} has ${children.length} sub-essences; remove them first`)
@@ -786,24 +788,88 @@ export class EssenceManager {
     const maxBytes = Math.max(1024, Math.floor(Number(options.maxBytes) || 32 * 1024 * 1024))
     const root = this.essenceRoot(essenceId)
     const meta = this.getMeta(essenceId)
-    const overlayRoot = path.join(root, 'overlay')
+    const full = options.full === true
+    const base = full ? root : path.join(root, 'overlay')
     const files = []
     let total = 0
+    // full=true：整包导出（跨机迁移）；跳过凭据、运行时 home 与备份目录。
+    const skip = new Set(full ? ['credentials', 'runtime', 'Backup'] : ['credentials'])
     const walk = (dir, relative) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.name === 'credentials') continue
-        const full = path.join(dir, entry.name)
+        if (skip.has(entry.name)) continue
+        const target = path.join(dir, entry.name)
         const rel = relative ? `${relative}/${entry.name}` : entry.name
-        if (entry.isDirectory()) { walk(full, rel); continue }
+        if (entry.isDirectory()) { walk(target, rel); continue }
         if (!entry.isFile()) continue
-        const bytes = fs.readFileSync(full)
+        const bytes = fs.readFileSync(target)
         total += bytes.length
         if (total > maxBytes) throw new Error('essence bundle too large')
-        files.push({ path: `overlay/${rel}`, base64: bytes.toString('base64') })
+        files.push({ path: full ? rel : `overlay/${rel}`, base64: bytes.toString('base64') })
       }
     }
-    if (exists(overlayRoot)) walk(overlayRoot, '')
-    return { ok: true, essenceId, meta, files, bytes: total, createdAt: this.now() }
+    if (exists(base)) walk(base, '')
+    return { ok: true, essenceId, meta, files, bytes: total, full, createdAt: this.now() }
+  }
+
+  /** v3.0.9 备份：essences/<id>/Backup（固定一份，旧备份覆盖）。 */
+  backup(essenceId) {
+    const root = this.essenceRoot(essenceId)
+    this.getMeta(essenceId)
+    const target = path.join(root, 'Backup')
+    if (exists(target)) removeTree(target)
+    copyTree(root, target)
+    const nested = path.join(target, 'Backup')
+    if (exists(nested)) removeTree(nested)
+    let bytes = 0
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(file)
+        else if (entry.isFile()) bytes += fs.statSync(file).size
+      }
+    }
+    walk(target)
+    return { ok: true, essenceId, backupDir: target, bytes, at: this.now() }
+  }
+
+  /** v3.0.9 还原：用 Backup 覆盖当前 overlay/merged/meta（Backup 保留一份）。 */
+  restoreBackup(essenceId) {
+    const root = this.essenceRoot(essenceId)
+    const backupDir = path.join(root, 'Backup')
+    if (!exists(backupDir)) throw new Error('backup-missing')
+    for (const entry of fs.readdirSync(backupDir, { withFileTypes: true })) {
+      if (entry.name === 'Backup' || entry.name === 'runtime') continue
+      const from = path.join(backupDir, entry.name)
+      const to = path.join(root, entry.name)
+      if (exists(to)) removeTree(to)
+      copyTree(from, to)
+    }
+    this.recompute(essenceId)
+    return { ok: true, essenceId, restored: true, at: this.now() }
+  }
+
+  /** v3.0.9 导入：{meta, files:[{path,base64}]} → 新元主目录，可直接继续开发。 */
+  importBundle(doc, options = {}) {
+    const sourceMeta = asObject(doc?.meta)
+    const files = Array.isArray(doc?.files) ? doc.files : []
+    if (files.length === 0) throw new Error('bundle has no files')
+    const name = String(options?.name ?? sourceMeta.name ?? '导入的元主').trim() || '导入的元主'
+    const meta = this.create({
+      name,
+      tier: options?.tier ?? sourceMeta.tier,
+      parentId: options?.parentId ?? null,
+      skipQuota: options?.skipQuota === true,
+    })
+    const root = this.essenceRoot(meta.id)
+    for (const file of files) {
+      const rel = String(file?.path ?? '')
+      if (!rel || rel.includes('..') || path.isAbsolute(rel)) continue
+      const target = path.join(root, rel)
+      ensureDir(path.dirname(target))
+      fs.writeFileSync(target, Buffer.from(String(file.base64 ?? ''), 'base64'))
+    }
+    this.recompute(meta.id)
+    return { ok: true, essence: this.getMeta(meta.id), files: files.length, sourceId: sourceMeta.id ?? null }
   }
 
   // ── 合并与物化 ──────────────────────────────────────────────────────────

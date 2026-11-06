@@ -284,6 +284,8 @@ test('essence manager: 子原身规则（两级上限、父级删除保护）', 
   const child = manager.create({ name: '子原身', tier: 'vip10', parentId: parent.id })
   assert.equal(manager.listChildren(parent.id).length, 1)
   assert.throws(() => manager.create({ name: '孙原身', parentId: child.id }), /只允许两级原身/)
+  manager.archive(parent.id)
+  manager.archive(child.id)
   assert.throws(() => manager.remove(parent.id), /sub-essences/)
   manager.remove(child.id)
   assert.deepEqual(manager.remove(parent.id), { removed: true })

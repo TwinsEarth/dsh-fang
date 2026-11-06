@@ -1293,7 +1293,12 @@ export function apply(ctx, config) {
       return { ...result, default: defaultEssence }
     },
     setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
-    downloadEssence: (essenceId) => essenceManager.downloadBundle(essenceId),
+    downloadEssence: (essenceId, options = {}) => essenceManager.downloadBundle(essenceId, { full: options?.full === true }),
+    backupEssence: (essenceId) => essenceManager.backup(essenceId),
+    restoreEssence: (essenceId) => essenceManager.restoreBackup(essenceId),
+    importEssence: (input = {}) => essenceManager.importBundle(input?.bundle ?? input, {
+      name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
+    }),
     // v3.0.9 原身运行态：用元主 merged/profile 起一个**隔离 home** 的配置态实例。
     // 隔离边界：DSH_HOME = essences/<id>/runtime/home（自己的 sessions/storages），
     // 不写母体 sessions；node_modules 通过 junction 指向母体模块树（不复制）。
@@ -1827,6 +1832,24 @@ export function apply(ctx, config) {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         return json(res, 200, mirrorService.openEssenceRuntime(query.get('essenceId')))
       })
+      route('POST', `${prefix}/api/essence/backup`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.backupEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'backup-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/restore`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.restoreEssence(String(body?.essenceId ?? '')) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'restore-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/essence/import`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.importEssence(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'import-failed', detail: String(error?.message ?? error) })
+        }
+      })
       route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
         const body = await readBody(req)
         try { return json(res, 200, { ok: true, essence: mirrorService.renameEssence(String(body?.essenceId ?? ''), body?.name) }) } catch (error) {
@@ -1860,7 +1883,8 @@ export function apply(ctx, config) {
       route('GET', `${prefix}/api/essence/download`, (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         try {
-          const bundle = mirrorService.downloadEssence(String(query.get('essenceId') ?? ''))
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          const bundle = mirrorService.downloadEssence(String(query.get('essenceId') ?? ''), { full: query.get('full') === '1' })
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
             'content-disposition': `attachment; filename="essence-${bundle.essenceId}.json"`,
