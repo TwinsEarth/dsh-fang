@@ -577,6 +577,67 @@ test('orchestrator: 元主 backup / restore / import 三条路由', async () => 
   }
 })
 
+test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档拒绝）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-'))
+  const sessionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-src-'))
+  const workspaceKey = '--E-GPT--'
+  const liveId = '11111111-1111-4111-8111-111111111111'
+  const archivedId = '22222222-2222-4222-8222-222222222222'
+  for (const id of [liveId, archivedId]) {
+    fs.mkdirSync(path.join(sessionsRoot, workspaceKey, id), { recursive: true })
+    fs.writeFileSync(path.join(sessionsRoot, workspaceKey, id, 'session.v4.jsonl.zstd'), 'x')
+  }
+  const catalog = {
+    listSessions: () => ({
+      sessionsRoot,
+      sessions: [
+        { sessionId: liveId, workspaceKey, archived: false, title: '进行中会话' },
+        { sessionId: archivedId, workspaceKey, archived: true, title: '归档会话' },
+      ],
+    }),
+  }
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer, fangSessionCatalog: catalog } })
+  const call = async (body) => {
+    const res = makeRes()
+    await webServer.find('POST', '/fang/api/essence/runtime').handler(makeReq(body, 'POST'), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const essence = mirror.createEssence({ name: '会话导入元主' })
+
+    const ok = await call({ essenceId: essence.id, sessionIds: [liveId] })
+    assert.equal(ok.statusCode, 200)
+    assert.equal(ok.json().importedSessions.length, 1)
+    assert.equal(
+      fs.existsSync(path.join(dataRoot, 'essences', essence.id, 'runtime', 'home', 'sessions', workspaceKey, liveId, 'session.v4.jsonl.zstd')),
+      true,
+      '会话目录必须复制进隔离 home',
+    )
+
+    const archived = await call({ essenceId: essence.id, sessionIds: [archivedId] })
+    assert.equal(archived.statusCode, 400)
+    assert.match(String(archived.json().detail), /archived-session-not-importable/)
+
+    const tooMany = await call({
+      essenceId: essence.id,
+      sessionIds: ['a', 'b', 'c', 'd', 'e', 'f'],
+    })
+    assert.equal(tooMany.statusCode, 400)
+    assert.match(String(tooMany.json().detail), /too-many-sessions/)
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(sessionsRoot, { recursive: true, force: true })
+  }
+})
+
 test('orchestrator: 元主运行态路由对未知元主返回 400（不假装启动）', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-'))

@@ -376,6 +376,27 @@ test('essence manager: backup 只保留一份，restore 回填 overlay', async (
   assert.equal(fs.readdirSync(root).filter((name) => name === 'Backup').length, 1, '只保留一份备份')
 })
 
+test('essence manager: copy 深拷贝沙箱目录（排除 runtime/Backup/凭据）', () => {
+  const { manager } = makeFixture()
+  const source = manager.create({ name: '深拷贝源', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+  const root = manager.essenceRoot(source.id)
+  fs.mkdirSync(path.join(root, 'sandbox'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'sandbox', 'data.txt'), 'hello', 'utf8')
+  fs.mkdirSync(path.join(root, 'runtime', 'home'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'runtime', 'home', 'x.txt'), 'runtime', 'utf8')
+  fs.mkdirSync(path.join(root, 'Backup'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'Backup', 'b.txt'), 'backup', 'utf8')
+  fs.writeFileSync(path.join(root, 'overlay', 'credentials', 'c.json'), '{}', 'utf8')
+
+  const copied = manager.copy(source.id, { name: '深拷贝副本' })
+  const copiedRoot = manager.essenceRoot(copied.id)
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'sandbox', 'data.txt')), true, '自定义沙箱目录必须被复制')
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'runtime')), false, '运行态目录不复制')
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'Backup')), false, '备份目录不复制')
+  assert.equal(fs.existsSync(path.join(copiedRoot, 'overlay', 'credentials', 'c.json')), false, '凭据不复制')
+  assert.ok(copied.copy.copiedFiles > 0)
+})
+
 test('essence manager: recomputeAll 在镜像指纹变化后批量更新', async () => {
   const { manager, profileDir } = makeFixture()
   const first = manager.create({ name: '原身E' })
