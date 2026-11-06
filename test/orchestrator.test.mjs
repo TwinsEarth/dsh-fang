@@ -34,6 +34,8 @@ function makeFakeForker(overrides = {}) {
     },
     async spawn(args) {
       calls.spawn.push(args)
+      // 真实 forker 的 spawn 必须有 homeDir/profile：测试桩也照此拒绝，避免假绿。
+      if (!args.homeDir || !args.profile) return { ok: false, error: 'no-home-dir' }
       live.add(args.forkId)
       counter += 1
       const port = overrides.port ?? 18000 + counter

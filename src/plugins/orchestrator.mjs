@@ -1355,7 +1355,14 @@ export function apply(ctx, config) {
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
       // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
       const importedSessions = importSessionsInto(homeDir, input?.sessionIds)
-      const started = await f.spawn({ forkId })
+      // 注意：forker.spawn 需要显式 homeDir/profile（它不从 provision 记录里猜）。
+      const started = await f.spawn({
+        forkId,
+        homeDir,
+        profile: 'essence-runtime',
+        cliPath: cliPath(),
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId },
+      })
       if (!started.ok) throw new Error(String(started.error ?? 'runtime-spawn-failed'))
       return {
         ok: true, essenceId: id, forkId,
