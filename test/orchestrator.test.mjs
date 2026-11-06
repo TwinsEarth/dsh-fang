@@ -514,6 +514,69 @@ test('orchestrator: clone-profile → essence stale → sync 全链路', async (
   }
 })
 
+test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    const handler = webServer.find(method, routePath).handler
+    await handler(makeReq(body, method), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const created = mirror.createEssence({ name: '路由测试元主' })
+    const essenceId = created.id
+
+    // 1) backup：生成 essences/<id>/Backup，重复调用仍只有一份
+    const first = await call('POST', '/fang/api/essence/backup', { essenceId })
+    assert.equal(first.statusCode, 200)
+    assert.equal(first.json().ok, true)
+    const backupDir = path.join(dataRoot, 'essences', essenceId, 'Backup')
+    assert.equal(fs.existsSync(backupDir), true)
+    await call('POST', '/fang/api/essence/backup', { essenceId })
+    const backups = fs.readdirSync(path.join(dataRoot, 'essences', essenceId)).filter((name) => name === 'Backup')
+    assert.equal(backups.length, 1, '只保留一份备份')
+
+    // 2) restore：有备份 → 200 restored
+    const restored = await call('POST', '/fang/api/essence/restore', { essenceId })
+    assert.equal(restored.statusCode, 200)
+    assert.equal(restored.json().ok, true)
+    assert.equal(restored.json().restored, true)
+
+    // 2b) restore：没有备份的元主 → 400 backup-failed detail backup-missing
+    const noBackup = mirror.createEssence({ name: '无备份元主' })
+    const missing = await call('POST', '/fang/api/essence/restore', { essenceId: noBackup.id })
+    assert.equal(missing.statusCode, 400)
+    assert.equal(missing.json().error, 'restore-failed')
+    assert.match(String(missing.json().detail), /backup-missing/)
+
+    // 3) import：整包 → 新元主
+    const bundle = mirror.downloadEssence(essenceId, { full: true })
+    assert.equal(bundle.full, true)
+    const imported = await call('POST', '/fang/api/essence/import', { bundle })
+    assert.equal(imported.statusCode, 200)
+    const importedBody = imported.json()
+    assert.equal(importedBody.ok, true)
+    assert.notEqual(importedBody.essence.id, essenceId)
+    assert.ok(importedBody.files > 0)
+
+    // 3b) import：空包 → 400 import-failed
+    const empty = await call('POST', '/fang/api/essence/import', { bundle: { files: [] } })
+    assert.equal(empty.statusCode, 400)
+    assert.equal(empty.json().error, 'import-failed')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主运行态路由对未知元主返回 400（不假装启动）', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-'))
