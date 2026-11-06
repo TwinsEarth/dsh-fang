@@ -98,7 +98,7 @@ export function collectFacts ({ base = 'origin/main' } = {}) {
   return { pkg, version, kernelVersion, changelog, subjects, merges, changed, latestTag, tagExists, base, baseExists }
 }
 
-export function runChecks (facts, { prTitle = '', allowPaths = [], reconcile = false } = {}) {
+export function runChecks (facts, { prTitle = '', allowPaths = [], reconcile = false, onMainPush = false } = {}) {
   const checks = []
   const add = (id, ok, detail = '') => checks.push({ id, ok: !!ok, detail })
   const v = parseSemver(facts.version)
@@ -108,10 +108,12 @@ export function runChecks (facts, { prTitle = '', allowPaths = [], reconcile = f
   add('version: 语义化版本', !!v, facts.version || '(missing)')
   add('version: kernel FANG_VERSION 一致', !!v && facts.kernelVersion === facts.version, `${facts.kernelVersion || '(missing)'} vs ${facts.version}`)
   add('version: CHANGELOG 有本节', !!changelogHeading, `## v${facts.version}`)
-  add('version: 版本号尚未打标签', !!v && (!facts.tagExists || reconcile || infraOnly), facts.tagExists
-    ? (reconcile || infraOnly
-        ? `v${facts.version} 已存在（${reconcile ? '主干回收' : '纯基础设施'} PR：不产生新发布物）`
-        : `v${facts.version} 已存在（已发布？改用下一个补丁版本）`)
+  add('version: 版本号尚未打标签', !!v && (!facts.tagExists || reconcile || infraOnly || onMainPush), facts.tagExists
+    ? (onMainPush
+        ? `v${facts.version} 已存在（main 后置检查：发布后版本号已打标属正常）`
+        : reconcile || infraOnly
+          ? `v${facts.version} 已存在（${reconcile ? '主干回收' : '纯基础设施'} PR：不产生新发布物）`
+          : `v${facts.version} 已存在（已发布？改用下一个补丁版本）`)
     : 'new')
 
   const latest = facts.latestTag ? facts.latestTag.replace(/^v/, '') : ''
@@ -123,10 +125,10 @@ export function runChecks (facts, { prTitle = '', allowPaths = [], reconcile = f
   const stepOk = reconcile
     ? step.kind === 'same'
     : ['patch', 'minor', 'major'].includes(step.kind) ||
-      (step.kind === 'same' && (!facts.tagExists || infraOnly)) ||
+      (step.kind === 'same' && (!facts.tagExists || infraOnly || onMainPush)) ||
       (step.kind === 'skip' && waiver)
   add('version: 版本阶梯（跳号需 waiver）', !!latest ? stepOk : true,
-    latest ? `${latest} → ${facts.version} = ${step.kind}${reconcile ? '（reconcile）' : ''}${step.kind === 'skip' && waiver ? '（有 waiver）' : ''}` : '首个版本')
+    latest ? `${latest} → ${facts.version} = ${step.kind}${reconcile ? '（reconcile）' : ''}${onMainPush && step.kind === 'same' ? '（main 后置检查）' : ''}${step.kind === 'skip' && waiver ? '（有 waiver）' : ''}` : '首个版本')
 
   const auditExists = !!facts.version && fs.existsSync(path.join(ROOT, `docs/AUDIT-v${facts.version}.md`))
   add('docs: AUDIT-v<版本>.md 存在', auditExists, `docs/AUDIT-v${facts.version}.md`)
@@ -165,6 +167,8 @@ function main () {
   const base = get('--base', process.env.GITHUB_BASE_REF ? `origin/${process.env.GITHUB_BASE_REF}` : 'origin/main')
   const prTitle = get('--title', process.env.PR_TITLE || '')
   const reconcile = argv.includes('--reconcile') || /^chore\(v\d+\.\d+\.\d+\):\s*主干回收/.test(prTitle)
+  // push 到 main 是发布后的后置检查：版本号已经打标/阶梯持平都是正常状态。
+  const onMainPush = process.env.GITHUB_EVENT_NAME === 'push' && process.env.GITHUB_REF === 'refs/heads/main'
 
   let facts
   try {
@@ -175,7 +179,7 @@ function main () {
     return
   }
 
-  const checks = runChecks(facts, { prTitle, allowPaths, reconcile })
+  const checks = runChecks(facts, { prTitle, allowPaths, reconcile, onMainPush })
   const green = checks.every((c) => c.ok)
   if (json) {
     console.log(JSON.stringify({ green, version: facts.version, base: facts.base, latestTag: facts.latestTag, checks }, null, 2))
