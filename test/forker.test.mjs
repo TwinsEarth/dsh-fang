@@ -365,7 +365,8 @@ test('provision in cleanTemplate mode builds the fork profile from a forker-owne
     assert.equal(pkg.dependencies, undefined, 'mother dependencies must never leak into a clean fork profile')
     assert.equal(readFile(path.join(result.profileDir, 'cordis.yml')).trim(), '[]')
     const forkPatch = readFile(path.join(result.profileDir, 'cordis.patch.yml'))
-    assert.match(forkPatch, /^# fang: fork is production-only/)
+    assert.match(forkPatch, /id: ui-settings-general/, 'clean template must seed the welcome notice config form')
+    assert.match(forkPatch, /# fang: fork is production-only/)
     assert.doesNotMatch(forkPatch, /^\s*\[\s*\]\s*$/m, '空数组必须被移除，否则 YAML 非法')
     assert.match(forkPatch, /id: tool-plugin-manager/)
     assert.doesNotMatch(forkPatch, /id: config-editor/, '不能禁用 config-editor：会移除 configForms，客户端 50 个插件 pending')
@@ -499,7 +500,7 @@ test('ensureTemplate writes the clean profile contract and is idempotent', () =>
       '@local/custom-bundle',
     ])
     assert.equal(readFile(path.join(dir, 'cordis.yml')).trim(), '[]')
-    assert.equal(readFile(path.join(dir, 'cordis.patch.yml')).trim(), '[]')
+    assert.match(readFile(path.join(dir, 'cordis.patch.yml')), /- id: ui-settings-general/)
     assert.equal(isLink(path.join(dir, 'node_modules')), true)
     assert.equal(
       path.resolve(fs.realpathSync(path.join(dir, 'node_modules'))).toLowerCase(),

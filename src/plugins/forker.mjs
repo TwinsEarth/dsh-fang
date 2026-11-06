@@ -80,6 +80,18 @@ const PORT_PROBE_TIMEOUT_MS = 5000
 /** Bundle list of the clean fork profile: base + web app + this bundle (Cordis patch). */
 const CLEAN_TEMPLATE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 
+// v3.1.0: DSH's first-run preview notice persists ui-settings-general.welcomeNoticeVersion.
+// A clean profile that omits the row leaves the config form unavailable, so 「继续」 always
+// reports "暂时无法保存确认状态". Seed the acknowledgement in every generated clean profile;
+// the fork lock then appends its own disable rows.
+const WELCOME_NOTICE_PATCH = [
+  '- id: ui-settings-general',
+  '  name: "@deepseek-ai/dsh-client-ui-settings-general"',
+  '  config:',
+  '    welcomeNoticeVersion: 2026-09-28.1',
+  '',
+].join('\n')
+
 const DEFAULTS = {
   cliPath: '',
   profileTemplate: '',
@@ -686,7 +698,7 @@ export function apply(ctx, config) {
       )
       files.push('package.json')
       for (const name of ['cordis.yml', 'cordis.patch.yml']) {
-        writeFileAtomic(path.join(templateDir, name), '[]\n')
+        writeFileAtomic(path.join(templateDir, name), name === 'cordis.patch.yml' ? WELCOME_NOTICE_PATCH : '[]\n')
         files.push(name)
       }
       const srcRaw = String(opts.nodeModulesSource ?? '').trim()
