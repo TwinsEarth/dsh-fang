@@ -1135,6 +1135,9 @@ export function apply(ctx, config) {
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }
+      try { assertInside(layout.forkHomesDir, task.homeDir, 'fork-home') } catch (error) {
+        return { ok: false, error: 'path-escape', taskId: id, detail: String(error?.message ?? error) }
+      }
       const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
       const forkBundle = path.join(forkProfileDir, 'node_modules', '@local', 'dsh-fang')
       if (!exists(forkBundle)) {
@@ -1630,6 +1633,7 @@ export function apply(ctx, config) {
       await essenceManager.ensureFresh(id)
       const merged = essenceManager.mergedProfileDir(id)
       if (!exists(merged)) throw new Error('merged-profile-missing')
+      assertInside(layout.essenceRoot, merged, 'essence-merged')
       const motherModules = path.join(templateDir(), 'node_modules')
       const link = path.join(merged, 'node_modules')
       if (exists(motherModules) && !exists(link)) {
@@ -1639,6 +1643,7 @@ export function apply(ctx, config) {
       // v3.0.9 三区：运行态 home 在 runtimeRoot 下（FANG_HOME 时是 sessions/<essenceId>/home），
       // 原身文件夹只保留配置，项目/会话/任务文件不落原身目录。
       const homeDir = runtimeHomeFor(id)
+      assertInside(layout.runtimeRoot, homeDir, 'runtime-home')
       const legacyHomes = [
         path.join(layout.dataDir, 'runtime', forkId, 'home'),
         path.join(essenceManager.essenceRoot(id), 'runtime', 'home'),
