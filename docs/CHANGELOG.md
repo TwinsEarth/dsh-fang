@@ -13,6 +13,7 @@
 - **smoke 断言反转**：`package-smoke.mjs` 由「client half 必须禁用」改为断言 `dsh.client.platform === 'web'`、`client.js` 注册发布包 ID、包含 `sidebar.panellist` 与 `main` 槽位；v3.0.9 的 tarball 会在该门禁直接 FAIL。
 - **安装 drill 真实拉取 boot 页**：`install-drill.mjs` 在干净 profile 启动 Web 后请求首页（先交换 302 的 set-cookie），断言 `@twinsearth/dsh-fang/client.js` 在插件清单中；profile 现在写入 `dependencies`，与 `pnpm add` 落盘一致。drill 结束时用 `taskkill /T` 清理宿主进程。
 - **healthz 增加 client half 启用检查**。
+- **PR 门禁识别 GitHub 合成 merge ref**：`pr-gate` 在 CI 的 `refs/pull/N/merge` 检出上会先解包到真实 PR 提交，再做线性历史与 conventional-commit 检查，避免平台生成的 merge 提交被误判为本 PR 的提交。
 
 ### 门禁
 - `preflight --e2e` GREEN：751 pass / 0 fail / 1 skip；e2e 75/75；allow-list routes=84 findings=0。

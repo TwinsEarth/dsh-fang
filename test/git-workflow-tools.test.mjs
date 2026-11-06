@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { parseAllow, isAllowed, evaluatePush, isProtectedRef } from '../tools/git/guard-main.mjs'
-import { classifyStep, parseSubject, isForbiddenPath, parseSemver, runChecks as runPrChecks } from '../tools/git/pr-gate.mjs'
+import { classifyStep, parseSubject, isForbiddenPath, parseSemver, runChecks as runPrChecks, resolveSubjectRange } from '../tools/git/pr-gate.mjs'
 import { planCut, insertChangelogSection, changelogHasSection, auditStub } from '../tools/git/version-cut.mjs'
 import { runChecks, sha256File } from '../tools/git/verify-release.mjs'
 
@@ -64,6 +64,20 @@ test('pr-gate: PR 标题与提交主题必须是 type(vX.Y.Z): 摘要', () => {
   assert.equal(parseSubject('feat: 没写版本').version, '')
   assert.equal(parseSubject('Feat(v3.0.8): 大写类型').ok, false)
   assert.equal(parseSubject('随便写写').ok, false)
+})
+
+test('pr-gate: GitHub PR 合成 merge ref 解包为真实 PR 提交', () => {
+  const merged = resolveSubjectRange({
+    base: 'origin/main', baseSha: SHA, baseExists: true,
+    headParents: [SHA2, SHA, SHA2], headSubject: `Merge ${SHA2} into ${SHA}`,
+  })
+  assert.equal(merged.head, SHA2)
+  assert.equal(merged.range, `origin/main..${SHA2}`)
+  const normal = resolveSubjectRange({ base: 'origin/main', baseSha: SHA, baseExists: true, headParents: [SHA2, SHA], headSubject: 'fix(v3.0.10): x' })
+  assert.equal(normal.head, 'HEAD')
+  assert.equal(normal.range, 'origin/main..HEAD')
+  const noBase = resolveSubjectRange({ base: 'origin/main', baseExists: false, headParents: [], headSubject: '' })
+  assert.equal(noBase.range, 'HEAD')
 })
 
 test('pr-gate: 产物/商业层/运行数据路径默认禁止，可显式放行', () => {

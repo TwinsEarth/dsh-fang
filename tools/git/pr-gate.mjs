@@ -77,6 +77,22 @@ function read (rel) {
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : ''
 }
 
+/**
+ * The range whose commit subjects the gate reads. GitHub checks a pull request
+ * out at its synthetic merge commit by default; that commit's subject is the
+ * platform's "Merge <head> into <base>" text, not a change the PR authored.
+ * Unwrap it to the PR head so linear-history and conventional-commit checks see
+ * the commits the author actually wrote.
+ * @param {object} facts base ref, its resolved SHA, HEAD's parent list, HEAD subject.
+ * @returns {{range: string, head: string}} git log range and the diff head.
+ */
+export function resolveSubjectRange ({ base = 'origin/main', baseSha = '', baseExists = false, headParents = [], headSubject = '' } = {}) {
+  const syntheticMerge = baseExists && headParents.length === 3 && headParents[1] === baseSha &&
+    /^Merge [0-9a-f]{7,40} into [0-9a-f]{7,40}$/.test(String(headSubject))
+  if (syntheticMerge) return { range: `${base}..${headParents[2]}`, head: headParents[2] }
+  return { range: baseExists ? `${base}..HEAD` : 'HEAD', head: 'HEAD' }
+}
+
 export function collectFacts ({ base = 'origin/main' } = {}) {
   const pkg = JSON.parse(read('package.json') || '{}')
   const kernel = read('src/kernel/types.mjs')
@@ -84,10 +100,13 @@ export function collectFacts ({ base = 'origin/main' } = {}) {
   const kernelVersion = (kernel.match(/FANG_VERSION\s*=\s*'([^']+)'/) || [])[1] || ''
   const changelog = read('docs/CHANGELOG.md')
   const baseExists = git(['rev-parse', '--verify', base], { allowFail: true }).status === 0
-  const range = baseExists ? `${base}..HEAD` : 'HEAD'
+  const baseSha = baseExists ? git(['rev-parse', base], { allowFail: true }).out : ''
+  const headParents = git(['rev-list', '--parents', '-n', '1', 'HEAD'], { allowFail: true }).out.split(/\s+/).filter(Boolean)
+  const headSubject = git(['log', '-1', '--format=%s', 'HEAD'], { allowFail: true }).out
+  const { range, head } = resolveSubjectRange({ base, baseSha, baseExists, headParents, headSubject })
   const subjects = git(['log', '--format=%s', range], { allowFail: true }).out.split('\n').filter(Boolean)
   const merges = git(['log', '--merges', '--format=%h', range], { allowFail: true }).out.split('\n').filter(Boolean)
-  const changed = git(['diff', '--name-status', baseExists ? `${base}...HEAD` : 'HEAD'], { allowFail: true })
+  const changed = git(['diff', '--name-status', baseExists ? `${base}...${head}` : 'HEAD'], { allowFail: true })
     .out.split('\n').filter(Boolean).map((line) => {
       const [status, ...rest] = line.split('\t')
       return { status: status[0], file: rest.join('\t') }
