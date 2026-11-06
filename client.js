@@ -3278,19 +3278,116 @@ window.__ModuleLoader__.load({
     }
 
     // ── 截图（内置客户端模块，不再作为独立子插件）──────────────────────────
+    // 结果一律落在一个 body 级预览层里：看得见、能复制、说得清失败原因。
+    // 面板未挂载时 fang:notice 没有监听者，所以失败提示不能只靠事件。
+    const SHOT_NAME = () => `wengcheng-${Date.now()}.png`
+    let shotOverlay = null
+
+    function closeShotOverlay() {
+      if (!shotOverlay) return
+      try { shotOverlay.off() } catch { /* ignore */ }
+      try { shotOverlay.node.remove() } catch { /* ignore */ }
+      try { URL.revokeObjectURL(shotOverlay.url) } catch { /* ignore */ }
+      shotOverlay = null
+    }
+
+    function showShotOverlay({ blob = null, message = '', hint = '' } = {}) {
+      closeShotOverlay()
+      const doc = typeof document !== 'undefined' ? document : null
+      if (!doc?.body) return
+      const url = blob ? URL.createObjectURL(blob) : ''
+      const status = h('div', {
+        style: { fontSize: 13, lineHeight: 1.5, color: '#EFEFEF', whiteSpace: 'pre-wrap' },
+        text: message,
+      })
+      const actions = h('div', { style: { display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' } })
+      const mkBtn = (label, primary) => h('button', {
+        type: 'button',
+        style: {
+          height: 30, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+          border: primary ? '1px solid #17803D' : '1px solid rgba(255,255,255,.24)',
+          background: primary ? '#17803D' : 'transparent', color: '#fff',
+        },
+      }, label)
+      if (blob) {
+        const copyBtn = mkBtn('复制到剪贴板', true)
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+            copyBtn.textContent = '已复制 ✓'
+            status.textContent = '已复制到剪贴板，在输入框里 Ctrl+V 即可粘贴图片。'
+          } catch (error) {
+            status.textContent = '复制失败：' + String(error?.message ?? error) + '\n可点「下载 PNG」，或右键预览图选「复制图片」。'
+          }
+        })
+        const dlBtn = mkBtn('下载 PNG', false)
+        dlBtn.addEventListener('click', () => {
+          const link = h('a', { href: url, download: SHOT_NAME() })
+          doc.body.appendChild(link)
+          link.click()
+          link.remove()
+          status.textContent = '已下载 PNG，去浏览器的下载目录取文件。'
+        })
+        actions.append(copyBtn, dlBtn)
+      }
+      const closeBtn = mkBtn('关闭', false)
+      actions.append(closeBtn)
+      const preview = blob ? h('img', {
+        src: url,
+        alt: '截图预览',
+        style: { display: 'block', width: '100%', maxHeight: '58vh', objectFit: 'contain', borderRadius: 10, background: '#111', marginTop: 12 },
+      }) : null
+      const parts = [
+        h('div', { style: { fontSize: 14, fontWeight: 600, color: '#fff', marginBottom: 8 } }, '瓮城截图'),
+        status,
+      ]
+      if (preview) parts.push(preview)
+      if (hint) parts.push(h('div', { style: { marginTop: 8, fontSize: 12, color: '#9A9AA0' }, text: hint }))
+      parts.push(actions)
+      const card = h('div', {
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': '瓮城截图',
+        style: {
+          width: 'min(760px, 92vw)', padding: 18, borderRadius: 14, background: '#1D1D1F',
+          boxShadow: '0 24px 64px -12px rgba(0,0,0,.6)', pointerEvents: 'auto',
+        },
+      }, parts)
+      const backdrop = h('div', {
+        style: {
+          position: 'fixed', inset: 0, zIndex: 2147483000, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 24,
+          background: 'rgba(0,0,0,.55)', pointerEvents: 'auto',
+        },
+      }, card)
+      backdrop.addEventListener('click', (event) => { if (event.target === backdrop) closeShotOverlay() })
+      closeBtn.addEventListener('click', () => closeShotOverlay())
+      const onKey = (event) => { if (event.key === 'Escape') { event.preventDefault(); closeShotOverlay() } }
+      doc.addEventListener('keydown', onKey, true)
+      doc.body.appendChild(backdrop)
+      shotOverlay = { node: backdrop, url, off: () => doc.removeEventListener('keydown', onKey, true) }
+    }
+
     async function captureScreenshot() {
+      const unsupportedHint = '当前页面不支持屏幕捕获。请改用 Windows 截图：Win+Shift+S，或安装瓮城桌面端后按 Ctrl+X。'
       if (typeof window.fangShell?.captureScreen === 'function') {
         try {
           const result = await window.fangShell.captureScreen()
-          notifyScreenshot(result?.ok ? '已截图并复制到剪贴板，可直接 Ctrl+V 粘贴' : '截图失败：未获取到屏幕图像')
+          if (result?.ok) notifyScreenshot('已截图并复制到剪贴板，可直接 Ctrl+V 粘贴')
+          else showShotOverlay({ message: '桌面端没有拿到屏幕图像。', hint: '可改用 Win+Shift+S 截图后粘贴。' })
           return Boolean(result?.ok)
         } catch (error) {
-          notifyScreenshot('截图失败：' + String(error?.message ?? error))
+          showShotOverlay({ message: '截图失败：' + String(error?.message ?? error) })
           return false
         }
       }
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
+        showShotOverlay({ message: '浏览器不支持自动截屏。', hint: unsupportedHint })
+        return false
+      }
       let stream = null
       try {
+        // 浏览器会弹一次「选择要共享的内容」，选当前标签页/窗口/屏幕均可。
         stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
         const video = document.createElement('video')
         video.srcObject = stream
@@ -3302,20 +3399,27 @@ window.__ModuleLoader__.load({
         canvas.height = video.videoHeight
         canvas.getContext('2d').drawImage(video, 0, 0)
         const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
-        if (!blob) throw new Error('empty-capture')
+        if (!blob) throw new Error('截图内容为空')
+        let copied = false
         try {
           await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-          notifyScreenshot('已截图并复制到剪贴板，可直接 Ctrl+V 粘贴')
-        } catch {
-          const link = document.createElement('a')
-          link.href = URL.createObjectURL(blob)
-          link.download = `wengcheng-${Date.now()}.png`
-          link.click()
-          notifyScreenshot('剪贴板不可用，已下载截图 PNG')
-        }
+          copied = true
+        } catch { /* 预览层里还有手动复制按钮 */ }
+        showShotOverlay({
+          blob,
+          message: copied
+            ? '已截图并复制到剪贴板，在输入框里 Ctrl+V 即可粘贴。'
+            : '已截到图，但浏览器拒绝了自动写入剪贴板，请点下面的「复制到剪贴板」。',
+          hint: copied ? '' : '也可以点「下载 PNG」，或右键预览图选「复制图片」。',
+        })
         return true
       } catch (error) {
-        notifyScreenshot('截图已取消或失败：' + String(error?.message ?? error))
+        const name = String(error?.name ?? '')
+        const cancelled = name === 'NotAllowedError' || name === 'AbortError'
+        showShotOverlay({
+          message: cancelled ? '截图已取消（没有选择共享内容）。' : '截图失败：' + String(error?.message ?? error),
+          hint: '可以再按一次 Ctrl+X 重试，或改用 Win+Shift+S。',
+        })
         return false
       } finally {
         for (const track of stream?.getTracks?.() ?? []) { try { track.stop() } catch { /* ignore */ } }
@@ -3332,17 +3436,25 @@ window.__ModuleLoader__.load({
       return true
     }
 
+    // 插槽返回的必须是 React 元素；直接返回 DOM 节点会让宿主判为异常而关掉该项。
     function ScreenshotDock() {
-      return h('button', {
-        type: 'button',
-        'data-fang-entry': 'screenshot',
-        title: '截图并复制到剪贴板 (Ctrl+X / Ctrl+Shift+X)',
-        onClick: () => void captureScreenshot(),
-        style: {
-          height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer',
-          border: '1px solid rgba(127,127,127,.35)', background: 'transparent', color: 'inherit', fontSize: 12,
+      return React.createElement(DomMount, {
+        style: { display: 'inline-flex', alignItems: 'center' },
+        mount: (host) => {
+          const btn = h('button', {
+            type: 'button',
+            'data-fang-entry': 'screenshot',
+            title: '截图并复制到剪贴板 (Ctrl+X / Ctrl+Shift+X)',
+            style: {
+              height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer',
+              border: '1px solid rgba(127,127,127,.35)', background: 'transparent', color: 'inherit', fontSize: 12,
+            },
+          }, '截图 Ctrl+X')
+          btn.addEventListener('click', () => { void captureScreenshot() })
+          host.replaceChildren(btn)
+          return () => { host.replaceChildren() }
         },
-      }, '截图 Ctrl+X / ⌘⇧X')
+      })
     }
 
     // ── 插件入口 ──────────────────────────────────────────────────────────
