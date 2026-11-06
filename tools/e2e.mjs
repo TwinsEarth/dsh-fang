@@ -116,6 +116,9 @@ function makeProfile(homeRoot) {
   const shotLink = path.join(profileDir, 'node_modules', '@twinsearth', 'dsh-fang-screenshot')
   fs.mkdirSync(path.dirname(shotLink), { recursive: true })
   fs.symlinkSync(path.join(ROOT, 'screenshot'), shotLink, 'junction')
+  const entryLink = path.join(profileDir, 'node_modules', '@twinsearth', 'dsh-fang-web-entry')
+  fs.mkdirSync(path.dirname(entryLink), { recursive: true })
+  fs.symlinkSync(path.join(ROOT, 'web-entry'), entryLink, 'junction')
   return profileDir
 }
 
