@@ -1344,6 +1344,15 @@ export function apply(ctx, config) {
       try { runtime = f.status(forkId) ?? null } catch { runtime = null }
       return { ok: true, essenceId: id, forkId, runtime }
     },
+    /** 打开运行态：返回带临时 token 的 URL（仅内存，不落盘）。 */
+    openEssenceRuntime: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const f = forker()
+      if (!f || typeof f.openUrl !== 'function') return { ok: false, error: 'forker-unavailable' }
+      const out = f.openUrl(runtimeForkId(id))
+      if (!out || out.ok === false) return { ok: false, error: out?.error ?? 'not-running' }
+      return { ok: true, essenceId: id, url: out.url, port: out.port ?? null }
+    },
     // v3.0.9 升级链路 2.1：把本机母体 profile（PC 客户端那份）克隆成镜像基础层。
     cloneMotherProfile: (input = {}) => {
       const sourceDir = path.resolve(String(input?.sourceDir || templateDir()))
@@ -1813,6 +1822,10 @@ export function apply(ctx, config) {
             return json(res, 400, { ok: false, error: 'runtime-failed', detail: String(error?.message ?? error) })
           }
         },
+      })
+      route('GET', `${prefix}/api/essence/runtime/open`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        return json(res, 200, mirrorService.openEssenceRuntime(query.get('essenceId')))
       })
       route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
         const body = await readBody(req)

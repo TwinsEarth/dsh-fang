@@ -1589,6 +1589,93 @@ window.__ModuleLoader__.load({
         await refresh()
       }
 
+      // 打开&设置：未运行则先起隔离实例，再开带 token 的 URL。
+      async function openEssence(essenceId) {
+        if (isBusy()) return
+        S.busy = 'essence:open:' + essenceId
+        const st = await api(`/fang/api/essence/runtime?essenceId=${encodeURIComponent(essenceId)}`)
+        const runtime = st.body?.runtime ?? null
+        const running = Boolean(runtime && (runtime.running === true || String(runtime.status) === 'running'))
+        let url = ''
+        if (!running) {
+          const started = await api('/fang/api/essence/runtime', { method: 'POST', body: JSON.stringify({ action: 'start', essenceId }) })
+          if (started.status === 200 && started.body?.ok) url = String(started.body.url || '')
+          else setNotice({ tone: 'bad', title: '元主运行态启动失败', message: failureHint(started.body?.error || 'runtime-failed'), detail: started.body?.detail || '' })
+        } else {
+          const opened = await api(`/fang/api/essence/runtime/open?essenceId=${encodeURIComponent(essenceId)}`)
+          if (opened.status === 200 && opened.body?.url) url = String(opened.body.url)
+        }
+        S.busy = ''
+        if (url) { try { window.open(url, '_blank', 'noopener') } catch { /* 弹层被拦 */ } }
+        else if (running) setNotice({ tone: 'bad', title: '无法打开元主运行实例', message: '实例在跑但拿不到带 token 的地址' })
+        await refresh()
+      }
+
+      async function copyEssence(essence) {
+        if (isBusy()) return
+        askPrompt({
+          title: '复制元主', label: '新元主名称', value: `${essence.name || essence.id} 副本`, confirmLabel: '复制',
+          hint: '复制 overlay（插件补丁/设置/依赖），不复制凭据。',
+          onConfirm: async (name) => {
+            const trimmed = String(name ?? '').trim()
+            if (!trimmed) { S.modal.error = '请填写名称'; render(true); return false }
+            const result = await api('/fang/api/essence/copy', { method: 'POST', body: JSON.stringify({ essenceId: essence.id, name: trimmed }) })
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已复制', message: trimmed })
+            else setNotice({ tone: 'bad', title: '复制失败', message: failureHint(result.body?.error || 'http-' + result.status) })
+            await refresh()
+          },
+        })
+      }
+
+      function archiveEssence(essence) {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'info', title: '归档元主？', confirm: 'essence-archive',
+          message: `「${essence.name || essence.id}」将归档：只改元数据，不删目录；归档后不能派生/配置。`,
+          confirmLabel: '归档',
+          onConfirm: async () => {
+            const result = await api('/fang/api/essence/archive', { method: 'POST', body: JSON.stringify({ essenceId: essence.id, archived: true }) })
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已归档', message: essence.name || essence.id })
+            else setNotice({ tone: 'bad', title: '归档失败', message: failureHint(result.body?.error || 'http-' + result.status) })
+            await refresh()
+          },
+        })
+      }
+
+      function deleteEssence(essence) {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'bad', title: '永久删除元主？', confirm: 'delete', strong: true,
+          expected: String(essence.name || essence.id),
+          message: `将删除 essences/${essence.id}（overlay + merged），不删会话；此操作不可撤销。`,
+          confirmLabel: '永久删除',
+          onConfirm: async () => {
+            const result = await api('/fang/api/essence/delete', { method: 'POST', body: JSON.stringify({ essenceId: essence.id }) })
+            if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '元主已删除', message: essence.name || essence.id })
+            else setNotice({ tone: 'bad', title: '删除元主失败', message: failureHint(result.body?.error || 'http-' + result.status), detail: result.body?.detail || '' })
+            await refresh()
+          },
+        })
+      }
+
+      async function downloadEssence(essence) {
+        try {
+          const token = await ensureFangAuthToken()
+          const res = await fetch(`/fang/api/essence/download?essenceId=${encodeURIComponent(essence.id)}`, {
+            headers: token ? { 'x-fang-auth': token } : {},
+          })
+          if (!res.ok) throw new Error('HTTP ' + res.status)
+          const blob = await res.blob()
+          const link = h('a', { href: URL.createObjectURL(blob), download: `essence-${essence.id}.json` })
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          setNotice({ tone: 'ok', title: '元主配置已下载', message: `${essence.name || essence.id}（JSON，不含凭据）` })
+        } catch (error) {
+          setNotice({ tone: 'bad', title: '下载元主失败', message: String(error?.message ?? error) })
+        }
+      }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
@@ -1805,6 +1892,7 @@ window.__ModuleLoader__.load({
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
+        openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2348,15 +2436,32 @@ window.__ModuleLoader__.load({
           essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null,
           essence.archived !== true
             ? h('span', { style: { display: 'inline-flex', gap: 4 } },
-              button('运行时', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-04',
-                title: '用该元主的 merged profile 起一个隔离 home 的配置态实例（不写母体 sessions）',
-                onClick: () => void app.essenceRuntime('start', essence.id),
+              button('打开', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-06',
+                title: '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
+                onClick: () => void app.openEssence(essence.id),
               }),
-              button('停止', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-05',
-                title: '停止该元主的运行时（overlay 与数据保留）',
-                onClick: () => void app.essenceRuntime('stop', essence.id),
+              button('复制', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-07',
+                title: '复制元主配置（overlay + settings，不含凭据）',
+                onClick: () => void app.copyEssence(essence),
+              }),
+              button('归档', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-08',
+                title: essence.actions?.archive?.reason || '归档元主（只改元数据，不删目录）',
+                disabled: essence.actions?.archive?.enabled === false,
+                onClick: () => void app.archiveEssence(essence),
+              }),
+              button('删除', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-09',
+                title: essence.actions?.delete?.reason || '永久删除 essences/<id>（不删会话）',
+                disabled: essence.actions?.delete?.enabled === false,
+                onClick: () => void app.deleteEssence(essence),
+              }),
+              button('下载', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-10',
+                title: '下载元主配置 JSON（不含凭据，>32MB 拒绝）',
+                onClick: () => void app.downloadEssence(essence),
               }))
             : null)))
 
