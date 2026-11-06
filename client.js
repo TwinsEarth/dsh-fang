@@ -3436,7 +3436,7 @@ window.__ModuleLoader__.load({
       shotOverlay = null
     }
 
-    function showShotOverlay({ blob = null, message = '', hint = '' } = {}) {
+    function showShotOverlay({ blob = null, message = '', hint = '', extraActions = [] } = {}) {
       closeShotOverlay()
       const doc = typeof document !== 'undefined' ? document : null
       if (!doc?.body) return
@@ -3474,6 +3474,13 @@ window.__ModuleLoader__.load({
           status.textContent = '已下载 PNG，去浏览器的下载目录取文件。'
         })
         actions.append(copyBtn, dlBtn)
+      }
+      for (const extra of Array.isArray(extraActions) ? extraActions : []) {
+        if (!extra || typeof extra.onClick !== 'function') continue
+        const btn = mkBtn(String(extra.label ?? '操作'), extra.primary === true)
+        btn.setAttribute('data-fang-shot-action', String(extra.label ?? 'action'))
+        btn.addEventListener('click', () => { try { extra.onClick() } catch { /* ignore */ } })
+        actions.append(btn)
       }
       const closeBtn = mkBtn('关闭', false)
       actions.append(closeBtn)
@@ -3513,8 +3520,77 @@ window.__ModuleLoader__.load({
       shotOverlay = { node: backdrop, url, off: () => doc.removeEventListener('keydown', onKey, true) }
     }
 
+    // DSH 桌面端的渲染进程是 Electron：没有 setDisplayMediaRequestHandler 时
+    // getDisplayMedia 会直接 reject，用户看到的就是「没有选择共享内容」。
+    // 第一次 getDisplayMedia 被拒后记住：这个窗口没有共享选择器，之后直接走系统截图。
+    let webCaptureBlocked = false
+    const isEmbeddedDesktop = () => {
+      try { return /Electron\//i.test(String(navigator?.userAgent ?? '')) } catch { return false }
+    }
+
+    /** 调 Windows「屏幕截图」URI（与 Win+Shift+S 同一入口）；被拦截时返回 false。 */
+    function requestSystemSnip() {
+      try {
+        const link = h('a', { href: 'ms-screenclip:', rel: 'noopener', style: { display: 'none' } })
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        return true
+      } catch { return false }
+    }
+
+    async function readClipboardImage() {
+      try {
+        if (!navigator.clipboard?.read) return { ok: false, error: '当前环境不支持读取剪贴板图片' }
+        const items = await navigator.clipboard.read()
+        for (const item of items) {
+          const type = (item.types || []).find((candidate) => String(candidate).startsWith('image/'))
+          if (type) return { ok: true, blob: await item.getType(type) }
+        }
+        return { ok: false, error: '剪贴板里还没有图片（先按 Win+Shift+S 截图）' }
+      } catch (error) {
+        return { ok: false, error: String(error?.message ?? error) }
+      }
+    }
+
+    async function readClipboardIntoOverlay() {
+      const result = await readClipboardImage()
+      if (!result.ok) {
+        showShotOverlay({
+          message: '读取剪贴板失败：' + result.error,
+          hint: '先按 Win+Shift+S 拖选区域截图，再回来点「读取剪贴板」；也可以直接 Ctrl+V 粘贴。',
+        })
+        return
+      }
+      showShotOverlay({
+        blob: result.blob,
+        message: '已从剪贴板读到截图：直接 Ctrl+V 就能粘贴到输入框。',
+        hint: '要换一张，再按一次 Win+Shift+S。',
+      })
+    }
+
+    function showSnipGuidance(reason) {
+      showShotOverlay({
+        message: reason || '这个窗口不提供网页屏幕共享选择器，浏览器抓屏不可用。',
+        hint: '按 Win+Shift+S 拖选区域，截图会直接进剪贴板，然后 Ctrl+V 粘贴；也可以点下面的按钮。',
+        extraActions: [
+          {
+            label: '打开系统截图', primary: true,
+            onClick: () => {
+              const ok = requestSystemSnip()
+              showShotOverlay({
+                message: ok ? '已请求打开 Windows 截图：拖选区域后点「读取剪贴板」。' : '系统截图没有打开：请直接按 Win+Shift+S。',
+                hint: ok ? '截完图直接 Ctrl+V 粘贴；或点「读取剪贴板」先预览。' : '',
+                extraActions: [{ label: '读取剪贴板', primary: true, onClick: () => void readClipboardIntoOverlay() }],
+              })
+            },
+          },
+          { label: '读取剪贴板', onClick: () => void readClipboardIntoOverlay() },
+        ],
+      })
+    }
+
     async function captureScreenshot() {
-      const unsupportedHint = '当前页面不支持屏幕捕获。请改用 Windows 截图：Win+Shift+S，或安装瓮城桌面端后按 Ctrl+X。'
       if (typeof window.fangShell?.captureScreen === 'function') {
         try {
           const result = await window.fangShell.captureScreen()
@@ -3527,8 +3603,22 @@ window.__ModuleLoader__.load({
         }
       }
       if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
-        showShotOverlay({ message: '浏览器不支持自动截屏。', hint: unsupportedHint })
+        showSnipGuidance('当前页面不支持网页截屏。')
         return false
+      }
+      // Electron 宿主不会弹共享选择器：先走系统截图（Ctrl+X ≈ Win+Shift+S），别再让用户看失败框。
+      if (isEmbeddedDesktop() || webCaptureBlocked) {
+        const requested = requestSystemSnip()
+        showShotOverlay({
+          message: requested
+            ? '已请求 Windows 系统截图（等同 Win+Shift+S）：拖选区域后，直接 Ctrl+V 粘贴。'
+            : '这个窗口不能网页抓屏。请按 Win+Shift+S 截图。',
+          hint: 'DSH 桌面端不提供屏幕共享选择器，所以浏览器抓屏会直接失败；系统截图走的是 Windows 自己的剪贴板。',
+          extraActions: requested
+            ? [{ label: '读取剪贴板', primary: true, onClick: () => void readClipboardIntoOverlay() }]
+            : [{ label: '打开系统截图', primary: true, onClick: () => { requestSystemSnip() } }, { label: '读取剪贴板', onClick: () => void readClipboardIntoOverlay() }],
+        })
+        return requested
       }
       let stream = null
       try {
@@ -3545,6 +3635,7 @@ window.__ModuleLoader__.load({
         canvas.getContext('2d').drawImage(video, 0, 0)
         const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
         if (!blob) throw new Error('截图内容为空')
+        webCaptureBlocked = false
         let copied = false
         try {
           await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
@@ -3560,11 +3651,17 @@ window.__ModuleLoader__.load({
         return true
       } catch (error) {
         const name = String(error?.name ?? '')
-        const cancelled = name === 'NotAllowedError' || name === 'AbortError'
-        showShotOverlay({
-          message: cancelled ? '截图已取消（没有选择共享内容）。' : '截图失败：' + String(error?.message ?? error),
-          hint: '可以再按一次 Ctrl+X 重试，或改用 Win+Shift+S。',
-        })
+        if (name === 'NotAllowedError') {
+          webCaptureBlocked = true
+          showSnipGuidance('浏览器拒绝了屏幕捕获：这个窗口没有共享选择器。')
+        } else if (name === 'AbortError') {
+          showShotOverlay({
+            message: '截图已取消（没有选择共享内容）。',
+            hint: '再按一次 Ctrl+X 重试，或改用 Win+Shift+S 截图后 Ctrl+V 粘贴。',
+          })
+        } else {
+          showShotOverlay({ message: '截图失败：' + String(error?.message ?? error), hint: '可以改用 Win+Shift+S 截图后 Ctrl+V 粘贴。' })
+        }
         return false
       } finally {
         for (const track of stream?.getTracks?.() ?? []) { try { track.stop() } catch { /* ignore */ } }
@@ -3589,7 +3686,7 @@ window.__ModuleLoader__.load({
           const btn = h('button', {
             type: 'button',
             'data-fang-entry': 'screenshot',
-            title: '截图并复制到剪贴板 (Ctrl+X / Ctrl+Shift+X)',
+            title: '截图并复制到剪贴板：Ctrl+X（桌面端走 Windows 系统截图，浏览器走屏幕共享）',
             style: {
               height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer',
               border: '1px solid rgba(127,127,127,.35)', background: 'transparent', color: 'inherit', fontSize: 12,
