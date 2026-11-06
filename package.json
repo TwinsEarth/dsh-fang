@@ -68,5 +68,9 @@
   "license": "AGPL-3.0-or-later",
   "engines": {
     "node": ">=22"
+  },
+  "optionalDependencies": {
+    "@twinsearth/dsh-fang-web-entry": "0.1.0",
+    "@twinsearth/dsh-fang-queue-journal": "0.1.0"
   }
 }

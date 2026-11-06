@@ -133,3 +133,11 @@
         routes:
           enabled: true
           prefix: /fang
+
+    # Child plugins of the fang bundle: both are client halves only. They appear
+    # under the fang bundle row instead of as separate top-level plugins.
+    - id: fang-web-entry
+      name: '@twinsearth/dsh-fang-web-entry'
+
+    - id: fang-queue-journal
+      name: '@twinsearth/dsh-fang-queue-journal'
