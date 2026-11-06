@@ -1236,6 +1236,8 @@ export function apply(ctx, config) {
     ctx.logger?.warn?.('[essence] official essence seed failed', { error: String(error?.message ?? error) })
   }
   upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
+  // 元主运行态的 forkId 命名（稳定、可用于 forker 记录与端口池）
+  const runtimeForkId = (essenceId) => 'rt-' + String(essenceId).replace(/^essence-/, '').replace(/[^A-Za-z0-9-]/g, '-')
   const mirrorService = {
     status: () => mirrorManager.getStatus(),
     getPreferences: () => preferencesStore.get(),
@@ -1292,6 +1294,56 @@ export function apply(ctx, config) {
     },
     setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
     downloadEssence: (essenceId) => essenceManager.downloadBundle(essenceId),
+    // v3.0.9 原身运行态：用元主 merged/profile 起一个**隔离 home** 的配置态实例。
+    // 隔离边界：DSH_HOME = essences/<id>/runtime/home（自己的 sessions/storages），
+    // 不写母体 sessions；node_modules 通过 junction 指向母体模块树（不复制）。
+    startEssenceRuntime: async (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const meta = essenceManager.getMeta(id)
+      if (!meta || typeof meta.id !== 'string') throw new Error('unknown-essence')
+      if (meta.archived === true) throw new Error('essence-archived')
+      const f = forker()
+      if (!f || typeof f.provision !== 'function' || typeof f.spawn !== 'function') throw new Error('forker-unavailable')
+      await essenceManager.ensureFresh(id)
+      const merged = essenceManager.mergedProfileDir(id)
+      if (!exists(merged)) throw new Error('merged-profile-missing')
+      const motherModules = path.join(templateDir(), 'node_modules')
+      const link = path.join(merged, 'node_modules')
+      if (exists(motherModules) && !exists(link)) {
+        try { fs.symlinkSync(motherModules, link, 'junction') } catch { /* 已存在或权限不足时继续，forker 会再尝试 */ }
+      }
+      const forkId = runtimeForkId(id)
+      const homeDir = path.join(essenceManager.essenceRoot(id), 'runtime', 'home')
+      const provisioned = await f.provision({
+        forkId, taskTitle: `元主运行时 · ${String(meta.name ?? id)}`,
+        homeDir, profile: 'essence-runtime', profileTemplate: merged,
+      })
+      if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
+      const started = await f.spawn({ forkId })
+      if (!started.ok) throw new Error(String(started.error ?? 'runtime-spawn-failed'))
+      return {
+        ok: true, essenceId: id, forkId,
+        url: started.url, port: started.port, pid: started.pid,
+        sandboxHome: homeDir,
+      }
+    },
+    stopEssenceRuntime: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const f = forker()
+      if (!f || typeof f.stop !== 'function') return { ok: false, error: 'forker-unavailable' }
+      const forkId = runtimeForkId(id)
+      const out = f.stop(forkId)
+      return { ok: true, essenceId: id, forkId, stopped: out?.ok !== false }
+    },
+    essenceRuntimeStatus: (essenceId) => {
+      const id = String(essenceId ?? '').trim()
+      const f = forker()
+      if (!f || typeof f.status !== 'function') return { ok: false, error: 'forker-unavailable' }
+      const forkId = runtimeForkId(id)
+      let runtime = null
+      try { runtime = f.status(forkId) ?? null } catch { runtime = null }
+      return { ok: true, essenceId: id, forkId, runtime }
+    },
     // v3.0.9 升级链路 2.1：把本机母体 profile（PC 客户端那份）克隆成镜像基础层。
     cloneMotherProfile: (input = {}) => {
       const sourceDir = path.resolve(String(input?.sourceDir || templateDir()))
@@ -1742,6 +1794,21 @@ export function apply(ctx, config) {
         try { return json(res, 200, { ok: true, ...(await mirrorService.syncEssences(body)) }) } catch (error) {
           return json(res, 400, { ok: false, error: 'sync-failed', detail: String(error?.message ?? error) })
         }
+      })
+      // v3.0.9 原身运行态：start / stop（隔离 home 的配置态实例）
+      route('POST', `${prefix}/api/essence/runtime`, async (req, res) => {
+        const body = await readBody(req)
+        const action = String(body?.action ?? 'start')
+        try {
+          if (action === 'stop') return json(res, 200, mirrorService.stopEssenceRuntime(body?.essenceId))
+          return json(res, 200, await mirrorService.startEssenceRuntime(body?.essenceId))
+        } catch (error) {
+          return json(res, 400, { ok: false, error: 'runtime-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      route('GET', `${prefix}/api/essence/runtime`, (req, res) => {
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        return json(res, 200, mirrorService.essenceRuntimeStatus(query.get('essenceId')))
       })
       route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
         const body = await readBody(req)

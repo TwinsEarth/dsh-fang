@@ -1568,6 +1568,27 @@ window.__ModuleLoader__.load({
         await refresh()
       }
 
+      // 原身运行态：隔离 home 的配置态实例（不写母体 sessions）。
+      async function essenceRuntime(action, essenceId) {
+        if (isBusy()) return
+        S.busy = 'essence:runtime:' + essenceId
+        const result = await api('/fang/api/essence/runtime', { method: 'POST', body: JSON.stringify({ action, essenceId }) })
+        S.busy = ''
+        const body = result.body
+        if (result.status === 200 && body?.ok) {
+          setNotice({
+            tone: 'ok',
+            title: action === 'stop' ? '元主运行时已停止' : '元主运行时已启动',
+            message: action === 'stop'
+              ? '进程已停止（overlay 与数据保留）'
+              : `端口 ${body.port ?? '—'} · 隔离 home：${body.sandboxHome ?? '—'}`,
+          })
+        } else {
+          setNotice({ tone: 'bad', title: '元主运行态操作失败', message: failureHint(body?.error || 'runtime-failed'), detail: body?.detail || diagnosticText(result.diagnostic) })
+        }
+        await refresh()
+      }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
@@ -1783,7 +1804,7 @@ window.__ModuleLoader__.load({
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
-        cloneMotherProfile, syncEssence, syncEssences, setSessionWindow,
+        cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2324,7 +2345,20 @@ window.__ModuleLoader__.load({
               onClick: () => void app.syncEssence(essence.id),
             })
             : null,
-          essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null)))
+          essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null,
+          essence.archived !== true
+            ? h('span', { style: { display: 'inline-flex', gap: 4 } },
+              button('运行时', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-04',
+                title: '用该元主的 merged profile 起一个隔离 home 的配置态实例（不写母体 sessions）',
+                onClick: () => void app.essenceRuntime('start', essence.id),
+              }),
+              button('停止', {
+                size: 'sm', variant: 'ghost', dataBtnId: 'E-05',
+                title: '停止该元主的运行时（overlay 与数据保留）',
+                onClick: () => void app.essenceRuntime('stop', essence.id),
+              }))
+            : null)))
 
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,

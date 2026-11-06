@@ -514,6 +514,28 @@ test('orchestrator: clone-profile → essence stale → sync 全链路', async (
   }
 })
 
+test('orchestrator: 元主运行态路由对未知元主返回 400（不假装启动）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const handler = webServer.find('POST', '/fang/api/essence/runtime').handler
+    const res = makeRes()
+    await handler(makeReq({ action: 'start', essenceId: 'essence-does-not-exist' }, 'POST'), res)
+    assert.equal(res.statusCode, 400)
+    assert.equal(res.json().error, 'runtime-failed')
+    assert.match(String(res.json().detail), /unknown-essence/)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders v2', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-http2-'))
@@ -537,7 +559,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/essence/list', '/fang/api/auth-token', '/fang/api/tasks/open-url',
     '/fang/api/essence/create', '/fang/api/essence/rename', '/fang/api/essence/archive',
     '/fang/api/essence/delete', '/fang/api/essence/copy', '/fang/api/essence/default',
-    '/fang/api/essence/capture', '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
+    '/fang/api/essence/capture', '/fang/api/essence/sync', '/fang/api/essence/runtime', '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
     '/fang/api/tasks/download',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)
