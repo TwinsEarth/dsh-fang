@@ -2,6 +2,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
+import fs from 'node:fs'
+import os from 'node:os'
 import { resolveFangHome, resolveFangLayout } from '../src/kernel/paths.mjs'
 
 test('FANG_HOME gives D:/fang mirror/essence/sessions layout', () => {
@@ -14,10 +16,23 @@ test('FANG_HOME gives D:/fang mirror/essence/sessions layout', () => {
   assert.equal(layout.forksFile, path.join(layout.dataDir, 'forks.json'))
 })
 
-test('without FANG_HOME legacy layout is unchanged', () => {
-  const layout = resolveFangLayout({ env: { DSH_HOME: 'C:/Users/x/.dsh', DSH_PROFILE: 'desktop' }, argv: [] })
-  assert.equal(layout.fangHome, '')
-  assert.equal(layout.dataDir, path.resolve('C:/Users/x/.dsh/fang/desktop'))
-  assert.equal(layout.forkHomesDir, path.join(layout.dataDir, 'forks'))
-  assert.equal(resolveFangHome({}), '')
+test('without FANG_HOME: legacy data keeps legacy layout, fresh install defaults to D:/ToFuture', () => {
+  // 旧布局已有数据 → 不搬家
+  const legacyHome = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fang-legacy-')), '.dsh')
+  fs.mkdirSync(path.join(legacyHome, 'fang', 'desktop'), { recursive: true })
+  const legacy = resolveFangLayout({ env: { DSH_HOME: legacyHome, DSH_PROFILE: 'desktop' }, argv: [] })
+  assert.equal(legacy.fangHome, '')
+  assert.equal(legacy.dataDir, path.join(legacyHome, 'fang', 'desktop'))
+
+  // 全新环境：Windows 且有 D: → 默认主文件夹 D:\ToFuture；否则保持旧布局
+  const freshHome = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fang-fresh-')), '.dsh')
+  const fresh = resolveFangLayout({ env: { DSH_HOME: freshHome, DSH_PROFILE: 'desktop' }, argv: [] })
+  const expected = process.platform === 'win32' && fs.existsSync('D:\\') ? path.resolve('D:\\ToFuture') : ''
+  assert.equal(fresh.fangHome, expected)
+  if (expected) {
+    assert.equal(fresh.dataDir, path.join(expected, 'mirror', 'desktop'))
+    assert.equal(fresh.essenceRoot, path.join(expected, 'essence'))
+  } else {
+    assert.equal(fresh.dataDir, path.join(freshHome, 'fang', 'desktop'))
+  }
 })

@@ -7,6 +7,7 @@
 // Forks: every fork owns its own $DSH_HOME, so the same rule isolates it from the mother.
 import os from 'node:os'
 import path from 'node:path'
+import fs from 'node:fs'
 
 /** `--profile name` > `--profile=name` > $DSH_PROFILE > .../profiles/<name> > 'default' */
 export function detectProfileTag(argv = process.argv, env = process.env) {
@@ -37,10 +38,18 @@ export function resolveProfileDir(profileTag, env = process.env) {
   return path.join(resolveDshHome(env), 'profiles', profileTag)
 }
 
-/** 用户级数据根：$FANG_HOME（默认由安装器设为 D:\fang；未设置时保持旧布局）。 */
+/** 用户级数据根：$FANG_HOME 优先；未设置时新装默认 D:\ToFuture（旧布局有数据则继续用旧布局）。 */
 export function resolveFangHome(env = process.env) {
   const raw = env && env.FANG_HOME
   if (typeof raw === 'string' && raw.trim()) return path.resolve(raw.trim())
+  // 兼容：已有 $DSH_HOME/fang/<tag> 数据的安装不搬家，继续旧布局。
+  try {
+    if (fs.existsSync(path.join(resolveDshHome(env), 'fang'))) return ''
+  } catch { /* ignore */ }
+  // 新装默认主文件夹（Windows：D:\ToFuture；其他平台保持旧布局）。
+  if (process.platform === 'win32') {
+    try { if (fs.existsSync('D:\\')) return 'D:\\ToFuture' } catch { /* ignore */ }
+  }
   return ''
 }
 
