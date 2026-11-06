@@ -28,25 +28,37 @@ function load() {
   const React = { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) }
   const mod = loaded.factory((name) => { assert.equal(name, 'react'); return React })
   const ctx = { slots: { inject: (slot, cb) => cb(), register: () => () => {} } }
-  const dispose = mod.apply(ctx)
-  return { keydown: listeners.get('keydown'), dispose, captured }
+  mod.apply(ctx)
+  return { keydown: listeners.get('keydown'), captured }
 }
 
-test('screenshot shortcut is Ctrl+Shift+X, never Ctrl+X', async () => {
-  const { keydown, captured } = load()
-  assert.equal(typeof keydown, 'function')
-  let prevented = 0
-  const ctrlX = { key: 'x', ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, preventDefault: () => { prevented += 1 }, stopPropagation: () => {} }
-  keydown(ctrlX)
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(prevented, 0, 'Ctrl+X must stay Cut')
-  assert.equal(captured.length, 0, 'Ctrl+X must not capture')
+function editableTarget() {
+  return { closest: (selector) => (selector.includes('textarea') ? {} : null) }
+}
+function plainTarget() {
+  return { closest: () => null }
+}
 
-  const capture = { key: 'X', ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, preventDefault: () => { prevented += 1 }, stopPropagation: () => {} }
-  keydown(capture)
+test('Ctrl+X outside inputs captures; Ctrl+X inside input stays Cut', async () => {
+  const { keydown, captured } = load()
+  let prevented = 0
+  const event = (target, shift) => ({
+    key: 'x', ctrlKey: true, shiftKey: shift, altKey: false, metaKey: false, target,
+    preventDefault: () => { prevented += 1 }, stopPropagation: () => {},
+  })
+  keydown(event(editableTarget(), false))
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(prevented, 0, 'Ctrl+X in an input must stay Cut')
+  assert.equal(captured.length, 0, 'Ctrl+X in an input must not capture')
+
+  keydown(event(plainTarget(), false))
   await new Promise((resolve) => setTimeout(resolve, 10))
   assert.equal(prevented, 1)
   assert.equal(captured.length, 1)
+
+  keydown(event(editableTarget(), true))
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(captured.length, 2, 'Ctrl+Shift+X captures even in an input')
 })
 
 test('screenshot module id matches package and registers composer dock entry', () => {

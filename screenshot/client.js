@@ -17,6 +17,22 @@ window.__ModuleLoader__.load({
         && Boolean(event.metaKey) === SHORTCUT.meta
     }
 
+    /** 输入框/可编辑区域内 Ctrl+X 仍是剪切；区域外才当截图。 */
+    function isEditableTarget(target) {
+      try {
+        return Boolean(target?.closest?.('textarea, input, [contenteditable="true"], [contenteditable=""], [role="textbox"]'))
+      } catch { return false }
+    }
+
+    function matchesPlainCtrlX(event) {
+      return Boolean(event)
+        && String(event.key || '').toLowerCase() === 'x'
+        && event.ctrlKey === true
+        && event.shiftKey === false
+        && event.altKey === false
+        && event.metaKey === false
+    }
+
     function notify(text) {
       try { window.dispatchEvent(new CustomEvent('fang:notice', { detail: text })) } catch { /* ignore */ }
     }
@@ -90,17 +106,19 @@ window.__ModuleLoader__.load({
       return h('button', {
         type: 'button',
         'data-fang-entry': 'screenshot',
-        title: '截图并复制到剪贴板 (Ctrl+Shift+X)',
+        title: '截图并复制到剪贴板 (Ctrl+X 非输入框 / Ctrl+Shift+X 任意位置)',
         onClick: () => void capture(),
         style: {
           height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer',
           border: '1px solid rgba(127,127,127,.35)', background: 'transparent', color: 'inherit', fontSize: 12,
         },
-      }, '截图 ⌘⇧X')
+      }, '截图 Ctrl+X / ⌘⇧X')
     }
 
     function onKeyDown(event) {
-      if (!matchesCaptureShortcut(event)) return
+      const captureShortcut = matchesCaptureShortcut(event)
+        || (matchesPlainCtrlX(event) && !isEditableTarget(event.target))
+      if (!captureShortcut) return
       event.preventDefault()
       event.stopPropagation()
       void capture()

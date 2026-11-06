@@ -76,7 +76,7 @@
   },
   "optionalDependencies": {
     "@twinsearth/dsh-fang-queue-journal": "0.1.2",
-    "@twinsearth/dsh-fang-screenshot": "0.1.3",
+    "@twinsearth/dsh-fang-screenshot": "0.1.4",
     "@twinsearth/dsh-fang-web-entry": "0.1.1"
   }
 }
