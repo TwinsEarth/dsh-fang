@@ -57,14 +57,18 @@ test('S1: 官方 locked 元主只允许派生/复制/下载', () => {
   assert.ok(blocks.some((b) => b.code === 'locked'))
 })
 
-test('S1: 归档元主禁止派生/配置，但允许复制/下载', () => {
+test('S1: 归档元主（冻结）只允许删除，其它动作全部禁用', () => {
   const { actions, blocks } = buildEssenceActions({ locked: false, archived: true })
   assertShape(actions, ESSENCE_ACTION_IDS)
   assert.equal(actions.derive.enabled, false)
   assert.equal(actions.derive.code, 'archived')
   assert.equal(actions.configure.enabled, false)
-  assert.equal(actions.copy.enabled, true)
-  assert.equal(actions.download.enabled, true)
+  assert.equal(actions.copy.enabled, false)
+  assert.equal(actions.download.enabled, false)
+  assert.equal(actions.rename.enabled, false)
+  assert.equal(actions.archive.enabled, false)
+  assert.equal(actions.delete.enabled, true, '冻结后唯一可做的是删除')
+  assert.equal(actions.delete.confirm, 'strong')
   assert.ok(blocks.some((b) => b.code === 'archived'))
 })
 

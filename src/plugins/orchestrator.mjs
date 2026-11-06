@@ -1455,6 +1455,7 @@ export function apply(ctx, config) {
       }
       const meta = essenceManager.getMeta(essenceId)
       if (meta.locked === true) return { ok: false, error: 'locked', essenceId }
+      if (meta.archived === true) return { ok: false, error: 'archived', essenceId }
       const fresh = await essenceManager.ensureFresh(essenceId)
       return {
         ok: true, mode: 'one', essenceId,

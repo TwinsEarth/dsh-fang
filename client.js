@@ -2541,36 +2541,38 @@ window.__ModuleLoader__.load({
             })
             : null,
           essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null,
-          essence.archived !== true
-            ? h('span', { style: { display: 'inline-flex', gap: 4 } },
-              button('打开', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-06',
-                title: '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
-                onClick: () => void app.openEssence(essence.id),
-              }),
-              button('复制', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-07',
-                title: '复制元主配置（overlay + settings，不含凭据）',
-                onClick: () => void app.copyEssence(essence),
-              }),
-              button('归档', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-08',
-                title: essence.actions?.archive?.reason || '归档元主（只改元数据，不删目录）',
-                disabled: essence.actions?.archive?.enabled === false,
-                onClick: () => void app.archiveEssence(essence),
-              }),
-              button('删除', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-09',
-                title: essence.actions?.delete?.reason || '永久删除 essences/<id>（不删会话）',
-                disabled: essence.actions?.delete?.enabled === false,
-                onClick: () => void app.deleteEssence(essence),
-              }),
-              button('下载', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-10',
-                title: '下载元主配置 JSON（不含凭据，>32MB 拒绝）',
-                onClick: () => void app.downloadEssence(essence),
-              }))
-            : null)))
+          essence.archived === true ? h('span', { class: 'chip', title: '已归档（冻结）：只能删除' }, '冻结') : null,
+          h('span', { style: { display: 'inline-flex', gap: 4 } },
+            button('打开', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-06',
+              title: essence.archived === true ? '元主已冻结，不能打开' : '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
+              disabled: essence.archived === true,
+              onClick: () => void app.openEssence(essence.id),
+            }),
+            button('复制', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-07',
+              title: essence.actions?.copy?.reason || '深复制整份沙盒到新文件夹（不含凭据/运行态/备份）',
+              disabled: essence.actions?.copy?.enabled === false,
+              onClick: () => void app.copyEssence(essence),
+            }),
+            button('归档', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-08',
+              title: essence.actions?.archive?.reason || '归档元主（冻结，只改元数据）',
+              disabled: essence.actions?.archive?.enabled === false,
+              onClick: () => void app.archiveEssence(essence),
+            }),
+            button('删除', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-09',
+              title: essence.actions?.delete?.reason || '永久删除 essences/<id>（须先归档；不删会话）',
+              disabled: essence.actions?.delete?.enabled === false,
+              onClick: () => void app.deleteEssence(essence),
+            }),
+            button('下载', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-10',
+              title: essence.actions?.download?.reason || '下载元主整包 JSON（不含凭据）',
+              disabled: essence.actions?.download?.enabled === false,
+              onClick: () => void app.downloadEssence(essence),
+            })))))
 
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,

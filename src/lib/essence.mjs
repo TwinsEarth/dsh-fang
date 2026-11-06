@@ -86,6 +86,11 @@ function asObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
+/** v3.0.9：冻结（archived）的元主只能删除，其它操作一律拒绝。 */
+function assertNotFrozen(meta) {
+  if (meta && meta.archived === true) throw new Error(`essence ${meta.id} is archived/frozen（已冻结，只能删除）`)
+}
+
 /**
  * 原身（顶层）配额检查。
  * @param {string} tier VIP 等级
@@ -671,6 +676,7 @@ export class EssenceManager {
     const root = this.essenceRoot(essenceId)
     const meta = this.readMeta(root)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不支持修改设置）`)
+    assertNotFrozen(meta)
     const overlay = this.loadOverlay(root)
     await mutator(overlay)
     this.saveOverlay(root, overlay)
@@ -701,6 +707,7 @@ export class EssenceManager {
     const root = this.essenceRoot(essenceId)
     const meta = this.readMeta(root)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身等级不可修改）`)
+    assertNotFrozen(meta)
     const next = { ...meta, tier: normalizeTier(tier), updatedAt: this.now() }
     this.writeMeta(root, next)
     return this.getMeta(essenceId)
@@ -714,6 +721,7 @@ export class EssenceManager {
     const root = this.essenceRoot(essenceId)
     const meta = this.readMeta(root)
     if (meta.locked === true) throw new Error(`essence ${essenceId} is locked（官方推荐原身不可重命名）`)
+    assertNotFrozen(meta)
     const next = { ...meta, name: trimmed, updatedAt: this.now() }
     this.writeMeta(root, next)
     return this.getMeta(essenceId)
@@ -760,6 +768,7 @@ export class EssenceManager {
    */
   copy(essenceId, options = {}) {
     const source = this.getMeta(essenceId)
+    assertNotFrozen(source)
     const sourceRoot = this.essenceRoot(essenceId)
     const name = String(options?.name ?? `${source.name} 副本`).trim()
     const created = this.create({
@@ -838,7 +847,7 @@ export class EssenceManager {
   /** v3.0.9 备份：essences/<id>/Backup（固定一份，旧备份覆盖）。 */
   backup(essenceId) {
     const root = this.essenceRoot(essenceId)
-    this.getMeta(essenceId)
+    assertNotFrozen(this.getMeta(essenceId))
     const target = path.join(root, 'Backup')
     if (exists(target)) removeTree(target)
     copyTree(root, target)
@@ -858,6 +867,7 @@ export class EssenceManager {
 
   /** v3.0.9 还原：用 Backup 覆盖当前 overlay/merged/meta（Backup 保留一份）。 */
   restoreBackup(essenceId) {
+    assertNotFrozen(this.getMeta(essenceId))
     const root = this.essenceRoot(essenceId)
     const backupDir = path.join(root, 'Backup')
     if (!exists(backupDir)) throw new Error('backup-missing')
