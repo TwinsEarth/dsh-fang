@@ -1079,6 +1079,15 @@ window.__ModuleLoader__.load({
         collapsed: new Set(['temporary']),
         collapsedTasks: new Set(),
         showTemporary: readPref('fang.panel.showTemporary', true),
+        // 母体会话只读投影：默认只看最近 20 条，可切 50 / 全部（偏好存本机）。
+        sessionWindow: (() => {
+          try {
+            const raw = window?.localStorage?.getItem('fang.panel.sessionWindow')
+            if (raw === 'all') return 'all'
+            const size = Number(raw)
+            return Number.isFinite(size) && size >= 5 ? Math.min(200, Math.floor(size)) : 20
+          } catch { return 20 }
+        })(),
         view: 'console',
         busy: '',
         refreshing: false,
@@ -1238,7 +1247,7 @@ window.__ModuleLoader__.load({
           const [statusRes, tasksRes, sessionsRes, essenceRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
-            api('/fang/api/sessions').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? 1000 : S.sessionWindow}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/essence/list').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
           ])
           if (!alive || seq !== refreshSeq) return
@@ -1304,6 +1313,13 @@ window.__ModuleLoader__.load({
 
       // ── 动作 ────────────────────────────────────────────────────────────
       const isBusy = () => S.busy !== ''
+
+      function setSessionWindow(next) {
+        const normalized = next === 'all' ? 'all' : Math.max(5, Math.min(200, Math.floor(Number(next) || 20)))
+        S.sessionWindow = normalized
+        try { window.localStorage?.setItem('fang.panel.sessionWindow', String(normalized)) } catch { /* ignore */ }
+        void refresh({ manual: true })
+      }
 
       async function deriveTask(payload) {
         if (deriveStore.inflight) return
@@ -1704,6 +1720,7 @@ window.__ModuleLoader__.load({
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
+        setSessionWindow,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2083,12 +2100,14 @@ window.__ModuleLoader__.load({
       const all = S.sessions.items
       const query = S.query.trim().toLowerCase()
       const filtered = query ? all.filter((session) => sessionSearchText(session).includes(query)) : all
-      const groups = groupMotherWorkspaces(filtered, S.aliases)
-      const split = classifyMotherSessions(filtered)
+      // 空会话（无用户消息）不进列表：它们没有任何内容可看。
+      const visible = filtered.filter((session) => session?.empty !== true)
+      const groups = groupMotherWorkspaces(visible, S.aliases)
+      const split = classifyMotherSessions(visible)
       const selected = all.find((session) => String(session.sessionId) === S.selectedSessionId) || null
       const countText = query
-        ? `${filtered.length}/${all.length}`
-        : `${all.length}${S.sessions.total > all.length ? '/' + S.sessions.total : ''}`
+        ? `${visible.length}/${all.length}`
+        : `${visible.length}${S.sessions.total > all.length ? '/' + S.sessions.total : ''}`
       const sessionState = S.sessions.state
 
       const head = h('div', { class: 'panel-head' },
@@ -2129,8 +2148,26 @@ window.__ModuleLoader__.load({
         h('div', { class: 'panel-tools' },
           h('span', null, `进行中 ${split.active.length}`),
           h('span', { class: 'spacer' }),
-          h('span', null, `临时 ${split.temporary.length} · 归档 ${split.archived.length}`),
+          h('span', { class: 'session-window', 'data-zone': 'session-window', style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('span', { class: 'hint' }, '显示'),
+            ...[[20, '20'], [50, '50'], ['all', '全部']].map(([value, label]) => {
+              const on = S.sessionWindow === value
+              return h('button', {
+                type: 'button',
+                'data-window': String(value),
+                'aria-pressed': on ? 'true' : 'false',
+                title: value === 'all' ? '加载宿主返回的全部会话（只读投影）' : `只显示最近 ${label} 条会话`,
+                onClick: () => app.setSessionWindow(value),
+                style: {
+                  height: 22, padding: '0 7px', borderRadius: 6, cursor: 'pointer', fontSize: 11,
+                  border: '1px solid ' + (on ? 'rgba(127,127,127,.55)' : 'transparent'),
+                  background: on ? 'rgba(127,127,127,.16)' : 'transparent',
+                  color: 'inherit',
+                },
+              }, label)
+            })),
           h('span', { class: 'spacer' }),
+          h('span', null, `临时 ${split.temporary.length} · 归档 ${split.archived.length}`),
           h('span', { title: '没有写接口的动作会明确禁用并说明原因，不会假装成功' }, '只读')))
 
       const scroll = h('div', { class: 'panel-scroll', 'data-sk': 'left' })
@@ -2141,7 +2178,7 @@ window.__ModuleLoader__.load({
         scroll.append(emptyBlock('母体会话不可读', failureHint(S.sessions.error), [
           button('重试', { size: 'sm', variant: 'ghost', onClick: () => void app.refresh({ manual: true }) }),
         ]))
-      } else if (filtered.length === 0) {
+      } else if (visible.length === 0) {
         scroll.append(emptyBlock(
           query ? `没有匹配「${clampText(S.query, 20)}」的会话` : '还没有母体会话',
           query ? '搜索标题、会话 ID 或工作区名；Esc 清空搜索。' : '在本机开一个新对话后刷新，它会出现在这里。选择会话是只读元数据，母体会话不会被改写。',
@@ -2151,7 +2188,7 @@ window.__ModuleLoader__.load({
         // 元主工作区的新建/归档/删除/下载是宿主职责：DOM 中不出现这些控件（不是禁用）。
         scroll.append(h('div', { class: 'section-head' },
           h('span', { class: 'section-title', style: { cursor: 'default' } }, '元主'),
-          h('span', { class: 'section-sub' }, `${groups.length} 个工作区`),
+          h('span', { class: 'section-sub' }, `${groups.length} 个工作区 · ${visible.length} 条会话`),
           h('span', { class: 'spacer' }),
           h('span', { class: 'section-hint', title: '工作区 CRUD 属于 DSH 宿主；fang 不复制宿主职责' }, '宿主管理 · 只读')))
 
