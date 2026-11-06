@@ -344,6 +344,22 @@ test('essence manager: captureFromProfile 拒绝把元主目录当母体', () =>
   assert.throws(() => manager.captureFromProfile(path.join(manager.essencesRoot, 'missing'), {}), /no package.json/)
 })
 
+test('essence manager: importBundle 整包往返（含引导/清单）且不覆盖新 meta', () => {
+  const { manager } = makeFixture()
+  const source = manager.create({ name: '源元主', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+  const bundle = manager.downloadBundle(source.id, { full: true })
+  assert.equal(bundle.full, true)
+  assert.ok(bundle.files.some((file) => file.path === 'IMPORT-GUIDE.md'))
+  assert.ok(bundle.files.some((file) => file.path === 'manifest.json'))
+  const imported = manager.importBundle(bundle, { name: '导入元主' })
+  assert.equal(imported.ok, true)
+  assert.notEqual(imported.essence.id, source.id)
+  assert.equal(imported.essence.name, '导入元主')
+  const importedPatch = path.join(manager.essenceRoot(imported.essence.id), 'overlay', 'cordis.patch.yml')
+  assert.equal(fs.existsSync(importedPatch), true, '导入后 overlay 必须存在')
+  assert.equal(manager.getMeta(imported.essence.id).id, imported.essence.id, 'meta.json 不得被旧包覆盖')
+})
+
 test('essence manager: recomputeAll 在镜像指纹变化后批量更新', async () => {
   const { manager, profileDir } = makeFixture()
   const first = manager.create({ name: '原身E' })

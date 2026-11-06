@@ -936,6 +936,8 @@ export class EssenceManager {
     for (const file of files) {
       const rel = String(file?.path ?? '')
       if (!rel || rel.includes('..') || path.isAbsolute(rel)) continue
+      // 包里的 meta.json / Backup 不能覆盖导入后新建的元数据。
+      if (rel === 'meta.json' || rel.startsWith('Backup/') || rel === 'Backup') continue
       const target = path.join(root, rel)
       ensureDir(path.dirname(target))
       fs.writeFileSync(target, Buffer.from(String(file.base64 ?? ''), 'base64'))

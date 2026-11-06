@@ -2040,7 +2040,7 @@ window.__ModuleLoader__.load({
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
-        openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence,
+        openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2558,6 +2558,11 @@ window.__ModuleLoader__.load({
             onClick: () => void app.syncEssences(),
           })
           : null,
+        button('导入', {
+          size: 'sm', variant: 'ghost', dataBtnId: 'E-11',
+          title: '导入元主整包（自己或他人下载的 JSON）：生成新元主文件夹并重算，可直接继续开发',
+          onClick: () => void app.essenceImport(),
+        }),
         button('从母体生成元主', {
           size: 'sm', variant: 'ghost', dataBtnId: 'E-01',
           title: '克隆母体 profile 的可写层（插件补丁/依赖/设置）生成新元主；不复制凭据与会话',
