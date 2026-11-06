@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
 
     function JournalDock() {
       const [entry, setEntry] = React.useState(null)
-      const [notice, setNotice] = React.useState('')
+      const [status, setStatus] = React.useState('')
       React.useEffect(() => {
         let alive = true
         journalRequest('GET').then(async (body) => {
@@ -117,35 +117,36 @@ window.__ModuleLoader__.load({
       if (!entry || (!entry.draft && !(entry.queue || []).length)) return null
       const restore = () => {
         const ok = writeComposer(String(entry.draft || ''))
-        setNotice(ok ? '草稿已放入输入框，请检查后手动发送' : '未找到输入框，请先打开会话')
+        setStatus(ok ? '草稿已放入输入框' : '未找到输入框，请先打开会话')
       }
-      const copyQueue = async () => {
-        const text = (entry.queue || []).map((item, i) => `${i + 1}. ${item.text}`).join('\n')
-        try { await navigator.clipboard.writeText(text); setNotice('队列快照已复制') } catch { setNotice('复制失败') }
+      const clear = async () => {
+        await journalRequest('POST', { draft: '', queue: [] })
+        setEntry(null)
+        setStatus('已清除记录')
       }
+      // 只留两个按钮：标题/字数/队列计数/操作回执全部走 tooltip + 读屏 live region。
       return h('div', {
         'data-fang-entry': 'queue-journal',
         style: {
-          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0',
-          padding: '6px 10px', border: '1px solid rgba(127,127,127,.35)', borderRadius: 10,
+          display: 'inline-flex', alignItems: 'center', gap: 6, margin: '2px 0',
+          padding: '3px 6px', border: '1px solid rgba(127,127,127,.3)', borderRadius: 9,
           fontSize: 12, background: 'rgba(127,127,127,.06)',
         },
       },
-      h('span', { style: { fontWeight: 600 } }, '瓮城：发现上次未发送内容'),
-      entry.draft ? h('span', { style: { opacity: .7 } }, `草稿 ${entry.draft.length} 字`) : null,
-      (entry.queue || []).length ? h('span', { style: { opacity: .7 } }, `排队快照 ${entry.queue.length} 条`) : null,
-      entry.draft ? h('button', { type: 'button', onClick: restore, style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' } }, '恢复草稿') : null,
-      (entry.queue || []).length ? h('button', { type: 'button', onClick: copyQueue, style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' } }, '复制队列快照') : null,
+      entry.draft ? h('button', {
+        type: 'button', title: `恢复上次未发送的草稿（${String(entry.draft).length} 字）`,
+        'aria-label': '恢复草稿', onClick: restore,
+        style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
+      }, '恢复草稿') : null,
       h('button', {
-        type: 'button',
-        onClick: async () => {
-          await journalRequest('POST', { draft: '', queue: [] })
-          setEntry(null)
-          setNotice('已清除记录')
-        },
+        type: 'button', title: '清除本地保存的草稿与排队快照', 'aria-label': '清除草稿',
+        onClick: clear,
         style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
       }, '清除'),
-      notice ? h('span', { role: 'status', style: { opacity: .7 } }, notice) : null)
+      h('span', {
+        role: 'status', 'aria-live': 'polite',
+        style: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' },
+      }, status))
     }
 
     let timer = null
