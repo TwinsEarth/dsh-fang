@@ -9,6 +9,16 @@
 |---|---|---|---|
 | GET | `/fang/api/connection` | — | `{ ok, url, origin, advertisedUrl, tokenized, available }`：`url` 由宿主 `connection.authenticatedUrl()` 生成（带本进程登录 token）；服务缺失时回退裸地址并如实返回 `tokenized:false` |
 
+## 0.1 升级链路（v3.0.9）
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| POST | `/fang/api/mirror/clone-profile` | `{ sourceDir? }` | `{ ok, sourceDir, target, files[], version, backup }`：把本机母体 profile 克隆成镜像基础层（先自动备份；不复制 node_modules/sessions/logs/credentials） |
+| POST | `/fang/api/essence/sync` | `{ essenceId?, concurrency? }` | 无 id：`{ ok, mode:'all', recomputed[], skipped[], conflicted[], failed[], durationMs }`；有 id：`{ ok, mode:'one', recomputed, status }`；locked 400 |
+
+`GET /fang/api/essence/list` 每项新增 `stale`，顶层新增 `mirrorFingerprint` / `staleCount`。
+`GET /fang/api/upgrade/status` 新增 `light:{tone:'green'|'yellow'|'red', reasons:[{code,text}]}` 与 `staleCount/conflicted/failedTasks`。
+
 ## 1. 元主（Essence）
 
 | 方法 | 路径 | 请求 | 响应 |

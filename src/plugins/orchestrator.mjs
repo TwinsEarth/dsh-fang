@@ -1242,13 +1242,19 @@ export function apply(ctx, config) {
     setPreferences: (patch = {}) => preferencesStore.update(patch),
     listEssences: () => {
       const defaultEssence = essenceManager.getDefault()
+      // 元主是否落后于母体镜像：lastMergedFingerprint !== 当前镜像指纹。
+      let mirrorFingerprint = ''
+      try { mirrorFingerprint = String(essenceManager.loadMirror().fingerprint ?? '') } catch { /* mirror 不可读时全部标 stale=false */ }
       const essences = essenceManager.list().map((meta) => {
         const ui = buildEssenceActions({ locked: meta.locked === true, archived: meta.archived === true })
+        const stale = mirrorFingerprint.length > 0 && meta.archived !== true
+          && String(meta.lastMergedFingerprint ?? '') !== mirrorFingerprint
         return {
           ...meta,
           locked: meta.locked === true,
           official: meta.official === true,
           archived: meta.archived === true,
+          stale,
           pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
           actions: ui.actions,
           blocks: ui.blocks,
@@ -1260,6 +1266,8 @@ export function apply(ctx, config) {
         defaultId: defaultEssence.essenceId,
         defaultEssence,
         essences,
+        mirrorFingerprint,
+        staleCount: essences.filter(item => item.stale === true).length,
         capacity: { slots: 7, defaultLimit: 5, used: essences.filter(item => item.archived !== true).length },
       }
     },
@@ -1284,6 +1292,63 @@ export function apply(ctx, config) {
     },
     setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
     downloadEssence: (essenceId) => essenceManager.downloadBundle(essenceId),
+    // v3.0.9 升级链路 2.1：把本机母体 profile（PC 客户端那份）克隆成镜像基础层。
+    cloneMotherProfile: (input = {}) => {
+      const sourceDir = path.resolve(String(input?.sourceDir || templateDir()))
+      const packageFile = path.join(sourceDir, 'package.json')
+      if (!exists(packageFile)) throw new Error('mother profile has no package.json: ' + sourceDir)
+      const activeProfile = path.join(mirrorRoot, 'active', 'profile')
+      const relative = path.relative(path.resolve(mirrorRoot), sourceDir)
+      if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+        throw new Error('clone: source is already inside the mirror')
+      }
+      let backup = null
+      try { backup = mirrorManager.backup({ label: '克隆母体前自动备份' }) } catch { /* 首次克隆没有可备份内容 */ }
+      if (exists(activeProfile)) removeTree(activeProfile)
+      ensureDir(activeProfile)
+      const picked = []
+      for (const rel of ['package.json', 'cordis.patch.yml', 'cordis.yml']) {
+        const from = path.join(sourceDir, rel)
+        if (!exists(from)) continue
+        fs.copyFileSync(from, path.join(activeProfile, rel))
+        picked.push(rel)
+      }
+      const settingsDir = path.join(sourceDir, 'settings')
+      if (exists(settingsDir)) { copyTree(settingsDir, path.join(activeProfile, 'settings')); picked.push('settings/') }
+      let version = ''
+      try { version = String(readJson(packageFile, {})?.version ?? '') } catch { version = '' }
+      const meta = mirrorManager.readMeta()
+      mirrorManager.writeMeta({
+        ...meta,
+        version: version || meta.version || 'unknown',
+        installedAt: nowMs(),
+        lastBackupAt: backup?.createdAt ?? meta.lastBackupAt,
+      })
+      return {
+        ok: true,
+        sourceDir,
+        target: activeProfile,
+        files: picked,
+        version: version || meta.version || 'unknown',
+        backup: backup ? { id: backup.id, bucket: backup.bucket, createdAt: backup.createdAt } : null,
+      }
+    },
+    // v3.0.9 升级链路 3：母体变化后，元主按 overlay 重放到新镜像（配置不动）。
+    syncEssences: async (input = {}) => {
+      const essenceId = String(input?.essenceId ?? '').trim()
+      if (!essenceId) {
+        const out = await essenceManager.recomputeAll({ concurrency: Number(input?.concurrency) || 2 })
+        return { ok: true, mode: 'all', ...out }
+      }
+      const meta = essenceManager.getMeta(essenceId)
+      if (meta.locked === true) return { ok: false, error: 'locked', essenceId }
+      const fresh = await essenceManager.ensureFresh(essenceId)
+      return {
+        ok: true, mode: 'one', essenceId,
+        recomputed: fresh.recomputed === true,
+        status: fresh.meta?.status ?? 'unknown',
+      }
+    },
     backup: (input = {}) => mirrorManager.backup({
       label: input?.label, bucket: input?.bucket === 'restore' ? 'restore' : 'backup',
     }),
@@ -1504,9 +1569,13 @@ export function apply(ctx, config) {
       route('GET', `${prefix}/api/upgrade/status`, (req, res) => {
         let mirror = null
         let essences = []
-        try { mirror = service.status()?.mirror ?? null } catch { /* empty */ }
-        try { essences = service.listEssences?.() ?? [] } catch { /* empty */ }
-        return json(res, 200, buildUpgradeStatus({ version: FANG_VERSION, mirror, essences }))
+        let compat = null
+        try { mirror = mirrorService.status() } catch { /* empty */ }
+        try { essences = mirrorService.listEssences()?.essences ?? [] } catch { /* empty */ }
+        try { compat = readCompatStatus(layout.dataDir) } catch { /* empty */ }
+        let failedTasks = 0
+        try { failedTasks = [...tasks.values()].filter(task => task.status === TASK_STATUS.FAILED).length } catch { /* empty */ }
+        return json(res, 200, buildUpgradeStatus({ version: FANG_VERSION, mirror, essences, compat, tasks: { failed: failedTasks } }))
       })
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
@@ -1632,6 +1701,13 @@ export function apply(ctx, config) {
         const out = mirrorService.setBackupInterval(body?.hours)
         return json(res, out.ok ? 200 : 400, out)
       })
+      // v3.0.9 升级链路 2.1：从本机母体 profile 克隆镜像基础层（先自动备份）。
+      route('POST', `${prefix}/api/mirror/clone-profile`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.cloneMotherProfile(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'clone-failed', detail: String(error?.message ?? error) })
+        }
+      })
       // v3.0.8 镜像偏好：对话框交互超时 15/30/60s（宿主侧持久化）
       route('GET', `${prefix}/api/mirror/preferences`, (req, res) => json(res, 200, mirrorService.getPreferences()))
       route('POST', `${prefix}/api/mirror/preferences/set`, async (req, res) => {
@@ -1658,6 +1734,13 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         try { return json(res, 200, { ok: true, ...mirrorService.captureEssence(body) }) } catch (error) {
           return json(res, 400, { ok: false, error: 'capture-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.9 升级链路 3：把元主 overlay 重放到当前镜像（单个或全部）。
+      route('POST', `${prefix}/api/essence/sync`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...(await mirrorService.syncEssences(body)) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'sync-failed', detail: String(error?.message ?? error) })
         }
       })
       route('POST', `${prefix}/api/essence/rename`, async (req, res) => {

@@ -460,6 +460,60 @@ test('orchestrator: GET /fang/api/connection 返回带进程 token 的地址', a
   }
 })
 
+test('orchestrator: clone-profile → essence stale → sync 全链路', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-upgrade-'))
+  const motherProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-mother-up-'))
+  const previousProfileDir = process.env.DSH_PROFILE_DIR
+  delete process.env.DSH_PROFILE_DIR
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({
+    name: 'desktop', version: '9.9.9', dependencies: {},
+  }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'), '- id: ui-theme\n  config: {}\n', 'utf8')
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      adapterTimeoutMs: 100,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const clone = makeRes()
+    await webServer.find('POST', '/fang/api/mirror/clone-profile').handler(makeReq({}, 'POST'), clone)
+    assert.equal(clone.statusCode, 200)
+    assert.equal(clone.json().ok, true)
+    assert.equal(clone.json().version, '9.9.9')
+    assert.ok(clone.json().files.includes('package.json'))
+    const mirrorProfile = path.join(dataRoot, 'mirror', 'active', 'profile')
+    assert.equal(fs.existsSync(path.join(mirrorProfile, 'cordis.patch.yml')), true)
+
+    const list = makeRes()
+    await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), list)
+    const before = list.json()
+    assert.ok(String(before.mirrorFingerprint).length > 0)
+    const official = before.essences.find((item) => item.id === 'essence-official-dev')
+    assert.equal(official.stale, true, '镜像变化后官方元主必须标记为待同步')
+
+    const sync = makeRes()
+    await webServer.find('POST', '/fang/api/essence/sync').handler(makeReq({}, 'POST'), sync)
+    assert.equal(sync.statusCode, 200)
+    assert.equal(sync.json().ok, true)
+    assert.equal(sync.json().mode, 'all')
+
+    const list2 = makeRes()
+    await webServer.find('GET', '/fang/api/essence/list').handler(makeReq(undefined, 'GET'), list2)
+    assert.equal(list2.json().staleCount, 0, '同步后不应再有 stale 元主')
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(motherProfile, { recursive: true, force: true })
+    if (previousProfileDir === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = previousProfileDir
+  }
+})
+
 test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders v2', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-http2-'))

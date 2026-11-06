@@ -1505,6 +1505,69 @@ window.__ModuleLoader__.load({
         })
       }
 
+      // 升级链路 2.1：克隆母体 profile 到镜像（先自动备份，克隆后元主待同步）。
+      function cloneMotherProfile() {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'info',
+          title: '克隆母体到镜像？',
+          confirm: 'clone-mother',
+          message: '读取本机母体 profile（package.json / cordis.patch.yml / cordis.yml / settings），覆盖镜像 active/profile，并先自动备份当前镜像。\n\n克隆后所有元主会变成「🔼 待同步」——不会自动改它们的配置。',
+          confirmLabel: '克隆母体',
+          onConfirm: async () => {
+            S.busy = 'mirror:clone'
+            const result = await api('/fang/api/mirror/clone-profile', { method: 'POST', body: JSON.stringify({}) })
+            S.busy = ''
+            const body = result.body
+            if (result.status === 200 && body?.ok) {
+              setNotice({
+                tone: 'ok', title: '母体已克隆到镜像',
+                message: `版本 ${body.version} · ${(body.files || []).length} 个文件 → active/profile`,
+                detail: body.backup ? `已自动备份：${body.backup.id}` : '',
+              })
+            } else {
+              const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+              setNotice({ tone: 'bad', title: '克隆母体失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+            }
+            await refresh()
+          },
+        })
+      }
+
+      // 升级链路 3：把元主 overlay 重放到当前镜像（配置不动）。
+      async function syncEssence(essenceId) {
+        if (isBusy()) return
+        S.busy = 'essence:sync:' + essenceId
+        const result = await api('/fang/api/essence/sync', { method: 'POST', body: JSON.stringify({ essenceId }) })
+        S.busy = ''
+        const body = result.body
+        if (result.status === 200 && body?.ok) {
+          setNotice({ tone: body.status === 'ready' ? 'ok' : 'warn', title: '元主已同步', message: `${essenceId} · ${body.status}${body.recomputed ? '（已重新物化）' : '（无需重算）'}` })
+        } else {
+          setNotice({ tone: 'bad', title: '元主同步失败', message: failureHint(body?.error || 'sync-failed'), detail: body?.detail || diagnosticText(result.diagnostic) })
+        }
+        await refresh()
+      }
+
+      async function syncEssences() {
+        if (isBusy()) return
+        S.busy = 'essence:sync:all'
+        const result = await api('/fang/api/essence/sync', { method: 'POST', body: JSON.stringify({}) })
+        S.busy = ''
+        const body = result.body
+        if (result.status === 200 && body?.ok) {
+          setNotice({
+            tone: (body.conflicted || []).length > 0 ? 'warn' : 'ok',
+            title: '元主批量同步完成',
+            message: `重算 ${(body.recomputed || []).length} · 跳过 ${(body.skipped || []).length} · 冲突 ${(body.conflicted || []).length} · 失败 ${(body.failed || []).length}`,
+            detail: (body.failed || []).length ? (body.failed || []).map((item) => `${item.id}: ${item.error}`).join('\n') : '',
+          })
+        } else {
+          setNotice({ tone: 'bad', title: '元主批量同步失败', message: failureHint(body?.error || 'sync-failed'), detail: body?.detail || diagnosticText(result.diagnostic) })
+        }
+        await refresh()
+      }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
@@ -1720,7 +1783,7 @@ window.__ModuleLoader__.load({
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
-        setSessionWindow,
+        cloneMotherProfile, syncEssence, syncEssences, setSessionWindow,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2114,7 +2177,25 @@ window.__ModuleLoader__.load({
         h('div', { class: 'panel-title-row' },
           h('h2', { class: 'panel-title' }, '母体'),
           h('span', { class: 'panel-sub' }, '元主 · 项目 & 会话'),
-          h('span', { class: 'panel-count', title: '已加载 / 宿主返回的会话总数' }, `${countText} 会话`)),
+          h('span', { class: 'panel-count', title: '已加载 / 宿主返回的会话总数' }, `${countText} 会话`),
+          (() => {
+            const stale = Number(S.essenceList?.data?.staleCount) || 0
+            const update = S.mirror?.data?.updateAvailable === true
+            const conflicted = (S.essenceList?.data?.essences || []).filter((item) => item.status === 'conflicted').length
+            const tone2 = (conflicted > 0) ? 'red' : (stale > 0 || update) ? 'yellow' : 'green'
+            const label2 = tone2 === 'red' ? '红灯' : tone2 === 'yellow' ? '黄灯' : '绿灯'
+            const reasons = []
+            if (update) reasons.push('母体有新版本')
+            if (stale > 0) reasons.push(`${stale} 个元主待同步`)
+            if (conflicted > 0) reasons.push(`${conflicted} 个元主冲突`)
+            return h('span', {
+              class: 'chip', 'data-lamp': tone2,
+              title: reasons.length ? reasons.join('；') : '母体 / 元主 / 分身状态正常',
+              style: { display: 'inline-flex', alignItems: 'center', gap: 6 },
+            },
+            h('span', { 'aria-hidden': 'true', style: { width: 8, height: 8, borderRadius: '50%', background: tone2 === 'red' ? '#C8102E' : tone2 === 'yellow' ? '#B45309' : '#17803D' } }),
+            label2)
+          })()),
         (() => {
           const data = S.status.data
           const tone = S.status.state === 'ready' ? 'ok' : data ? 'info' : 'neutral'
@@ -2127,6 +2208,11 @@ window.__ModuleLoader__.load({
                 chip(tone, label, { state: S.status.state === 'ready' ? 'running' : 'unknown' }),
                 data?.version ? h('span', { class: 'hint', style: { fontFamily: 'var(--f-mono)' } }, 'v' + String(data.version).replace(/^v/, '')) : null),
               h('div', { class: 'mother-control-sub' }, '只读访问：不写入、不改写母体会话')),
+            button('克隆母体', {
+              size: 'sm', variant: 'quiet', dataBtnId: 'M-07',
+              title: '把本机母体 profile（package.json / cordis.patch.yml / settings）克隆到镜像 active/，先自动备份；克隆后元主会黄灯待同步',
+              onClick: () => void app.cloneMotherProfile(),
+            }),
             button('打开门户', {
               size: 'sm', variant: 'quiet', icon: icon('globe', 12), dataBtnId: 'M-06',
               title: '在新窗口打开 /fang/panel 独立门户（不关闭母体）',
@@ -2203,10 +2289,18 @@ window.__ModuleLoader__.load({
 
       const essences = Array.isArray(S.essenceList?.data?.essences) ? S.essenceList.data.essences : []
       const defaultEssenceId = String(S.essenceList?.data?.defaultId ?? '')
+      const staleCount = Number(S.essenceList?.data?.staleCount) || 0
       const essenceHead = h('div', { class: 'section-head', 'data-zone': 'essence-head' },
         h('span', { class: 'section-title', style: { cursor: 'default' } }, '元主'),
-        h('span', { class: 'section-sub' }, `${essences.length} 个 · 默认 ${defaultEssenceId ? short(defaultEssenceId, 18) : '—'}`),
+        h('span', { class: 'section-sub' }, `${essences.length} 个 · 默认 ${defaultEssenceId ? short(defaultEssenceId, 18) : '—'}${staleCount > 0 ? ` · ${staleCount} 待同步` : ''}`),
         h('span', { class: 'spacer' }),
+        staleCount > 0
+          ? button('全部同步', {
+            size: 'sm', variant: 'ghost', dataBtnId: 'E-02',
+            title: '把所有待同步元主重放到新母体：只重建底层，用户插件配置与设置保持不变',
+            onClick: () => void app.syncEssences(),
+          })
+          : null,
         button('从母体生成元主', {
           size: 'sm', variant: 'ghost', dataBtnId: 'E-01',
           title: '克隆母体 profile 的可写层（插件补丁/依赖/设置）生成新元主；不复制凭据与会话',
@@ -2222,6 +2316,14 @@ window.__ModuleLoader__.load({
             : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: essence.name || essence.id }),
           essence.id === defaultEssenceId ? h('span', { class: 'chip' }, '默认') : null,
           essence.locked ? h('span', { class: 'chip' }, '锁定') : null,
+          essence.stale ? h('span', { class: 'chip', title: '母体镜像已变化，此元主仍在旧镜像上' }, '🔼 待同步') : null,
+          essence.stale && essence.locked !== true
+            ? button('同步', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-03',
+              title: '重放该元主的插件/设置到新母体（配置不变）',
+              onClick: () => void app.syncEssence(essence.id),
+            })
+            : null,
           essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null)))
 
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
