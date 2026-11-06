@@ -31,7 +31,7 @@
 
 ### 分身（生产盘）
 - 来源元主 `merged/profile` 模板；每次 spawn 重放配置 + 重锁；
-- 组合层禁用 `plugin-manager`/`tool-plugin-manager`/`config-editor`/`ui-settings*`；
+- 组合层只禁用 `tool-plugin-manager`（实测：禁用 `config-editor`/`ui-settings*` 会移除 configForms，导致 locale 与 50 个客户端插件 pending，故回退为安全集合）；
 - `package.json`/`cordis.patch.yml` 只读（`cordis.yml` 保持可写，否则启动 EPERM）；
 - 单会话守卫 + 物理分支（adapter `fork-session`，`activeBranchId` 指针）。
 

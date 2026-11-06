@@ -25,7 +25,7 @@
 ### 3. 分身（生产盘）
 - 派生模板 = 来源元主 `merged/profile`（修复 clean-template 覆盖原身配置的问题）；
 - 每次 spawn 重放配置（package/cordis/settings），再重新加锁；
-- 生产盘硬禁（本版边界）：组合层禁用 `plugin-manager`/`tool-plugin-manager`/`config-editor`/`ui-settings*`（真实 `dump-config` 验证）+ 每次 spawn 重锁 + `package.json`/`cordis.patch.yml` 只读；
+- 生产盘锁定（本版边界，实测修正）：只禁用 `tool-plugin-manager`；**不能禁用 `config-editor`/`ui-settings*`**——它们提供 `configForms`，禁用会让 locale 及之后 50 个客户端插件永久 pending（web boot 失败）。另加每次 spawn 重锁 + `package.json`/`cordis.patch.yml` 只读；配置在每次打开时从源元主重放；
 - 单会话守卫：启动/还原前隔离未登记多余会话（`quarantine-sessions/`），分支登记会话豁免；
 - 物理分支：adapter `fork-session`（分身内 `ctx.sessions.fork`）+ 分支库 `sessionId` + 任务 `activeBranchId`；分身卡「分支」面板（派生/列表/激活/打开分身/复制会话 ID）；
 - 「元主」栏「派生」按钮：选一个现有进行中会话 → 创建分身 + 沙箱 + 整目录复制会话。
