@@ -1,6 +1,6 @@
 {
   "name": "@twinsearth/dsh-fang-screenshot",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": false,
   "type": "module",
   "description": "Screenshot client module for dsh-Fang (Wengcheng): Ctrl+Shift+X captures the screen, copies the image to the clipboard, and never binds Ctrl+X.",

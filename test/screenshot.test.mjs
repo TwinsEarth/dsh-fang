@@ -32,33 +32,22 @@ function load() {
   return { keydown: listeners.get('keydown'), captured }
 }
 
-function editableTarget() {
-  return { closest: (selector) => (selector.includes('textarea') ? {} : null) }
-}
-function plainTarget() {
-  return { closest: () => null }
-}
-
-test('Ctrl+X outside inputs captures; Ctrl+X inside input stays Cut', async () => {
+test('Ctrl+X always captures, including inside the composer', async () => {
   const { keydown, captured } = load()
   let prevented = 0
-  const event = (target, shift) => ({
-    key: 'x', ctrlKey: true, shiftKey: shift, altKey: false, metaKey: false, target,
+  const editable = { closest: (selector) => (selector.includes('textarea') ? {} : null) }
+  const event = (shift) => ({
+    key: 'x', ctrlKey: true, shiftKey: shift, altKey: false, metaKey: false, target: editable,
     preventDefault: () => { prevented += 1 }, stopPropagation: () => {},
   })
-  keydown(event(editableTarget(), false))
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(prevented, 0, 'Ctrl+X in an input must stay Cut')
-  assert.equal(captured.length, 0, 'Ctrl+X in an input must not capture')
-
-  keydown(event(plainTarget(), false))
+  keydown(event(false))
   await new Promise((resolve) => setTimeout(resolve, 10))
   assert.equal(prevented, 1)
   assert.equal(captured.length, 1)
 
-  keydown(event(editableTarget(), true))
+  keydown(event(true))
   await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(captured.length, 2, 'Ctrl+Shift+X captures even in an input')
+  assert.equal(captured.length, 2)
 })
 
 test('screenshot module id matches package and registers composer dock entry', () => {

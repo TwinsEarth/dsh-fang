@@ -106,7 +106,7 @@ window.__ModuleLoader__.load({
       return h('button', {
         type: 'button',
         'data-fang-entry': 'screenshot',
-        title: '截图并复制到剪贴板 (Ctrl+X 非输入框 / Ctrl+Shift+X 任意位置)',
+        title: '截图并复制到剪贴板 (Ctrl+X / Ctrl+Shift+X)',
         onClick: () => void capture(),
         style: {
           height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer',
@@ -116,8 +116,9 @@ window.__ModuleLoader__.load({
     }
 
     function onKeyDown(event) {
-      const captureShortcut = matchesCaptureShortcut(event)
-        || (matchesPlainCtrlX(event) && !isEditableTarget(event.target))
+      // Ctrl+X is the requested screenshot shortcut, including while the composer
+      // has focus. Ctrl+Shift+X remains as an alternative.
+      const captureShortcut = matchesCaptureShortcut(event) || matchesPlainCtrlX(event)
       if (!captureShortcut) return
       event.preventDefault()
       event.stopPropagation()
