@@ -830,6 +830,12 @@ export class EssenceManager {
     const walk = (dir, relative) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (skip.has(entry.name)) continue
+        // full=true：运行态只导出它的会话沙箱（runtime/home/sessions），不含进程/依赖目录。
+        if (full && entry.name === 'runtime') {
+          const sessionsDir = path.join(dir, 'runtime', 'home', 'sessions')
+          if (exists(sessionsDir)) walk(sessionsDir, 'runtime/home/sessions')
+          continue
+        }
         const target = path.join(dir, entry.name)
         const rel = relative ? `${relative}/${entry.name}` : entry.name
         if (entry.isDirectory()) { walk(target, rel); continue }
@@ -841,6 +847,38 @@ export class EssenceManager {
       }
     }
     if (exists(base)) walk(base, '')
+    if (full) {
+      // 迁移引导 + 清单，保证新 PC 拿到包就知道怎么导入。
+      const guide = [
+        '# dsh-Fang 元主导入引导',
+        '',
+        '1. 目标机器安装并启用 dsh-Fang（@local/dsh-fang）。',
+        '2. 打开瓮城面板 → 元主区 → 「导入」→ 选择本 JSON 文件（或 POST /fang/api/essence/import）。',
+        '3. 导入会生成新的 essences/<新id> 并自动重算；凭据不随包迁移，需要重新登录。',
+        '4. 打开前建议先执行「同步」，把该元主重放到目标机器当前的母体镜像。',
+        '',
+        `来源元主：${String(meta?.name ?? '')} (${essenceId})`,
+        `导出时间：${new Date(this.now()).toISOString()}`,
+        '包格式：dsh-fang-essence-bundle v1',
+      ].join('\n')
+      const manifest = JSON.stringify({
+        format: 'dsh-fang-essence-bundle',
+        version: 1,
+        createdAt: this.now(),
+        sourceId: essenceId,
+        name: meta?.name ?? null,
+        tier: meta?.tier ?? null,
+        files: files.length,
+      }, null, 2)
+      const appendText = (name, text) => {
+        const bytes = Buffer.from(text, 'utf8')
+        total += bytes.length
+        if (total > maxBytes) throw new Error('essence bundle too large')
+        files.push({ path: name, base64: bytes.toString('base64') })
+      }
+      appendText('IMPORT-GUIDE.md', guide)
+      appendText('manifest.json', manifest)
+    }
     return { ok: true, essenceId, meta, files, bytes: total, full, createdAt: this.now() }
   }
 

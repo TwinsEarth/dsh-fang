@@ -1734,6 +1734,28 @@ window.__ModuleLoader__.load({
         })
       }
 
+      async function saveBlob(blob, suggestedName) {
+        try {
+          if (typeof window.showSaveFilePicker === 'function') {
+            const handle = await window.showSaveFilePicker({
+              suggestedName,
+              types: [{ description: '元主整包', accept: { 'application/json': ['.json'] } }],
+            })
+            const writable = await handle.createWritable()
+            await writable.write(blob)
+            await writable.close()
+            return { ok: true, mode: 'picker' }
+          }
+        } catch (error) {
+          if (String(error?.name) === 'AbortError') return { ok: false, aborted: true }
+        }
+        const link = h('a', { href: URL.createObjectURL(blob), download: suggestedName })
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        return { ok: true, mode: 'download' }
+      }
+
       async function downloadEssence(essence) {
         try {
           const token = await ensureFangAuthToken()
@@ -1742,11 +1764,16 @@ window.__ModuleLoader__.load({
           })
           if (!res.ok) throw new Error('HTTP ' + res.status)
           const blob = await res.blob()
-          const link = h('a', { href: URL.createObjectURL(blob), download: `essence-${essence.id}.json` })
-          document.body.appendChild(link)
-          link.click()
-          link.remove()
-          setNotice({ tone: 'ok', title: '元主配置已下载', message: `${essence.name || essence.id}（JSON，不含凭据）` })
+          const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+          const name = `essence-${String(essence.name || essence.id).replace(/[\\/:*?"<>|\s]+/g, '-')}-${stamp}.json`
+          const saved = await saveBlob(blob, name)
+          if (saved.aborted) return
+          setNotice({
+            tone: 'ok',
+            title: '元主整包已下载',
+            message: `${name}（${Math.round(blob.size / 1024)} KB）`,
+            detail: saved.mode === 'picker' ? '已保存到你选择的文件夹；包内含 IMPORT-GUIDE.md 与 manifest.json。' : '已保存到下载目录；包内含导入引导与清单。',
+          })
         } catch (error) {
           setNotice({ tone: 'bad', title: '下载元主失败', message: String(error?.message ?? error) })
         }
