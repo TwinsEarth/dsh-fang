@@ -1033,6 +1033,40 @@ export function apply(ctx, config) {
     },
 
     /** 还原存档：用原 home/profile 重新 spawn（新端口 + 新 token），再握手。 */
+    /** 分身配置重置：把来源原身的 merged/profile 重新覆盖到分身 profile（保留 node_modules 与会话）。 */
+    async resetForkConfig(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (!task.essenceId) return { ok: false, error: 'no-source-essence' }
+      const meta = essenceManager.getMeta(task.essenceId)
+      if (!meta || typeof meta.id !== 'string') return { ok: false, error: 'source-essence-missing' }
+      if (meta.archived === true) return { ok: false, error: 'source-essence-archived' }
+      await essenceManager.ensureFresh(task.essenceId)
+      const source = essenceManager.mergedProfileDir(task.essenceId)
+      const target = path.join(task.homeDir, 'profiles', task.profile)
+      if (!exists(target)) return { ok: false, error: 'fork-profile-missing' }
+      const picked = []
+      for (const rel of ['package.json', 'cordis.patch.yml', 'cordis.yml']) {
+        const from = path.join(source, rel)
+        if (!exists(from)) continue
+        fs.copyFileSync(from, path.join(target, rel))
+        picked.push(rel)
+      }
+      const settings = path.join(source, 'settings')
+      if (exists(settings)) {
+        const to = path.join(target, 'settings')
+        if (exists(to)) removeTree(to)
+        copyTree(settings, to)
+        picked.push('settings/')
+      }
+      task.configSyncedAt = nowMs()
+      task.configSyncedFrom = task.essenceId
+      persist()
+      audit('fork-config-reset', { taskId: id, essenceId: task.essenceId, files: picked })
+      return { ok: true, taskId: id, essenceId: task.essenceId, files: picked }
+    },
+
     async restoreTask(taskId) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
@@ -1048,6 +1082,13 @@ export function apply(ctx, config) {
       }
       const f = forker()
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
+      let configReset = null
+      if (task.essenceId) {
+        try { configReset = await service.resetForkConfig(id) } catch (error) {
+          configReset = { ok: false, error: String(error?.message ?? error) }
+        }
+      }
       const started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
@@ -1074,7 +1115,7 @@ export function apply(ctx, config) {
       persist()
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
-      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter }
+      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset }
     },
 
     /** 永久删除存档：reap（杀进程 + 删 home + 删记录）；forker 记录已丢时按 home 兜底清理。 */
@@ -1819,6 +1860,16 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         const out = await service.restoreTask(String(body?.taskId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
+      })
+      // v3.0.9：把分身配置重置回来源原身（分身只生产，不保留插件/设置改动）。
+      route('POST', `${prefix}/api/tasks/reset`, async (req, res) => {
+        const body = await readBody(req)
+        try {
+          const out = await service.resetForkConfig(String(body?.taskId ?? ''))
+          return json(res, out.ok ? 200 : 409, out)
+        } catch (error) {
+          return json(res, 500, { ok: false, error: 'reset-failed', detail: String(error?.message ?? error) })
+        }
       })
       route('POST', `${prefix}/api/tasks/archive/delete`, async (req, res) => {
         const body = await readBody(req)

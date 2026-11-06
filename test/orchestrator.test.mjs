@@ -620,6 +620,39 @@ test('orchestrator: createTask({essenceId}) 用原身 merged 作模板，归档�
   }
 })
 
+test('orchestrator: 分身配置可重置回来源原身（生产数据不动）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-reset-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '重置来源', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+    const out = await svc.createTask({ title: '可重置分身', essenceId: essence.id })
+    assert.equal(out.ok, true)
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    const profileDir = path.join(task.homeDir, 'profiles', task.profile)
+    fs.writeFileSync(path.join(profileDir, 'package.json'), '{"name":"tampered"}', 'utf8')
+    fs.mkdirSync(path.join(task.homeDir, 'sessions', 'ws', 'session-x'), { recursive: true })
+    fs.writeFileSync(path.join(task.homeDir, 'sessions', 'ws', 'session-x', 'session.v4.jsonl.zstd'), 'prod', 'utf8')
+
+    const reset = await svc.resetForkConfig(task.taskId)
+    assert.equal(reset.ok, true)
+    const pkgText = fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8')
+    assert.notEqual(JSON.parse(pkgText).name, 'tampered', '配置必须回到原身版本')
+    assert.equal(fs.existsSync(path.join(task.homeDir, 'sessions', 'ws', 'session-x', 'session.v4.jsonl.zstd')), true, '生产数据不得被重置清掉')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))
