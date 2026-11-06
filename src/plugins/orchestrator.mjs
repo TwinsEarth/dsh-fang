@@ -1344,7 +1344,7 @@ export function apply(ctx, config) {
   const preferencesStore = new PreferencesStore({ mirrorRoot, logger: ctx.logger ?? {} })
   preferencesStore.load()
   const essenceManager = new EssenceManager({
-    essencesRoot: path.join(layout.dataDir, 'essences'),
+    essencesRoot: layout.essenceRoot,
     mirrorRoot,
     logger: ctx.logger ?? {},
   })
@@ -1358,9 +1358,20 @@ export function apply(ctx, config) {
   upgradeCoordinator = new MirrorUpgradeCoordinator({ essence: essenceManager, logger: ctx.logger ?? {} })
   // 元主运行态的 forkId 命名（稳定、可用于 forker 记录与端口池）
   const runtimeForkId = (essenceId) => 'rt-' + String(essenceId).replace(/^essence-/, '').replace(/[^A-Za-z0-9-]/g, '-')
+  // v3.0.9 三区口径：运行态 home 统一在 runtimeRoot（FANG_HOME 下是 sessions/<essenceId>/home）。
+  const runtimeHomeFor = (essenceId) => path.join(layout.runtimeRoot, String(essenceId), 'home')
+  // 路径守卫：任何拼接出来的目标必须落在给定根内（拒绝 .. / 绝对路径逃逸）。
+  const assertInside = (root, target, label) => {
+    const resolvedRoot = path.resolve(String(root))
+    const resolved = path.resolve(String(target))
+    if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
+      throw new Error(`path-escape: ${label} (${resolved} not under ${resolvedRoot})`)
+    }
+    return resolved
+  }
   // v3.0.9 会话配额：数该元主运行态隔离 home 里的会话目录（归档数不再计入——归档目录由实例自管）。
   const countEssenceSessions = (essenceId, meta) => {
-    const home = path.join(layout.dataDir, 'runtime', runtimeForkId(essenceId), 'home', 'sessions')
+    const home = path.join(runtimeHomeFor(essenceId), 'sessions')
     let used = 0
     try {
       for (const workspace of fs.readdirSync(home, { withFileTypes: true })) {
@@ -1444,9 +1455,12 @@ export function apply(ctx, config) {
       if (!row) throw new Error('unknown-session: ' + id)
       if (row.archived === true) throw new Error('archived-session-not-importable: ' + id)
       const workspaceKey = String(row.workspaceKey ?? '')
+      if (!workspaceKey || workspaceKey.includes('..') || workspaceKey.includes('/') || workspaceKey.includes('\\')) {
+        throw new Error('invalid-workspace-key: ' + workspaceKey)
+      }
       const source = path.join(sessionsRoot, workspaceKey, id)
       if (!exists(source)) throw new Error('session-dir-missing: ' + id)
-      const target = path.join(homeDir, 'sessions', workspaceKey, id)
+      const target = assertInside(homeDir, path.join(homeDir, 'sessions', workspaceKey, id), 'session-import')
       ensureDir(path.dirname(target))
       if (exists(target)) removeTree(target)
       copyTree(source, target)
@@ -1514,13 +1528,14 @@ export function apply(ctx, config) {
       const result = essenceManager.copy(essenceId, { name })
       // v3.0.9：沙盒会话（运行态隔离 home 里的 sessions）随副本一起复制，副本可继续开发。
       const candidates = [
-        path.join(layout.dataDir, 'runtime', runtimeForkId(String(essenceId)), 'home', 'sessions'),
+        path.join(runtimeHomeFor(String(essenceId)), 'sessions'),
         path.join(essenceManager.essenceRoot(String(essenceId)), 'runtime', 'home', 'sessions'),
+        path.join(layout.dataDir, 'runtime', runtimeForkId(String(essenceId)), 'home', 'sessions'),
       ]
       const source = candidates.find((dir) => exists(dir))
       let sessionsCopied = 0
       if (source) {
-        const target = path.join(layout.dataDir, 'runtime', runtimeForkId(result.id), 'home', 'sessions')
+        const target = path.join(runtimeHomeFor(result.id), 'sessions')
         try {
           copyTree(source, target)
           const walk = (dir) => {
@@ -1535,7 +1550,7 @@ export function apply(ctx, config) {
         // 工作区索引也随副本走，否则副本里会话会按 workspace key 显示。
         const sourceIndex = path.join(path.dirname(path.dirname(source)), 'storages', 'workspace.json')
         if (exists(sourceIndex)) {
-          const targetIndex = path.join(layout.dataDir, 'runtime', runtimeForkId(result.id), 'home', 'storages', 'workspace.json')
+          const targetIndex = path.join(runtimeHomeFor(result.id), 'storages', 'workspace.json')
           try { ensureDir(path.dirname(targetIndex)); fs.copyFileSync(sourceIndex, targetIndex) } catch { /* ignore */ }
         }
       }
@@ -1559,7 +1574,7 @@ export function apply(ctx, config) {
       if (bundle.full !== true) return bundle
       // 整包迁移还要带走运行态沙盒：会话 + 工作区索引（运行态 home 在原身文件夹之外）。
       const id = String(essenceId)
-      const home = path.join(layout.dataDir, 'runtime', runtimeForkId(id), 'home')
+      const home = runtimeHomeFor(id)
       const addFile = (relative, file) => {
         try {
           const bytes = fs.readFileSync(file)
@@ -1610,12 +1625,18 @@ export function apply(ctx, config) {
         try { fs.symlinkSync(motherModules, link, 'junction') } catch { /* 已存在或权限不足时继续，forker 会再尝试 */ }
       }
       const forkId = runtimeForkId(id)
-      // v3.0.9 隔离：运行态 home 放在原身文件夹之外（essences/<id>/ 只放配置），
-      // 会话/项目/任务文件因此不落在原身目录里。
-      const homeDir = path.join(layout.dataDir, 'runtime', forkId, 'home')
-      const legacyHome = path.join(essenceManager.essenceRoot(id), 'runtime', 'home')
-      if (!exists(homeDir) && exists(legacyHome)) {
-        try { ensureDir(path.dirname(homeDir)); copyTree(legacyHome, homeDir) } catch { /* 迁移失败不阻塞 */ }
+      // v3.0.9 三区：运行态 home 在 runtimeRoot 下（FANG_HOME 时是 sessions/<essenceId>/home），
+      // 原身文件夹只保留配置，项目/会话/任务文件不落原身目录。
+      const homeDir = runtimeHomeFor(id)
+      const legacyHomes = [
+        path.join(layout.dataDir, 'runtime', forkId, 'home'),
+        path.join(essenceManager.essenceRoot(id), 'runtime', 'home'),
+      ]
+      if (!exists(homeDir)) {
+        const legacyHome = legacyHomes.find((dir) => exists(dir))
+        if (legacyHome) {
+          try { ensureDir(path.dirname(homeDir)); copyTree(legacyHome, homeDir) } catch { /* 迁移失败不阻塞 */ }
+        }
       }
       const provisioned = await f.provision({
         forkId, taskTitle: `元主运行时 · ${String(meta.name ?? id)}`,

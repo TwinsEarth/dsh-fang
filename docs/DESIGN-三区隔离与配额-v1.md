@@ -36,18 +36,15 @@ FANG_HOME = D:\ToFuture（新装默认；env FANG_HOME 可覆盖）
 │   ├─ backup/<id>/            自动/手动备份（24h 轮转）
 │   └─ restore/<id>/           手动备份（保留）
 ├─ essence/
-│   ├─ <essenceId>/            原身沙箱（overlay/merged/runtime）
-│   │   ├─ overlay/            patch / package / settings（可写）
-│   │   ├─ merged/profile/     物化 profile（只可由重算写）
-│   │   ├─ runtime/home/       配置态实例的隔离 DSH_HOME
-│   │   └─ Backup/             单份备份
-│   └─ ...
+│   └─ <essenceId>/            原身沙箱（只放配置：overlay/merged/Backup）
+├─ forks/                      分身 home（生产数据，独立于原身）
 └─ sessions/
-    ├─ <essenceId>/            原身会话（进行中；≤10 默认）
-    │   ├─ --workspace-key--/<sessionId>/
-    │   └─ archived/          归档会话（不计配额）
-    └─ ...
+    └─ <essenceId>/home/       原身运行态 DSH_HOME（其 sessions/storages 在这里）
 ```
+
+> 三区已按此实拆（v3.0.9）：`essenceRoot=<FANG_HOME>/essence`、`forkHomesDir=<FANG_HOME>/forks`、
+> `runtimeRoot=<FANG_HOME>/sessions`；旧布局（无 FANG_HOME）保持 `dataDir/essences`、`dataDir/forks`、
+> `dataDir/runtime`，并在启动时把旧运行态 home 迁移到新位置。
 
 | 目录 | 写者 | 读者 |
 |---|---|---|

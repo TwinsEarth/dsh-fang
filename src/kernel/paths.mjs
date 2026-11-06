@@ -74,9 +74,13 @@ export function resolveFangLayout(options = {}) {
   const dataDir = dataRoot
     ? path.resolve(dataRoot)
     : (resolvedFangHome ? path.join(resolvedFangHome, 'mirror', profileTag) : path.join(dshHome, 'fang', profileTag))
+  // 三区分离：母体=mirror/<tag>，原身=essence/，分身=forks/，会话/运行态=sessions/。
+  const essenceRoot = resolvedFangHome ? path.join(resolvedFangHome, 'essence') : path.join(dataDir, 'essences')
   const forkHomesDir = forksRoot
     ? path.resolve(forksRoot)
-    : (resolvedFangHome ? path.join(resolvedFangHome, 'essence') : path.join(dataDir, 'forks'))
+    : (resolvedFangHome ? path.join(resolvedFangHome, 'forks') : path.join(dataDir, 'forks'))
+  const sessionsRoot = resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : ''
+  const runtimeRoot = resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : path.join(dataDir, 'runtime')
   return {
     dataDir,
     profileTag,
@@ -92,8 +96,9 @@ export function resolveFangLayout(options = {}) {
     roundsDir: path.join(dataDir, 'rounds'),
     runDir: path.join(dataDir, 'run'),
     forkHomesDir,
-    essenceRoot: forkHomesDir,
-    sessionsRoot: resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : '',
+    essenceRoot,
+    runtimeRoot,
+    sessionsRoot,
   }
 }
 

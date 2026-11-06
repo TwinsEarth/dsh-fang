@@ -673,7 +673,7 @@ test('orchestrator: 元主进行中会话配额（默认 10，超出拒绝再开
     })
     const mirror = ctx.get(SERVICE.mirror)
     const essence = mirror.createEssence({ name: '配额元主', tier: 'free' })
-    const sessionsHome = path.join(dataRoot, 'runtime', `rt-${essence.id.replace(/^essence-/, '')}`, 'home', 'sessions', '--ws--')
+    const sessionsHome = path.join(dataRoot, 'runtime', essence.id, 'home', 'sessions', '--ws--')
     for (let index = 0; index < 10; index += 1) {
       fs.mkdirSync(path.join(sessionsHome, `session-${String(index).padStart(8, '0')}-0000-4000-8000-000000000000`), { recursive: true })
     }
@@ -747,7 +747,7 @@ test('orchestrator: 复制元主时带走沙盒会话（运行态 sessions）', 
     })
     const mirror = ctx.get(SERVICE.mirror)
     const source = mirror.createEssence({ name: '带会话的源元主' })
-    const srcForkId = `rt-${source.id.replace(/^essence-/, '')}`
+    const srcForkId = source.id
     const srcSessionFile = path.join(dataRoot, 'runtime', srcForkId, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')
     fs.mkdirSync(path.dirname(srcSessionFile), { recursive: true })
     fs.writeFileSync(srcSessionFile, 'conversation', 'utf8')
@@ -755,7 +755,7 @@ test('orchestrator: 复制元主时带走沙盒会话（运行态 sessions）', 
     const copied = mirror.copyEssence(source.id, '带会话的副本')
     assert.notEqual(copied.id, source.id)
     assert.ok(copied.copy.sessionsCopied >= 1, '沙盒会话必须被复制')
-    const dstForkId = `rt-${copied.id.replace(/^essence-/, '')}`
+    const dstForkId = copied.id
     assert.equal(
       fs.existsSync(path.join(dataRoot, 'runtime', dstForkId, 'home', 'sessions', '--ws--', '11111111-1111-4111-8111-111111111111', 'session.v4.jsonl.zstd')),
       true,
@@ -856,6 +856,7 @@ test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档�
       sessions: [
         { sessionId: liveId, workspaceKey, archived: false, title: '进行中会话' },
         { sessionId: archivedId, workspaceKey, archived: true, title: '归档会话' },
+        { sessionId: '33333333-3333-4333-8333-333333333333', workspaceKey: '..', archived: false, title: '越界会话' },
       ],
     }),
   }
@@ -899,6 +900,10 @@ test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档�
     const archived = await call({ essenceId: essence.id, sessionIds: [archivedId] })
     assert.equal(archived.statusCode, 400)
     assert.match(String(archived.json().detail), /archived-session-not-importable/)
+
+    const escaped = await call({ essenceId: essence.id, sessionIds: ['33333333-3333-4333-8333-333333333333'] })
+    assert.equal(escaped.statusCode, 400)
+    assert.match(String(escaped.json().detail), /invalid-workspace-key/)
 
     const tooMany = await call({
       essenceId: essence.id,
