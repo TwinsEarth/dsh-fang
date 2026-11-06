@@ -587,6 +587,39 @@ test('orchestrator: 空白母体与自动同步间隔偏好', async () => {
   }
 })
 
+test('orchestrator: createTask({essenceId}) 用原身 merged 作模板，归档原身拒绝派生', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-essfork-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '分身来源原身', defaultPatchEntries: [{ id: 'p1', name: '@x/p1' }] })
+
+    const out = await svc.createTask({ title: '从原身派生', essenceId: essence.id })
+    assert.equal(out.ok, true)
+    const provision = forker.calls.provision.at(-1)
+    assert.match(String(provision.profileTemplate), /essences[\\/]essence-.*[\\/]merged[\\/]profile$/s)
+
+    const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    assert.equal(task.essenceId, essence.id, '任务必须记录来源原身')
+
+    mirror.archiveEssence(essence.id, true)
+    const archived = await svc.createTask({ title: '冻结原身派生', essenceId: essence.id })
+    assert.equal(archived.ok, false)
+    assert.equal(archived.error, 'essence-archived')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

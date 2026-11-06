@@ -230,6 +230,8 @@ export function apply(ctx, config) {
       adapter: f.adapter ?? { ok: false, error: 'not-handshaked' },
       collaborators: Array.isArray(f.collaborators) ? f.collaborators : [],
       template: f.template ?? '',
+      essenceId: f.essenceId ?? null,
+      sourceEssence: f.sourceEssence ?? null,
     }
   }
 
@@ -447,6 +449,20 @@ export function apply(ctx, config) {
       const profile = `fang-${taskId.replace(/^task_/, '').slice(0, 12)}`
       const homeDir = path.join(layout.forkHomesDir, taskId)
       const template = String(input.template ?? '').trim()
+      // v3.0.9：从原身派生时，模板来源是该原身的 merged/profile（分身只生产，不回写原身）。
+      let sourceEssence = null
+      if (input.essenceId) {
+        const essenceId = String(input.essenceId).trim()
+        const meta = essenceManager.getMeta(essenceId)
+        if (!meta || typeof meta.id !== 'string') return { ok: false, error: 'unknown-essence' }
+        if (meta.archived === true) return { ok: false, error: 'essence-archived' }
+        await essenceManager.ensureFresh(essenceId)
+        const fresh = essenceManager.getMeta(essenceId)
+        sourceEssence = { id: essenceId, name: meta.name, fingerprint: fresh?.lastMergedFingerprint ?? null }
+      }
+      const profileTemplate = sourceEssence
+        ? essenceManager.mergedProfileDir(sourceEssence.id)
+        : (template || templateDir())
       const task = normalizeTask({
         taskId,
         title,
@@ -456,6 +472,8 @@ export function apply(ctx, config) {
         createdAt: nowMs(),
         collaborators: Array.isArray(input.collaborators) ? input.collaborators : [],
         template,
+        essenceId: sourceEssence?.id ?? null,
+        sourceEssence,
         adapter: { ok: false, error: 'handshaking' },
       })
       tasks.set(taskId, task)
@@ -467,7 +485,7 @@ export function apply(ctx, config) {
           taskTitle: title,
           homeDir,
           profile,
-          profileTemplate: template || templateDir(),
+          profileTemplate,
         })
         if (provisioned && provisioned.ok === false) {
           task.status = TASK_STATUS.FAILED
@@ -1773,7 +1791,7 @@ export function apply(ctx, config) {
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
         try {
-          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators })
+          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators, essenceId: body?.essenceId })
           return json(res, out.ok ? 200 : 409, out)
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) })
