@@ -187,6 +187,20 @@ window.__ModuleLoader__.load({
         window.localStorage.setItem(key, value ? '1' : '0')
       } catch { /* 隐私模式：偏好只影响本次会话 */ }
     }
+    function readNumberPref(key, fallback) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return fallback
+        const raw = window.localStorage.getItem(key)
+        const n = Number(raw)
+        return raw !== null && Number.isFinite(n) ? n : fallback
+      } catch { return fallback }
+    }
+    function writeNumberPref(key, value) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return
+        window.localStorage.setItem(key, String(value))
+      } catch { /* 隐私模式 */ }
+    }
 
     // ── 标题降级：绝不把工作区名当会话标题 ────────────────────────────────
     function sessionTitleInfo(session) {
@@ -654,8 +668,14 @@ window.__ModuleLoader__.load({
 .chip--neutral{color:var(--f-text-3);background:var(--f-surface-2);border-color:var(--f-border)}
 
 /* layout */
-.fang-body{display:grid;grid-template-columns:minmax(320px,1fr) minmax(0,1fr);gap:16px;align-items:start;min-height:0;flex:1 1 auto}
-@media (max-width:1100px){.fang-body{grid-template-columns:1fr}}
+.fang-body{position:relative;display:grid;grid-template-columns:minmax(320px,50fr) minmax(0,50fr);gap:16px;align-items:start;min-height:0;flex:1 1 auto}
+.fang-body.is-resizing{cursor:col-resize;user-select:none}
+.fang-body.is-resizing *{user-select:none}
+.fang-split-handle{position:absolute;top:0;bottom:0;left:50%;width:10px;transform:translateX(-50%);cursor:col-resize;z-index:6;border-radius:6px;background:transparent;touch-action:none}
+.fang-split-handle::after{content:"";position:absolute;top:50%;left:50%;width:3px;height:46px;transform:translate(-50%,-50%);border-radius:3px;background:var(--f-border-strong,var(--f-border));opacity:.55;transition:opacity .15s,background .15s}
+.fang-split-handle:hover::after,.fang-split-handle:focus-visible::after,.fang-body.is-resizing .fang-split-handle::after{opacity:1;background:var(--f-blue,#3b82f6)}
+.fang-split-handle:focus-visible{outline:2px solid var(--f-blue,#3b82f6);outline-offset:2px}
+@media (max-width:1100px){.fang-body{grid-template-columns:1fr}.fang-split-handle{display:none}}
 .panel{background:var(--f-surface);border:1px solid var(--f-border);border-radius:var(--f-radius-panel);
   box-shadow:var(--f-shadow-card);display:flex;flex-direction:column;min-height:0;overflow:hidden;
   max-height:calc(100vh - 132px)}
@@ -923,8 +943,8 @@ window.__ModuleLoader__.load({
   .section-title{min-height:34px}
 }
 .btn--sm{min-height:34px}
-.expand-btn{width:34px;height:34px}
-.section-title{min-height:34px}
+.expand-btn{width:34px;height:34px;min-width:34px}
+.section-title{min-height:34px;min-width:34px}
 .fork-actions .btn,.fork-actions .text-action{min-height:34px}
 @media (prefers-reduced-motion:reduce){
   .fang-console *,.fang-console *::before,.fang-console *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
@@ -1078,6 +1098,11 @@ window.__ModuleLoader__.load({
         expanded: new Set(),
         collapsed: new Set(['temporary']),
         collapsedTasks: new Set(),
+        // 主工作区比例：元宝工作区 / 分身工作区，默认 50:50，可拖动中间手柄调整。
+        splitRatio: (() => {
+          const n = readNumberPref('fang.panel.split', 0.5)
+          return Math.min(0.75, Math.max(0.25, Number.isFinite(n) ? n : 0.5))
+        })(),
         showTemporary: readPref('fang.panel.showTemporary', true),
         // 母体会话只读投影：默认只看最近 20 条，可切 50 / 全部（偏好存本机）。
         sessionWindow: (() => {
@@ -3716,9 +3741,63 @@ window.__ModuleLoader__.load({
       for (const node of renderNotices(S, app)) frag.append(node)
 
       if (S.role.value === 'mother') {
-        frag.append(h('div', { class: 'fang-body', 'aria-busy': S.refreshing ? 'true' : undefined },
-          renderMotherPanel(S, app),
-          renderForkPanel(S, app)))
+        const body = h('div', { class: 'fang-body', 'aria-busy': S.refreshing ? 'true' : undefined })
+        body.append(renderMotherPanel(S, app), renderForkPanel(S, app))
+        // 中间拖动手柄：默认 50:50，可拖动/键盘方向键调整，双击恢复 50:50（偏好存本机）。
+        const handle = h('div', {
+          class: 'fang-split-handle',
+          role: 'separator',
+          'aria-orientation': 'vertical',
+          'aria-label': '调整元宝工作区与分身工作区比例',
+          'aria-valuemin': '25',
+          'aria-valuemax': '75',
+          tabindex: '0',
+          title: '拖动调整比例；双击恢复 50:50',
+        })
+        const applyRatio = (ratio, persist = false) => {
+          const clamped = Math.min(0.75, Math.max(0.25, Number.isFinite(ratio) ? ratio : 0.5))
+          S.splitRatio = clamped
+          const left = (clamped * 100).toFixed(2)
+          const right = ((1 - clamped) * 100).toFixed(2)
+          // fr 会先扣除 gap 再按比例分配，避免 50% + gap 溢出。
+          body.style.gridTemplateColumns = `minmax(320px, ${left}fr) minmax(0, ${right}fr)`
+          handle.style.left = left + '%'
+          handle.setAttribute('aria-valuenow', String(Math.round(clamped * 100)))
+          if (persist) writeNumberPref('fang.panel.split', clamped)
+        }
+        applyRatio(S.splitRatio)
+        const onMove = (event) => {
+          const x = event.touches ? event.touches[0]?.clientX : event.clientX
+          if (typeof x !== 'number') return
+          const rect = body.getBoundingClientRect()
+          if (rect.width > 0) applyRatio((x - rect.left) / rect.width)
+        }
+        const stop = () => {
+          body.classList.remove('is-resizing')
+          document.removeEventListener('mousemove', onMove)
+          document.removeEventListener('touchmove', onMove)
+          document.removeEventListener('mouseup', stop)
+          document.removeEventListener('touchend', stop)
+          writeNumberPref('fang.panel.split', S.splitRatio)
+        }
+        const start = (event) => {
+          event.preventDefault()
+          body.classList.add('is-resizing')
+          document.addEventListener('mousemove', onMove)
+          document.addEventListener('touchmove', onMove, { passive: false })
+          document.addEventListener('mouseup', stop, { once: true })
+          document.addEventListener('touchend', stop, { once: true })
+        }
+        handle.addEventListener('mousedown', start)
+        handle.addEventListener('touchstart', start, { passive: false })
+        handle.addEventListener('dblclick', () => applyRatio(0.5, true))
+        handle.addEventListener('keydown', (event) => {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+          event.preventDefault()
+          applyRatio(S.splitRatio + (event.key === 'ArrowLeft' ? -0.02 : 0.02), true)
+        })
+        body.append(handle)
+        frag.append(body)
         frag.append(renderFooter(S, app))
       } else if (S.role.value === 'fork') {
         frag.append(renderHostNotice(S, app))
