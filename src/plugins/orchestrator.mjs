@@ -1823,6 +1823,10 @@ export function apply(ctx, config) {
       const provisioned = await f.provision({
         forkId, taskTitle: `元主运行时 · ${String(meta.name ?? id)}`,
         homeDir, profile: 'essence-runtime', profileTemplate: merged,
+        // 元主运行态必须继承元主的插件/设置；clean template 只用于空白分身，
+        // 否则官方/用户元主打开后看不到本机插件列表（v3.0.10 实测）。
+        cleanTemplate: false,
+        nodeModulesSource: motherModules,
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
       // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
@@ -2243,7 +2247,7 @@ export function apply(ctx, config) {
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
         try {
-          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators, essenceId: body?.essenceId })
+          const out = await service.createTask({ title: body?.title, template: body?.template, collaborators: body?.collaborators, essenceId: body?.essenceId, importSession: body?.importSession, seed: body?.seed })
           return json(res, out.ok ? 200 : 409, out)
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) })
