@@ -5,12 +5,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 export const FORK_LOCKED_ENTRY_IDS = Object.freeze([
-  'plugin-manager',
+  // 只禁用不影响 DSH 客户端服务图的条目。
+  // 禁用 config-editor / ui-settings 会移除 configForms 服务，导致 locale 及之后
+  // 50 个客户端插件永久 pending（实测：web boot 50 entries did not activate）。
   'tool-plugin-manager',
-  'config-editor',
-  'ui-settings',
-  'ui-settings-account',
-  'ui-settings-general',
 ])
 
 // cordis.yml 不加只读：DSH 启动时会打开它做规范化写入，只读会导致 EPERM 启动失败。
@@ -49,6 +47,8 @@ export function applyForkConfigLock(profileDir, options = {}) {
   }
   if (lines.length === 0) return { ok: true, entries: 0 }
   const prefix = text.trim().length === 0 ? '' : (text.endsWith('\n') ? text : text + '\n')
-  fs.writeFileSync(file, `${prefix}# fang: fork is production-only (plugin install / settings disabled)\n${lines.join('\n')}\n`, 'utf8')
+  const comment = text.includes('# fang: fork is production-only')
+    ? '' : '# fang: fork is production-only (plugin install / settings disabled)\n'
+  fs.writeFileSync(file, `${prefix}${comment}${lines.join('\n')}\n`, 'utf8')
   return { ok: true, entries: lines.length / 2 }
 }
