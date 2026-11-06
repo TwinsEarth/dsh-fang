@@ -43,10 +43,13 @@ for (const rel of files) {
   }
 }
 
-// A2：发布包禁用浏览器 client half（dsh.client 必须去掉）；
-// client 入口仍保留给桌面壳（exports["./client"]）。
+// v3.0.10：发布包必须保留 dsh.client —— Web 端「瓮城」主面板由 client half 提供；
+// 桌面壳复用同一 ./client 入口。删掉它会让 npm 安装只剩设置页入口（v3.0.9 事故）。
 const stagedDsh = pkg.dsh && typeof pkg.dsh === 'object' ? { ...pkg.dsh } : {}
-delete stagedDsh.client
+if (stagedDsh.client === undefined) {
+  console.error('FAIL package.json declares no dsh.client; the Web client half cannot load')
+  process.exit(1)
+}
 
 const stagedPkg = {
   ...pkg,

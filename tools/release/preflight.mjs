@@ -22,6 +22,8 @@ add('license: core AGPL text', readText('LICENSE-CORE').includes('GNU AFFERO GEN
 add('license: package.json AGPL', pkg.license === 'AGPL-3.0-or-later', String(pkg.license))
 add('license: SDK MIT text', readText('LICENSE-SDK').includes('MIT License'))
 add('license: commercial + CLA + NOTICE', ['LICENSE-COMMERCIAL', 'CLA.md', 'NOTICE'].every((f) => fs.existsSync(path.join(ROOT, f))))
+// v3.0.10：源码声明必须保留浏览器 client half；发布 staging 曾删掉它导致 Web 面板不加载。
+add('package: dsh.client enabled', pkg.dsh?.client?.platform === 'web', JSON.stringify(pkg.dsh?.client ?? null))
 
 // UI 半是浏览器模块，没有单元测试；至少保证它是一份可解析的 JS（v2.6.2 起纳入门禁）。
 const clientParse = nodeRun(['--check', 'client.js'])

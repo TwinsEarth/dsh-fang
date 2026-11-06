@@ -29,6 +29,7 @@ try {
   add('package: AGPL license', pkg.license === 'AGPL-3.0-or-later', String(pkg.license))
   add('package: LICENSE-CORE shipped', fs.existsSync(path.join(pkgDir, 'LICENSE-CORE')))
   add('package: client half shipped', fs.existsSync(path.join(pkgDir, 'client.js')))
+  add('package: dsh.client enabled', pkg.dsh?.client?.platform === 'web', JSON.stringify(pkg.dsh?.client ?? null))
   add('package: bundle patch shipped', fs.existsSync(path.join(pkgDir, 'cordis.patch.yml')))
   add('package: no dist/node_modules inside', !fs.existsSync(path.join(pkgDir, 'dist')) && !fs.existsSync(path.join(pkgDir, 'node_modules')))
 
