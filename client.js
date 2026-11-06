@@ -117,6 +117,7 @@ window.__ModuleLoader__.load({
       'derive-failed': '派生请求失败。',
       'stop-failed': '分身进程未停止，归档没有生效；任务仍保留。',
       'derived-session-missing': '会话已不在目录中（可能刚被归档），请刷新。',
+      'capture-failed': '从母体生成元主失败：母体 profile 不可读或补丁解析失败（详情见下方）。',
     }
 
     // ── 通用工具 ──────────────────────────────────────────────────────────
@@ -1453,6 +1454,41 @@ window.__ModuleLoader__.load({
         })
       }
 
+      function captureEssence() {
+        if (isBusy()) return
+        const profile = String(S.status?.data?.mother?.profile || 'desktop')
+        askPrompt({
+          title: '从母体生成元主',
+          label: '新元主名称',
+          value: `${profile} 元主`,
+          confirmLabel: '生成',
+          hint: '复制母体 profile 的可写层：插件补丁、依赖与设置；不复制凭据、会话和 node_modules。生成后可在元主区设为默认派生基底。',
+          onConfirm: async (name) => {
+            const trimmed = String(name ?? '').trim()
+            if (!trimmed) { S.modal.error = '请填写元主名称'; render(true); return false }
+            S.busy = 'essence:capture'
+            const result = await api('/fang/api/essence/capture', { method: 'POST', body: JSON.stringify({ name: trimmed }) })
+            S.busy = ''
+            const body = result.body
+            if (result.status === 200 && body?.ok) {
+              const status = String(body.status ?? '')
+              const conflicts = Array.isArray(body.conflicts) ? body.conflicts.length : 0
+              const captured = body.captured ?? {}
+              setNotice({
+                tone: status === 'ready' ? 'ok' : 'warn',
+                title: status === 'ready' ? '元主已生成' : '元主已生成（有冲突）',
+                message: `「${body.meta?.name || trimmed}」· 补丁 ${captured.patchEntries ?? 0} 条 · 依赖 ${captured.dependencies ?? 0} 个 · 设置 ${captured.settings ?? 0} 组 · 捆绑 ${captured.bundles ?? 0} 个`,
+                detail: conflicts > 0 ? `${conflicts} 条合并冲突：元主已物化，但需要人工处理后再用于派生。` : '',
+              })
+            } else {
+              const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+              setNotice({ tone: 'bad', title: '生成元主失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+            }
+            await refresh()
+          },
+        })
+      }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
@@ -1667,7 +1703,7 @@ window.__ModuleLoader__.load({
 
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
-        archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText,
+        archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2129,18 +2165,32 @@ window.__ModuleLoader__.load({
       }
 
       const essences = Array.isArray(S.essenceList?.data?.essences) ? S.essenceList.data.essences : []
-      const essenceList = essences.length
-        ? h('div', { class: 'essence-list', 'data-zone': 'essence-list', style: { display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 8px' } },
-          ...essences.map((essence) => h('div', { class: 'essence-row', 'data-essence-id': essence.id, style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
-            essence.locked
-              ? h('span', { class: 'hint' }, essence.name || essence.id)
-              : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: essence.name || essence.id }),
-            essence.locked ? h('span', { class: 'chip' }, '锁定') : null)))
-        : null
+      const defaultEssenceId = String(S.essenceList?.data?.defaultId ?? '')
+      const essenceHead = h('div', { class: 'section-head', 'data-zone': 'essence-head' },
+        h('span', { class: 'section-title', style: { cursor: 'default' } }, '元主'),
+        h('span', { class: 'section-sub' }, `${essences.length} 个 · 默认 ${defaultEssenceId ? short(defaultEssenceId, 18) : '—'}`),
+        h('span', { class: 'spacer' }),
+        button('从母体生成元主', {
+          size: 'sm', variant: 'ghost', dataBtnId: 'E-01',
+          title: '克隆母体 profile 的可写层（插件补丁/依赖/设置）生成新元主；不复制凭据与会话',
+          onClick: () => void app.captureEssence(),
+        }))
+      const essenceList = h('div', { class: 'essence-list', 'data-zone': 'essence-list', style: { display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 8px' } },
+        essences.length === 0
+          ? h('span', { class: 'hint' }, '还没有自定义元主；点上方「从母体生成元主」克隆当前母体配置。')
+          : null,
+        ...essences.map((essence) => h('div', { class: 'essence-row', 'data-essence-id': essence.id, style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+          essence.locked
+            ? h('span', { class: 'hint' }, essence.name || essence.id)
+            : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: essence.name || essence.id }),
+          essence.id === defaultEssenceId ? h('span', { class: 'chip' }, '默认') : null,
+          essence.locked ? h('span', { class: 'chip' }, '锁定') : null,
+          essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null)))
 
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,
         h('div', { class: 'mother-slots' }, renderSlotStrip(projectCapacity(S.status.data, S.tasks.items))),
+        essenceHead,
         essenceList,
         scroll)
     }

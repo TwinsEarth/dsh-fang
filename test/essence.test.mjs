@@ -289,6 +289,59 @@ test('essence manager: 子原身规则（两级上限、父级删除保护）', 
   assert.deepEqual(manager.remove(parent.id), { removed: true })
 })
 
+test('essence manager: captureFromProfile 克隆母体可写层（patch/依赖/设置），不复制凭据', () => {
+  const { manager, root } = makeFixture()
+  const mother = path.join(root, 'mother-profile')
+  fs.mkdirSync(path.join(mother, 'settings'), { recursive: true })
+  fs.mkdirSync(path.join(mother, 'credentials'), { recursive: true })
+  fs.writeFileSync(path.join(mother, 'cordis.patch.yml'), `- insert:
+    - id: my-plugin
+      name: "@x/my-plugin"
+      config: { a: 1 }
+`, 'utf8')
+  fs.writeFileSync(path.join(mother, 'package.json'), JSON.stringify({
+    name: 'desktop',
+    private: true,
+    dsh: { profile: { bundles: ['@dsh/base', '@dsh/web-app'] } },
+    dependencies: { '@dsh/base': '^1.0.0', 'my-plugin': '^2.0.0' },
+    scripts: { build: 'echo should-not-copy' },
+  }), 'utf8')
+  fs.writeFileSync(path.join(mother, 'settings', 'ui.yaml'), JSON.stringify({ theme: 'dark' }), 'utf8')
+  fs.writeFileSync(path.join(mother, 'credentials', 'mother-secret.json'), '{"leak":true}', 'utf8')
+
+  const out = manager.captureFromProfile(mother, { name: '母体克隆' })
+  assert.equal(out.meta.status, ESSENCE_STATUS.READY)
+  assert.equal(out.captured.patchEntries, 1)
+  assert.equal(out.captured.dependencies, 2)
+  assert.equal(out.captured.bundles, 2)
+  assert.equal(out.captured.settings, 1)
+  assert.equal(out.captured.credentialsCopied, false)
+
+  const overlayRoot = path.join(manager.essenceRoot(out.meta.id), 'overlay')
+  const patch = parsePatchEntries(fs.readFileSync(path.join(overlayRoot, 'cordis.patch.yml'), 'utf8'))
+  assert.equal(patch.entries.some(entry => entry.id === 'my-plugin'), true)
+  const pkg = JSON.parse(fs.readFileSync(path.join(overlayRoot, 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dependencies, { '@dsh/base': '^1.0.0', 'my-plugin': '^2.0.0' })
+  assert.equal(pkg.scripts, undefined, 'scripts 不进元主 overlay')
+  assert.equal(Array.isArray(pkg.dsh?.profile?.bundles), true)
+  const settings = JSON.parse(fs.readFileSync(path.join(overlayRoot, 'settings', 'ui.yaml'), 'utf8'))
+  assert.deepEqual(settings, { theme: 'dark' })
+  // 母体凭据既不进 overlay，也不进物化 profile（B8）
+  const overlayCredentials = fs.readdirSync(path.join(overlayRoot, 'credentials'))
+  assert.deepEqual(overlayCredentials, [])
+  assert.equal(fs.existsSync(path.join(manager.mergedProfileDir(out.meta.id), 'credentials')), false)
+})
+
+test('essence manager: captureFromProfile 拒绝把元主目录当母体', () => {
+  const { manager } = makeFixture()
+  const meta = manager.create({ name: '原身G' })
+  assert.throws(
+    () => manager.captureFromProfile(manager.mergedProfileDir(meta.id), { name: '克隆失败' }),
+    /refusing to clone from an essence directory/,
+  )
+  assert.throws(() => manager.captureFromProfile(path.join(manager.essencesRoot, 'missing'), {}), /no package.json/)
+})
+
 test('essence manager: recomputeAll 在镜像指纹变化后批量更新', async () => {
   const { manager, profileDir } = makeFixture()
   const first = manager.create({ name: '原身E' })

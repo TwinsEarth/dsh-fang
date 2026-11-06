@@ -563,6 +563,105 @@ export class EssenceManager {
   }
 
   /**
+   * 从母体 profile 生成元主（v3.0.9）：把母体的**可写层**克隆成新元主的覆盖层。
+   *
+   * 克隆范围（只读母体）：
+   *   * `cordis.patch.yml` → overlay patch entries（插件安装/启用/配置）
+   *   * `package.json` → overlay 的 name/private/type/dsh/dependencies（可关）
+   *   * `settings/*.yaml` → overlay settings（可关）
+   * 绝不复制：credentials、sessions、storages、logs、node_modules（B8 边界）。
+   *
+   * @param {string} profileDir 母体 profile 目录（必须含 package.json）
+   * @param {{name?:string, tier?:string, parentId?:string|null, includeDependencies?:boolean,
+   *   includeSettings?:boolean, defaultPatchEntries?:Array<Record<string,unknown>>, skipQuota?:boolean}} [options]
+   * @returns {{meta:any, captured:Record<string,unknown>, conflicts:Conflict[], status:string}}
+   */
+  captureFromProfile(profileDir, options = {}) {
+    const dir = path.resolve(String(profileDir ?? '').trim())
+    if (dir.length === 0) throw new Error('capture: mother profile dir required')
+    const packageFile = path.join(dir, 'package.json')
+    if (!exists(packageFile)) throw new Error(`capture: mother profile has no package.json: ${dir}`)
+    // 元主自己的物化目录不能当母体（否则是自我叠加）。
+    const relative = path.relative(path.resolve(this.essencesRoot), dir)
+    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+      throw new Error('capture: refusing to clone from an essence directory')
+    }
+    const profilePkg = asObject(readJson(packageFile, {}))
+    const patchText = exists(path.join(dir, 'cordis.patch.yml'))
+      ? fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
+      : ''
+    const parsed = parsePatchEntries(patchText)
+    if (parsed.errors.length > 0) {
+      throw new Error(`capture: mother patch parse failed: ${parsed.errors.join('; ')}`)
+    }
+    const fallbackName = typeof profilePkg.name === 'string' && profilePkg.name.length > 0
+      ? `${profilePkg.name} 元主` : `${path.basename(dir)} 元主`
+    const name = String(options?.name ?? '').trim() || fallbackName
+
+    const created = this.create({
+      name,
+      tier: options?.tier,
+      parentId: options?.parentId ?? null,
+      skipQuota: options?.skipQuota === true,
+    })
+    const root = this.essenceRoot(created.id)
+    const overlay = this.loadOverlay(root)
+    const seedEntries = Array.isArray(options?.defaultPatchEntries)
+      ? options.defaultPatchEntries.map(entry => ({ ...entry })) : []
+    overlay.patchEntries = [...seedEntries, ...parsed.entries, ...overlay.patchEntries]
+    if (options?.includeDependencies !== false) {
+      overlay.packageJson = { ...this.selectProfilePackage(profilePkg), ...overlay.packageJson }
+    }
+    if (options?.includeSettings !== false) {
+      Object.assign(overlay.settings, this.readProfileSettings(dir))
+    }
+    this.saveOverlay(root, overlay)
+    const merge = this.recompute(created.id)
+    const bundles = asObject(profilePkg.dsh).profile?.bundles
+    const captured = {
+      profileDir: dir,
+      profileName: typeof profilePkg.name === 'string' ? profilePkg.name : null,
+      patchEntries: parsed.entries.length,
+      dependencies: Object.keys(asObject(overlay.packageJson.dependencies)).length,
+      bundles: Array.isArray(bundles) ? bundles.length : 0,
+      settings: Object.keys(overlay.settings).length,
+      credentialsCopied: false,
+    }
+    return { meta: this.getMeta(created.id), captured, conflicts: merge.conflicts, status: merge.status }
+  }
+
+  /** 提取可安全复制进元主 overlay 的 profile package.json 字段（不含 scripts/devDeps）。 */
+  selectProfilePackage(profilePkg) {
+    /** @type {Record<string, unknown>} */
+    const picked = {}
+    for (const key of ['name', 'private', 'type']) {
+      if (profilePkg?.[key] !== undefined) picked[key] = profilePkg[key]
+    }
+    const dsh = asObject(profilePkg?.dsh)
+    if (Object.keys(dsh).length > 0) picked.dsh = dsh
+    const deps = asObject(profilePkg?.dependencies)
+    if (Object.keys(deps).length > 0) picked.dependencies = deps
+    return picked
+  }
+
+  /** 读取母体 profile 的 settings/*.yaml（仅为覆盖层，不碰其他目录）。 */
+  readProfileSettings(profileDir) {
+    /** @type {Record<string, unknown>} */
+    const settings = {}
+    const settingsDir = path.join(String(profileDir), 'settings')
+    if (!exists(settingsDir)) return settings
+    for (const file of fs.readdirSync(settingsDir)) {
+      if (!file.endsWith('.yaml') && !file.endsWith('.yml')) continue
+      const text = fs.readFileSync(path.join(settingsDir, file), 'utf8')
+      const name = file.replace(/\.ya?ml$/, '')
+      try { settings[name] = JSON.parse(text) } catch {
+        settings[name] = parseYamlSubset(text).value
+      }
+    }
+    return settings
+  }
+
+  /**
    * 修改覆盖层并重算（mutator 直接改 overlay 对象；save 由 manager 完成）。
    * @param {string} essenceId
    * @param {(overlay: {patchEntries:Array<Record<string,unknown>>, packageJson:Record<string,unknown>, settings:Record<string,unknown>, credentialsPath:string}) => (void|Promise<void>)} mutator

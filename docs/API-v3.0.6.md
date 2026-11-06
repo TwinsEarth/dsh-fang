@@ -15,6 +15,7 @@
 | POST | `/fang/api/essence/copy` | `{ essenceId, name? }` | `{ ok, essence }`（复制 overlay/settings，**不复制 credentials**） |
 | POST | `/fang/api/essence/default` | `{ essenceId }` | `{ ok, default:{essenceId,name} }` |
 | GET | `/fang/api/essence/download?essenceId=` | — | JSON 附件 `{ ok, essenceId, meta, files:[{path,base64}], bytes }`（不含 credentials；>32MB 拒绝） |
+| POST | `/fang/api/essence/capture` | `{ name?, tier?, parentId?, includeDependencies?, includeSettings?, setDefault? }` | `{ ok, meta, captured, conflicts[], status, default }`（v3.0.9：从母体 profile 生成元主；不复制 credentials/sessions/node_modules） |
 
 `essence` 对象新增字段：`locked/official/archived/archivedAt/pluginCount/createdAt/updatedAt`。
 配额：默认 5、物理槽位 7（`capacity` 为契约值，配额执行将在 v3.0.6 后续提交接入）。

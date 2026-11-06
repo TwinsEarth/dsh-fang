@@ -378,6 +378,56 @@ test('orchestrator: promoteTask refuses low grade and non-sandbox routes', skipN
   } finally { await adapter.close() }
 })
 
+test('orchestrator: POST /fang/api/essence/capture 从母体 profile 生成元主', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-capture-'))
+  const motherProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-mother-'))
+  const previousProfileDir = process.env.DSH_PROFILE_DIR
+  delete process.env.DSH_PROFILE_DIR
+  // 母体模板必须“真的装了本 bundle”才会被 templateDir() 选中，否则测试会落到机器上的真实 profile。
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({
+    name: 'desktop',
+    private: true,
+    dsh: { profile: { bundles: ['@dsh/base', '@dsh/web-app'] } },
+    dependencies: { '@dsh/base': '^1.0.0' },
+  }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'),
+    '- insert:\n    - id: my-plugin\n      name: "@x/my-plugin"\n', 'utf8')
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      adapterTimeoutMs: 100,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const handler = webServer.find('POST', '/fang/api/essence/capture').handler
+    const res = makeRes()
+    await handler(makeReq({ name: '克隆元主' }, 'POST'), res)
+    const body = res.json()
+    assert.equal(res.statusCode, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.meta.name, '克隆元主')
+    assert.equal(body.captured.patchEntries, 1)
+    assert.equal(body.captured.bundles, 2)
+    assert.equal(body.captured.credentialsCopied, false)
+    assert.equal(body.status, 'ready')
+    // 未给名字时用 profile 名称兜底，而不是失败
+    const unnamed = makeRes()
+    await handler(makeReq({}, 'POST'), unnamed)
+    assert.equal(unnamed.statusCode, 200)
+    assert.match(String(unnamed.json()?.meta?.name), /元主$/)
+  } finally {
+    cleanup(ctx, dataRoot)
+    fs.rmSync(motherProfile, { recursive: true, force: true })
+    if (previousProfileDir === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = previousProfileDir
+  }
+})
+
 test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders v2', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-http2-'))
@@ -401,7 +451,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
     '/fang/api/essence/list', '/fang/api/auth-token', '/fang/api/tasks/open-url',
     '/fang/api/essence/create', '/fang/api/essence/rename', '/fang/api/essence/archive',
     '/fang/api/essence/delete', '/fang/api/essence/copy', '/fang/api/essence/default',
-    '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
+    '/fang/api/essence/capture', '/fang/api/essence/download', '/fang/api/tasks/rename', '/fang/api/tasks/copy',
     '/fang/api/tasks/download',
   ]) {
     assert.ok(paths.includes(p), `route ${p} must be registered`)

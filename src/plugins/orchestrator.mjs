@@ -1270,6 +1270,18 @@ export function apply(ctx, config) {
     archiveEssence: (essenceId, archived = true) => essenceManager.archive(essenceId, archived === true),
     deleteEssence: (essenceId) => essenceManager.remove(essenceId),
     copyEssence: (essenceId, name) => essenceManager.copy(essenceId, { name }),
+    // v3.0.9 母体 → 元主：克隆母体 profile 的可写层（patch/依赖/设置），不带凭据与会话。
+    captureEssence: (input = {}) => {
+      const result = essenceManager.captureFromProfile(templateDir(), {
+        name: input?.name,
+        tier: input?.tier,
+        parentId: input?.parentId ?? null,
+        includeDependencies: input?.includeDependencies !== false,
+        includeSettings: input?.includeSettings !== false,
+      })
+      const defaultEssence = input?.setDefault === true ? essenceManager.setDefault(result.meta.id) : null
+      return { ...result, default: defaultEssence }
+    },
     setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
     downloadEssence: (essenceId) => essenceManager.downloadBundle(essenceId),
     backup: (input = {}) => mirrorManager.backup({
@@ -1634,6 +1646,13 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         try { return json(res, 200, { ok: true, essence: mirrorService.createEssence(body) }) } catch (error) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // v3.0.9 母体 → 元主：从当前母体 profile 的可写层生成一个可配置元主。
+      route('POST', `${prefix}/api/essence/capture`, async (req, res) => {
+        const body = await readBody(req)
+        try { return json(res, 200, { ok: true, ...mirrorService.captureEssence(body) }) } catch (error) {
+          return json(res, 400, { ok: false, error: 'capture-failed', detail: String(error?.message ?? error) })
         }
       })
       route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
