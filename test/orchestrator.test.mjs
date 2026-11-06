@@ -1005,6 +1005,33 @@ test('orchestrator: 元主栏“派生”= essenceId 模板 + 复制一个现有
   }
 })
 
+test('orchestrator: 启动时加载已有 tasks.json 不触发 scanForkSessions TDZ', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-load-'))
+  const seedTask = {
+    forkId: 'task_seed_loaded', taskId: 'task_seed_loaded', title: '旧任务', profile: 'fang-seed',
+    homeDir: path.join(dataRoot, 'forks', 'task_seed_loaded'), status: 'archived',
+    createdAt: Date.now(), adapter: { ok: false, error: 'archived' },
+  }
+  fs.writeFileSync(path.join(dataRoot, 'tasks.json'), JSON.stringify([seedTask]), 'utf8')
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    assert.doesNotThrow(() => orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: false },
+      authToken: TEST_AUTH_TOKEN,
+    }))
+    const svc = ctx.get(SERVICE.orchestrator)
+    const list = svc.listTasks()
+    assert.equal(list.length, 1)
+    assert.equal(list[0].taskId, 'task_seed_loaded')
+    assert.deepEqual(list[0].sessions, { count: 0, violation: false })
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))

@@ -238,7 +238,6 @@ export function apply(ctx, config) {
       template: f.template ?? '',
       essenceId: f.essenceId ?? null,
       sourceEssence: f.sourceEssence ?? null,
-      sessions: (() => { const list = scanForkSessions(f); return { count: list.length, violation: list.length > 1 } })(),
     }
   }
 
@@ -368,6 +367,8 @@ export function apply(ctx, config) {
       updatedAt: t.updatedAt ?? live?.exitedAt ?? t.createdAt,
       projectBytes: t.projectBytes ?? 0,
       essenceId: t.essenceId ?? null,
+      // 视图层才扫描会话（normalizeTask 在 apply 早期执行，不能引用后声明的 scanForkSessions）。
+      sessions: (() => { const list = scanForkSessions(t); return { count: list.length, violation: list.length > 1 } })(),
       // 来源原身已被删除：分身仍可运行/归档/还原/删除，但不能重新派生。
       essenceDeleted: Boolean(t.essenceId) && (t.essenceDeleted === true || isTombstoned(t.essenceId)),
       // 方案 B：同一分身可挂多个分支会话，但同时只有一个 active。
