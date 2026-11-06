@@ -13,6 +13,22 @@ export const FORK_LOCKED_ENTRY_IDS = Object.freeze([
   'ui-settings-general',
 ])
 
+export const PROFILE_CONFIG_FILES = Object.freeze(['package.json', 'cordis.yml', 'cordis.patch.yml'])
+
+/** 把分身 profile 的配置文件设为只读（防止误写；不防有意绕过）。 */
+export function setProfileConfigReadonly(profileDir, readonly = true) {
+  if (String(process.env.DSH_FANG_FORK_PROFILE_RO ?? '1') === '0') return { ok: true, skipped: true, changed: [] }
+  const changed = []
+  for (const name of PROFILE_CONFIG_FILES) {
+    const file = path.join(String(profileDir), name)
+    try {
+      fs.chmodSync(file, readonly ? 0o444 : 0o644)
+      changed.push(name)
+    } catch { /* 文件不存在/平台不支持则跳过 */ }
+  }
+  return { ok: true, changed }
+}
+
 export function applyForkConfigLock(profileDir, options = {}) {
   if (String(process.env.DSH_FANG_FORK_CONFIG_LOCK ?? '1') === '0') return { ok: true, skipped: true }
   const file = path.join(String(profileDir), 'cordis.patch.yml')

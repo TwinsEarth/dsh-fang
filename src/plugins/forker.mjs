@@ -57,7 +57,7 @@ import {
   z,
 } from '../kernel/index.mjs'
 import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
-import { applyForkConfigLock } from '../lib/fork-config-lock.mjs'
+import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 
 export const name = 'fang-forker'
 export const inject = []
@@ -776,6 +776,8 @@ export function apply(ctx, config) {
     // 生产盘锁定：关闭插件安装 / 设置 UI（派生时写入 profile patch）。
     const configLock = applyForkConfigLock(profileDir)
     if (configLock.ok !== true) warnings.push('fork-config-lock-failed')
+    // 配置文件只读：防误写（DSH_FANG_FORK_PROFILE_RO=0 可关）。
+    const profileReadonly = setProfileConfigReadonly(profileDir, true)
 
     // node_modules junction in the fork profile (always to the mother's module tree).
     let nodeModules = null
@@ -816,7 +818,7 @@ export function apply(ctx, config) {
     records.set(forkId, rec)
     persist()
     audit(AUDIT.FORK_CREATED, { forkId, homeDir, profile, taskTitle: rec.taskTitle, cloned, warnings, template })
-    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, warnings, configLock }
+    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, warnings, configLock, profileReadonly }
   }
 
   // ───────────────────────────── spawn ─────────────────────────────
@@ -894,6 +896,8 @@ export function apply(ctx, config) {
     const templateDirForRec = String(rec.template ?? '').trim()
     if (templateDirForRec && exists(templateDirForRec) && exists(rec.profileDir)) {
       try {
+        // 重放前先解锁，否则复制会因只读失败。
+        setProfileConfigReadonly(rec.profileDir, false)
         cloneProfileConfig(templateDirForRec, rec.profileDir)
         const settingsSrc = path.join(templateDirForRec, 'settings')
         if (exists(settingsSrc)) {
@@ -907,6 +911,7 @@ export function apply(ctx, config) {
       }
     }
     try { rec.configLock = applyForkConfigLock(rec.profileDir) } catch { rec.configLock = { ok: false } }
+    try { rec.profileReadonly = setProfileConfigReadonly(rec.profileDir, true) } catch { rec.profileReadonly = { ok: false } }
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
     // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。

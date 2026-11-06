@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { applyForkConfigLock, FORK_LOCKED_ENTRY_IDS } from '../src/lib/fork-config-lock.mjs'
+import { applyForkConfigLock, FORK_LOCKED_ENTRY_IDS, setProfileConfigReadonly } from '../src/lib/fork-config-lock.mjs'
 
 const tmpProfile = () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-lock-'))
@@ -24,6 +24,18 @@ test('fork-config-lock: 写入禁用条目且幂等', () => {
   const second = applyForkConfigLock(dir)
   assert.equal(second.entries, 0, '第二次不得重复写入')
   assert.equal(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'), text)
+})
+
+test('fork-config-lock: 配置文件只读/可解锁', () => {
+  const dir = tmpProfile()
+  fs.writeFileSync(path.join(dir, 'cordis.yml'), '[]\n', 'utf8')
+  const locked = setProfileConfigReadonly(dir, true)
+  assert.equal(locked.ok, true)
+  assert.ok(locked.changed.includes('package.json') === false, '不存在的文件跳过')
+  assert.ok(locked.changed.includes('cordis.patch.yml'))
+  assert.throws(() => fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), 'x', 'utf8'), '只读后写入必须失败')
+  setProfileConfigReadonly(dir, false)
+  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '[]\n', 'utf8')
 })
 
 test('fork-config-lock: DSH_FANG_FORK_CONFIG_LOCK=0 可关闭', () => {
