@@ -27,6 +27,33 @@ test('fork-config-lock: 写入禁用条目且幂等', () => {
   assert.equal(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'), text)
 })
 
+test('fork-config-lock: JSON {insert} 补丁结构化合并，保持合法 YAML/JSON', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-lock-json-'))
+  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '{"insert":[{"id":"ui-chat"}]}\n', 'utf8')
+  const out = applyForkConfigLock(dir)
+  assert.equal(out.ok, true)
+  assert.equal(out.entries, FORK_LOCKED_ENTRY_IDS.length)
+  const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'))
+  assert.ok(Array.isArray(parsed), '必须变成顶层数组，不能在 JSON object 后追加 YAML')
+  assert.ok(parsed.some((entry) => Array.isArray(entry.insert) && entry.insert.some((inner) => inner.id === 'ui-chat')))
+  assert.ok(parsed.some((entry) => entry.id === FORK_LOCKED_ENTRY_IDS[0] && entry.disabled === true))
+  assert.ok(parsed.some((entry) => entry.id === 'ui-settings-general'))
+  const again = applyForkConfigLock(dir)
+  assert.equal(again.entries, 0, '重复应用不得重复写入')
+})
+
+test('fork-config-lock: essence-runtime 不设只读（元主设置需要原子写 package.json）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-runtime-ro-'))
+  const dir = path.join(root, 'profiles', 'essence-runtime')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}', 'utf8')
+  const out = setProfileConfigReadonly(dir, true)
+  assert.equal(out.runtime, true)
+  assert.equal(out.skipped, true)
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"enabled":true}', 'utf8')
+  assert.equal(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'), '{"enabled":true}')
+})
+
 test('fork-config-lock: 配置文件只读/可解锁', () => {
   const dir = tmpProfile()
   fs.writeFileSync(path.join(dir, 'cordis.yml'), '[]\n', 'utf8')

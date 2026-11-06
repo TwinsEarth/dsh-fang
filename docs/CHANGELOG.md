@@ -4,6 +4,27 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.1.0（2026-11-07）
+
+**主题：元主运行态继承本机插件/设置；修复 essence 派生 JSON 补丁导致的 `spawn-failed`、派生会话丢失、元主设置 EPERM；隔离迁移遗留会话。**
+
+### 修复
+- **元主运行态继承元主配置**：`startEssenceRuntime` 现在传 `cleanTemplate: false` + `nodeModulesSource`，从 essence `merged/profile` 克隆，而不是退回 `base + web-app + fang` 的 clean template。官方/用户元主打开后能看到本机插件与设置。
+- **JSON 形状 profile patch 归一化**：`applyForkConfigLock` 识别 `{ insert: [...] }` 与 JSON 数组，结构化合并锁条目/欢迎说明；不再在 JSON object 后追加 YAML 列表，修复 essence 派生分身启动即退出的 `spawn-failed: exited`。
+- **元主行派生的会话复制**：`POST /fang/api/tasks/create` 透传 `importSession` / `seed`，元主栏选中的会话会真正复制进分身 home。
+- **元主运行态可写**：`setProfileConfigReadonly` 跳过 `essence-runtime`，启用内置插件/修改设置不再 `EPERM rename package.json.<tmp>`；真正的分身仍保持只读。
+- **欢迎说明预置**：clean template 与 fork lock 均写入 `ui-settings-general.welcomeNoticeVersion`，首次运行预览说明可正常保存。
+- **迁移遗留会话隔离**：官方元主运行态 home 中由旧运行态迁移带入的 4 个历史会话与 workspace 索引移入 `quarantine-sessions/`（数据保留），新打开默认不带历史会话；需要时显式「启动并导入」。
+
+### 测试
+- `fork-config-lock`：JSON `{insert}` 结构化合并、`essence-runtime` 不设只读。
+- `orchestrator`：`startEssenceRuntime` 的 provision 必须 `cleanTemplate=false` 且带 `nodeModulesSource`。
+
+### 门禁
+- `preflight --e2e` GREEN：754 pass / 0 fail / 1 skip；e2e 75/75；allow-list routes=84 findings=0。
+- `dist/dsh-fang-3.1.0.tgz`（396,470 B，119 entries）sha256 `a78ab4eb443d8d4f9702ea52322fc13605745c8d1f1e3857a1cc90c8e71a5ac7`。
+- `package-smoke` PASS；`install-drill` GREEN 7/7（干净 profile boot 含 `@twinsearth/dsh-fang/client.js`，version=3.1.0）；`healthz` HEALTHY。
+
 ## v3.0.10（2026-11-07）
 
 **主题：修复 npm 发布包剥离 `dsh.client` 导致 Web「瓮城」主面板不加载；发布门禁补上 client half 物化断言。**

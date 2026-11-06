@@ -11,12 +11,24 @@ export const FORK_LOCKED_ENTRY_IDS = Object.freeze([
   'tool-plugin-manager',
 ])
 
+/** DSH first-run notice needs a durable ui-settings-general config form in every fork profile. */
+const WELCOME_NOTICE_ENTRY = Object.freeze({
+  id: 'ui-settings-general',
+  name: '@deepseek-ai/dsh-client-ui-settings-general',
+  config: Object.freeze({ welcomeNoticeVersion: '2026-09-28.1' }),
+})
+
 // cordis.yml 不加只读：DSH 启动时会打开它做规范化写入，只读会导致 EPERM 启动失败。
 export const PROFILE_CONFIG_FILES = Object.freeze(['package.json', 'cordis.patch.yml'])
 
 /** 把分身 profile 的配置文件设为只读（防止误写；不防有意绕过）。 */
 export function setProfileConfigReadonly(profileDir, readonly = true) {
   if (String(process.env.DSH_FANG_FORK_PROFILE_RO ?? '1') === '0') return { ok: true, skipped: true, changed: [] }
+  // essence-runtime 是元主的配置态实例：DSH 设置/内置插件开关需要原子写 package.json。
+  // 只对真正的分身（生产盘）保持只读；否则点「启用」会 EPERM rename package.json.tmp。
+  if (readonly && path.basename(String(profileDir)) === 'essence-runtime') {
+    return { ok: true, skipped: true, runtime: true, changed: [] }
+  }
   const changed = []
   for (const name of PROFILE_CONFIG_FILES) {
     const file = path.join(String(profileDir), name)
@@ -28,11 +40,54 @@ export function setProfileConfigReadonly(profileDir, readonly = true) {
   return { ok: true, changed }
 }
 
+/**
+ * Essence-derived profiles serialize their patch as a JSON object `{ insert: [...] }`.
+ * Appending YAML lines after that object produces invalid YAML (the v3.0.10 spawn-failed
+ * bug). Return the semantic entry array when the file is JSON, so the lock can be merged
+ * structurally instead.
+ * @param {string} text
+ * @returns {Array<Record<string, unknown>> | null}
+ */
+function jsonPatchEntries(text) {
+  const trimmed = String(text ?? '').trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
+  let value
+  try { value = JSON.parse(trimmed) } catch { return null }
+  if (Array.isArray(value)) return value.length === 0 ? null : value
+  if (value !== null && typeof value === 'object' && Array.isArray(value.insert)) return [value]
+  return null
+}
+
+/** Add the lock rows and the onboarding row without duplicating ids. */
+function withLockRows(entries, ids) {
+  const out = entries.slice()
+  let added = 0
+  for (const id of ids) {
+    if (!out.some((entry) => entry !== null && typeof entry === 'object' && entry.id === id)) {
+      out.push({ id, disabled: true })
+      added += 1
+    }
+  }
+  if (!out.some((entry) => entry !== null && typeof entry === 'object' && entry.id === WELCOME_NOTICE_ENTRY.id)) {
+    out.push({ ...WELCOME_NOTICE_ENTRY, config: { ...WELCOME_NOTICE_ENTRY.config } })
+  }
+  return { entries: out, added }
+}
+
 export function applyForkConfigLock(profileDir, options = {}) {
   if (String(process.env.DSH_FANG_FORK_CONFIG_LOCK ?? '1') === '0') return { ok: true, skipped: true }
   const file = path.join(String(profileDir), 'cordis.patch.yml')
   let text = ''
   try { text = fs.readFileSync(file, 'utf8') } catch { text = '' }
+  const ids = options.ids ?? FORK_LOCKED_ENTRY_IDS
+  // JSON object/array patches are semantic entry lists; merge them structurally. Appending
+  // YAML text after `{ insert: [...] }` would make the whole file unparsable.
+  const jsonEntries = jsonPatchEntries(text)
+  if (jsonEntries !== null) {
+    const merged = withLockRows(jsonEntries, ids)
+    fs.writeFileSync(file, `${JSON.stringify(merged.entries, null, 2)}\n`, 'utf8')
+    return { ok: true, entries: merged.added }
+  }
   // 模板里的 `[]`（空 YAML 数组）必须去掉，否则追加 `- id:` 会变成非法 YAML。
   const kept = text
     .replace(/^\uFEFF/, '')
@@ -40,15 +95,23 @@ export function applyForkConfigLock(profileDir, options = {}) {
     .filter((line) => !/^\s*\[\s*\]\s*(#.*)?$/.test(line))
   text = kept.join('\n')
   const lines = []
-  for (const id of (options.ids ?? FORK_LOCKED_ENTRY_IDS)) {
+  for (const id of ids) {
     const present = new RegExp(`(^|\\n)\\s*-\\s*id:\\s*${id}\\s*$`, 'm').test(text)
     if (present) continue
     lines.push(`- id: ${id}`, '  disabled: true')
+  }
+  if (!new RegExp(`(^|\\n)\\s*-\\s*id:\\s*${WELCOME_NOTICE_ENTRY.id}\\s*$`, 'm').test(text)) {
+    lines.push(
+      `- id: ${WELCOME_NOTICE_ENTRY.id}`,
+      `  name: "${WELCOME_NOTICE_ENTRY.name}"`,
+      '  config:',
+      `    welcomeNoticeVersion: ${WELCOME_NOTICE_ENTRY.config.welcomeNoticeVersion}`,
+    )
   }
   if (lines.length === 0) return { ok: true, entries: 0 }
   const prefix = text.trim().length === 0 ? '' : (text.endsWith('\n') ? text : text + '\n')
   const comment = text.includes('# fang: fork is production-only')
     ? '' : '# fang: fork is production-only (plugin install / settings disabled)\n'
   fs.writeFileSync(file, `${prefix}${comment}${lines.join('\n')}\n`, 'utf8')
-  return { ok: true, entries: lines.length / 2 }
+  return { ok: true, entries: ids.length }
 }
