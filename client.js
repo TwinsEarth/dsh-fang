@@ -1461,7 +1461,24 @@ window.__ModuleLoader__.load({
           try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
         }
         const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
-        notify('bad', `打开分身失败：${code}（不会打开无 token 的裸 URL）`)
+        if (code === 'not-running') {
+          notify('warn', '分身已停止，正在启动…')
+          const restored = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId }) })
+          if (restored.status !== 200 || restored.body?.ok === false) {
+            notify('bad', `启动分身失败：${restored.body?.error || 'restore-failed'}`)
+            return
+          }
+          for (let i = 0; i < 20; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 800))
+            const retry = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+            if (retry.status === 200 && retry.body?.url) {
+              try { window.open(retry.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
+            }
+          }
+          notify('warn', '分身已启动，但 Web URL 尚未就绪；稍后点“打开”再试。')
+          return
+        }
+        notify('bad', `打开分身失败：${code}`)
       }
 
       async function copyText(text, label) {
