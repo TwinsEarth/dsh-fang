@@ -834,6 +834,16 @@ test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档�
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-'))
   const sessionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-src-'))
   const workspaceKey = '--E-GPT--'
+  // 母体工作区索引（供导入合并使用），测试期间把 DSH_HOME 指到临时目录
+  const previousDshHome = process.env.DSH_HOME
+  const dshHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-sess-home-'))
+  fs.mkdirSync(path.join(dshHome, 'storages'), { recursive: true })
+  fs.writeFileSync(path.join(dshHome, 'storages', 'workspace.json'), JSON.stringify({
+    unit: { name: 'workspace', version: 2 },
+    global: { initialized: true, defaultWorkspaceId: 'ws-1', workspaceIds: ['ws-1'], archivedSessionIds: [], pinnedSessionIds: [] },
+    tables: { workspaces: { 'ws-1': { path: 'E:\\GPT', title: 'GPT 工作区', sessionIds: ['11111111-1111-4111-8111-111111111111'] } } },
+  }), 'utf8')
+  process.env.DSH_HOME = dshHome
   const liveId = '11111111-1111-4111-8111-111111111111'
   const archivedId = '22222222-2222-4222-8222-222222222222'
   for (const id of [liveId, archivedId]) {
@@ -879,6 +889,12 @@ test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档�
       false,
       '运行态 home 不得落在原身文件夹内',
     )
+    // 工作区索引合并：分组应显示工作区名，而不是 --E-GPT-- key
+    const importedIndex = JSON.parse(fs.readFileSync(path.join(okBody.sandboxHome, 'storages', 'workspace.json'), 'utf8'))
+    const workspaceRecord = importedIndex.tables.workspaces['ws-1']
+    assert.equal(workspaceRecord.path, 'E:\\GPT')
+    assert.equal(workspaceRecord.title, 'GPT 工作区')
+    assert.ok(workspaceRecord.sessionIds.includes('11111111-1111-4111-8111-111111111111'))
 
     const archived = await call({ essenceId: essence.id, sessionIds: [archivedId] })
     assert.equal(archived.statusCode, 400)
@@ -893,6 +909,9 @@ test('orchestrator: 打开元主运行时导入进行中会话（≤5，归档�
   } finally {
     cleanup(ctx, dataRoot)
     fs.rmSync(sessionsRoot, { recursive: true, force: true })
+    fs.rmSync(dshHome, { recursive: true, force: true })
+    if (previousDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousDshHome
   }
 })
 

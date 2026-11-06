@@ -12,7 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import {
-  z, roleGate, resolveFangLayout, resolveProfileDir,
+  z, roleGate, resolveFangLayout, resolveProfileDir, resolveSessionsLayout,
   SERVICE, AUDIT, TASK_STATUS, FORK_STATUS, FANG_VERSION, ADAPTER_OP,
   exists, ensureDir, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree,
   newId, iso, nowMs, bus, sleep, parseWebUrl, probeWebUrl,
@@ -1376,7 +1376,57 @@ export function apply(ctx, config) {
     return { used, limit, over: used >= limit }
   }
 
-  // 打开元主时导入 1–5 个**进行中**会话（归档会话拒绝导入）。
+  // 把母体的工作区索引按“被导入的会话”过滤后合并进隔离 home，界面上按工作区名分组而不是 key。
+  const mergeWorkspaceIndexFor = (homeDir, importedSessions) => {
+    try {
+      const motherLayout = resolveSessionsLayout()
+      const motherRaw = exists(motherLayout.workspaceFile) ? fs.readFileSync(motherLayout.workspaceFile, 'utf8') : ''
+      const mother = parseWorkspaceIndex(motherRaw)
+      const keys = new Set(importedSessions.map((session) => String(session.workspaceKey)))
+      const ids = new Set(importedSessions.map((session) => String(session.sessionId)))
+      const targetFile = path.join(homeDir, 'storages', 'workspace.json')
+      const existing = exists(targetFile) ? parseWorkspaceIndex(fs.readFileSync(targetFile, 'utf8')) : { workspaces: [], global: { archivedSessionIds: [], pinnedSessionIds: [] } }
+      const byPath = new Map(existing.workspaces.map((workspace) => [workspace.path, workspace]))
+      for (const workspace of mother.workspaces) {
+        if (!keys.has(encodeWorkspaceKey(workspace.path))) continue
+        const previous = byPath.get(workspace.path)
+        const sessionIds = [...new Set([...(previous?.sessionIds ?? []), ...workspace.sessionIds.filter((id) => ids.has(id))])]
+        byPath.set(workspace.path, { ...workspace, sessionIds })
+      }
+      const workspaces = [...byPath.values()]
+      const archivedSessionIds = [...new Set([
+        ...(existing.global?.archivedSessionIds ?? []),
+        ...mother.global.archivedSessionIds.filter((id) => ids.has(id)),
+      ])]
+      const pinnedSessionIds = [...new Set([
+        ...(existing.global?.pinnedSessionIds ?? []),
+        ...mother.global.pinnedSessionIds.filter((id) => ids.has(id)),
+      ])]
+      const tables = {}
+      for (const workspace of workspaces) {
+        tables[workspace.id] = {
+          path: workspace.path, title: workspace.title, sessionIds: workspace.sessionIds,
+          createdAt: workspace.createdAt, updatedAt: workspace.updatedAt,
+        }
+      }
+      ensureDir(path.dirname(targetFile))
+      writeJsonAtomic(targetFile, {
+        unit: { name: 'workspace', version: 2 },
+        global: {
+          initialized: true,
+          defaultWorkspaceId: workspaces[0]?.id ?? null,
+          workspaceIds: workspaces.map((workspace) => workspace.id),
+          archivedSessionIds,
+          pinnedSessionIds,
+        },
+        tables: { workspaces: tables },
+      })
+      return { ok: true, workspaces: workspaces.length }
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) }
+    }
+  }
+
   const importSessionsInto = (homeDir, sessionIds) => {
     const ids = [...new Set((Array.isArray(sessionIds) ? sessionIds : []).map((id) => String(id ?? '').trim()).filter(Boolean))]
     if (ids.length === 0) return []
@@ -1401,6 +1451,11 @@ export function apply(ctx, config) {
       if (exists(target)) removeTree(target)
       copyTree(source, target)
       imported.push({ sessionId: id, title: row.title ?? null, workspaceKey })
+    }
+    // 工作区索引合并：让实例按工作区名分组，而不是显示 --E-GPT-- 这样的 key。
+    const index = mergeWorkspaceIndexFor(homeDir, imported)
+    if (index.ok === false) {
+      try { audit('workspace-index-merge-failed', { homeDir, error: index.error }) } catch { /* ignore */ }
     }
     return imported
   }
@@ -1477,6 +1532,12 @@ export function apply(ctx, config) {
           }
           walk(target)
         } catch { /* 会话复制失败不阻塞配置副本，如实返回 0 */ }
+        // 工作区索引也随副本走，否则副本里会话会按 workspace key 显示。
+        const sourceIndex = path.join(path.dirname(path.dirname(source)), 'storages', 'workspace.json')
+        if (exists(sourceIndex)) {
+          const targetIndex = path.join(layout.dataDir, 'runtime', runtimeForkId(result.id), 'home', 'storages', 'workspace.json')
+          try { ensureDir(path.dirname(targetIndex)); fs.copyFileSync(sourceIndex, targetIndex) } catch { /* ignore */ }
+        }
       }
       return { ...result, copy: { ...(result.copy ?? {}), sessionsCopied } }
     },
@@ -1493,7 +1554,35 @@ export function apply(ctx, config) {
       return { ...result, default: defaultEssence }
     },
     setDefaultEssence: (essenceId) => essenceManager.setDefault(essenceId),
-    downloadEssence: (essenceId, options = {}) => essenceManager.downloadBundle(essenceId, { full: options?.full === true }),
+    downloadEssence: (essenceId, options = {}) => {
+      const bundle = essenceManager.downloadBundle(essenceId, { full: options?.full === true })
+      if (bundle.full !== true) return bundle
+      // 整包迁移还要带走运行态沙盒：会话 + 工作区索引（运行态 home 在原身文件夹之外）。
+      const id = String(essenceId)
+      const home = path.join(layout.dataDir, 'runtime', runtimeForkId(id), 'home')
+      const addFile = (relative, file) => {
+        try {
+          const bytes = fs.readFileSync(file)
+          bundle.files.push({ path: relative, base64: bytes.toString('base64') })
+          bundle.bytes += bytes.length
+        } catch { /* 读失败跳过，不阻塞导出 */ }
+      }
+      const indexFile = path.join(home, 'storages', 'workspace.json')
+      if (exists(indexFile)) addFile('runtime/home/storages/workspace.json', indexFile)
+      const sessionsDir = path.join(home, 'sessions')
+      if (exists(sessionsDir)) {
+        const walk = (dir, rel) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fullPath = path.join(dir, entry.name)
+            const nextRel = rel ? rel + '/' + entry.name : entry.name
+            if (entry.isDirectory()) walk(fullPath, nextRel)
+            else if (entry.isFile()) addFile('runtime/home/sessions/' + nextRel, fullPath)
+          }
+        }
+        walk(sessionsDir, '')
+      }
+      return bundle
+    },
     backupEssence: (essenceId) => essenceManager.backup(essenceId),
     restoreEssence: (essenceId) => essenceManager.restoreBackup(essenceId),
     importEssence: (input = {}) => essenceManager.importBundle(input?.bundle ?? input, {
