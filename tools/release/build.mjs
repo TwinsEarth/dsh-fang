@@ -43,6 +43,11 @@ for (const rel of files) {
   }
 }
 
+// A2：发布包禁用浏览器 client half（dsh.client 必须去掉）；
+// client 入口仍保留给桌面壳（exports["./client"]）。
+const stagedDsh = pkg.dsh && typeof pkg.dsh === 'object' ? { ...pkg.dsh } : {}
+delete stagedDsh.client
+
 const stagedPkg = {
   ...pkg,
   name: PUBLISH_NAME,
@@ -55,6 +60,7 @@ const stagedPkg = {
   bugs: { url: 'https://github.com/TwinsEarth/dsh-fang/issues' },
   engines: { node: '>=22' },
   bin: { fangctl: './tools/fangctl.mjs' },
+  dsh: stagedDsh,
   files: undefined,
   scripts: { test: pkg.scripts?.test ?? 'node --test --test-concurrency=1 "test/*.test.mjs"' },
 }
