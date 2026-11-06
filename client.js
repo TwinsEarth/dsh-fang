@@ -2739,10 +2739,17 @@ window.__ModuleLoader__.load({
     function renderConfirmModal(S, app) {
       const modal = S.modal
       const expected = String(modal.expected || '')
-      const matches = !modal.strong || String(modal.typed || '').trim() === expected
-      const level = modal.strong ? 'strong' : 'once'
       const inputId = 'fang-confirm-input'
       const reasonId = 'fang-confirm-reason'
+      // 输入框是就地改 DOM 的，点击时必须以输入框当前值为准，
+      // 否则首次渲染算出的 matches=false 会把「已输入正确名称」的点击吞掉。
+      const inputValue = () => {
+        if (!modal.strong) return ''
+        const node = app.view.querySelector('#' + inputId)
+        return String(node?.value ?? modal.typed ?? '').trim()
+      }
+      const confirmed = () => !modal.strong || inputValue() === expected
+      const level = modal.strong ? 'strong' : 'once'
       return h('div', { class: 'overlay', 'data-overlay': '1', onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() } },
         h('div', {
           class: 'glass glass--sm', role: 'alertdialog', 'aria-modal': 'true',
@@ -2793,10 +2800,15 @@ window.__ModuleLoader__.load({
             }),
             button(modal.confirmLabel || '确认', {
               size: 'sm', variant: modal.tone === 'info' ? 'info' : 'danger', fk: 'confirm-ok',
-              disabled: !matches,
+              disabled: modal.strong,
               describedBy: modal.strong ? reasonId : undefined,
               onClick: () => {
-                if (!matches) return
+                if (!confirmed()) {
+                  // 名称还没对上：把焦点送回输入框，别让点击静默丢失。
+                  const node = app.view.querySelector('#' + inputId)
+                  if (node) node.focus({ preventScroll: true })
+                  return
+                }
                 const run = modal.onConfirm
                 app.closeModal()
                 void run()
