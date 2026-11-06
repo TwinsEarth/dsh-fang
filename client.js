@@ -1704,6 +1704,16 @@ window.__ModuleLoader__.load({
         })
       }
 
+      async function stopEssenceRuntime(essence) {
+        if (isBusy()) return
+        S.busy = 'essence:stop'
+        const result = await api('/fang/api/essence/runtime', { method: 'POST', body: JSON.stringify({ action: 'stop', essenceId: essence.id }) })
+        S.busy = ''
+        if (result.status === 200 && result.body?.ok) setNotice({ tone: 'ok', title: '运行实例已停止', message: essence.name || essence.id })
+        else setNotice({ tone: 'bad', title: '停止失败', message: failureHint(result.body?.error || 'http-' + result.status), detail: result.body?.detail || '' })
+        await refresh()
+      }
+
       function unfreezeEssence(essence) {
         if (isBusy()) return
         askConfirm({
@@ -2077,7 +2087,7 @@ window.__ModuleLoader__.load({
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
-        essenceBackup, essenceRestore, openEssenceDetail, unfreezeEssence,
+        essenceBackup, essenceRestore, openEssenceDetail, unfreezeEssence, stopEssenceRuntime,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -2637,11 +2647,18 @@ window.__ModuleLoader__.load({
                 title: '解冻（恢复活跃态，可打开/设置/派生）；不还原备份内容',
                 onClick: () => void app.unfreezeEssence(essence),
               })
-              : button('打开', {
+              : button(essence.runtime?.running === true ? '停止' : '打开', {
                 size: 'sm', variant: 'ghost', dataBtnId: 'E-06',
-                title: '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
-                onClick: () => void app.openEssence(essence.id),
+                title: essence.runtime?.running === true
+                  ? '停止该元主的运行实例（端口释放；会话/沙盒文件保留）'
+                  : '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
+                onClick: () => essence.runtime?.running === true ? void app.stopEssenceRuntime(essence) : void app.openEssence(essence.id),
               }),
+            essence.runtime?.running === true && essence.archived !== true ? button('进入', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'E-21',
+              title: '在新标签打开运行中的实例（临时 token，不落盘）',
+              onClick: () => void app.openEssence(essence.id),
+            }) : null,
             essence.archived === true ? null : button('复制', {
               size: 'sm', variant: 'ghost', dataBtnId: 'E-07',
               title: essence.actions?.copy?.reason || '深复制整份沙盒到新文件夹（不含凭据/运行态/备份）',

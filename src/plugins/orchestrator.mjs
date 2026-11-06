@@ -1540,6 +1540,13 @@ export function apply(ctx, config) {
           sessions: sessionQuota,
           // 设计稿字段：quota.sessions = { used, limit, over }
           quota: { sessions: sessionQuota },
+          // 运行态：面板据此把「打开」切换成「停止」。
+          runtime: (() => {
+            try {
+              const live = forker()?.status?.(runtimeForkId(meta.id))
+              return live ? { running: live.running === true, pid: live.pid ?? null, port: live.port ?? null } : { running: false, pid: null, port: null }
+            } catch { return { running: false, pid: null, port: null } }
+          })(),
           pluginCount: (() => { try { return essenceManager.pluginCount(meta.id) } catch { return 0 } })(),
           actions: ui.actions,
           blocks: ui.blocks,

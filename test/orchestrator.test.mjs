@@ -848,6 +848,11 @@ test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归�
     assert.ok(String(lastSpawn.homeDir ?? '').length > 0, 'spawn 必须显式带 homeDir')
     assert.equal(lastSpawn.profile, 'essence-runtime')
     assert.equal(started.sandboxHome, lastSpawn.homeDir)
+    const running = mirror.listEssences().essences.find((item) => item.id === essence.id)
+    assert.equal(running.runtime.running, true, '运行中必须暴露 runtime.running=true（用于显示「停止」）')
+    mirror.stopEssenceRuntime(essence.id)
+    const stopped = mirror.listEssences().essences.find((item) => item.id === essence.id)
+    assert.equal(stopped.runtime.running, false, '停止后运行态必须回到 false（用于显示「打开」）')
   } finally {
     cleanup(ctx, dataRoot)
   }
