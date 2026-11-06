@@ -1796,19 +1796,23 @@ export function apply(ctx, config) {
         }
       })
       // v3.0.9 原身运行态：start / stop（隔离 home 的配置态实例）
-      route('POST', `${prefix}/api/essence/runtime`, async (req, res) => {
-        const body = await readBody(req)
-        const action = String(body?.action ?? 'start')
-        try {
-          if (action === 'stop') return json(res, 200, mirrorService.stopEssenceRuntime(body?.essenceId))
-          return json(res, 200, await mirrorService.startEssenceRuntime(body?.essenceId))
-        } catch (error) {
-          return json(res, 400, { ok: false, error: 'runtime-failed', detail: String(error?.message ?? error) })
-        }
-      })
-      route('GET', `${prefix}/api/essence/runtime`, (req, res) => {
-        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
-        return json(res, 200, mirrorService.essenceRuntimeStatus(query.get('essenceId')))
+      // 注意：DSH webServer 按 path 键路由，GET+POST 必须走 routeMethods 一次注册，
+      // 否则第二次 register 抛出，后面的路由会静默丢失（实测踩过）。
+      routeMethods(`${prefix}/api/essence/runtime`, {
+        GET: (req, res) => {
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          return json(res, 200, mirrorService.essenceRuntimeStatus(query.get('essenceId')))
+        },
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const action = String(body?.action ?? 'start')
+          try {
+            if (action === 'stop') return json(res, 200, mirrorService.stopEssenceRuntime(body?.essenceId))
+            return json(res, 200, await mirrorService.startEssenceRuntime(body?.essenceId))
+          } catch (error) {
+            return json(res, 400, { ok: false, error: 'runtime-failed', detail: String(error?.message ?? error) })
+          }
+        },
       })
       route('POST', `${prefix}/api/essence/rename`, async (req, res) => {
         const body = await readBody(req)
