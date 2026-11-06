@@ -118,8 +118,9 @@ test('paths: profile tag and DSH_HOME resolution precedence', () => {
   assert.ok(layout.bufferDir.includes('buffer'))
   assert.ok(layout.forksFile.endsWith('forks.json'))
 
-  const derived = resolveFangLayout({ env: { DSH_HOME: 'C:\\home', DSH_PROFILE: 'pp' } })
-  assert.ok(derived.dataDir.endsWith(path.join('fang', 'pp')))
+  const derived = resolveFangLayout({ env: { DSH_HOME: 'C:\\home', DSH_PROFILE: 'pp', FANG_HOME: 'C:\\fanghome' } })
+  assert.equal(derived.dataDir, path.resolve('C:\\fanghome\\mirror\\pp'))
+  assert.equal(derived.essenceRoot, path.resolve('C:\\fanghome\\essence'))
 })
 
 test('rounds: begin round snapshots, reset restores the pre-image', () => {
