@@ -13,7 +13,8 @@ export const FORK_LOCKED_ENTRY_IDS = Object.freeze([
   'ui-settings-general',
 ])
 
-export const PROFILE_CONFIG_FILES = Object.freeze(['package.json', 'cordis.yml', 'cordis.patch.yml'])
+// cordis.yml 不加只读：DSH 启动时会打开它做规范化写入，只读会导致 EPERM 启动失败。
+export const PROFILE_CONFIG_FILES = Object.freeze(['package.json', 'cordis.patch.yml'])
 
 /** 把分身 profile 的配置文件设为只读（防止误写；不防有意绕过）。 */
 export function setProfileConfigReadonly(profileDir, readonly = true) {
@@ -34,6 +35,12 @@ export function applyForkConfigLock(profileDir, options = {}) {
   const file = path.join(String(profileDir), 'cordis.patch.yml')
   let text = ''
   try { text = fs.readFileSync(file, 'utf8') } catch { text = '' }
+  // 模板里的 `[]`（空 YAML 数组）必须去掉，否则追加 `- id:` 会变成非法 YAML。
+  const kept = text
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*\[\s*\]\s*(#.*)?$/.test(line))
+  text = kept.join('\n')
   const lines = []
   for (const id of (options.ids ?? FORK_LOCKED_ENTRY_IDS)) {
     const present = new RegExp(`(^|\\n)\\s*-\\s*id:\\s*${id}\\s*$`, 'm').test(text)
@@ -41,7 +48,7 @@ export function applyForkConfigLock(profileDir, options = {}) {
     lines.push(`- id: ${id}`, '  disabled: true')
   }
   if (lines.length === 0) return { ok: true, entries: 0 }
-  const prefix = text.length === 0 ? '' : (text.endsWith('\n') ? text : text + '\n')
+  const prefix = text.trim().length === 0 ? '' : (text.endsWith('\n') ? text : text + '\n')
   fs.writeFileSync(file, `${prefix}# fang: fork is production-only (plugin install / settings disabled)\n${lines.join('\n')}\n`, 'utf8')
   return { ok: true, entries: lines.length / 2 }
 }

@@ -72,6 +72,8 @@ const cp = (from, to) => {
       continue
     }
     fs.mkdirSync(path.dirname(dst), { recursive: true })
+    // 目标可能是分身只读配置文件（0444），复制前先解锁。
+    try { if (fs.existsSync(dst)) fs.chmodSync(dst, 0o644) } catch { /* ignore */ }
     fs.copyFileSync(src, dst)
   }
 }
@@ -159,6 +161,23 @@ if (exists(legacyRuntime)) {
     cp(from, target)
     console.log(`[migrate] 运行态 ${entry.name} -> ${target}`)
   }
+}
+
+// 运行态 home 归口：essence/<id>/runtime/home -> sessions/<id>/home（三区规则）
+try {
+  for (const entry of fs.readdirSync(paths.essence, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const from = path.join(paths.essence, entry.name, 'runtime', 'home')
+    if (!exists(from)) continue
+    const target = path.join(paths.sessions, entry.name, 'home')
+    if (exists(target) && fs.readdirSync(target).length > 0) continue
+    fs.mkdirSync(path.dirname(target), { recursive: true })
+    fs.renameSync(from, target)
+    try { fs.rmSync(path.join(paths.essence, entry.name, 'runtime'), { recursive: true, force: true }) } catch { /* 残留不阻塞 */ }
+    console.log(`[migrate] 运行态归口 ${entry.name} -> ${target}`)
+  }
+} catch (error) {
+  console.warn('[migrate] runtime homes: ' + String(error?.message ?? error))
 }
 
 fs.writeFileSync(path.join(paths.dataDir, 'migrated-to-fang-home.json'), JSON.stringify({
