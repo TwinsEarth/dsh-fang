@@ -23,6 +23,21 @@ window.__ModuleLoader__.load({
     }
 
     function WengchengEntry() {
+      const [backup, setBackup] = React.useState('')
+      const backupMother = async () => {
+        setBackup('备份中…')
+        try {
+          const auth = await fetch('/fang/api/auth-token', { headers: { accept: 'application/json' } }).then((r) => r.json())
+          const res = await fetch('/fang/api/mirror/backup', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-fang-auth': String(auth?.token || '') },
+            body: JSON.stringify({ bucket: 'restore', label: '插件设置备份' }),
+          })
+          setBackup(res.ok ? '已创建母体备份' : `备份失败（${res.status}）`)
+        } catch (error) {
+          setBackup('备份失败：' + String(error?.message ?? error))
+        }
+      }
       return h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
         h('a', {
           href: 'dsh-fang://open',
@@ -33,6 +48,13 @@ window.__ModuleLoader__.load({
             color: 'inherit', fontWeight: 600,
           },
         }, '打开瓮城控制台'),
+        h('button', {
+          type: 'button',
+          'data-fang-entry': 'backup-mother',
+          onClick: backupMother,
+          style: { height: 32, padding: '0 12px', borderRadius: 8, cursor: 'pointer' },
+        }, '备份母体'),
+        backup ? h('span', { role: 'status', style: { opacity: .75, fontSize: 12 } }, backup) : null,
         h('span', { style: { opacity: .7, fontSize: 12 } }, '需要在 PC 安装 dsh-fang 桌面端'))
     }
 
@@ -46,17 +68,14 @@ window.__ModuleLoader__.load({
     }
 
     function FangLaunchPanel() {
-      if (typeof React.useEffect === 'function') {
-        React.useEffect(() => { openPanel() }, [])
-      }
       return h('div', {
         'data-fang-entry': 'launch-panel',
         style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, minHeight: 240, padding: 24 },
       },
       h(GateIcon, { size: 40 }),
-      h('div', { style: { fontSize: 16, fontWeight: 700 } }, '正在打开瓮城桌面…'),
-      h('button', { type: 'button', onClick: openPanel, style: { height: 32, padding: '0 12px', borderRadius: 8, cursor: 'pointer' } }, '打开瓮城桌面'),
-      h('div', { style: { opacity: .65, fontSize: 12 } }, '需要在 PC 安装 dsh-fang 桌面端'))
+      h('div', { style: { fontSize: 16, fontWeight: 700 } }, '瓮城桌面控制台'),
+      h('button', { type: 'button', onClick: openPanel, style: { height: 34, padding: '0 14px', borderRadius: 8, cursor: 'pointer', fontWeight: 600 } }, '打开瓮城桌面'),
+      h('div', { style: { opacity: .65, fontSize: 12 } }, '点击按钮唤起 PC 端 dsh-fang（需要桌面端已安装）'))
     }
 
     return {

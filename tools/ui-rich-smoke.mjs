@@ -126,13 +126,14 @@ const ui = await evalr(`(async () => {
   const paletteOpen = !!q('[data-zone="palette"]');
   mother?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
   const opensAfter = (window.__uiSmoke?.opens || []).length;
+  const portalNotice = (document.body.textContent || '').includes('母体 Web 就是当前 DSH 客户端');
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   const paletteAfterEsc = !!q('[data-zone="palette"]');
   const slots = [...document.querySelectorAll('[data-slot]')].map((el) => ({
     slot: el.getAttribute('data-slot'), enabled: el.getAttribute('data-enabled'), reason: el.getAttribute('data-reason') || '',
   }));
   const header = document.body.textContent || '';
-  return JSON.stringify({ paletteOpen, opensAfter, paletteAfterEsc, slots, header });
+  return JSON.stringify({ paletteOpen, opensAfter, portalNotice, paletteAfterEsc, slots, header });
 })()`)
 const u = JSON.parse(ui)
 const counts = {
@@ -275,7 +276,7 @@ const cases = [
   { id: 'UI-01', ok: counts.mother === 1 && counts.essence === 2 && counts.derived === 1, evidence: `mother=${counts.mother} essence=${counts.essence} derived=${counts.derived}` },
   { id: 'UI-mounted', ok: s.mounted === '1' && !s.mountError, evidence: `mounted=${s.mounted} error=${s.mountError}` },
   { id: 'UI-02', ok: u.paletteOpen, evidence: `palette=${u.paletteOpen}` },
-  { id: 'UI-03', ok: u.opensAfter > 0, evidence: `opens=${u.opensAfter}` },
+  { id: 'UI-03', ok: u.opensAfter > 0 || u.portalNotice === true, evidence: `opens=${u.opensAfter} notice=${u.portalNotice}` },
   { id: 'UI-04', ok: !u.paletteAfterEsc, evidence: `afterEsc=${u.paletteAfterEsc}` },
   { id: 'UI-05', ok: u.slots.length === 7 && u.slots.filter((x) => x.enabled === 'false').every((x) => x.reason), evidence: `slots=${u.slots.length}` },
   { id: 'UI-07-input', ok: ui07Input === true, evidence: `input=${ui07Input}` },

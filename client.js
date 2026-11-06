@@ -435,13 +435,21 @@ window.__ModuleLoader__.load({
       return ''
     }
     function openMotherPortal() {
+      // 母体 Web 是 DSH 客户端本身；/fang/panel 不是已注册路由，直接打开只会白屏。
+      // 只有当前页面本身带着 DSH web token 时，才可能在新标签恢复同一个宿主。
+      const token = new URLSearchParams(location.search).get('token') || ''
       const origin = resolveMotherOrigin()
-      const url = origin ? `${origin}/fang/panel` : '/fang/panel'
+      if (!window.fangShell && token && origin) {
+        try {
+          const win = window.open(`${origin}/?token=${encodeURIComponent(token)}`, '_blank', 'noopener')
+          if (win) return
+        } catch { /* popup blocked */ }
+      }
       try {
-        const win = window.open(url, '_blank', 'noopener')
-        if (win) return
-      } catch { /* 弹窗被拦 → 同页打开 */ }
-      try { window.location.assign(url) } catch { /* ignore */ }
+        window.dispatchEvent(new CustomEvent('fang:notice', {
+          detail: '母体 Web 就是当前 DSH 客户端：请在左侧会话列表/工作区中查看（/fang/panel 不是有效路由）。',
+        }))
+      } catch { /* ignore */ }
     }
 
     // ── DOM 构造器 h()：本文件唯一的视图原语 ──────────────────────────────
@@ -1125,6 +1133,8 @@ window.__ModuleLoader__.load({
         if (alive) render(true)
       }
       const setNotice = (notice) => { S.notice = notice; render() }
+      const onFangNotice = (event) => notify('warn', String(event?.detail || ''))
+      window.addEventListener('fang:notice', onFangNotice)
 
       // 渲染：整棵视图重建 + 焦点/滚动/光标恢复；编辑中挂起后台刷新，避免输入被重建。
       function render(force = false) {
@@ -1647,6 +1657,7 @@ window.__ModuleLoader__.load({
           if (pollTimer) window.clearInterval(pollTimer)
           if (toastTimer) window.clearTimeout(toastTimer)
           if (deriveTicker) window.clearInterval(deriveTicker)
+          window.removeEventListener('fang:notice', onFangNotice)
           unsubscribe()
           root.remove()
         },

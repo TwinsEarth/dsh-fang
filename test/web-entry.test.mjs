@@ -18,8 +18,8 @@ test('web entry links to dsh-fang://open and renders no fang panel', () => {
   assert.match(source, /dsh-fang:\/\/open/)
   assert.match(source, /plugins\.bundle\.config/)
   assert.match(source, /sidebar\.panellist/)
-  assert.equal(source.includes('/fang/api/'), false)
   assert.equal(source.includes('mountPanel'), false)
+  assert.match(source, /备份母体/)
 })
 
 test('client half registers the sidebar entry and the plugin-config entry', () => {
@@ -31,7 +31,11 @@ test('client half registers the sidebar entry and the plugin-config entry', () =
   })
   assert.ok(loaded)
   assert.equal(loaded.id, '@twinsearth/dsh-fang-web-entry')
-  const React = { createElement: (type, props, ...children) => ({ type, props: props || {}, children }), useEffect: (fn) => fn() }
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useEffect: (fn) => fn(),
+    useState: (initial) => [initial, () => {}],
+  }
   const mod = loaded.factory((name) => { assert.equal(name, 'react'); return React })
   const registrations = []
   const ctx = {
@@ -48,7 +52,7 @@ test('client half registers the sidebar entry and the plugin-config entry', () =
   assert.equal(sidebar.options.id, 'fang-sidebar-entry')
   assert.ok(main)
   assert.equal(main.options.key, 'fang-sidebar-entry')
-  assert.equal(JSON.stringify(main.component()).includes('正在打开瓮城桌面'), true)
+  assert.equal(JSON.stringify(main.component()).includes('打开瓮城桌面'), true)
   assert.ok(config)
   assert.equal(config.options.key, '@twinsearth/dsh-fang')
   assert.equal(JSON.stringify(config.component()).includes('打开瓮城控制台'), true)
