@@ -57,7 +57,7 @@ import {
   z,
 } from '../kernel/index.mjs'
 import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
-import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
+import { applyForkConfigLock, clearForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 
 export const name = 'fang-forker'
 export const inject = []
@@ -926,8 +926,17 @@ export function apply(ctx, config) {
         rec.configSync = { at: nowMs(), ok: false, error: msgOf(e) }
       }
     }
-    try { rec.configLock = applyForkConfigLock(rec.profileDir) } catch { rec.configLock = { ok: false } }
-    try { rec.profileReadonly = setProfileConfigReadonly(rec.profileDir, true) } catch { rec.profileReadonly = { ok: false } }
+    const configInstance = path.basename(String(rec.profileDir)) === 'essence-runtime'
+    if (configInstance) {
+      // 配置态实例（元宝运行态）必须可写、可管理插件；spawn 不能再次套生产盘锁。
+      try { clearForkConfigLock(rec.profileDir) } catch { /* best effort */ }
+      try { setProfileConfigReadonly(rec.profileDir, false) } catch { /* ignore */ }
+      rec.configLock = { ok: true, skipped: true, runtime: true }
+      rec.profileReadonly = { ok: true, skipped: true, runtime: true }
+    } else {
+      try { rec.configLock = applyForkConfigLock(rec.profileDir) } catch { rec.configLock = { ok: false } }
+      try { rec.profileReadonly = setProfileConfigReadonly(rec.profileDir, true) } catch { rec.profileReadonly = { ok: false } }
+    }
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
     // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。

@@ -120,7 +120,58 @@ window.__ModuleLoader__.load({
       return writeComposer(String(text || ''))
     }
 
+    const QUEUE_COUNT_RE = /(\d+)\s*(条排队消息|queued messages|件のキュー済みメッセージ|mensagens na fila|messages en file d'attente|nachrichten in der warteschlange|сообщения в очереди|mensajes en cola|mensagens na fila)/i
+    const QUEUE_ACTION_LABELS = /^(插话发送|编辑排队消息|删除排队消息|保存排队消息|取消编辑|发送中…|排队消息图片|queued message image|edit queued message|remove queued message|save queued message|cancel edit|sending…|steer)$/i
+
+    /** 从 QueueDock 行里去掉操作按钮，只留消息正文。 */
+    function queueRowText(row) {
+      try {
+        const clone = row.cloneNode(true)
+        for (const node of clone.querySelectorAll('button, [role="button"]')) node.remove()
+        const lines = String(clone.innerText || clone.textContent || '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line && !QUEUE_ACTION_LABELS.test(line))
+        return lines.join(' ').trim()
+      } catch { return '' }
+    }
+
+    /**
+     * DSH QueueDock 的 CSS 是 hashed class（F07MqG_*），不能靠 class*=queue。
+     * 以 header 的“N 条排队消息”文案定位，再通过 aria-controls 找到列表。
+     */
+    function scanQueueDock() {
+      const out = []
+      const seen = new Set()
+      const pushText = (text) => {
+        const value = String(text || '').trim()
+        if (!value || value.length > 4000 || seen.has(value)) return
+        seen.add(value)
+        out.push({ text: value, at: Date.now() })
+      }
+      // DSH 自带 QueueDock 的稳定锚点：data-queue-dock；每行是 li。
+      const docks = document.querySelectorAll('[data-queue-dock]')
+      for (const dock of docks) {
+        for (const row of dock.querySelectorAll('li')) pushText(queueRowText(row))
+      }
+      if (docks.length > 0) return out
+
+      // 兼容：通过 header 的“N 条排队消息”文案 + aria-controls 定位。
+      const headers = [...document.querySelectorAll('button[aria-controls], [role="button"][aria-controls]')]
+        .filter((el) => QUEUE_COUNT_RE.test(String(el.textContent || '')))
+      for (const header of headers) {
+        const listId = header.getAttribute('aria-controls')
+        const list = (listId ? document.getElementById(listId) : null) || header.parentElement?.querySelector('ul')
+        if (!list) continue
+        for (const row of list.querySelectorAll('li')) pushText(queueRowText(row))
+      }
+      return out
+    }
+
     function scanQueue() {
+      const found = scanQueueDock()
+      if (found.length > 0) return found.slice(-100)
+      // 旧 DOM / 自定义队列仍走宽松选择器
       const seen = new Set()
       const out = []
       const nodes = document.querySelectorAll('[class*="queue" i], [data-testid*="queue" i], [aria-label*="queue" i], [class*="pending" i], [data-testid*="pending" i], [aria-label*="排队"], [title*="排队"]')

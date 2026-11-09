@@ -4,6 +4,23 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.1.5（2026-11-09）
+
+**主题：排队消息列表恢复真正可用 + 分身界面不再出现母体 404 错误。**
+
+### 修复
+- **queue-journal 0.1.4**：DSH QueueDock 使用 hashed CSS class，旧扫描器只能靠 `class*=queue` 命中不到 → 只保存单草稿。新增稳定锚点 `[data-queue-dock]` 扫描，恢复时显示并放回完整排队消息列表。
+- **分身 Web UI**：`role=fork` 只渲染分身说明页，不再无条件渲染母体状态/任务/会话/审批/看护的 404 错误横幅，也不再发起母体 API 请求。
+- **fork 插件设置入口**：分身 profile 额外锁定 `ui-plugin-manager` / `ui-settings-plugin-inventory`，隐藏插件设置入口，避免点击启用时因只读 package.json 报 EPERM。
+- **essence-runtime 不再被 spawn 重新上锁**：元宝运行态 spawn 时跳过生产盘锁并解锁历史锁。
+
+### 测试/门禁
+- 发布前重跑 `preflight --e2e`、install/reinstall drill；证据见 `docs/AUDIT-v3.1.5.md`。
+
+### 已知边界
+- 分身仍是生产盘；插件配置请在母体或元宝运行态完成。
+- PluginUpdater/SuperAgent/HarnessMM/PJM/Worker 本体未接。
+
 ## v3.1.4（2026-11-09）
 
 **主题：元宝工作区卡片 UI + 元宝运行态插件管理修复 + 发布流水线幂等。**
