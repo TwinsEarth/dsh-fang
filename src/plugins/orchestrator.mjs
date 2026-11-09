@@ -14,7 +14,7 @@ import path from 'node:path'
 import {
   z, roleGate, resolveFangLayout, resolveProfileDir, resolveSessionsLayout,
   SERVICE, AUDIT, TASK_STATUS, FORK_STATUS, FANG_VERSION, ADAPTER_OP,
-  exists, ensureDir, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree, digestTree,
+  exists, ensureDir, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree, digestTree, makeJunction,
   newId, iso, nowMs, bus, sleep, parseWebUrl, probeWebUrl,
   invokeCommercial, commercialConfigSchemaDefaults,
 } from '../kernel/index.mjs'
@@ -81,6 +81,17 @@ export function atomicReplaceDir(sourceDir, targetDir) {
   }
 }
 
+
+const FORK_BUNDLE_NAMES = Object.freeze(['@local/dsh-fang', '@twinsearth/dsh-fang'])
+
+/** 分身 profile 可解析的 fang bundle 路径（npm 安装名/开发 link 名都接受）。 */
+function forkBundlePath(profileDir) {
+  for (const name of FORK_BUNDLE_NAMES) {
+    const candidate = path.join(String(profileDir ?? ''), 'node_modules', ...name.split('/'))
+    if (exists(candidate)) return candidate
+  }
+  return null
+}
 
 export const name = 'fang-orchestrator'
 export const inject = []
@@ -754,9 +765,10 @@ export function apply(ctx, config) {
 
         // 防御：分身的 profile 必须能解析本 bundle；否则派生出来的是一个"没有 /fang 路由"的
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
+        // npm 安装名是 @twinsearth/dsh-fang；开发 link 才是 @local/dsh-fang。两者都算可用。
         const forkProfileDir = path.join(homeDir, 'profiles', profile)
-        const forkBundle = path.join(forkProfileDir, 'node_modules', '@local', 'dsh-fang')
-        if (!exists(forkBundle)) {
+        const forkBundle = forkBundlePath(forkProfileDir)
+        if (!forkBundle) {
           task.status = TASK_STATUS.FAILED
           tasks.delete(taskId)
           persist()
@@ -1414,8 +1426,8 @@ export function apply(ctx, config) {
         return { ok: false, error: 'path-escape', taskId: id, detail: String(error?.message ?? error) }
       }
       const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
-      const forkBundle = path.join(forkProfileDir, 'node_modules', '@local', 'dsh-fang')
-      if (!exists(forkBundle)) {
+      const forkBundle = forkBundlePath(forkProfileDir)
+      if (!forkBundle) {
         return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
       }
       const f = forker()
@@ -1494,8 +1506,8 @@ export function apply(ctx, config) {
           report.failed.push({ taskId: id, error: 'path-escape' })
           continue
         }
-        const forkBundle = path.join(task.homeDir, 'profiles', task.profile, 'node_modules', '@local', 'dsh-fang')
-        if (!exists(forkBundle)) {
+        const forkBundle = forkBundlePath(path.join(task.homeDir, 'profiles', task.profile))
+        if (!forkBundle) {
           report.failed.push({ taskId: id, error: 'fork-bundle-unavailable' })
           continue
         }
@@ -2158,9 +2170,12 @@ export function apply(ctx, config) {
       // makeJunction 对已存在的链接不会替换，所以先安全移除旧 junction（不进入目标）。
       const runtimeProfileDir = path.join(homeDir, 'profiles', 'essence-runtime')
       const runtimeModules = path.join(runtimeProfileDir, 'node_modules')
-      if (exists(runtimeModules)) {
-        try { if (fs.lstatSync(runtimeModules).isSymbolicLink()) removeTree(runtimeModules) } catch { /* ignore */ }
-      }
+      // 迁移/旧版本可能留下“指向不存在 merged/profile/node_modules”的 junction；
+      // fs.existsSync 对 broken junction 返回 false，必须用 lstat 才能发现并清掉。
+      try {
+        const stat = fs.lstatSync(runtimeModules)
+        if (stat.isSymbolicLink() || !exists(runtimeModules)) removeTree(runtimeModules)
+      } catch { /* 不存在 */ }
       const legacyHomes = [
         path.join(layout.dataDir, 'runtime', forkId, 'home'),
         path.join(essenceManager.essenceRoot(id), 'runtime', 'home'),
@@ -2180,6 +2195,17 @@ export function apply(ctx, config) {
         nodeModulesSource: essenceModules,
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
+      // provision 若看到旧 junction 可能不替换；这里以 essenceModules 为准做最后自愈。
+      if (!exists(runtimeModules)) {
+        try {
+          const stat = fs.lstatSync(runtimeModules)
+          if (stat.isSymbolicLink()) removeTree(runtimeModules)
+        } catch { /* ignore */ }
+        if (!exists(essenceModules)) throw new Error('runtime-node-modules-source-missing')
+        try { makeJunction(essenceModules, runtimeModules) } catch (error) {
+          throw new Error(`runtime-node-modules-junction-failed: ${String(error?.message ?? error)}`)
+        }
+      }
       writeModuleStoreConfig(runtimeProfileDir)
       // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
       const importedSessions = importSessionsInto(homeDir, input?.sessionIds)

@@ -1,6 +1,6 @@
 {
   "name": "@twinsearth/dsh-fang-queue-journal",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": false,
   "type": "module",
   "description": "Composer draft/queue journal for dsh-Fang: persist unsent input and a read-only queue mirror; recovery is always user-confirmed.",
