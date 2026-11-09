@@ -303,6 +303,23 @@ test('roleGate: forker is mother-only — no service and no directories in a for
   }
 })
 
+test('forker: runtime supervise can be toggled without restarting the host', () => {
+  const dataRoot = tmp('fang-forker-supervision-')
+  const { ctx, service } = newForkContext({ dataRoot })
+  try {
+    assert.equal(service.getSupervision().enabled, false, 'default is opt-in')
+    assert.equal(service.getSupervision().configured, false)
+    assert.deepEqual(service.setSupervise(true), { ok: true, enabled: true })
+    assert.equal(service.getSupervision().enabled, true)
+    assert.equal(service.getSupervision().configured, false, 'config does not change; runtime override only')
+    assert.deepEqual(service.setSupervise(false), { ok: true, enabled: false })
+    assert.equal(service.getSupervision().enabled, false)
+  } finally {
+    try { ctx.dispose() } catch { /* ignore */ }
+    fs.rmSync(dataRoot, { recursive: true, force: true })
+  }
+})
+
 test('apply registers fangForker and an empty registry reports clean failures', () => {
   const root = tmp()
   const dataRoot = path.join(root, 'data')

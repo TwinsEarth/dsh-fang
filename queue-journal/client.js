@@ -18,6 +18,13 @@ window.__ModuleLoader__.load({
       return value.slice(0, 200)
     }
 
+    // The official slot prop gives us the real SessionId. The URL may not carry
+    // one (DSH keeps the selected Session in client state), so using the URL as
+    // the journal key collapses every session onto "/" and only the last draft
+    // survives. Prefer the SessionId; keep the URL only as a compatibility key.
+    let activeKey = ''
+    let activeSessionId = ''
+
     let tokenCache = { at: 0, token: '' }
     async function fangToken() {
       if (tokenCache.token && Date.now() - tokenCache.at < 30_000) return tokenCache.token
@@ -32,14 +39,33 @@ window.__ModuleLoader__.load({
     async function journalRequest(method, entry, keyOverride) {
       const token = await fangToken()
       if (!token) return null
-      const key = keyOverride || sessionKey()
+      const key = keyOverride || activeKey || activeSessionId || sessionKey()
       const res = await fetch(method === 'POST' ? '/fang/api/composer/journal' : '/fang/api/composer/journal?key=' + encodeURIComponent(key), {
         method,
         headers: { 'content-type': 'application/json', 'x-fang-auth': token },
-        body: method === 'POST' ? JSON.stringify({ key, path: location.hash || location.pathname, ...entry }) : undefined,
+        body: method === 'POST'
+          ? JSON.stringify({ key, sessionId: activeSessionId || undefined, path: location.hash || location.pathname, ...entry })
+          : undefined,
       })
       if (!res.ok) return null
       return res.json()
+    }
+
+    async function queueRestore(sessionId, items) {
+      const token = await fangToken()
+      if (!token) return { ok: false, error: 'auth-unavailable' }
+      const res = await fetch('/fang/api/composer/queue', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-fang-auth': token },
+        body: JSON.stringify({
+          sessionId,
+          items: items.slice(0, 100).map((item) => ({ text: String(item?.text ?? '').slice(0, 4000) })),
+        }),
+      })
+      let body = null
+      try { body = await res.json() } catch { /* non-json */ }
+      if (!res.ok) return { ok: false, error: body?.error || 'http-' + res.status, detail: body?.detail || '' }
+      return { ok: true, queued: Number(body?.queued) || 0, failed: Number(body?.failed) || 0 }
     }
 
     function findComposer() {
@@ -49,7 +75,6 @@ window.__ModuleLoader__.load({
           const r = el.getBoundingClientRect()
           return r.width > 80 && r.height > 16
         })
-      // Prefer the largest (the main composer), not a hidden side field.
       return nodes.sort((a, b) => {
         const ra = a.getBoundingClientRect()
         const rb = b.getBoundingClientRect()
@@ -85,6 +110,16 @@ window.__ModuleLoader__.load({
       return true
     }
 
+    function setDraftViaApi(props, text) {
+      try {
+        if (props?.inputActions && typeof props.inputActions.setDraft === 'function') {
+          props.inputActions.setDraft(String(text || ''))
+          return true
+        }
+      } catch { /* fall back to the DOM */ }
+      return writeComposer(String(text || ''))
+    }
+
     function scanQueue() {
       const seen = new Set()
       const out = []
@@ -98,54 +133,114 @@ window.__ModuleLoader__.load({
       return out.slice(-100)
     }
 
-    function JournalDock() {
+    function JournalDock(props) {
+      const sessionId = String(props?.sessionId || '')
       const [entry, setEntry] = React.useState(null)
       const [status, setStatus] = React.useState('')
+      const [showQueue, setShowQueue] = React.useState(false)
+
       React.useEffect(() => {
+        activeSessionId = sessionId
+        activeKey = sessionId || sessionKey()
+        setEntry(null)
+        setShowQueue(false)
         let alive = true
         journalRequest('GET').then(async (body) => {
           let found = body?.entry ?? null
           // Migration: older builds keyed everything under "/".
-          if (!found && sessionKey() !== '/') {
+          if (!found && activeKey !== '/') {
             const legacy = await journalRequest('GET', null, '/').catch(() => null)
             found = legacy?.entry ?? null
           }
           if (alive) setEntry(found)
         }).catch(() => {})
         return () => { alive = false }
-      }, [])
+      }, [sessionId])
+
       if (!entry || (!entry.draft && !(entry.queue || []).length)) return null
-      const restore = () => {
-        const ok = writeComposer(String(entry.draft || ''))
-        setStatus(ok ? '草稿已放入输入框' : '未找到输入框，请先打开会话')
+
+      const queue = Array.isArray(entry.queue) ? entry.queue : []
+      const restoreAll = async () => {
+        const draft = String(entry.draft || '')
+        const draftOk = draft ? setDraftViaApi(props, draft) : true
+        if (!draftOk) {
+          setStatus('未找到输入框，请先打开会话')
+          return
+        }
+        if (queue.length > 0) {
+          if (!sessionId) {
+            setStatus('草稿已恢复；队列需要先选中会话')
+            return
+          }
+          const restored = await queueRestore(sessionId, queue)
+          if (!restored.ok) {
+            setStatus(restored.error === 'session-not-live'
+              ? '草稿已恢复；会话未运行，队列保留待重试'
+              : '草稿已恢复；队列恢复失败：' + restored.error)
+            return
+          }
+          await journalRequest('POST', { draft: '', queue: [] })
+          setEntry(null)
+          setStatus(`已恢复草稿，并把 ${restored.queued} 条排队消息放回官方队列${restored.failed ? `（${restored.failed} 条失败）` : ''}`)
+          return
+        }
+        await journalRequest('POST', { draft: '', queue: [] })
+        setEntry(null)
+        setStatus('草稿已放入官方输入框')
       }
+
       const clear = async () => {
         await journalRequest('POST', { draft: '', queue: [] })
         setEntry(null)
         setStatus('已清除记录')
       }
-      // 只留两个按钮：标题/字数/队列计数/操作回执全部走 tooltip + 读屏 live region。
+
+      const rowText = (item) => {
+        const text = String(item?.text || '').replace(/\s+/g, ' ').trim()
+        return text.length > 140 ? text.slice(0, 137) + '…' : text
+      }
+
       return h('div', {
         'data-fang-entry': 'queue-journal',
         style: {
-          display: 'inline-flex', alignItems: 'center', gap: 6, margin: '2px 0',
+          display: 'inline-flex', flexDirection: 'column', gap: 6, margin: '2px 0', maxWidth: '100%',
           padding: '3px 6px', border: '1px solid rgba(127,127,127,.3)', borderRadius: 9,
           fontSize: 12, background: 'rgba(127,127,127,.06)',
         },
       },
-      entry.draft ? h('button', {
-        type: 'button', title: `恢复上次未发送的草稿（${String(entry.draft).length} 字）`,
-        'aria-label': '恢复草稿', onClick: restore,
-        style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
-      }, '恢复草稿') : null,
-      h('button', {
-        type: 'button', title: '清除本地保存的草稿与排队快照', 'aria-label': '清除草稿',
-        onClick: clear,
-        style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
-      }, '清除'),
+      h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+        h('button', {
+          type: 'button',
+          title: `恢复草稿${queue.length ? `，并把这 ${queue.length} 条排队消息放回官方输入队列` : ''}`,
+          'aria-label': '恢复全部草稿与队列',
+          onClick: () => { void restoreAll() },
+          style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
+        }, queue.length ? `恢复全部 (${queue.length + (entry.draft ? 1 : 0)})` : '恢复草稿'),
+        queue.length > 0 ? h('button', {
+          type: 'button',
+          title: '展开保存的排队消息列表',
+          'aria-expanded': showQueue ? 'true' : 'false',
+          onClick: () => setShowQueue((value) => !value),
+          style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
+        }, `队列 ${queue.length}`) : null,
+        h('button', {
+          type: 'button', title: '清除本地保存的草稿与排队快照', 'aria-label': '清除草稿',
+          onClick: () => { void clear() },
+          style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
+        }, '清除'),
+      ),
+      showQueue && queue.length > 0 ? h('div', {
+        role: 'list',
+        style: { display: 'grid', gap: 4, maxHeight: 180, overflow: 'auto', padding: '2px 0' },
+      }, ...queue.map((item, index) => h('div', {
+        role: 'listitem',
+        key: `${index}:${item?.at || ''}`,
+        title: String(item?.text || ''),
+        style: { padding: '3px 6px', border: '1px solid rgba(127,127,127,.22)', borderRadius: 6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+      }, `${index + 1}. ${rowText(item)}`))) : null,
       h('span', {
         role: 'status', 'aria-live': 'polite',
-        style: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' },
+        style: status ? { padding: '1px 2px', opacity: .8 } : { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' },
       }, status))
     }
 

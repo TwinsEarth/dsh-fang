@@ -22,7 +22,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { SERVICE, AUDIT, ROLE, z, readJson, roleGate } from '../kernel/index.mjs'
-import { scanSource, importsToSignals } from './imports.mjs'
+import { scanSource, scanDeep, importsToSignals } from './imports.mjs'
 
 export const name = 'fang-scorer'
 export const inject = []
@@ -148,8 +148,9 @@ export function basisOf(environment, bands = null) {
  */
 export function scoreScan(signals, pkg = {}, bands = BAND_DEFAULTS.mother) {
   const thresholds = resolveBands(ROLE.MOTHER, bands)
+  const c3 = { count: 0, core: false, graced: false, applied: false }
   if (pkg?.dsh?.hotReload === false) {
-    return { grade: 'E', S: 100, veto: true, degraded: false, perDim: {}, reasons: ['hotReload-false'] }
+    return { grade: 'E', S: 100, veto: true, degraded: false, perDim: {}, reasons: ['hotReload-false'], c3 }
   }
 
   const reasons = []
@@ -164,11 +165,17 @@ export function scoreScan(signals, pkg = {}, bands = BAND_DEFAULTS.mother) {
     if (fam === 'C3') {
       const services = Array.isArray(s?.evidence?.services) ? s.evidence.services : []
       const core = services.some(x => ['sessions', 'registry', 'loader'].includes(x))
-      weight = (services.length > 8 || core) ? weight : 0
+      const graced = !(services.length > 8 || core)
+      c3.count = Math.max(c3.count, services.length)
+      c3.core = c3.core || core
+      c3.graced = graced
+      c3.applied = true
+      weight = graced ? 0 : weight
       if (weight <= 0) {
         reasons.push(`${s?.id}:C3-service-grace`)
         continue
       }
+      reasons.push(`${s?.id}:C3-service-risk(count=${services.length},core=${core})`)
     }
     if (!(weight > 0)) continue
 
@@ -191,7 +198,7 @@ export function scoreScan(signals, pkg = {}, bands = BAND_DEFAULTS.mother) {
     // 证据不全时不给 A/B：降 C。
     if (grade === 'A' || grade === 'B') grade = 'C'
   }
-  return { grade, S, veto: false, degraded, perDim, reasons }
+  return { grade, S, veto: false, degraded, perDim, reasons, c3 }
 }
 
 /** 等级 → 动作灯色。B 级已可能含单一危险能力（child_process 单独 28 分 = B），不能判绿。 */
@@ -200,6 +207,33 @@ export function gradeToColor(grade) {
     : grade === 'B' ? 'blue'
     : grade === 'C' ? 'yellow'
     : 'red'
+}
+
+/**
+ * Resolve a plugin-relative file while proving it stays inside the plugin root.
+ * Absolute candidates, `..` escapes and symlinks pointing outside are rejected.
+ * Returns the checked absolute path, or null when the candidate is unsafe/missing.
+ */
+export function resolvePluginFile(rootDir, candidate) {
+  const root = path.resolve(String(rootDir ?? ''))
+  const rel = String(candidate ?? '')
+  if (!rel || path.isAbsolute(rel)) return null
+  const target = path.resolve(root, rel)
+  const inside = (from, to) => {
+    const r = path.relative(from, to)
+    return r === '' || (!r.startsWith('..' + path.sep) && r !== '..' && !path.isAbsolute(r))
+  }
+  if (!inside(root, target)) return null
+  try {
+    const realRoot = fs.realpathSync(root)
+    const realTarget = fs.realpathSync(target)
+    if (!inside(realRoot, realTarget)) return null
+    const st = fs.statSync(target)
+    if (!st.isFile()) return null
+    return target
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -228,7 +262,128 @@ export function entryCandidates(pkg, manifest = null) {
   return out
 }
 
-/** 对一段源码评分（纯函数，basis 注解由这里统一生成）。 */
+/**
+ * Deep directory scan: entry + all local .js/.mjs/.cjs files (bounded), imports and
+ * a small call-layer signal set. It is still not an AST/call graph and says so via
+ * coverage/degradedReasons instead of pretending completeness.
+ */
+const DEEP_MAX_FILES = 200
+const DEEP_MAX_BYTES = 2 * 1024 * 1024
+const DEEP_MAX_FILE_BYTES = 512 * 1024
+
+function listDeepFiles(root) {
+  const files = []
+  const reasons = []
+  let bytes = 0
+  let skipped = 0
+  let truncated = false
+  const walk = (dir, relBase) => {
+    let entries
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch (e) {
+      skipped += 1
+      reasons.push(`readdir-failed:${relBase || '.'}:${String(e?.message ?? e)}`)
+      return
+    }
+    for (const entry of entries) {
+      if (truncated) return
+      if (entry.isSymbolicLink()) { skipped += 1; continue }
+      const rel = relBase ? `${relBase}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue
+        walk(path.join(dir, entry.name), rel)
+        continue
+      }
+      if (!entry.isFile() || !/\.(?:mjs|cjs|js)$/i.test(entry.name)) continue
+      const abs = resolvePluginFile(root, rel)
+      if (!abs) { skipped += 1; reasons.push(`unsafe-or-missing:${rel}`); continue }
+      let size = 0
+      try { size = fs.statSync(abs).size } catch { skipped += 1; reasons.push(`stat-failed:${rel}`); continue }
+      if (size > DEEP_MAX_FILE_BYTES) { skipped += 1; reasons.push(`file-too-large:${rel}`); continue }
+      if (files.length >= DEEP_MAX_FILES || bytes + size > DEEP_MAX_BYTES) {
+        truncated = true
+        break
+      }
+      files.push({ rel, abs })
+      bytes += size
+    }
+  }
+  walk(root, '')
+  return { files, skipped, truncated, reasons }
+}
+
+function scoreDeepDir(root, pkg, manifest, settings, basis) {
+  let entry = null
+  for (const candidate of entryCandidates(pkg, manifest)) {
+    const file = resolvePluginFile(root, candidate)
+    if (file) {
+      try {
+        if (fs.statSync(file).isFile()) { entry = { rel: candidate, abs: file }; break }
+      } catch { /* next */ }
+    }
+  }
+  if (!entry) return null
+  const listed = listDeepFiles(root)
+  const files = listed.files.some((file) => file.rel === entry.rel)
+    ? listed.files
+    : [{ rel: entry.rel, abs: entry.abs }, ...listed.files]
+  const scanSignals = []
+  const callSites = []
+  const scanWarnings = []
+  const reasons = [...listed.reasons]
+  let imports = 0
+  let scannedFiles = 0
+  for (const file of files) {
+    let source = ''
+    try {
+      source = fs.readFileSync(file.abs, 'utf8')
+    } catch (e) {
+      reasons.push(`read-failed:${file.rel}:${String(e?.message ?? e)}`)
+      continue
+    }
+    try {
+      const deep = scanDeep(source)
+      scannedFiles += 1
+      imports += deep.imports.length
+      scanWarnings.push(...deep.warnings.map((warning) => ({ ...warning, file: file.rel })))
+      for (const site of deep.callSites ?? []) callSites.push({ ...site, file: file.rel })
+      scanSignals.push(...deep.signals)
+    } catch (e) {
+      reasons.push(`scan-failed:${file.rel}:${String(e?.message ?? e)}`)
+    }
+  }
+  const degradedReasons = [...new Set(reasons)]
+  const scored = scoreScan(scanSignals, { ...(pkg ?? {}), __parseErrors: scanWarnings.length }, settings.thresholds)
+  const truncated = listed.truncated || listed.skipped > 0 || degradedReasons.length > 0
+  let grade = scored.grade
+  if (truncated && (grade === 'A' || grade === 'B')) grade = 'C'
+  const degraded = scored.degraded || truncated
+  return {
+    grade,
+    S: scored.S,
+    color: gradeToColor(grade),
+    veto: scored.veto,
+    degraded,
+    signals: scanSignals.map((signal) => ({ id: signal.id, weight: signal.weight })),
+    reasons: [...scored.reasons, ...degradedReasons.map((reason) => `deep-degraded:${reason}`)],
+    perDim: scored.perDim,
+    c3: scored.c3,
+    coverage: 'deep-import+call',
+    imports,
+    warnings: scanWarnings.length,
+    callSites,
+    scannedFiles,
+    skippedFiles: listed.skipped,
+    truncated: listed.truncated,
+    degradedReasons,
+    dir: root,
+    entry: entry.rel,
+    basis,
+  }
+}
+
+
 function scoreSourceImpl(source, pkg = {}, opts = {}) {
   const environment = environmentOf(opts, ROLE.MOTHER)
   const bands = resolveBands(environment, opts && typeof opts === 'object' ? opts.thresholds : null)
@@ -237,7 +392,7 @@ function scoreSourceImpl(source, pkg = {}, opts = {}) {
 
   let scan
   try {
-    scan = scanSource(text)
+    scan = opts && opts.deep === true ? scanDeep(text) : scanSource(text)
   } catch (e) {
     return {
       grade: 'E', S: 100, color: 'red', veto: false, degraded: true,
@@ -246,21 +401,25 @@ function scoreSourceImpl(source, pkg = {}, opts = {}) {
       basis,
     }
   }
-  const mapped = importsToSignals(scan, pkg)
-  const scored = scoreScan(mapped.signals, { ...(pkg ?? {}), __parseErrors: scan.warnings.length }, bands)
+  const mappedSignals = scan.signals ?? importsToSignals(scan, pkg).signals
+  const coverage = scan.coverage ?? 'import-only'
+  const scored = scoreScan(mappedSignals, { ...(pkg ?? {}), __parseErrors: scan.warnings.length }, bands)
   return {
     grade: scored.grade,
     S: scored.S,
     color: gradeToColor(scored.grade),
     veto: scored.veto,
     degraded: scored.degraded,
-    signals: mapped.signals.map(s => ({ id: s.id, weight: s.weight })),
+    signals: mappedSignals.map(s => ({ id: s.id, weight: s.weight })),
     reasons: scored.reasons,
     // 附加证据（契约允许附加字段，编排器/UI 可直接用）
     perDim: scored.perDim,
-    coverage: mapped.coverage,
+    c3: scored.c3,
+    coverage,
     imports: scan.imports.length,
     warnings: scan.warnings.length,
+    ...(scan.callSites ? { callSites: scan.callSites } : {}),
+    ...(opts && opts.deep === true ? { scannedFiles: 1 } : {}),
     basis,
   }
 }
@@ -304,6 +463,8 @@ export function apply(ctx, config) {
   const environment = gate.role
   const policy = {
     allowlist: Array.isArray(cfg.allowlist) ? cfg.allowlist.map(String) : [],
+    // allowlist is policy evidence only: it never lowers the static risk score.
+    allowlistUsedForScoring: false,
     environment,
     thresholds,
   }
@@ -312,8 +473,23 @@ export function apply(ctx, config) {
     try { safeGet(ctx, SERVICE.auditor)?.append?.(kind, data) } catch { /* 审计缺失不得影响评分 */ }
   }
 
-  /** opts.environment 优先；缺省用本实例部署环境。 */
-  const settingsFor = (opts) => ({ environment: environmentOf(opts, environment), thresholds })
+  /** opts.environment 优先；缺省用本实例部署环境。可选的临时 bands 只能收紧，不能放宽。 */
+  const settingsFor = (opts) => {
+    const env = environmentOf(opts, environment)
+    const base = resolveBands(env, thresholds)
+    const requested = opts && typeof opts === 'object' ? opts.thresholds : null
+    if (!requested || typeof requested !== 'object') {
+      return { environment: env, thresholds: base, deep: opts?.deep === true }
+    }
+    const candidate = resolveBands(env, requested)
+    const tightened = {
+      a: Math.min(base.a, candidate.a),
+      b: Math.min(base.b, candidate.b),
+      c: Math.min(base.c, candidate.c),
+      d: Math.min(base.d, candidate.d),
+    }
+    return { environment: env, thresholds: tightened, deep: opts?.deep === true }
+  }
 
   const service = {
     policy,
@@ -330,18 +506,53 @@ export function apply(ctx, config) {
     },
 
     scoreSource(source, pkg = {}, opts = {}) {
-      return scoreSourceImpl(source, pkg ?? {}, settingsFor(opts))
+      const out = scoreSourceImpl(source, pkg ?? {}, settingsFor(opts))
+      // Hot path stays silent by default; callers that need an audit trail can
+      // opt in without making every umbrella source score write a ledger row.
+      if (opts && typeof opts === 'object' && opts.audit === true) {
+        audit(AUDIT.SCORE, {
+          component: name,
+          scope: 'source',
+          grade: out.grade,
+          S: out.S,
+          degraded: out.degraded,
+          environment: out.basis?.environment ?? null,
+          signals: out.signals.map(s => s.id),
+        })
+      }
+      return out
     },
 
     scoreDir(dir, manifest = null, opts = {}) {
       const settings = settingsFor(opts)
       const basis = basisOf(settings.environment, resolveBands(settings.environment, settings.thresholds))
       const abs = path.resolve(String(dir ?? ''))
-      const pkg = readJson(path.join(abs, 'package.json'), null) ?? {}
+      const pkgFile = resolvePluginFile(abs, 'package.json')
+      const pkg = pkgFile ? (readJson(pkgFile, null) ?? {}) : {}
+      if (settings.deep === true) {
+        const deep = scoreDeepDir(abs, pkg, manifest, settings, basis)
+        if (deep) {
+          audit(AUDIT.SCORE, {
+            component: name,
+            dir: abs,
+            entry: deep.entry,
+            grade: deep.grade,
+            S: deep.S,
+            veto: deep.veto,
+            degraded: deep.degraded,
+            environment: deep.basis.environment,
+            coverage: deep.coverage,
+            scannedFiles: deep.scannedFiles,
+            signals: deep.signals.map(s => s.id),
+          })
+          return deep
+        }
+      }
       let src = null
       let entry = null
       for (const candidate of entryCandidates(pkg, manifest)) {
-        const file = path.join(abs, candidate)
+        const file = resolvePluginFile(abs, candidate)
+        if (!file) continue
         try {
           const st = fs.statSync(file)
           if (!st.isFile()) continue
@@ -405,6 +616,7 @@ export const _internals = {
   normalizeBands,
   normalizeThresholds,
   resolveBands,
+  resolvePluginFile,
   basisOf,
   environmentOf,
   normalizeEnvironment,

@@ -118,6 +118,10 @@ window.__ModuleLoader__.load({
       'stop-failed': '分身进程未停止，归档没有生效；任务仍保留。',
       'derived-session-missing': '会话已不在目录中（可能刚被归档），请刷新。',
       'capture-failed': '从母体生成元主失败：母体 profile 不可读或补丁解析失败（详情见下方）。',
+      'not-pending': '该票已被处理（可能刚被其他人/另一个标签页处理），请刷新后再看。',
+      'explicit-choice-required': '红色/阻塞票需要逐条显式处理，不能被批量代选。',
+      'session-daily-quota-exceeded': '该会话今日创建决策票已达上限；请先处理已有票，或换会话。',
+      'ai-schema-invalid': 'AI 返回结构不符合 schema，已拒绝写入这张票的建议；可重试。',
     }
 
     // ── 通用工具 ──────────────────────────────────────────────────────────
@@ -558,6 +562,7 @@ window.__ModuleLoader__.load({
       disc: (size = 14) => glyph(['M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18', 'M12 9.6a2.4 2.4 0 1 0 0 4.8a2.4 2.4 0 0 0 0-4.8', 'M12 3v6.6', 'M12 14.4V21'], size),
       arrowUp: (size = 14) => glyph(['M12 19V5', 'M6 11l6-6 6 6'], size),
       play: (size = 13) => glyph(['M8 5l11 7-11 7z'], size),
+      inbox: (size = 14) => glyph(['M4 5h16v14H4z', 'M4 13h4l2 3h4l2-3h4'], size),
       spinner: (size = 14) => {
         const node = svg('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', class: 'fang-icon fang-spin', 'aria-hidden': 'true', focusable: 'false' })
         node.appendChild(svg('circle', { cx: 12, cy: 12, r: 8.5, stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-dasharray': '38 12' }))
@@ -949,6 +954,125 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion:reduce){
   .fang-console *,.fang-console *::before,.fang-console *::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+
+/* ── 决策收件箱（独立侧边栏入口 + 右侧抽屉 / 独立 Slot）────────────────── */
+.fang-inbox{
+  --f-inbox-border:rgba(16,17,20,.1);--f-inbox-text:#1D1D1F;--f-inbox-text2:#5F6368;--f-inbox-surface:#fff;--f-inbox-surface2:#FAFAFC;
+  position:relative;display:flex;flex-direction:column;min-height:0;height:100%;background:var(--f-inbox-surface);color:var(--f-inbox-text);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;font-size:13px;line-height:1.45;
+}
+.fang-inbox *{box-sizing:border-box}
+.fang-inbox button,.fang-inbox input,.fang-inbox select{font-family:inherit}
+.fang-inbox-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--f-inbox-border);flex:0 0 auto}
+.fang-inbox-title{font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;min-width:0}
+.fang-inbox-unread{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#C8102E;color:#fff;font-size:11px;font-weight:600}
+.fang-inbox-actions{margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.fang-inbox-btn{height:26px;padding:0 8px;border-radius:8px;border:1px solid rgba(16,17,20,.14);background:#fff;color:inherit;font:inherit;font-size:12px;cursor:pointer}
+.fang-inbox-btn:hover{background:#F2F2F5}
+.fang-inbox-btn:disabled{opacity:.5;cursor:default}
+.fang-inbox-btn--primary{background:#0A6BE0;border-color:#0A6BE0;color:#fff}
+.fang-inbox-btn--primary:hover{background:#0857B8}
+.fang-inbox-btn--danger{color:#C8102E;border-color:rgba(200,16,46,.3)}
+.fang-inbox-ai{padding:8px 12px;border-bottom:1px solid var(--f-inbox-border);font-size:12px;color:var(--f-inbox-text2);flex:0 0 auto}
+.fang-inbox-ai summary{cursor:pointer;color:var(--f-inbox-text2)}
+.fang-inbox-ai-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;align-items:center}
+.fang-inbox-ai input,.fang-inbox-ai select{height:26px;padding:0 6px;border-radius:7px;border:1px solid rgba(16,17,20,.14);font:inherit;font-size:12px;background:#fff;color:#1D1D1F}
+.fang-inbox-ai-status{font-size:11px;color:#6E6E73;margin-top:2px}
+.fang-inbox-ai-test{font-size:11.5px;margin-top:6px;padding:5px 8px;border-radius:7px;background:#F2F2F5;color:#5F6368}
+.fang-inbox-ai-test--ok{background:rgba(23,128,61,.08);color:#17803D}
+.fang-inbox-ai-test--err{background:rgba(200,16,46,.07);color:#C8102E}
+.fang-inbox-ai-test--testing{background:rgba(10,107,224,.07);color:#0857B8}
+.fang-inbox-ai-risks{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.fang-inbox-ai-tag{font-size:10px;font-weight:700;color:#8A5A00;background:rgba(180,83,9,.1);border-radius:4px;padding:0 4px;margin-right:5px}
+.fang-inbox-ai-stream{font-size:11px;color:#0857B8;background:rgba(10,107,224,.05);border-radius:6px;padding:4px 6px;margin-top:4px;white-space:pre-wrap;max-height:120px;overflow:auto}.fang-inbox-risk{font-size:10.5px;padding:1px 5px;border-radius:5px;background:#F2F2F5;color:#5F6368}
+.fang-inbox-risk--low{background:rgba(23,128,61,.1);color:#17803D}
+.fang-inbox-risk--medium{background:rgba(180,83,9,.1);color:#9A4A06}
+.fang-inbox-risk--high{background:rgba(200,16,46,.09);color:#C8102E}
+.fang-inbox-ai-missing{font-size:10.5px;color:#8A5A00;margin-top:3px}
+.fang-inbox-exec{font-size:10.5px;margin-top:3px;color:#5F6368}
+.fang-inbox-exec--done{color:#17803D}
+.fang-inbox-exec--failed{color:#C8102E}
+.fang-inbox-exec--running{color:#0857B8}
+.fang-inbox-toolbar{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--f-inbox-border);flex-wrap:wrap;flex:0 0 auto}
+.fang-inbox-hint{font-size:11.5px;color:#86868B}
+.fang-inbox-body{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 10px 16px;display:flex;flex-direction:column;gap:8px}
+.fang-inbox-group{border:1px solid var(--f-inbox-border);border-radius:12px;overflow:hidden;background:#fff}
+.fang-inbox-group-head{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:0;background:var(--f-inbox-surface2);cursor:pointer;font:inherit;text-align:left;color:inherit}
+.fang-inbox-group-toggle{display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:0;cursor:pointer}
+.fang-inbox-group-check{flex:none;margin:0;accent-color:#0A6BE0;cursor:pointer}
+.fang-inbox-group-head b{font-size:12.5px}
+.fang-inbox-group-head .n{margin-left:auto;font-size:11.5px;color:#6E6E73}
+.fang-inbox-group[data-level="red"] .fang-inbox-group-head{background:rgba(200,16,46,.06);color:#C8102E}
+.fang-inbox-group[data-level="yellow"] .fang-inbox-group-head{background:rgba(180,83,9,.07);color:#9A4A06}
+.fang-inbox-group[data-level="blue"] .fang-inbox-group-head{background:rgba(10,107,224,.06);color:#0857B8}
+.fang-inbox-group[data-level="green"] .fang-inbox-group-head{background:rgba(23,128,61,.06);color:#17803D}
+.fang-inbox-group[data-level="gray"] .fang-inbox-group-head{color:#6E6E73}
+.fang-inbox-item{display:flex;gap:8px;padding:8px 10px;border-top:1px solid rgba(16,17,20,.06);align-items:flex-start}
+.fang-inbox-item[data-level="red"]{border-left:3px solid #C8102E}
+.fang-inbox-item[data-level="yellow"]{border-left:3px solid #B45309}
+.fang-inbox-item[data-level="blue"]{border-left:3px solid #0A6BE0}
+.fang-inbox-item[data-level="green"]{border-left:3px solid #17803D}
+.fang-inbox-item[data-level="gray"]{border-left:3px solid #C7C7CC;opacity:.72}
+.fang-inbox-item.is-active{background:#F2F6FF;outline:2px solid rgba(10,107,224,.35);outline-offset:-2px}
+.fang-inbox-check{margin-top:2px;flex:0 0 auto}
+.fang-inbox-main{min-width:0;flex:1 1 auto}
+.fang-inbox-item-title{font-size:12.5px;font-weight:600;line-height:1.35;overflow-wrap:anywhere}
+.fang-inbox-item-context{font-size:12px;color:#5F6368;margin-top:2px;white-space:pre-wrap;max-height:72px;overflow:hidden}
+.fang-inbox-meta{font-size:11px;color:#86868B;margin-top:3px}
+.fang-inbox-item-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+.fang-inbox-item-actions .fang-inbox-btn{height:24px;padding:0 7px;font-size:11.5px}
+.fang-inbox-ai-advice{font-size:11.5px;color:#0857B8;background:rgba(10,107,224,.06);border-radius:6px;padding:4px 6px;margin-top:4px;white-space:pre-wrap}
+.fang-inbox-empty{padding:28px 16px;text-align:center;color:#86868B;font-size:12px}
+.fang-inbox-err{margin:8px 10px;padding:8px 10px;border-radius:8px;background:rgba(200,16,46,.07);color:#C8102E;font-size:12px}
+.fang-inbox-seat{display:inline-flex;align-items:center;justify-content:center;position:relative;width:28px;height:28px;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer}
+.fang-inbox-seat:hover{background:rgba(127,127,127,.1)}
+.fang-inbox-seat .fang-inbox-badge{position:absolute;top:-3px;right:-4px;min-width:15px;height:15px;padding:0 3px;border-radius:999px;background:#C8102E;color:#fff;font-size:9.5px;line-height:15px;text-align:center;font-weight:600}
+.fang-decision-mini{margin:0 0 12px;border:1px solid var(--f-border,rgba(16,17,20,.1));border-radius:14px;background:var(--f-surface,#fff);overflow:hidden;box-shadow:0 2px 8px rgba(16,17,20,.05)}
+.fang-decision-mini-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--f-border,rgba(16,17,20,.1))}
+.fang-decision-mini-head b{font-size:13px}
+.fang-decision-mini-count{font-size:11px;color:var(--f-text-3,#8A8A8E)}
+.fang-decision-mini-spacer{flex:1}
+.fang-decision-mini-refresh{height:24px;padding:0 8px;border-radius:7px;border:1px solid var(--f-border,rgba(16,17,20,.14));background:transparent;color:inherit;font-size:11px;cursor:pointer}
+.fang-decision-mini-body{padding:6px 10px 10px;display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto}
+.fang-decision-mini-group{border-radius:9px;background:rgba(127,127,127,.04)}
+.fang-decision-mini-group[data-level="red"]{background:rgba(200,16,46,.05)}
+.fang-decision-mini-group-head{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:0;background:transparent;color:inherit;font-size:12px;cursor:pointer;text-align:left}
+.fang-decision-mini-group-head span{margin-left:auto;font-size:10.5px;color:var(--f-text-3,#8A8A8E)}
+.fang-decision-mini-list{display:flex;flex-direction:column;gap:6px;padding:0 8px 8px}
+.fang-decision-mini-item{border-left:3px solid rgba(16,17,20,.18);padding:4px 0 4px 8px}
+.fang-decision-mini-item[data-level="red"],.fang-decision-mini-group[data-level="red"] .fang-decision-mini-item{border-left-color:#C8102E}
+.fang-decision-mini-item[data-level="yellow"]{border-left-color:#B45309}
+.fang-decision-mini-item[data-level="blue"]{border-left-color:#0A6BE0}
+.fang-decision-mini-title{font-size:12.5px;font-weight:600;overflow-wrap:anywhere}
+.fang-decision-mini-meta{font-size:10.5px;color:var(--f-text-3,#8A8A8E);margin-top:1px;overflow-wrap:anywhere}
+.fang-decision-mini-context{font-size:11px;color:var(--f-text-2,#5F6368);margin-top:2px;overflow-wrap:anywhere}
+.fang-decision-mini-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.fang-decision-mini-actions .fang-inbox-btn{height:22px;font-size:11px;padding:0 7px}
+.fang-inbox-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,92vw);z-index:2147483001;background:#fff;border-left:1px solid rgba(16,17,20,.12);box-shadow:-18px 0 48px rgba(0,0,0,.18);transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
+.fang-inbox-drawer.is-open{transform:none}
+.fang-inbox-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.26);z-index:2147483000;animation:fang-fade .15s ease}
+.fang-inbox-stream{font-size:11px;color:#17803D;white-space:nowrap}
+.fang-inbox-seat.has-red .fang-inbox-badge{animation:fang-inbox-pulse 1.2s ease-in-out infinite}
+@keyframes fang-inbox-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+.fang-red-alert-stack{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483002;display:flex;flex-direction:column;gap:8px;width:min(560px,92vw)}
+.fang-inbox-red-alert{background:#fff;border:1px solid rgba(200,16,46,.4);border-left:5px solid #C8102E;border-radius:12px;box-shadow:0 16px 40px rgba(200,16,46,.22);padding:10px 12px;animation:fang-rise .18s ease}
+.fang-inbox-red-alert-title{display:flex;align-items:center;gap:6px;color:#C8102E;font-weight:700;font-size:13px}
+.fang-inbox-red-alert-body{font-size:13px;font-weight:600;margin-top:2px;color:#1D1D1F}
+.fang-inbox-red-alert-context{font-size:11.5px;color:#6E6E73;margin-top:2px}
+.fang-inbox-red-alert-actions{display:flex;gap:6px;margin-top:7px}
+.fang-inbox-batch-fail{margin:0 0 8px;padding:8px 10px;border:1px solid rgba(180,83,9,.35);background:rgba(180,83,9,.06);border-radius:10px;font-size:12px}
+.fang-inbox-batch-fail-title{font-weight:700;color:#9A4A06;margin-bottom:4px}
+.fang-inbox-batch-fail-row{display:flex;gap:8px;justify-content:space-between;padding:3px 0;border-top:1px dashed rgba(180,83,9,.2)}
+.fang-inbox-batch-fail-row b{font-weight:600;overflow-wrap:anywhere}
+.fang-inbox-batch-fail-row span{color:#6E6E73;white-space:nowrap}
+.fang-inbox-batch-fail-actions{display:flex;gap:6px;margin-top:6px}
+.fang-inbox-confirm{position:absolute;inset:0;z-index:5;background:rgba(0,0,0,.32);display:flex;align-items:center;justify-content:center;padding:16px}
+.fang-inbox-confirm-card{width:min(420px,100%);background:#fff;border-radius:14px;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:14px 16px}
+.fang-inbox-confirm-title{font-size:14px;font-weight:700;color:#1D1D1F}
+.fang-inbox-confirm-msg{font-size:12.5px;color:#5F6368;margin-top:6px;line-height:1.5}
+.fang-inbox-confirm-detail{font-size:11.5px;color:#6E6E73;background:#FAFAFC;border-radius:8px;padding:6px 8px;margin-top:6px;white-space:pre-wrap;max-height:120px;overflow:auto}
+.fang-inbox-confirm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+@media (prefers-reduced-motion:reduce){.fang-inbox-drawer{transition:none}.fang-inbox-seat.has-red .fang-inbox-badge{animation:none}}
       `
       target.head.appendChild(style)
     }
@@ -1124,6 +1248,11 @@ window.__ModuleLoader__.load({
         aliases: loadAliases(),
         mirror: { state: 'idle', data: null, error: '', busy: '', etag: '' },
         link: { state: 'idle', data: null, error: '', probe: null, target: resolveMotherOrigin(), busy: false },
+        approvals: { state: 'idle', items: [], failed: [], degraded: false, error: '', at: 0 },
+        forkSupervision: { state: 'idle', data: null, error: '', at: 0 },
+        decisions: { state: 'idle', items: [], counts: {}, rev: 0, error: '', at: 0 },
+        decisionAi: { state: 'idle', configured: false, provider: null, model: null, providers: [], error: '' },
+        decisionOpen: { green: false, gray: false },
         lastRefreshAt: 0,
       }
 
@@ -1269,13 +1398,40 @@ window.__ModuleLoader__.load({
         const seq = ++refreshSeq
         if (options.manual) { S.refreshing = true; schedule() }
         try {
-          const [statusRes, tasksRes, sessionsRes, essenceRes] = await Promise.all([
+          const [statusRes, tasksRes, sessionsRes, essenceRes, approvalsRes, supervisionRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? 1000 : S.sessionWindow}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/essence/list').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api('/fang/api/approvals').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api('/fang/api/forks/supervision').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
           ])
           if (!alive || seq !== refreshSeq) return
+          if (supervisionRes.status === 200 && supervisionRes.body?.ok) {
+            S.forkSupervision = { state: 'ready', data: supervisionRes.body, error: '', at: Date.now() }
+          } else {
+            S.forkSupervision = {
+              ...S.forkSupervision, state: 'error',
+              error: supervisionRes.body?.error || (supervisionRes.status ? 'http-' + supervisionRes.status : 'network'),
+              at: Date.now(),
+            }
+          }
+          if (approvalsRes.status === 200 && approvalsRes.body && approvalsRes.body.ok !== false) {
+            S.approvals = {
+              state: 'ready',
+              items: Array.isArray(approvalsRes.body.items) ? approvalsRes.body.items : [],
+              failed: Array.isArray(approvalsRes.body.failed) ? approvalsRes.body.failed : [],
+              degraded: approvalsRes.body.degraded === true,
+              error: '', at: Date.now(),
+            }
+          } else {
+            S.approvals = {
+              ...S.approvals,
+              state: 'error',
+              error: approvalsRes.body?.error || (approvalsRes.status ? 'http-' + approvalsRes.status : 'network'),
+              at: Date.now(),
+            }
+          }
 
           if (essenceRes.status === 200 && essenceRes.body && Array.isArray(essenceRes.body.essences)) {
             S.essenceList = { data: essenceRes.body, error: '', at: Date.now() }
@@ -2224,10 +2380,140 @@ window.__ModuleLoader__.load({
 
       const unsubscribe = deriveStore.subscribe((value) => { S.derive = value; schedule() })
 
+      async function decideApproval(item, outcome) {
+        if (isBusy()) return
+        const key = `${item?.source ?? ''}:${item?.taskId ?? ''}:${item?.approvalId ?? ''}`
+        S.busy = 'approval:' + key
+        schedule(true)
+        const result = await api('/fang/api/approvals/decide', {
+          method: 'POST',
+          body: JSON.stringify({
+            source: item?.source,
+            taskId: item?.taskId ?? null,
+            approvalId: item?.approvalId,
+            outcome,
+            by: 'fang-ui',
+          }),
+        })
+        S.busy = ''
+        if (result.status === 200 && result.body?.ok !== false) {
+          setNotice({
+            tone: 'ok',
+            title: outcome === 'approved' ? '已批准' : '已拒绝',
+            message: `${item?.source === 'mother' ? '母体' : '分身'} · ${item?.title || item?.approvalId || ''}`,
+          })
+        } else if (result.status === 409) {
+          setNotice({ tone: 'warn', title: '已被处理', message: '该审批项已结算或不存在，列表将刷新。' })
+        } else {
+          setNotice({
+            tone: 'bad',
+            title: '审批操作失败',
+            message: failureHint(result.body?.error || (result.status ? 'http-' + result.status : 'network')),
+            detail: diagnosticText(result.diagnostic),
+          })
+        }
+        await refresh({ manual: true })
+      }
+
+      async function decisionAction(ticket, action, option) {
+        if (isBusy()) return
+        const key = `decision:${ticket?.id ?? ''}`
+        S.busy = key
+        schedule(true)
+        const path = action === 'abandon' ? '/fang/api/decisions/abandon' : '/fang/api/decisions/resolve'
+        const result = await api(path, {
+          method: 'POST',
+          body: JSON.stringify({ id: ticket?.id, option, by: 'fang-ui' }),
+        })
+        S.busy = ''
+        if (result.status === 200 && result.body?.ok !== false) {
+          setNotice({ tone: 'ok', title: action === 'abandon' ? '已放弃' : '已处理', message: ticket?.title || ticket?.id || '' })
+        } else if (result.status === 409) {
+          setNotice({ tone: 'warn', title: '已被处理', message: '该决策已结算或过期，列表将刷新。' })
+        } else {
+          setNotice({ tone: 'bad', title: '决策操作失败', message: failureHint(result.body?.error || (result.status ? 'http-' + result.status : 'network')) })
+        }
+        await refresh({ manual: true })
+      }
+
+      async function decisionBatch(level) {
+        if (isBusy()) return
+        const items = (S.decisions?.items ?? []).filter((item) => item.status === 'pending' && item.level === level)
+        if (!items.length) return
+        S.busy = `decision-batch:${level}`
+        schedule(true)
+        const result = await api('/fang/api/decisions/resolve', {
+          method: 'POST',
+          body: JSON.stringify({ ids: items.map((item) => item.id), by: 'fang-ui' }),
+        })
+        S.busy = ''
+        if (result.status === 200 && result.body?.ok !== false) {
+          setNotice({ tone: 'ok', title: '已批量处理', message: `${level} · ${items.length} 项` })
+        } else {
+          setNotice({ tone: 'bad', title: '批量处理失败', message: failureHint(result.body?.error || 'http-' + result.status) })
+        }
+        await refresh({ manual: true })
+      }
+
+      async function saveDecisionAi() {
+        const read = (name) => String(view.querySelector(`[data-ai-field="${name}"]`)?.value ?? '').trim()
+        const provider = read('provider') || 'deepseek'
+        const apiKey = read('apiKey')
+        const model = read('model')
+        const baseUrl = read('baseUrl')
+        if (!apiKey) { setNotice({ tone: 'warn', title: '需要 API Key', message: '请填入你自己的模型 API Key；只保存在宿主内存，不写入仓库。' }); return }
+        const result = await api('/fang/api/decisions/ai/config', {
+          method: 'POST',
+          body: JSON.stringify({ provider, apiKey, model: model || undefined, baseUrl: baseUrl || undefined }),
+        })
+        if (result.status === 200 && result.body?.ok !== false) {
+          setNotice({ tone: 'ok', title: 'AI 已启用', message: `${result.body.provider || provider} · ${result.body.model || model}` })
+        } else {
+          setNotice({ tone: 'bad', title: 'AI 配置失败', message: failureHint(result.body?.error || result.body?.reason || 'http-' + result.status) })
+        }
+        await refresh({ manual: true })
+      }
+
+      async function adviseDecision(ticket) {
+        if (isBusy()) return
+        S.busy = `decision-ai:${ticket?.id ?? ''}`
+        schedule(true)
+        const result = await api('/fang/api/decisions/ai/advise', { method: 'POST', body: JSON.stringify({ id: ticket?.id }) })
+        S.busy = ''
+        if (result.status === 200 && result.body?.ok !== false) {
+          setNotice({ tone: 'ok', title: 'AI 建议已生成', message: result.body.advice?.summary || ticket?.title || '' })
+        } else {
+          setNotice({ tone: 'bad', title: 'AI 建议失败', message: failureHint(result.body?.error || result.body?.reason || 'http-' + result.status) })
+        }
+        await refresh({ manual: true })
+      }
+
+      async function setForkSupervision(patch = {}) {
+        const res = await api('/fang/api/forks/supervision', { method: 'POST', body: JSON.stringify(patch) })
+        if (res.status === 200 && res.body?.ok) {
+          S.forkSupervision = { state: 'ready', data: res.body, error: '', at: Date.now() }
+          setNotice({ tone: 'ok', title: '分身看护已更新', message: `自动启动 ${res.body.effective?.autostartForks ? '开' : '关'} · 崩溃重启 ${res.body.effective?.supervise ? '开' : '关'}` })
+        } else {
+          S.forkSupervision = {
+            ...S.forkSupervision, state: 'error',
+            error: res.body?.error || (res.status ? 'http-' + res.status : 'network'), at: Date.now(),
+          }
+          setNotice({ tone: 'bad', title: '分身看护更新失败', message: failureHint(S.forkSupervision.error) })
+        }
+        schedule(true)
+        return res
+      }
+
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
+        decideApproval,
+        setForkSupervision,
+        decisionAction,
+        decisionBatch,
+        saveDecisionAi,
+        adviseDecision,
         openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
         essenceBackup, essenceRestore, openEssenceDetail, unfreezeEssence, stopEssenceRuntime,
         openBranches, forkBranch, activateBranch, deriveFromEssence,
@@ -2404,6 +2690,7 @@ window.__ModuleLoader__.load({
 
     function renderStats(S) {
       const data = S.status.data
+      const restart = data?.restart
       const ready = Number(data?.tasks?.ready ?? 0) || 0
       const running = Number(data?.tasks?.running ?? 0) || 0
       const max = data?.tasks?.max ?? '—'
@@ -2427,6 +2714,15 @@ window.__ModuleLoader__.load({
         item(ready > 0 ? 'ok' : 'neutral', '就绪', data ? `${ready}/${max}` : '—', `适配器已握手的分身 ${ready} 个 / 上限 ${max} 个。`),
         h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
         item(running > 0 ? 'bad' : 'neutral', '未握手', data ? String(running) : '—', `进程在跑但适配器未握手的分身 ${running} 个；大于 0 时按三色模型标红。`),
+        ...(restart?.available ? [
+          h('span', { class: 'stat-sep', 'aria-hidden': 'true' }),
+          item(
+            restart.redLineAutoAllowed ? 'bad' : (restart.state && restart.state !== 'idle' ? 'warn' : 'neutral'),
+            '重启守卫',
+            restart.mode ? String(restart.mode) : '—',
+            `重启守卫：state=${restart.state ?? '—'} · mode=${restart.mode ?? '—'} · authMode=${restart.authMode ?? '—'} · strictRedLine=${restart.strictRedLine === false ? 'false（红灯可自动放行）' : 'true'} · 决策层不执行`,
+          ),
+        ] : []),
         total > 0 ? h('span', { class: 'stat-sep', 'aria-hidden': 'true' }) : null,
         total > 0 ? item('neutral', '项目', String(total), `当前分身项目总数 ${total}（含临时与存档）。`) : null)
     }
@@ -2485,6 +2781,7 @@ window.__ModuleLoader__.load({
 
     function renderHeader(S, app) {
       const data = S.status.data
+      const restart = data?.restart
       const cap = projectCapacity(data, S.tasks.items)
       const quotaFull = !cap.deriveEnabled || cap.headroom <= 0
       const reasonId = 'fang-quota-reason'
@@ -2499,6 +2796,13 @@ window.__ModuleLoader__.load({
             h('span', { class: 'fh-sub' }, '母体 × 分身 · 三区控制台'))),
         renderStats(S),
         h('div', { class: 'fh-actions' },
+          restart?.available && restart.redLineAutoAllowed
+            ? chip('warn', '红灯自动放行', {
+              title: 'strictRedLine=false：auto 授权模式下红灯可被策略自动放行。这只到决策层；execution.executed 恒为 false，真正重启仍由外部 supervisor 的 armed 清单决定。',
+              state: 'red-line-auto-allowed',
+              danger: true,
+            })
+            : null,
           quotaFull ? h('span', { class: 'quota-reason', id: reasonId, tabindex: -1, 'data-reason': 'M-05', 'data-reason-code': 'quota-exceeded' }, `配额已满（${cap.used}/${cap.limit}）：先归档旧分身。`) : null,
           button(`${S.view === 'archive' ? '返回面板' : `读档 (${archivedCount})`}`, {
             variant: S.view === 'archive' ? 'ghost' : 'quiet', size: 'sm', dataBtnId: 'M-01',
@@ -2510,6 +2814,11 @@ window.__ModuleLoader__.load({
             variant: 'quiet', size: 'sm',
             title: '临时 = 快速派生的空白分身与空会话；偏好会记住（localStorage）',
             onClick: () => app.toggleTemporary(), fk: 'temp-toggle', dataBtnId: 'M-02',
+          }),
+          button('收件箱', {
+            variant: 'ghost', size: 'sm', icon: icon('inbox', 14),
+            title: '决策收件箱：独立抽屉；红/黄/蓝/绿/灰分组、未读计数、键盘导航与批量处理',
+            onClick: () => openInboxExternally?.(), fk: 'inbox', dataBtnId: 'M-06',
           }),
           button('刷新', {
             variant: 'ghost', size: 'sm', icon: icon('refresh', 14), busy: S.refreshing,
@@ -2551,6 +2860,63 @@ window.__ModuleLoader__.load({
     }
 
     // ── 全局提示（派生结果 / 动作结果 / 接口错误）───────────────────────────
+    // 待批区：只读母体聚合接口；不直接跨 fork adapter
+    // 瓮城·决策中心：注意力分级面板。红色置顶；绿/灰默认折叠；所有操作等接口返回。
+    function renderApprovals(S, app) {
+      const state = S.approvals || { state: 'idle', items: [], failed: [], degraded: false, error: '' }
+      if (state.state === 'error' && state.items.length === 0) {
+        return [h('div', { class: 'notice notice--warn', role: 'status' },
+          h('div', { class: 'notice-main' },
+            h('div', { class: 'notice-title' }, icon('alert', 14), '待批信息不可用'),
+            h('div', { class: 'notice-text' }, failureHint(state.error || 'network'))))]
+      }
+      if (state.items.length === 0 && state.failed.length === 0) return []
+      const toneOf = (risk) => risk === 'red' ? 'bad' : risk === 'yellow' ? 'warn' : risk === 'blue' ? 'info' : 'ok'
+      const ttlText = (deadlineAt) => {
+        const at = Number(deadlineAt)
+        if (!Number.isFinite(at) || at <= 0) return '无期限'
+        const left = at - Date.now()
+        if (left <= 0) return '已到期'
+        const seconds = Math.ceil(left / 1000)
+        return seconds < 60 ? `${seconds}s` : `${Math.ceil(seconds / 60)}m`
+      }
+      const rows = state.items.map((item) => {
+        const key = `${item.source}:${item.taskId ?? ''}:${item.approvalId}`
+        const busy = S.busy === 'approval:' + key
+        const orphaned = item.state === 'orphaned'
+        return h('div', {
+          class: 'notice', role: 'listitem', 'data-approval-key': key, 'data-approval-state': item.state,
+          style: { display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', marginTop: 4 },
+        },
+        chip(toneOf(item.risk), item.source === 'mother' ? '母体' : '分身'),
+        h('div', { class: 'notice-main', style: { minWidth: 0, flex: 1 } },
+          h('div', { class: 'notice-title', style: { fontSize: 13 } }, clampText(item.title) || item.approvalId || '未命名审批'),
+          h('div', { class: 'notice-text', style: { fontSize: 12 } },
+            `${item.kind || 'approval'} · ${orphaned ? '已中断（重启前）' : '剩余 ' + ttlText(item.deadlineAt)}${item.taskId ? ' · ' + short(item.taskId, 10) : ''}`)),
+        orphaned ? null : button('批准', {
+          size: 'sm', variant: 'primary', busy,
+          disabled: busy,
+          onClick: () => void app.decideApproval(item, 'approved'),
+        }),
+        orphaned ? null : button('拒绝', {
+          size: 'sm', variant: 'ghost', busy,
+          disabled: busy,
+          onClick: () => void app.decideApproval(item, 'denied'),
+        }))
+      })
+      return [h('div', {
+        class: 'notice notice--info', role: 'region', 'aria-label': '待批事项',
+        'data-zone': 'approvals', style: { padding: '8px 10px' },
+      },
+      h('div', { class: 'notice-main' },
+        h('div', { class: 'notice-title' }, icon('alert', 14), `待批 ${state.items.length}`,
+          state.failed.length > 0 ? h('span', { class: 'chip', title: '部分来源不可用；不显示假 pending' }, '部分不可用') : null),
+        state.failed.length > 0
+          ? h('div', { class: 'notice-text' }, `前端不可用：${state.failed.map((entry) => entry.taskId || '母体').join('、')}`)
+          : null,
+        h('div', { role: 'list', style: { marginTop: 4 } }, ...rows)))]
+    }
+
     function renderNotices(S, app) {
       const nodes = []
       const derive = S.derive
@@ -2959,6 +3325,134 @@ window.__ModuleLoader__.load({
     }
 
     // ── 右栏：分身区 ─────────────────────────────────────────────────────
+    /**
+     * 右侧工作区内的「决策中心」区域：红置顶、黄/蓝分组、绿/灰默认折叠；
+     * 操作后重新拉取（不乐观删除）；409 显示「已被处理」。
+     */
+    function renderDecisionMini() {
+      const section = h('div', { class: 'fang-decision-mini', 'data-zone': 'decision-mini' })
+      const state = {
+        loading: true, items: [], error: '', notice: '', busy: false,
+        collapsed: new Set(['green', 'gray']),
+      }
+      const LEVELS_MINI = [
+        { level: 'red', label: '红色 · 阻塞', tone: 'red' },
+        { level: 'yellow', label: '黄色', tone: 'yellow' },
+        { level: 'blue', label: '蓝色', tone: 'blue' },
+        { level: 'green', label: '绿色', tone: 'green' },
+        { level: 'gray', label: '灰色归档', tone: 'gray' },
+      ]
+      const remaining = (expiresAt) => {
+        if (!expiresAt) return '无期限'
+        const diff = Number(expiresAt) - Date.now()
+        if (diff <= 0) return '已过期'
+        const minutes = Math.max(1, Math.round(diff / 60000))
+        if (minutes < 60) return `剩余 ${minutes} 分钟`
+        return `剩余 ${Math.floor(minutes / 60)} 小时`
+      }
+      const sourceLabel = (item) => {
+        const source = item?.source ?? {}
+        return String(source.rawSource || source.agentRole || 'unknown')
+          + (source.taskName ? ` · ${source.taskName}` : '')
+          + (source.sessionId && source.sessionId !== 'unknown' ? ` · ${source.sessionId}` : '')
+      }
+      const itemsFor = (level) => level === 'gray'
+        ? state.items.filter((item) => item.status !== 'pending')
+        : state.items.filter((item) => item.status === 'pending' && item.level === level)
+
+      const load = async () => {
+        const result = await api('/fang/api/decisions?includeArchived=1')
+        if (result.status === 200 && result.body?.ok !== false) {
+          state.items = Array.isArray(result.body.items) ? result.body.items : []
+          state.error = ''
+        } else {
+          state.error = result.body?.error || (result.status ? 'http-' + result.status : 'network')
+        }
+        state.loading = false
+        render()
+      }
+      const act = async (item, option) => {
+        if (state.busy) return
+        state.busy = true
+        state.notice = ''
+        render()
+        const result = option === null
+          ? await api('/fang/api/decisions/abandon', { method: 'POST', body: JSON.stringify({ id: item.id, by: 'fang-panel' }) })
+          : await api('/fang/api/decisions/resolve', { method: 'POST', body: JSON.stringify({ id: item.id, option, by: 'fang-panel' }) })
+        if (result.status === 409) state.notice = '该票已被处理（可能刚被其他人/另一标签页处理），已刷新'
+        else if (result.status !== 200 || result.body?.ok === false) state.notice = '操作失败：' + failureHint(result.body?.reason || result.body?.error || ('http-' + result.status))
+        state.busy = false
+        await load() // 不做乐观删除：无论成功失败都重新拉取
+      }
+
+      function render() {
+        const pending = state.items.filter((item) => item.status === 'pending')
+        const head = h('div', { class: 'fang-decision-mini-head' },
+          h('b', null, '决策中心'),
+          h('span', { class: 'fang-decision-mini-count' }, pending.length ? `${pending.length} 待处理` : '暂无待处理'),
+          h('span', { class: 'fang-decision-mini-spacer' }),
+          h('button', { type: 'button', class: 'fang-decision-mini-refresh', title: '重新拉取', onClick: () => { if (!state.busy) void load() } }, '刷新'))
+        const body = h('div', { class: 'fang-decision-mini-body' })
+        if (state.notice) body.append(h('div', { class: 'notice notice--warn', role: 'status' }, state.notice))
+        if (state.loading) body.append(h('div', { class: 'loading-line' }, icon('spinner', 13), '正在读取决策…'))
+        else if (state.error) body.append(h('div', { class: 'notice notice--bad', role: 'alert' }, '决策中心不可用：' + failureHint(state.error)))
+        else {
+          for (const meta of LEVELS_MINI) {
+            const items = itemsFor(meta.level)
+            if (!items.length) continue
+            const collapsed = state.collapsed.has(meta.level)
+            const group = h('div', { class: 'fang-decision-mini-group', 'data-level': meta.level },
+              h('button', {
+                type: 'button', class: 'fang-decision-mini-group-head',
+                'aria-expanded': collapsed ? 'false' : 'true',
+                onClick: () => {
+                  if (collapsed) state.collapsed.delete(meta.level)
+                  else state.collapsed.add(meta.level)
+                  render()
+                },
+              }, h('b', null, meta.label), h('span', null, `${items.length} 项 · ${collapsed ? '展开' : '收起'}`)))
+            if (!collapsed) {
+              const list = h('div', { class: 'fang-decision-mini-list' })
+              for (const item of items.slice(0, 30)) {
+                const actions = h('div', { class: 'fang-decision-mini-actions' })
+                for (const option of (item.options || []).slice(0, 4)) {
+                  actions.append(h('button', {
+                    type: 'button', class: 'fang-inbox-btn' + (option.isRecommended ? ' fang-inbox-btn--primary' : ''),
+                    disabled: state.busy || item.status !== 'pending',
+                    onClick: () => void act(item, option.value),
+                  }, option.label || option.value))
+                }
+                if (item.status === 'pending') {
+                  actions.append(h('button', {
+                    type: 'button', class: 'fang-inbox-btn fang-inbox-btn--danger', disabled: state.busy,
+                    onClick: () => void act(item, null),
+                  }, '放弃/忽略'))
+                }
+                list.append(h('div', { class: 'fang-decision-mini-item', 'data-inbox-id': item.id, 'data-level': item.level },
+                  h('div', { class: 'fang-decision-mini-title' }, inboxText(item.title) || item.id),
+                  h('div', { class: 'fang-decision-mini-meta' }, `${sourceLabel(item)} · ${remaining(item.expiresAt)}`),
+                  item.context ? h('div', { class: 'fang-decision-mini-context' }, inboxText(item.context, 240)) : null,
+                  actions))
+              }
+              group.append(list)
+            }
+            body.append(group)
+          }
+          if (!pending.length && !itemsFor('gray').length) body.append(h('div', { class: 'loading-line' }, '没有待处理决策。'))
+        }
+        section.replaceChildren(head, body)
+      }
+
+      render()
+      void load()
+      const timer = setInterval(() => {
+        if (!section.isConnected) { clearInterval(timer); return }
+        if (!state.busy) void load()
+      }, 5000)
+      timer.unref?.()
+      return section
+    }
+
     function renderForkPanel(S, app) {
       const freshness = freshnessOf(S)
       const all = S.tasks.items
@@ -2992,6 +3486,7 @@ window.__ModuleLoader__.load({
         renderCapacityStrip(cap))
 
       const scroll = h('div', { class: 'panel-scroll', 'data-sk': 'right' })
+      scroll.append(renderDecisionMini())
 
       if (S.tasks.state === 'loading' && all.length === 0) {
         scroll.append(h('div', { class: 'loading-line' }, icon('spinner', 14), '正在读取分身任务…'))
@@ -3735,10 +4230,44 @@ window.__ModuleLoader__.load({
           h('a', { class: 'fang-portal-link', href: '/fang/panel', target: '_blank', rel: 'noopener' }, '独立门户', icon('external', 11))))
     }
 
+    function renderForkSupervision(S, app) {
+      const sv = S.forkSupervision || { state: 'idle' }
+      if (sv.state === 'idle') return null
+      if (sv.state === 'error') {
+        return h('div', { class: 'notice notice--warn', role: 'status', 'data-zone': 'fork-supervision' },
+          h('div', { class: 'notice-main' },
+            h('div', { class: 'notice-title' }, '分身看护不可用'),
+            h('div', { class: 'notice-text' }, failureHint(sv.error || 'network'))),
+          button('重试', { size: 'sm', variant: 'ghost', onClick: () => void app.refresh({ manual: true }) }))
+      }
+      const data = sv.data || {}
+      const eff = data.effective || {}
+      const persisted = data.persisted || {}
+      const toggle = (key, label, checked, title) => h('label', {
+        class: 'supervision-toggle', title, style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, cursor: 'pointer' },
+      },
+      h('input', {
+        type: 'checkbox', checked: checked === true, 'data-supervision': key,
+        onChange: () => void app.setForkSupervision({ [key]: !checked }),
+      }), label)
+      return h('div', { class: 'notice notice--info', role: 'status', 'data-zone': 'fork-supervision', style: { padding: '8px 10px' } },
+        h('div', { class: 'notice-main', style: { width: '100%' } },
+          h('div', { class: 'notice-title' }, '分身看护'),
+          h('div', { class: 'notice-text', style: { display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'center', marginTop: 4 } },
+            toggle('autostartForks', '自动启动分身（watchdog 下次启动生效）', eff.autostartForks === true),
+            toggle('supervise', '崩溃自动重启（立即生效）', eff.supervise === true),
+            h('span', { style: { color: 'var(--f-text-3)' } },
+              `持久化：${persisted.exists ? '已保存' : '默认值'}${data.forker?.enabled === true ? ' · forker 看护中' : ''}`))))
+    }
+
     function renderApp(S, app) {
       const frag = document.createDocumentFragment()
       frag.append(renderHeader(S, app))
       for (const node of renderNotices(S, app)) frag.append(node)
+      for (const node of renderApprovals(S, app)) frag.append(node)
+      const forkSupervisionNode = renderForkSupervision(S, app)
+      if (forkSupervisionNode) frag.append(forkSupervisionNode)
+      // 决策中心已移出主面板：独立「收件箱」侧栏入口 + 右侧抽屉 / sidebar.right.pane.tab。
 
       if (S.role.value === 'mother') {
         const body = h('div', { class: 'fang-body', 'aria-busy': S.refreshing ? 'true' : undefined })
@@ -4120,6 +4649,911 @@ window.__ModuleLoader__.load({
       parent.append(trigger, popup)
       render()
       return () => { trigger.remove(); popup.remove() }
+    }
+
+    // ── 决策收件箱（独立侧栏入口 + 右侧抽屉 / 独立 Slot）────────────────────
+    // 数据与渲染都不依赖「瓮城」主面板：右侧 slot / 抽屉挂载时自轮询 /fang/api/decisions。
+    const DECISION_INBOX = Object.freeze({ id: 'fang-decision-inbox', kind: 'fangDecisionInbox', label: '收件箱' })
+    /** 插件 apply 时注入；主面板 Header 用它兜底打开收件箱（侧栏 Slot 不可用时）。 */
+    let openInboxExternally = null
+    const INBOX_LEVELS = Object.freeze([
+      { level: 'red', label: '紧急决策', hint: '会阻塞 Agent' },
+      { level: 'yellow', label: '建议决策', hint: '影响方向/进度' },
+      { level: 'blue', label: '日常建议', hint: '可按推荐处理' },
+      { level: 'green', label: '通知与汇报', hint: '默认折叠' },
+      { level: 'gray', label: '已归档 / 过期', hint: '只读' },
+    ])
+    const INBOX_POLL_MS = 5000
+    const inboxText = (value, max = 420) => {
+      const text = String(value ?? '').trim()
+      return text.length > max ? text.slice(0, max - 1) + '…' : text
+    }
+    function inboxButton(label, onClick, options = {}) {
+      const node = h('button', {
+        type: 'button',
+        class: 'fang-inbox-btn' + (options.primary ? ' fang-inbox-btn--primary' : '') + (options.danger ? ' fang-inbox-btn--danger' : ''),
+        disabled: options.disabled === true,
+        title: options.title,
+        'aria-label': options.ariaLabel,
+      }, label)
+      if (typeof onClick === 'function') node.addEventListener('click', (event) => { event.preventDefault(); onClick(event) })
+      return node
+    }
+
+    const INBOX_SEEN_KEY = 'fang.inbox.seenRev'
+    function readInboxSeenRev() {
+      try {
+        const value = Number(window?.localStorage?.getItem(INBOX_SEEN_KEY))
+        return Number.isFinite(value) && value > 0 ? value : 0
+      } catch { return 0 }
+    }
+    function writeInboxSeenRev(rev) {
+      try { window?.localStorage?.setItem(INBOX_SEEN_KEY, String(rev)) } catch { /* local only */ }
+    }
+
+    /** 红色强提醒：页面内红色横幅 + 标题闪烁 +（已授权时）系统通知；同一 ticket 只提醒一次。 */
+    function showRedDecisionAlert(ticket, store) {
+      const doc = typeof document !== 'undefined' ? document : null
+      if (!doc || !ticket?.id) return
+      let stack = doc.querySelector('[data-fang-red-alerts]')
+      if (!stack) {
+        stack = h('div', { class: 'fang-red-alert-stack', 'data-fang-red-alerts': '1' })
+        doc.body.append(stack)
+      }
+      if (stack.querySelector(`[data-red-ticket="${ticket.id}"]`)) return
+      const remove = () => { node.remove(); if (!stack.childElementCount) stack.remove() }
+      const node = h('div', {
+        class: 'fang-inbox-red-alert', role: 'alert', 'data-red-ticket': ticket.id,
+      },
+      h('div', { class: 'fang-inbox-red-alert-title' }, icon('alert', 15), '红色决策待处理'),
+      h('div', { class: 'fang-inbox-red-alert-body' }, inboxText(ticket.title, 120)),
+      ticket.context ? h('div', { class: 'fang-inbox-red-alert-context' }, inboxText(ticket.context, 160)) : null,
+      h('div', { class: 'fang-inbox-red-alert-actions' },
+        inboxButton('打开收件箱', () => { remove(); store.openHandler?.() }, { primary: true }),
+        inboxButton('关闭', remove)))
+      stack.append(node)
+      // 标题闪烁（不改回原值前先记下），10s 后恢复。
+      try {
+        const base = String(doc.title || '').replace(/^● 红色决策 · /, '')
+        doc.title = '● 红色决策 · ' + base
+        clearTimeout(showRedDecisionAlert._titleTimer)
+        showRedDecisionAlert._titleTimer = setTimeout(() => {
+          const current = String(doc.title || '')
+          if (current.startsWith('● 红色决策 · ')) doc.title = current.replace('● 红色决策 · ', '')
+        }, 10000)
+      } catch { /* ignore */ }
+      // 系统通知只在用户已授权时发；不在这里自动申请权限（避免打扰）。
+      try {
+        if (typeof window !== 'undefined' && window.Notification?.permission === 'granted') {
+          const notice = new window.Notification('红色决策待处理', { body: inboxText(ticket.title, 120), tag: ticket.id, renotify: false })
+          notice.onclick = () => { try { window.focus() } catch { /* ignore */ } remove() }
+        }
+      } catch { /* notification optional */ }
+    }
+
+    /** 收件箱唯一数据源：侧栏未读徽标 / 右侧 tab / 抽屉 共用。 */
+    function createDecisionInboxStore() {
+      const S = {
+        state: 'idle', items: [], rev: 0, error: '', at: 0,
+        streamState: 'idle', seenRev: readInboxSeenRev(), redPending: 0,
+        selected: new Set(), collapsed: new Set(['green', 'gray']),
+        batchFailures: [], batchFailuresKind: null,
+        busy: '', notice: '',
+        ai: { state: 'idle', configured: false, provider: null, model: null, providers: [], error: '' },
+        aiTest: { state: 'idle', ok: null, message: '', latencyMs: 0 },
+        aiStream: { id: '', text: '', state: '' },
+      }
+      const listeners = new Set()
+      let timer = null
+      let inflight = null
+      let streamAbort = null
+      let reconnectTimer = null
+      let disposed = false
+      let openHandler = null
+      const emit = () => { for (const fn of [...listeners]) { try { fn(S) } catch { /* listener must not break */ } } }
+      const pending = () => S.items.filter(item => item.status === 'pending')
+      const ticketRev = (item) => Number(item?.rev) || 0
+      // 未读计数 = pending 数：侧栏 badge、tab 标题、收件箱标题三处共用同一口径。
+      // seenRev 仍保留用于“新 ticket 提醒”去重，但不参与 badge 计数。
+      const unread = () => pending().length
+      const syncBadges = () => {
+        S.redPending = pending().filter(item => item.level === 'red').length
+      }
+      const snapshot = () => S
+      const inboxOnScreen = () => {
+        try {
+          const doc = typeof document !== 'undefined' ? document : null
+          if (!doc) return false
+          if (doc.visibilityState === 'hidden') return false
+          const node = doc.querySelector('[data-zone="decision-inbox"]')
+          if (!node) return false
+          return node.getClientRects?.().length > 0
+        } catch { return false }
+      }
+      const markSeen = () => {
+        const maxRev = S.items.reduce((max, item) => Math.max(max, ticketRev(item)), S.seenRev)
+        if (maxRev <= S.seenRev) return
+        S.seenRev = maxRev
+        writeInboxSeenRev(maxRev)
+        syncBadges()
+        emit()
+      }
+      const mergeTickets = (incoming) => {
+        const byId = new Map(S.items.map(item => [item.id, item]))
+        const freshRed = []
+        for (const item of incoming) {
+          if (!item || !item.id) continue
+          if (!byId.has(item.id) && item.status === 'pending' && item.level === 'red') freshRed.push(item)
+          byId.set(item.id, item)
+        }
+        S.items = [...byId.values()]
+        S.rev = S.items.reduce((max, item) => Math.max(max, ticketRev(item)), S.rev)
+        syncBadges()
+        return freshRed
+      }
+      const alertTarget = { get openHandler() { return openHandler } }
+      const alertFresh = (freshRed) => {
+        if (!freshRed.length) return
+        if (inboxOnScreen()) { markSeen(); return }
+        for (const ticket of freshRed) showRedDecisionAlert(ticket, alertTarget)
+      }
+
+      async function refresh() {
+        if (inflight) return inflight
+        inflight = (async () => {
+          const query = '/fang/api/decisions?includeArchived=1' + (S.rev > 0 ? '&since=' + encodeURIComponent(String(S.rev)) : '')
+          const [decisions, ai] = await Promise.all([
+            api(query).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api('/fang/api/decisions/ai').catch(() => ({ status: 0, body: null })),
+          ])
+          if (decisions.status === 200 && decisions.body?.ok !== false) {
+            const incoming = Array.isArray(decisions.body.items) ? decisions.body.items : []
+            const freshRed = mergeTickets(incoming)
+            S.rev = Math.max(S.rev, Number(decisions.body.rev) || 0)
+            S.state = 'ready'; S.error = ''
+            alertFresh(freshRed)
+          } else {
+            S.state = S.items.length ? 'stale' : 'error'
+            S.error = decisions.body?.error || (decisions.status ? 'http-' + decisions.status : 'network')
+          }
+          if (ai.status === 200 && ai.body?.ok !== false) S.ai = { ...S.ai, ...ai.body, state: 'ready', error: '' }
+          else S.ai = { ...S.ai, state: 'error', error: ai.body?.error || 'ai-unavailable' }
+          const alive = new Set(pending().map(item => item.id))
+          for (const id of [...S.selected]) if (!alive.has(id)) S.selected.delete(id)
+          S.at = Date.now()
+          emit()
+        })()
+        try { return await inflight } finally { inflight = null }
+      }
+
+      /** SSE：bus 事件 → 立即合并；断线 2.5s 重连；轮询仅作降级。 */
+      async function connectStream() {
+        if (disposed || streamAbort) return
+        const controller = new AbortController()
+        streamAbort = controller
+        try {
+          const token = await ensureFangAuthToken()
+          const response = await fetch('/fang/api/decisions/events', {
+            headers: { accept: 'text/event-stream', 'x-fang-auth': token },
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+          if (!response.ok || !response.body?.getReader) throw new Error('stream-unavailable')
+          S.streamState = 'open'
+          emit()
+          const reader = response.body.getReader()
+          const decoder = new TextDecoder()
+          let buffer = ''
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            let index = buffer.indexOf('\n\n')
+            while (index >= 0) {
+              handleStreamFrame(buffer.slice(0, index))
+              buffer = buffer.slice(index + 2)
+              index = buffer.indexOf('\n\n')
+            }
+          }
+          throw new Error('stream-closed')
+        } catch (error) {
+          if (controller.signal.aborted || disposed) return
+          streamAbort = null
+          S.streamState = 'retry'
+          emit()
+          clearTimeout(reconnectTimer)
+          reconnectTimer = setTimeout(() => { if (!disposed && !streamAbort) void connectStream() }, 2500)
+        }
+      }
+
+      function handleStreamFrame(raw) {
+        let event = 'message'
+        const dataLines = []
+        for (const line of String(raw ?? '').split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+        }
+        if (!dataLines.length) return
+        let payload = null
+        try { payload = JSON.parse(dataLines.join('\n')) } catch { return }
+        if (event === 'ready') {
+          S.streamState = 'open'
+          S.rev = Math.max(S.rev, Number(payload?.rev) || 0)
+          S.at = Date.now()
+          emit()
+          return
+        }
+        if (event === 'ticket' && payload?.ticket?.id) {
+          const freshRed = mergeTickets([payload.ticket])
+          S.state = 'ready'; S.error = ''
+          S.at = Date.now()
+          alertFresh(freshRed)
+          emit()
+        }
+      }
+
+      function start() {
+        if (timer) return
+        syncBadges()
+        void refresh()
+        void connectStream()
+        // 降级轮询：SSE 正常时也低频兜底（SSE 掉线时由重连补齐，最多 30s 的空窗）。
+        timer = setInterval(() => {
+          try { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return } catch { /* ignore */ }
+          if (S.streamState === 'open') return
+          void refresh()
+        }, INBOX_POLL_MS)
+      }
+      function stop() {
+        disposed = true
+        if (timer) clearInterval(timer)
+        timer = null
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+        try { streamAbort?.abort() } catch { /* ignore */ }
+        streamAbort = null
+      }
+      function subscribe(fn) { listeners.add(fn); try { fn(S) } catch { /* ignore */ } return () => listeners.delete(fn) }
+      async function act(label, run) {
+        if (S.busy) return null
+        S.busy = label; S.notice = ''; emit()
+        try {
+          const result = await run()
+          if (result?.status === 200 && result.body?.ok !== false) {
+            S.notice = result.body?.ok === false ? '' : 'ok'
+          } else {
+            S.notice = 'err:' + (result?.body?.error || result?.body?.reason || (result?.status ? 'http-' + result.status : 'network'))
+          }
+          return result
+        } finally {
+          S.busy = ''
+          await refresh().catch(() => {})
+        }
+      }
+      async function runBatch(label, request) {
+        if (S.busy) return null
+        const ids = [...S.selected].filter(id => pending().some(item => item.id === id))
+        if (!ids.length) { S.notice = 'err:no-selected'; emit(); return null }
+        S.busy = label; S.notice = ''; S.batchFailures = []
+        S.batchFailuresKind = label === 'batch-archive' ? 'archive' : 'resolve'
+        emit()
+        try {
+          const result = await request(ids)
+          const rows = Array.isArray(result?.body?.results) ? result.body.results : []
+          S.batchFailures = rows
+            .filter(row => row.ok === false)
+            .map(row => ({
+              id: String(row.id ?? ''),
+              reason: String(row.reason ?? 'failed'),
+              title: String(S.items.find(item => item.id === row.id)?.title ?? row.id ?? ''),
+            }))
+          if (result?.status === 200) S.notice = S.batchFailures.length ? '' : 'ok'
+          else S.notice = 'err:' + (result?.body?.error || (result?.status ? 'http-' + result.status : 'network'))
+          return result
+        } finally {
+          S.busy = ''
+          await refresh().catch(() => {})
+        }
+      }
+      async function runAiTest(input) {
+        S.aiTest = { state: 'testing', ok: null, message: '正在测试连接…', latencyMs: 0 }
+        S.busy = 'ai-test'; emit()
+        try {
+          const result = await api('/fang/api/decisions/ai/test', { method: 'POST', body: JSON.stringify(input ?? {}) })
+          const body = result?.body ?? {}
+          if (result?.status === 200 && body.ok !== false) {
+            S.aiTest = {
+              state: 'ok', ok: true,
+              message: `连接成功 · ${body.provider || input?.provider || 'AI'} / ${body.model || '—'} · ${Number(body.latencyMs) || 0}ms`,
+              latencyMs: Number(body.latencyMs) || 0,
+            }
+          } else {
+            S.aiTest = {
+              state: 'err', ok: false,
+              message: failureHint(body.reason || body.error || (result?.status ? 'http-' + result.status : 'network')),
+              latencyMs: 0,
+            }
+          }
+          return result
+        } catch (error) {
+          S.aiTest = { state: 'err', ok: false, message: String(error?.message ?? error), latencyMs: 0 }
+          return null
+        } finally {
+          S.busy = ''
+          emit()
+        }
+      }
+      async function saveAiWithTest(input) {
+        // 保存前先真实调用一次；测试失败绝不启用（避免“保存即启用”的假成功）。
+        const tested = await runAiTest(input)
+        if (!(tested?.status === 200 && tested.body?.ok !== false)) {
+          S.notice = 'err:ai-test-failed'; emit(); return null
+        }
+        return act('ai-config', () => api('/fang/api/decisions/ai/config', {
+          method: 'POST', body: JSON.stringify(input ?? {}),
+        }))
+      }
+      async function runAdviseStream(id) {
+        if (S.busy) return null
+        S.busy = 'ai-advise-stream'
+        S.aiStream = { id: String(id), text: '', state: 'running' }
+        emit()
+        try {
+          const token = await ensureFangAuthToken()
+          const response = await fetch('/fang/api/decisions/ai/advise/stream', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'text/event-stream', 'x-fang-auth': token },
+            body: JSON.stringify({ id }),
+          })
+          if (!response.ok || !response.body?.getReader) {
+            S.aiStream = { id: '', text: '', state: '' }
+            S.busy = ''
+            emit()
+            return act('ai-advise', () => api('/fang/api/decisions/ai/advise', { method: 'POST', body: JSON.stringify({ id }) }))
+          }
+          const reader = response.body.getReader()
+          const decoder = new TextDecoder()
+          let buffer = ''
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            let index = buffer.indexOf('\n\n')
+            while (index >= 0) {
+              const raw = buffer.slice(0, index)
+              buffer = buffer.slice(index + 2)
+              index = buffer.indexOf('\n\n')
+              let event = 'message'
+              const dataLines = []
+              for (const line of raw.split('\n')) {
+                if (line.startsWith('event:')) event = line.slice(6).trim()
+                else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+              }
+              if (!dataLines.length) continue
+              let payload = null
+              try { payload = JSON.parse(dataLines.join('\n')) } catch { continue }
+              if (event === 'delta' && typeof payload?.text === 'string') {
+                S.aiStream = { ...S.aiStream, text: payload.text.slice(0, 4000), state: 'running' }
+                emit()
+              } else if (event === 'error') {
+                S.notice = 'err:' + (payload?.reason || payload?.error || 'ai-failed')
+              }
+            }
+          }
+          S.aiStream = { id: S.aiStream.id, text: S.aiStream.text, state: 'done' }
+          return true
+        } catch (error) {
+          S.notice = 'err:' + String(error?.message ?? error)
+          return null
+        } finally {
+          S.busy = ''
+          emit()
+          await refresh().catch(() => {})
+        }
+      }
+      return {
+        id: DECISION_INBOX.id,
+        kind: DECISION_INBOX.kind,
+        state: S,
+        pending, unread, snapshot, start, stop, subscribe, refresh,
+        markSeen,
+        streamState: () => S.streamState,
+        setOpenHandler(fn) { openHandler = typeof fn === 'function' ? fn : null },
+        get openHandler() { return openHandler },
+        toggleSelected(id) { if (S.selected.has(id)) S.selected.delete(id); else S.selected.add(id); emit() },
+        setNotice(text) { S.notice = String(text ?? ''); emit() },
+        clearSelected() { S.selected.clear(); emit() },
+        toggleCollapsed(level) { if (S.collapsed.has(level)) S.collapsed.delete(level); else S.collapsed.add(level); emit() },
+        collapseAll(all) { S.collapsed = new Set(all ? INBOX_LEVELS.map(item => item.level) : []); emit() },
+        /** 分组头三态全选：未选 → 全选；部分/全选 → 全选；全选再点 → 清空本组。 */
+        toggleGroupSelected(level) {
+          const items = pending().filter(item => item.level === level)
+          if (!items.length) return
+          const all = items.every(item => S.selected.has(item.id))
+          for (const item of items) {
+            if (all) S.selected.delete(item.id)
+            else S.selected.add(item.id)
+          }
+          emit()
+        },
+        selectRecommended() {
+          for (const item of pending()) {
+            if (item.level === 'green' || item.options?.some(option => option.isRecommended)) S.selected.add(item.id)
+          }
+          emit()
+        },
+        selectAllPending() {
+          for (const item of pending()) S.selected.add(item.id)
+          emit()
+        },
+        clearBatchFailures() { S.batchFailures = []; emit() },
+        resolve(id, option) {
+          return act('resolve', () => api('/fang/api/decisions/resolve', {
+            method: 'POST', body: JSON.stringify({ id, option, by: 'fang-inbox' }),
+          }))
+        },
+        abandon(id) {
+          return act('abandon', () => api('/fang/api/decisions/abandon', {
+            method: 'POST', body: JSON.stringify({ id, by: 'fang-inbox' }),
+          }))
+        },
+        resolveSelected() {
+          return runBatch('batch-resolve', (ids) => api('/fang/api/decisions/resolve', {
+            method: 'POST', body: JSON.stringify({ ids, by: 'fang-inbox' }),
+          }))
+        },
+        archiveSelected() {
+          return runBatch('batch-archive', (ids) => api('/fang/api/decisions/abandon', {
+            method: 'POST', body: JSON.stringify({ ids, by: 'fang-inbox' }),
+          }))
+        },
+        retryFailures() {
+          const ids = [...new Set(S.batchFailures.map(failure => failure.id))]
+            .filter(id => pending().some(item => item.id === id))
+          const kind = S.batchFailuresKind === 'archive' ? 'archive' : 'resolve'
+          S.batchFailures = []
+          S.selected = new Set(ids)
+          emit()
+          if (!ids.length) return Promise.resolve(null)
+          const path = kind === 'archive' ? '/fang/api/decisions/abandon' : '/fang/api/decisions/resolve'
+          return runBatch(kind === 'archive' ? 'batch-archive' : 'batch-resolve', (nextIds) => api(path, {
+            method: 'POST', body: JSON.stringify({ ids: nextIds, by: 'fang-inbox' }),
+          }))
+        },
+        configureAi(input) {
+          return act('ai-config', () => api('/fang/api/decisions/ai/config', {
+            method: 'POST', body: JSON.stringify(input),
+          }))
+        },
+        testAi(input) { return runAiTest(input) },
+        saveAiWithTest(input) { return saveAiWithTest(input) },
+        adviseStream(id) { return runAdviseStream(id) },
+        advise(id) {
+          return act('ai-advise', () => api('/fang/api/decisions/ai/advise', {
+            method: 'POST', body: JSON.stringify({ id }),
+          }))
+        },
+      }
+    }
+
+    function mountInboxTitle(host, store) {
+      const doc = host.ownerDocument
+      injectStyle(doc)
+      const render = () => {
+        const n = store.unread()
+        host.replaceChildren(h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, fontWeight: 600 } },
+          '收件箱',
+          n > 0 ? h('span', { class: 'fang-inbox-unread' }, n > 99 ? '99+' : String(n)) : null))
+      }
+      const unsubscribe = store.subscribe(render)
+      render()
+      return () => { unsubscribe(); host.replaceChildren() }
+    }
+
+    /** 左侧栏独立入口：图标 + 未读红点；点击打开右侧收件箱。 */
+    function mountInboxSeat(host, store, open) {
+      const doc = host.ownerDocument
+      injectStyle(doc)
+      const badge = h('span', { class: 'fang-inbox-badge', 'aria-hidden': 'true' })
+      const button = h('button', {
+        type: 'button', class: 'fang-inbox-seat',
+        'data-fang-entry': 'decision-inbox',
+        title: '决策收件箱', 'aria-label': '决策收件箱',
+        onClick: (event) => { event.preventDefault(); event.stopPropagation(); open() },
+      }, icon('inbox', 17), badge)
+      host.replaceChildren(button)
+      const render = () => {
+        const n = store.unread()
+        badge.textContent = n > 99 ? '99+' : String(n)
+        badge.style.display = n > 0 ? 'block' : 'none'
+        button.classList.toggle('has-red', store.state.redPending > 0)
+        button.title = store.state.redPending > 0
+          ? `决策收件箱：${n} 条待处理，其中 ${store.state.redPending} 条红色待处理`
+          : (n > 0 ? `决策收件箱：${n} 条待处理` : '决策收件箱：暂无待处理')
+      }
+      const unsubscribe = store.subscribe(render)
+      render()
+      return () => { unsubscribe(); host.replaceChildren() }
+    }
+
+    function openInboxDrawer(store) {
+      const doc = typeof document !== 'undefined' ? document : null
+      if (!doc) return
+      const existing = doc.querySelector('[data-fang-inbox-drawer]')
+      if (existing) { existing.classList.add('is-open'); existing.querySelector('button')?.focus?.(); return }
+      const backdrop = h('div', { class: 'fang-inbox-backdrop', 'data-fang-inbox-backdrop': '1' })
+      const panel = h('aside', { class: 'fang-inbox-drawer', 'data-fang-inbox-drawer': '1', role: 'dialog', 'aria-modal': 'true', 'aria-label': '决策收件箱' })
+      let teardown = null
+      const close = () => {
+        try { teardown?.() } catch { /* ignore */ }
+        backdrop.remove(); panel.remove()
+        doc.removeEventListener('keydown', onKey, true)
+        try { window.removeEventListener('resize', onResize) } catch { /* ignore */ }
+      }
+      const onKey = (event) => { if (event.key === 'Escape') { event.preventDefault(); close() } }
+      const onResize = () => { if (!doc.body.contains(panel)) close() }
+      backdrop.addEventListener('click', close)
+      doc.body.append(backdrop, panel)
+      teardown = mountDecisionInbox(panel, store, { drawer: true, onClose: close })
+      doc.addEventListener('keydown', onKey, true)
+      try { window.addEventListener('resize', onResize) } catch { /* ignore */ }
+      try {
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => panel.classList.add('is-open'))
+        else panel.classList.add('is-open')
+      } catch { panel.classList.add('is-open') }
+      try {
+        const active = doc.activeElement
+        if (active && typeof active.blur === 'function') active.blur()
+      } catch { /* ignore */ }
+    }
+
+    /** 收件箱主体：可折叠分组 + 未读计数 + 键盘导航 + 批量操作。 */
+    function mountDecisionInbox(host, store, options = {}) {
+      const doc = host.ownerDocument
+      injectStyle(doc)
+      const state = store.state
+      let activeId = ''
+      let disposed = false
+      let aiOpen = false
+      const root = h('div', {
+        class: 'fang-inbox', tabindex: 0, role: 'region', 'aria-label': '决策收件箱',
+        'data-zone': 'decision-inbox', 'data-drawer': options.drawer ? '1' : '0',
+      })
+      host.replaceChildren(root)
+      try { host.style.height = host.style.height || '100%' } catch { /* ignore */ }
+      try { host.style.minHeight = '0' } catch { /* ignore */ }
+
+      const focusRoot = () => { try { root.focus({ preventScroll: true }) } catch { root.focus?.() } }
+      const pickOption = (item) => {
+        const recommended = item.options?.find(option => option.isRecommended)
+        if (recommended) return recommended.value
+        if (item.options?.length) return item.options[0].value
+        return '__ACK__'
+      }
+      const sourceText = (item) => {
+        const source = item?.source || {}
+        const role = source.agentRole || 'worker'
+        const trusted = source.roleTrusted === true || String(source.roleSource || '').startsWith('host:')
+        const name = source.taskName || (source.sessionId && source.sessionId !== 'unknown' ? short(source.sessionId, 10) : '')
+        return `${role}${trusted ? '' : '（自报）'}${name ? ' · ' + name : ''}`
+      }
+      const visiblePending = () => {
+        const list = []
+        for (const level of INBOX_LEVELS) {
+          if (level.level === 'gray' || state.collapsed.has(level.level)) continue
+          for (const item of state.items) {
+            if (item.status === 'pending' && item.level === level.level) list.push(item)
+          }
+        }
+        return list
+      }
+
+      function itemNode(item, archived = false) {
+        const selected = state.selected.has(item.id)
+        const busy = state.busy === 'resolve' || state.busy === 'abandon' || state.busy === 'batch'
+        const node = h('div', {
+          class: 'fang-inbox-item' + (activeId === item.id ? ' is-active' : ''),
+          'data-level': item.level, 'data-inbox-id': item.id, role: 'listitem',
+          onClick: () => { activeId = item.id; render() },
+        },
+        archived ? null : h('input', {
+          type: 'checkbox', class: 'fang-inbox-check', checked: selected,
+          'aria-label': `选择：${item.title || item.id}`,
+          onClick: (event) => event.stopPropagation(),
+          onChange: () => { store.toggleSelected(item.id); focusRoot() },
+        }),
+        h('div', { class: 'fang-inbox-main' },
+          h('div', { class: 'fang-inbox-item-title' }, inboxText(item.title) || item.id,
+            item.budgetDemoted ? h('span', { class: 'chip', style: { marginLeft: 6, fontSize: 10 }, title: '全库 pending red 超限，已降级为黄色' }, '预算降级') : null,
+            item.attentionDemoted
+              ? h('span', {
+                class: 'chip', style: { marginLeft: 6, fontSize: 10 },
+                title: `注意力配额不足（${item.attentionQuota?.scope === 'source' ? '来源' : '全库'} ${item.attentionQuota?.used ?? '?'}/${item.attentionQuota?.limit ?? '?'}），已降一级`,
+              }, '注意力降级')
+              : null),
+          item.context ? h('div', { class: 'fang-inbox-item-context' }, inboxText(item.context)) : null,
+          h('div', { class: 'fang-inbox-meta' }, `${sourceText(item)} · ${fmtRelative(item.createdAt)}${item.expiresAt ? ' · 到期 ' + fmtRelative(item.expiresAt) : ''}`),
+          item.ai ? h('div', { class: 'fang-inbox-ai-advice' },            h('span', { class: 'fang-inbox-ai-tag' }, 'AI · 未核实'),
+            `${item.ai.summary || ''}${item.ai.recommendation ? ' · 推荐：' + item.ai.recommendation : ''}`,
+            Array.isArray(item.ai.optionRisks) && item.ai.optionRisks.length
+              ? h('div', { class: 'fang-inbox-ai-risks' },
+                ...item.ai.optionRisks.map(risk => h('span', {
+                  class: 'fang-inbox-risk fang-inbox-risk--' + String(risk.risk || 'unknown'),
+                  title: risk.reason || '',
+                }, `${risk.value}: ${({ low: '低', medium: '中', high: '高' })[risk.risk] || risk.risk}`)))
+              : null,
+            Array.isArray(item.ai.missingInfo) && item.ai.missingInfo.length
+              ? h('div', { class: 'fang-inbox-ai-missing' }, '缺失信息：' + item.ai.missingInfo.join('、'))
+              : null) : null,
+          item.execution
+            ? h('div', {
+              class: 'fang-inbox-exec fang-inbox-exec--' + String(item.execution.status || 'unknown'),
+              title: item.execution.error || '',
+            }, `动作 ${item.execution.actionId || '?'}：${({ running: '执行中…', done: '已执行', failed: '执行失败' })[item.execution.status] || item.execution.status}`)
+            : null,
+          state.aiStream?.id === item.id && state.aiStream.text
+            ? h('div', { class: 'fang-inbox-ai-stream' }, state.aiStream.text)
+            : null,
+          archived ? null : h('div', { class: 'fang-inbox-item-actions' },
+            ...(item.options?.length
+              ? item.options.slice(0, 5).map(option => inboxButton(option.label || option.value, () => void store.resolve(item.id, option.value), {
+                primary: option.isRecommended === true, disabled: busy,
+              }))
+              : [inboxButton('知道了', () => void store.resolve(item.id, '__ACK__'), { primary: true, disabled: busy })]),
+            inboxButton('AI 建议', () => void store.adviseStream(item.id), { title: 'AI 建议（流式，失败自动回落一次性）', disabled: busy || state.ai.configured !== true }),
+            inboxButton('忽略', () => void store.abandon(item.id), { danger: true, disabled: busy }))))
+        return node
+      }
+
+      function aiPanel() {
+        const ai = state.ai || {}
+        const configured = ai.configured === true
+        const persistence = ai.persistence || {}
+        const quota = ai.quota || {}
+        const circuit = ai.circuit || {}
+        const testState = state.aiTest || { state: 'idle', message: '' }
+        const readFields = () => ({
+          provider: String(root.querySelector('[data-inbox-ai="provider"]')?.value || 'deepseek'),
+          apiKey: String(root.querySelector('[data-inbox-ai="apiKey"]')?.value || '').trim(),
+          model: String(root.querySelector('[data-inbox-ai="model"]')?.value || '').trim() || undefined,
+          baseUrl: String(root.querySelector('[data-inbox-ai="baseUrl"]')?.value || '').trim() || undefined,
+        })
+        const persistenceText = persistence.enabled === false
+          ? 'Key 持久化：关闭（仅内存）'
+          : (persistence.available
+            ? `Key 持久化：${persistence.backend}${persistence.saved ? ' · 已保存' : ''}`
+            : `Key 持久化：不可用（${persistence.reason || 'backend-unavailable'}）→ 仅内存`)
+        const hostText = ai.endpointHost ? ` · 发往 ${ai.endpointHost}` : ''
+        const quotaText = `今日 AI：${quota.used ?? 0}/${quota.limit ? quota.limit : '∞'}`
+        const usage = ai.usage || {}
+        const tokenText = (usage.promptTokens || usage.completionTokens)
+          ? `tokens ${Number(usage.promptTokens || 0) + Number(usage.completionTokens || 0)}${usage.costMicros !== null && usage.costMicros !== undefined ? ` · $${(Number(usage.costMicros) / 1e6).toFixed(4)}` : ''}`
+          : ''
+        const circuitText = circuit.state === 'open'
+          ? `熔断：开（${Math.ceil((circuit.retryAfterMs || 0) / 1000)}s）`
+          : '熔断：关'
+        return h('details', { class: 'fang-inbox-ai', open: aiOpen, onToggle: (event) => { aiOpen = event.target.open } },
+          h('summary', null, configured ? `AI：${ai.provider || 'custom'} / ${ai.model || '—'}` : 'AI 智能建议（需配置自有 API Key）'),
+          h('div', { class: 'fang-inbox-ai-status' }, `${persistenceText}${hostText} · ${quotaText}${tokenText ? ' · ' + tokenText : ''} · ${circuitText}`),
+          h('div', { class: 'fang-inbox-ai-row' },
+            h('select', { 'data-inbox-ai': 'provider', 'aria-label': '模型提供商' },
+              ...((Array.isArray(ai.providers) && ai.providers.length ? ai.providers : [{ id: 'deepseek', label: 'DeepSeek' }]).map(provider =>
+                h('option', { value: provider.id }, provider.label || provider.id)))),
+            h('input', {
+              'data-inbox-ai': 'apiKey', type: 'password', autocomplete: 'off',
+              placeholder: configured ? '新 API Key（更换时填写）' : 'API Key', 'aria-label': '模型 API Key',
+            }),
+            h('input', { 'data-inbox-ai': 'model', type: 'text', placeholder: '模型（可留空）', autocomplete: 'off', 'aria-label': '模型名' }),
+            h('input', { 'data-inbox-ai': 'baseUrl', type: 'url', placeholder: 'Base URL（可留空）', autocomplete: 'off', 'aria-label': '模型 Base URL' }),
+            inboxButton('测试连接', () => {
+              const fields = readFields()
+              if (!fields.apiKey) { store.setNotice('err:api-key-required'); return }
+              void store.testAi(fields)
+            }),
+            inboxButton(configured ? '测试并更换' : '测试并保存启用', () => {
+              const fields = readFields()
+              if (!fields.apiKey) { store.setNotice('err:api-key-required'); return }
+              void store.saveAiWithTest(fields)
+            }, { primary: true })),
+          testState.message
+            ? h('div', { class: 'fang-inbox-ai-test fang-inbox-ai-test--' + String(testState.state || 'idle') }, testState.message)
+            : null)
+      }
+
+      function groupNode(levelMeta) {
+        const level = levelMeta.level
+        const archived = level === 'gray'
+        const items = state.items.filter(item => archived ? item.status !== 'pending' : (item.status === 'pending' && item.level === level))
+        if (!items.length) return null
+        const collapsed = state.collapsed.has(level)
+        const unread = archived ? 0 : items.length
+        const allSelected = !archived && items.every(item => state.selected.has(item.id))
+        const someSelected = !archived && !allSelected && items.some(item => state.selected.has(item.id))
+        let check = null
+        if (!archived) {
+          check = h('input', {
+            type: 'checkbox', class: 'fang-inbox-group-check', 'data-group-select': level,
+            checked: allSelected || undefined,
+            title: allSelected ? `取消全选「${levelMeta.label}」` : `全选「${levelMeta.label}」（${items.length} 项）`,
+            'aria-label': `全选${levelMeta.label}分组`,
+            onClick: (event) => event.stopPropagation(),
+            onChange: () => { store.toggleGroupSelected(level); focusRoot() },
+          })
+          check.indeterminate = someSelected
+        }
+        return h('div', { class: 'fang-inbox-group', 'data-level': level },
+          h('div', {
+            class: 'fang-inbox-group-head',
+            onClick: (event) => {
+              if (event.target?.closest?.('input')) return
+              store.toggleCollapsed(level); focusRoot()
+            },
+          },
+          check,
+          h('button', {
+            type: 'button', class: 'fang-inbox-group-toggle',
+            'aria-expanded': collapsed ? 'false' : 'true',
+          },
+          h('b', null, levelMeta.label),
+          h('span', { style: { fontSize: 11, color: 'inherit', opacity: .8 } }, levelMeta.hint),
+          h('span', { class: 'n' }, `${unread} 项 · ${collapsed ? '展开' : '收起'}`))),
+          collapsed ? null : h('div', { role: 'list' }, ...items.slice(0, archived ? 80 : 200).map(item => itemNode(item, archived))))
+      }
+
+      /** 批量确认弹窗：返回 Promise<boolean>；Esc/取消/点遮罩 = false。 */
+      function confirmBatchDialog({ title, message, detail, confirmLabel = '确认', danger = false }) {
+        return new Promise((resolve) => {
+          const overlay = h('div', { class: 'fang-inbox-confirm', role: 'presentation' })
+          const finish = (value) => {
+            try { overlay.remove() } catch { /* ignore */ }
+            try { root.removeEventListener('keydown', onConfirmKey, true) } catch { /* ignore */ }
+            resolve(value)
+          }
+          const onConfirmKey = (event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false) } }
+          const card = h('div', { class: 'fang-inbox-confirm-card', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+            h('div', { class: 'fang-inbox-confirm-title' }, title),
+            h('div', { class: 'fang-inbox-confirm-msg' }, message),
+            detail ? h('div', { class: 'fang-inbox-confirm-detail' }, detail) : null,
+            h('div', { class: 'fang-inbox-confirm-actions' },
+              inboxButton('取消', () => finish(false)),
+              inboxButton(confirmLabel, () => finish(true), { primary: !danger, danger })))
+          overlay.append(card)
+          overlay.addEventListener('click', (event) => { if (event.target === overlay) finish(false) })
+          root.append(overlay)
+          root.addEventListener('keydown', onConfirmKey, true)
+          try { card.querySelector('button')?.focus?.() } catch { /* ignore */ }
+        })
+      }
+
+      async function runBatchWithConfirm(kind) {
+        const ids = [...state.selected]
+        if (!ids.length) { store.setNotice('err:no-selected'); return }
+        const selectedItems = state.items.filter((item) => ids.includes(item.id))
+        const redCount = selectedItems.filter((item) => item.level === 'red' || item.isBlocking === true).length
+        const ok = await confirmBatchDialog({
+          title: kind === 'archive' ? '批量归档选中项？' : '批量按推荐处理选中项？',
+          message: `将处理 ${ids.length} 项${redCount > 0 ? `，其中 ${redCount} 项是红色/阻塞项（服务端会拒绝，需逐条处理）` : ''}。`,
+          detail: selectedItems.slice(0, 3).map((item) => `· ${item.title || item.id}`).join('\n') + (ids.length > 3 ? `\n… 另有 ${ids.length - 3} 项` : ''),
+          confirmLabel: kind === 'archive' ? '归档' : '处理',
+          danger: kind === 'archive',
+        })
+        if (!ok) return
+        if (kind === 'archive') void store.archiveSelected()
+        else void store.resolveSelected()
+      }
+
+      function render() {
+        if (disposed) return
+        const pending = store.pending()
+        const selectedCount = state.selected.size
+        const unread = pending.length
+        const head = h('div', { class: 'fang-inbox-head' },
+          h('div', { class: 'fang-inbox-title' }, icon('inbox', 16), '收件箱',
+            unread > 0 ? h('span', { class: 'fang-inbox-unread' }, unread > 99 ? '99+' : String(unread)) : null),
+          h('div', { class: 'fang-inbox-actions' },
+            inboxButton('刷新', () => void store.refresh(), { disabled: state.busy !== '' }),
+            inboxButton(state.collapsed.size ? '展开全部' : '收起全部', () => { store.collapseAll(state.collapsed.size === 0); focusRoot() }),
+            options.drawer ? inboxButton('关闭', () => options.onClose?.()) : null))
+        const toolbar = h('div', { class: 'fang-inbox-toolbar' },
+          h('span', { class: 'fang-inbox-hint' }, `待处理 ${unread} · 已选 ${selectedCount}`),
+          h('span', { class: 'fang-inbox-stream', title: state.streamState === 'open' ? 'SSE 实时推送已连接' : 'SSE 未连接，使用低频轮询兜底' },
+            state.streamState === 'open' ? '● 实时' : '○ 轮询'),
+          inboxButton('处理选中', () => void runBatchWithConfirm('resolve'), { primary: true, disabled: selectedCount === 0 || state.busy !== '' }),
+          inboxButton('归档选中', () => void runBatchWithConfirm('archive'), { danger: true, disabled: selectedCount === 0 || state.busy !== '' }),
+          inboxButton('全选', () => { store.selectAllPending(); focusRoot() }, { disabled: pending.length === 0, title: '全选所有待处理 ticket' }),
+          inboxButton('全选可推荐', () => { store.selectRecommended(); focusRoot() }, { disabled: pending.length === 0 }),
+          inboxButton('清空选择', () => { store.clearSelected(); focusRoot() }, { disabled: selectedCount === 0 }),
+          h('span', { class: 'fang-inbox-hint', style: { marginLeft: 'auto' } }, '↑↓ 选择 · Enter 处理 · X 勾选 · Shift+A 全选 · Esc 关闭'))
+        const body = h('div', { class: 'fang-inbox-body', role: 'list' })
+        // 批量失败逐条 UI：服务端返回 results[]，逐条展示 id/标题/原因，可重试。
+        if (state.batchFailures.length) {
+          body.prepend(h('div', { class: 'fang-inbox-batch-fail', role: 'alert' },
+            h('div', { class: 'fang-inbox-batch-fail-title' }, `批量操作有 ${state.batchFailures.length} 项失败（其余已处理）`),
+            ...state.batchFailures.map((failure) => h('div', { class: 'fang-inbox-batch-fail-row', 'data-fail-id': failure.id },
+              h('b', null, failure.title || failure.id),
+              h('span', null, failureHint(failure.reason)))),
+            h('div', { class: 'fang-inbox-batch-fail-actions' },
+              inboxButton('重试失败项', () => void store.retryFailures(), { primary: true }),
+              inboxButton('关闭', () => { store.clearBatchFailures(); focusRoot() }))))
+        }
+        if (state.state === 'loading' && !state.items.length) body.append(h('div', { class: 'fang-inbox-empty' }, icon('spinner', 16), ' 正在读取收件箱…'))
+        else if (state.state === 'error' && !state.items.length) {
+          body.append(h('div', { class: 'fang-inbox-err', role: 'alert' }, `收件箱不可用：${failureHint(state.error || 'network')}`))
+        } else if (!state.items.length) {
+          body.append(h('div', { class: 'fang-inbox-empty' },
+            '收件箱是空的。', h('br'), '决策中心创建的红/黄/蓝/绿 ticket 会出现在这里。'))
+        } else {
+          for (const meta of INBOX_LEVELS) {
+            const node = groupNode(meta)
+            if (node) body.append(node)
+          }
+        }
+        if (state.error && state.items.length) body.prepend(h('div', { class: 'fang-inbox-err', role: 'status' }, `刷新失败：${failureHint(state.error)}（显示上次结果）`))
+        if (state.notice && String(state.notice).startsWith('err:')) {
+          body.prepend(h('div', { class: 'fang-inbox-err', role: 'status' }, failureHint(String(state.notice).slice(4))))
+        }
+        // 确认弹窗不能被一次 store 刷新（SSE/轮询）从 DOM 里替换掉。
+        const openConfirm = root.querySelector(':scope > .fang-inbox-confirm')
+        root.replaceChildren(head, aiPanel(), toolbar, body)
+        if (openConfirm) root.append(openConfirm)
+      }
+
+      const onKeyDown = (event) => {
+        const tag = String(event.target?.tagName || '').toUpperCase()
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
+        const list = visiblePending()
+        const currentIndex = list.findIndex(item => item.id === activeId)
+        if (event.key === 'ArrowDown' || event.key === 'j') {
+          event.preventDefault()
+          const next = list[Math.min(list.length - 1, currentIndex + 1)] || list[0]
+          if (next) { activeId = next.id; render(); root.querySelector(`[data-inbox-id="${activeId}"]`)?.scrollIntoView?.({ block: 'nearest' }) }
+          return
+        }
+        if (event.key === 'ArrowUp' || event.key === 'k') {
+          event.preventDefault()
+          const prev = list[Math.max(0, currentIndex - 1)] || list[list.length - 1]
+          if (prev) { activeId = prev.id; render(); root.querySelector(`[data-inbox-id="${activeId}"]`)?.scrollIntoView?.({ block: 'nearest' }) }
+          return
+        }
+        if (event.key === 'Enter') {
+          const item = list.find(entry => entry.id === activeId)
+          if (!item) return
+          event.preventDefault()
+          void store.resolve(item.id, pickOption(item))
+          return
+        }
+        if (event.key === 'x' || event.key === 'X') {
+          const item = list.find(entry => entry.id === activeId)
+          if (item) { event.preventDefault(); store.toggleSelected(item.id) }
+          return
+        }
+        if (event.key === 'a' || event.key === 'A') {
+          event.preventDefault()
+          if (event.shiftKey) store.selectAllPending()
+          else store.selectRecommended()
+          return
+        }
+        if (event.key === 'r' || event.key === 'R') { event.preventDefault(); void store.refresh(); return }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          if (state.selected.size) store.clearSelected()
+          else if (options.drawer) options.onClose?.()
+        }
+      }
+      root.addEventListener('keydown', onKeyDown)
+      root.addEventListener('click', () => { focusRoot(); store.markSeen() })
+      root.addEventListener('focus', () => store.markSeen())
+      const unsubscribe = store.subscribe(render)
+      render()
+      // 收件箱在屏幕上 = 已读：未读红点只在「没看」时亮。
+      try { store.markSeen() } catch { /* ignore */ }
+      try { root.focus({ preventScroll: true }) } catch { /* ignore */ }
+      return () => {
+        disposed = true
+        try { unsubscribe() } catch { /* ignore */ }
+        try { root.removeEventListener('keydown', onKeyDown) } catch { /* ignore */ }
+        host.replaceChildren()
+      }
     }
 
     function mountPanel(host) {
@@ -4553,6 +5987,7 @@ window.__ModuleLoader__.load({
     // ── 插件入口 ──────────────────────────────────────────────────────────
     return {
       mountPanel,
+      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini } : {}),
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
@@ -4602,6 +6037,81 @@ window.__ModuleLoader__.load({
           order: 88,
         }, (props) => React.createElement(DomMount, {
           mount: (host) => mountBadge(host, props?.ctx ?? ctx),
+          style: { display: 'inline-flex', alignItems: 'center' },
+        }))))
+        // ── 决策收件箱：独立侧栏入口 + 右侧抽屉 / 独立 Slot ─────────────────
+        const inbox = createDecisionInboxStore()
+        inbox.start()
+        disposers.push(() => { try { inbox.stop() } catch { /* ignore */ } })
+        openInboxExternally = () => openInbox()
+        const tryService = (name) => {
+          try { if (ctx && typeof ctx === 'object' && ctx[name]) return ctx[name] } catch { /* ignore */ }
+          try { if (typeof ctx?.get === 'function') return ctx.get(name) } catch { /* ignore */ }
+          return null
+        }
+        let sidebarRight = tryService('sidebarRight')
+        let sidebarRightTabs = tryService('sidebarRightTabs')
+        if ((!sidebarRight || !sidebarRightTabs) && typeof ctx?.inject === 'function') {
+          try {
+            ctx.inject(['sidebarRight'], (scope) => {
+              sidebarRight = sidebarRight || scope?.sidebarRight || (typeof scope?.get === 'function' ? scope.get('sidebarRight') : null)
+            })
+          } catch { /* old host: drawer fallback below */ }
+          try {
+            ctx.inject(['sidebarRightTabs'], (scope) => {
+              sidebarRightTabs = sidebarRightTabs || scope?.sidebarRightTabs || (typeof scope?.get === 'function' ? scope.get('sidebarRightTabs') : null)
+            })
+          } catch { /* old host */ }
+        }
+        const openInbox = () => {
+          // 用户手势里申请通知权限（不能在自动提醒里弹权限框）。
+          try {
+            if (typeof window !== 'undefined' && window.Notification && window.Notification.permission === 'default') {
+              void window.Notification.requestPermission()
+            }
+          } catch { /* notification optional */ }
+          try {
+            if (sidebarRight && typeof sidebarRight.openTab === 'function') {
+              sidebarRight.openTab(DECISION_INBOX.kind, { params: {} })
+              return
+            }
+          } catch { /* fall through to local drawer */ }
+          openInboxDrawer(inbox)
+        }
+        inbox.setOpenHandler(openInbox)
+        openInboxExternally = () => openInbox()
+        if (sidebarRightTabs && typeof sidebarRightTabs.register === 'function') {
+          try {
+            const disposeTabType = sidebarRightTabs.register({
+              id: DECISION_INBOX.id,
+              kind: DECISION_INBOX.kind,
+              priority: 'builtin',
+              title: () => '收件箱',
+            })
+            disposers.push(() => { try { disposeTabType?.() } catch { /* ignore */ } })
+          } catch { /* old host */ }
+        }
+        disposers.push(ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab',
+          key: DECISION_INBOX.id,
+        }, () => React.createElement(DomMount, {
+          mount: (host) => mountDecisionInbox(host, inbox),
+          style: { display: 'block', height: '100%', minHeight: 0 },
+        }))))
+        disposers.push(ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab.title',
+          key: DECISION_INBOX.id,
+        }, () => React.createElement(DomMount, {
+          mount: (host) => mountInboxTitle(host, inbox),
+          style: { display: 'inline-flex', alignItems: 'center' },
+        }))))
+        disposers.push(ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'fang-inbox',
+          order: 80,
+          label: '收件箱',
+        }, () => React.createElement(DomMount, {
+          mount: (host) => mountInboxSeat(host, inbox, openInbox),
           style: { display: 'inline-flex', alignItems: 'center' },
         }))))
         return () => {

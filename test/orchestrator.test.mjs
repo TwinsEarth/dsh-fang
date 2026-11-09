@@ -11,9 +11,12 @@ import http from 'node:http'
 import zlib from 'node:zlib'
 
 import { makeCtx, makeWebServerStub, makeReq, makeRes, TEST_AUTH_TOKEN } from './helpers.mjs'
-import { SERVICE, FANG_VERSION } from '../src/kernel/index.mjs'
+import { SERVICE, FANG_VERSION, bus, resolveFangLayout } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
 import { BranchStore } from '../src/lib/branch-store.mjs'
+import { EssenceManager } from '../src/lib/essence.mjs'
+import { MirrorManager } from '../src/lib/mirror.mjs'
+import { readForkSupervisionSettings } from '../src/lib/fork-supervision-settings.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
 const hasRemote = await import('../src/lib/remote.mjs').then(() => true).catch(() => false)
@@ -102,6 +105,17 @@ async function makeAdapterServer(opts = {}) {
           })
         }
         if (op === 'score-plugin') return send(200, { ok: true, op, result: opts.forkScore ?? { grade: 'B', S: 30, color: 'blue' } })
+        if (op === 'approvals') {
+          state.approvalsCalls = (state.approvalsCalls ?? 0) + 1
+          if (opts.failApprovals) return send(500, { ok: false, op, error: 'approvals-down' })
+          return send(200, { ok: true, op, result: { items: opts.approvals ?? [] } })
+        }
+        if (op === 'approval-decide') {
+          state.approvalDecisions = state.approvalDecisions ?? []
+          state.approvalDecisions.push(body.payload ?? {})
+          if (opts.failApprovalDecide) return send(409, { ok: false, op, result: { ok: false, code: 'conflict', error: 'stale' } })
+          return send(200, { ok: true, op, result: { ok: true, id: body.payload?.id, outcome: body.payload?.outcome } })
+        }
         if (op === 'archive') return send(200, { ok: true, op, result: { archived: true } })
         return send(200, { ok: true, op, result: {} })
       })
@@ -157,7 +171,96 @@ test('orchestrator: registers service; status exposes tasks, forks compat, comme
   assert.equal(st.commercial.backup, false)
   assert.equal(st.services.forker, true)
   assert.equal(st.services.adapter, false, 'mother has no adapter service')
+  assert.equal(st.restart.available, false, 'no restart-guard service => unavailable, never faked')
   cleanup(ctx, dataRoot)
+})
+
+/** Read-only restart-guard stub used by the status/route contract tests. */
+function makeRestartGuardStub(overrides = {}) {
+  return {
+    state: () => ({
+      state: 'idle', pending: null, mode: 'enforce', authMode: 'auto',
+      strictRedLine: false, redLineAutoAllowed: true, allowProcessRestart: true,
+      tempEffectiveManual: false, contractVersion: 1, manifestTtlMs: 60000,
+      execution: { executed: false, decisionOnly: true }, ...overrides.state,
+    }),
+    policy: () => ({
+      mode: 'enforce', authMode: 'auto', strictRedLine: false, redLineAutoAllowed: true,
+      allowProcessRestart: true, decisionOnly: true, manifestTtlMs: 60000,
+      tempEffectiveManual: false, ...overrides.policy,
+    }),
+    executionContract: () => ({
+      version: 1, decisionOnly: true, guardExecuted: false, plannedExitCode: 75,
+      approval: { kind: 'fang-restart-approval', dir: 'approved' },
+      receipt: { kind: 'fang-restart-execution', dir: 'executed' },
+      supervisor: { armedWhen: [], mayExecuteWhen: [], receiptRequirements: [] },
+      rule: '「已执行」只认回执 execution.executed === true',
+      note: 'decision-only',
+    }),
+    approvals: () => ({
+      contractVersion: 1,
+      items: [{ id: 'rst_1', state: 'authorized' }],
+      counts: { total: 1, authorized: 1, executed: 0, stale: 0, notArmed: 0, invalid: 0 },
+    }),
+  }
+}
+
+test('orchestrator: status exposes a read-only restart-guard summary for the client', async () => {
+  const { ctx, svc, dataRoot } = await boot({ extraServices: { [SERVICE.restart]: makeRestartGuardStub() } })
+  try {
+    const st = svc.status()
+    assert.equal(st.restart.available, true)
+    assert.equal(st.restart.state, 'idle')
+    assert.equal(st.restart.mode, 'enforce')
+    assert.equal(st.restart.authMode, 'auto')
+    assert.equal(st.restart.strictRedLine, false)
+    assert.equal(st.restart.redLineAutoAllowed, true, 'client renders the 红灯自动放行 warning from this flag')
+    assert.equal(st.restart.allowProcessRestart, true)
+    assert.equal(st.restart.decisionOnly, true, 'the HTTP/UI surface never claims execution')
+    assert.equal(st.restart.contractVersion, 1)
+    assert.deepEqual(st.restart.approvals, {
+      total: 1, authorized: 1, executed: 0, stale: 0, notArmed: 0, invalid: 0,
+    })
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: GET /fang/api/restart is a read-only view of the supervisor contract', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-restart-http-'))
+  const ctx = makeCtx({
+    services: {
+      [SERVICE.forker]: makeFakeForker(),
+      webServer,
+      [SERVICE.restart]: makeRestartGuardStub(),
+    },
+  })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const route = webServer.find('GET', '/fang/api/restart')
+    assert.ok(route, 'GET /fang/api/restart must be registered')
+    const res = makeRes()
+    await route.handler(makeReq(undefined, 'GET'), res)
+    const body = res.json()
+    assert.equal(res.statusCode, 200)
+    assert.equal(body.ok, true)
+    assert.equal(body.available, true)
+    assert.equal(body.state.state, 'idle')
+    assert.equal(body.policy.mode, 'enforce')
+    assert.equal(body.policy.redLineAutoAllowed, true)
+    assert.equal(body.contract.decisionOnly, true)
+    assert.equal(body.contract.guardExecuted, false)
+    assert.equal(body.approvals.counts.authorized, 1)
+    assert.equal(body.executed, false, 'the route must never claim any execution')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
 })
 
 test('orchestrator: role matrix — a fork never lets orchestrator activate', async () => {
@@ -348,6 +451,7 @@ test('orchestrator: promoteTask re-scores with MOTHER thresholds and copies to s
     assert.ok(adapter.state.commands.some(c => c.op === 'score-plugin'), 'asked the fork for its score')
     assert.equal(scorerCalls.length, 1)
     assert.equal(scorerCalls[0].opts.environment, 'mother', 'mother must re-score with mother thresholds')
+    assert.equal(scorerCalls[0].opts.deep, true, 'mother promotion should use deep coverage')
     assert.equal(approver.requests.length, 1)
     assert.equal(approver.requests[0].pluginId, 'plug')
     assert.equal(routerCalls[0].source, 'mother')
@@ -355,6 +459,56 @@ test('orchestrator: promoteTask re-scores with MOTHER thresholds and copies to s
     assert.equal(fs.existsSync(target), true, 'plugin copied into mother staging')
     cleanup(ctx, dataRoot)
   } finally { await adapter.close() }
+})
+
+test('orchestrator: atomicReplaceDir swaps in a verified tree and removes the old target', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-atomic-'))
+  try {
+    const source = path.join(root, 'source')
+    const target = path.join(root, 'target')
+    fs.mkdirSync(source, { recursive: true })
+    fs.mkdirSync(target, { recursive: true })
+    fs.writeFileSync(path.join(source, 'new.txt'), 'new', 'utf8')
+    fs.writeFileSync(path.join(target, 'old.txt'), 'old', 'utf8')
+    const out = orchestrator.atomicReplaceDir(source, target)
+    assert.equal(typeof out.digest, 'string')
+    assert.equal(fs.readFileSync(path.join(target, 'new.txt'), 'utf8'), 'new')
+    assert.equal(fs.existsSync(path.join(target, 'old.txt')), false)
+    assert.deepEqual(fs.readdirSync(root).filter((name) => name.startsWith('target')), ['target'])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('orchestrator: promoteTask aborts before touching target when snapshot fails', async () => {
+  const adapter = await makeAdapterServer()
+  const approver = {
+    async requestPromotion() { return { id: 'apr_p', outcome: 'approved', by: 'tester' } },
+    async snapshot() { return { ok: false, error: 'snapshot-unavailable' } },
+  }
+  const scorer = { scoreDir() { return { grade: 'B', S: 30, color: 'blue' } } }
+  try {
+    const { ctx, svc, dataRoot } = await boot({
+      forker: makeFakeForker({ url: adapter.url, port: adapter.port }),
+      extraServices: { [SERVICE.approver]: approver, [SERVICE.scorer]: scorer },
+    })
+    try {
+      const created = await svc.createTask({ title: 'snapshot target' })
+      assert.equal(created.ok, true, JSON.stringify(created))
+      const target = path.join(dataRoot, 'promoted', 'plug')
+      fs.mkdirSync(target, { recursive: true })
+      fs.writeFileSync(path.join(target, 'old.txt'), 'old', 'utf8')
+      const out = await svc.promoteTask(created.taskId, 'plug')
+      assert.equal(out.ok, false)
+      assert.equal(out.error, 'snapshot-failed')
+      assert.equal(fs.readFileSync(path.join(target, 'old.txt'), 'utf8'), 'old', 'target must remain untouched')
+      assert.equal(fs.existsSync(path.join(dataRoot, 'work', `${created.taskId}-plug`)), false, 'staging workDir must be removed')
+    } finally {
+      cleanup(ctx, dataRoot)
+    }
+  } finally {
+    await adapter.close()
+  }
 })
 
 test('orchestrator: promoteTask refuses low grade and non-sandbox routes', skipNoRemote, async () => {
@@ -1035,6 +1189,27 @@ test('orchestrator: 启动时加载已有 tasks.json 不触发 scanForkSessions 
   }
 })
 
+test('orchestrator: resolveCliPath derives the CLI from the current install root', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-cli-'))
+  try {
+    const cli = path.join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd')
+    fs.mkdirSync(path.dirname(cli), { recursive: true })
+    fs.writeFileSync(cli, '@echo off\n', 'utf8')
+    assert.equal(
+      orchestrator.resolveCliPath('', {}, path.join(root, 'DeepSeek Harness.exe')),
+      cli,
+      'new install path must be derived instead of falling back to bare dsh',
+    )
+    assert.equal(
+      orchestrator.resolveCliPath('', { DSH_CLI: cli }, path.join(root, 'unrelated.exe')),
+      cli,
+      'DSH_CLI remains authoritative',
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('orchestrator: 元主 backup / restore / import 三条路由', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-bri-'))
@@ -1628,4 +1803,730 @@ test('orchestrator: listForkSessions reads the fork-owned session log and extrac
   assert.equal(out.sessions[0].workspaceTitle, 'ForkWS')
   assert.equal((await svc.listForkSessions('task_nope')).error, 'unknown-task')
   cleanup(ctx, dataRoot)
+})
+
+test('orchestrator: requestMotherRestart treats auto-allow as an allowed decision', async () => {
+  const restart = { request: async () => ({ id: 'rst_auto', outcome: 'auto-allow', decision: 'auto-allow' }) }
+  const { ctx, svc, dataRoot } = await boot({ extraServices: { [SERVICE.restart]: restart } })
+  try {
+    const out = await svc.requestMotherRestart('policy-auto')
+    assert.equal(out.ok, true)
+    assert.equal(out.outcome, 'auto-allow')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: approvals aggregate mother+fork and route fork decide', async () => {
+  const adapter = await makeAdapterServer({
+    approvals: [{ id: 'apr_shared', title: 'fork approval', risk: 'yellow', kind: 'promotion', createdAt: 1, deadlineAt: 3 }],
+  })
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-approvals-fork-'))
+  const motherApprover = {
+    pending() {
+      return [{ id: 'apr_shared', title: 'mother approval', risk: 'red', kind: 'restart', createdAt: 1, deadlineAt: 2 }]
+    },
+    decide() { return { ok: true, id: 'apr_shared', outcome: 'approved', by: 'tester' } },
+  }
+  const ctx = makeCtx({
+    services: {
+      [SERVICE.forker]: makeFakeForker({ url: adapter.url, port: adapter.port }),
+      webServer,
+      [SERVICE.approver]: motherApprover,
+    },
+  })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    await webServer.find(method, routePath.split('?')[0]).handler(makeReq(body, method), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      adapterTimeoutMs: 2000,
+      adapterPollMs: 20,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const created = await ctx.get(SERVICE.orchestrator).createTask({ title: 'approval fork' })
+    assert.equal(created.ok, true, JSON.stringify(created))
+    const listed = await call('GET', '/fang/api/approvals')
+    assert.equal(listed.statusCode, 200)
+    const body = listed.json()
+    assert.equal(body.degraded, false)
+    assert.equal(body.items.length, 2)
+    const same = body.items.filter((item) => item.approvalId === 'apr_shared')
+    assert.equal(same.length, 2, 'same id from mother and fork must both survive')
+    assert.deepEqual([...new Set(same.map((item) => item.source))].sort(), ['fork', 'mother'])
+    assert.equal(same.find((item) => item.source === 'fork').taskId, created.taskId)
+
+    const decided = await call('POST', '/fang/api/approvals/decide', {
+      source: 'fork', taskId: created.taskId, approvalId: 'apr_shared', outcome: 'approved', by: 'tester',
+    })
+    assert.equal(decided.statusCode, 200)
+    assert.equal(adapter.state.approvalDecisions.length, 1)
+    assert.equal(adapter.state.approvalDecisions[0].id, 'apr_shared')
+    assert.equal(adapter.state.approvalDecisions[0].outcome, 'approved')
+
+    const unknown = await call('POST', '/fang/api/approvals/decide', {
+      source: 'bogus', approvalId: 'apr_shared', outcome: 'approved',
+    })
+    assert.equal(unknown.statusCode, 400)
+  } finally {
+    cleanup(ctx, dataRoot)
+    await adapter.close()
+  }
+})
+
+test('orchestrator: decision-center list and resolve routes use the service', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-decision-route-'))
+  const calls = []
+  const restartCalls = []
+  const listCalls = []
+  const center = {
+    actionHandlers: [],
+    registerActionHandler(id, fn) { this.actionHandlers.push({ id, fn }); return () => { this.actionHandlers = this.actionHandlers.filter(item => item.id !== id) } },
+    list(opts) { listCalls.push(opts ?? {}); return { items: [{ id: 'dec_1', level: 'red', status: 'pending' }], counts: { red: 1 }, total: 1, active: 1, rev: 5 } },
+    get(id) { return id === 'dec_1' ? { id, level: 'red', status: 'pending' } : null },
+    ingest(body) { calls.push({ ingest: body }); return { ok: true, ticket: { id: 'ext_1', level: 'yellow', title: body?.title } } },
+    testAi(body) { calls.push({ aiTest: body }); return { ok: true, provider: 'deepseek', model: 'deepseek-flash', latencyMs: 12 } },
+    advise(id) { calls.push({ aiAdvise: id }); return { ok: false, reason: 'ai-rate-limited', retryAfterMs: 2000 } },
+    adviseStream(id, onDelta) { calls.push({ aiAdviseStream: id }); onDelta('he', 'he'); onDelta('llo', 'hello'); return Promise.resolve({ ok: true, advice: { summary: 'hello' }, ticket: { id } }) },
+    abandonMany(ids, opts) { calls.push({ abandonMany: ids, opts }); return { ok: true, results: ids.map(id => ({ id, ok: true })) } },
+    quotaStatus() { return { ok: true, total: 2, sessions: [{ sessionId: 's-a', count: 2 }], roles: [{ role: 'pm', count: 2 }], pending: { total: 1, red: 0, attentionPoints: 3 } } },
+    forkAggregation() { return { ok: true, mother: { forkId: 'mother', total: 1 }, forks: [{ forkId: 'fork-a', total: 2, pending: 1 }] } },
+    producerCatalog() { return { ok: true, version: 1, producers: [{ producer: 'PJM', kinds: ['pjm-timeout'] }] } },
+    resolve(id, option, opts) { calls.push({ id, option, opts }); return { ok: true, ticket: { id, status: 'resolved', resolvedOption: option } } },
+    abandon(id, opts) { calls.push({ id, abandon: true, opts }); return { ok: true, ticket: { id, status: 'abandoned' } } },
+  }
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer, [SERVICE.decisionCenter]: center, [SERVICE.restart]: { request: async (input) => { restartCalls.push(input); return { ok: true, requested: true } } } } })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    const req = makeReq(body, method)
+    req.url = routePath
+    await webServer.find(method, routePath.split('?')[0]).handler(req, res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const restartHandler = center.actionHandlers.find((item) => item.id === 'confirm_restart')
+    assert.ok(restartHandler, 'orchestrator must register the confirm_restart action hook')
+    const hooked = await restartHandler.fn({ ticket: { id: 'dec_1' }, payload: { reason: 'unit', risk: 'yellow' } })
+    assert.equal(hooked.ok, true)
+    assert.equal(restartCalls[0].origin, 'decision-center')
+    assert.equal(restartCalls[0].reason, 'unit')
+    const listed = await call('GET', '/fang/api/decisions')
+    assert.equal(listed.statusCode, 200)
+    assert.equal(listed.json().items[0].id, 'dec_1')
+
+    // SSE：bus 事件 → 已鉴权流；ready 首帧 + ticket 帧。
+    const eventsRoute = webServer.find('GET', '/fang/api/decisions/events')
+    assert.ok(eventsRoute, 'GET /fang/api/decisions/events must be registered')
+    const streamRes = {
+      statusCode: 0, headers: {}, chunks: [], ended: false,
+      writeHead(code, headers) { this.statusCode = code; Object.assign(this.headers, headers ?? {}) },
+      flushHeaders() {}, write(chunk) { this.chunks.push(String(chunk)); return true },
+      end() { this.ended = true }, on() {},
+      get text() { return this.chunks.join('') },
+    }
+    const sseReq = makeReq(undefined, 'GET')
+    await eventsRoute.handler(sseReq, streamRes)
+    assert.equal(streamRes.statusCode, 200)
+    assert.match(streamRes.headers['content-type'], /text\/event-stream/)
+    assert.match(streamRes.text, /event: ready/)
+    assert.match(streamRes.text, /"rev":5/)
+    bus.emit('fang/decision-created', { id: 'dec_sse', level: 'red', status: 'pending', rev: 6 })
+    assert.match(streamRes.text, /event: ticket/)
+    assert.match(streamRes.text, /dec_sse/)
+    assert.equal(streamRes.ended, false, 'stream stays open until the client disconnects')
+    sseReq.emit('close')
+    assert.equal(streamRes.ended, true, 'client disconnect closes the stream')
+
+    const resolved = await call('POST', '/fang/api/decisions/resolve', { id: 'dec_1', option: 'yes', by: 'tester' })
+    assert.equal(resolved.statusCode, 200)
+    assert.deepEqual(calls[0], { id: 'dec_1', option: 'yes', opts: { by: 'tester', note: undefined } })
+
+    // 外部生产者桥：POST /fang/api/decisions/ingest
+    const ingested = await call('POST', '/fang/api/decisions/ingest', {
+      producer: 'HarnessMM', kind: 'gdr', title: 'ingest from external', dedupeKey: 'hmm:1',
+      options: [{ value: 'a', label: 'A' }],
+    })
+    assert.equal(ingested.statusCode, 200)
+    assert.equal(ingested.json().ticket.id, 'ext_1')
+    assert.equal(calls.find((item) => item.ingest)?.ingest.producer, 'HarnessMM')
+
+    // 批量归档：POST /fang/api/decisions/abandon { ids } → abandonMany
+    const archived = await call('POST', '/fang/api/decisions/abandon', { ids: ['dec_a', 'dec_b'], by: 'tester' })
+    assert.equal(archived.statusCode, 200)
+    assert.equal(archived.json().results.length, 2)
+    assert.deepEqual(calls.find((item) => item.abandonMany)?.abandonMany, ['dec_a', 'dec_b'])
+
+    // 测试连接：POST /fang/api/decisions/ai/test（不保存）
+    const tested = await call('POST', '/fang/api/decisions/ai/test', {
+      provider: 'deepseek', apiKey: 'test-key-0123456789',
+    })
+    assert.equal(tested.statusCode, 200)
+    assert.equal(tested.json().ok, true)
+    assert.equal(calls.find((item) => item.aiTest)?.aiTest.provider, 'deepseek')
+
+    // AI 限流：429 + Retry-After 透传
+    const limited = await call('POST', '/fang/api/decisions/ai/advise', { id: 'dec_1' })
+    assert.equal(limited.statusCode, 429)
+    assert.equal(limited.json().reason, 'ai-rate-limited')
+    assert.equal(limited.headers['retry-after'], '2')
+
+    // 配额统计：GET /fang/api/decisions/quota
+    const quota = await call('GET', '/fang/api/decisions/quota')
+    assert.equal(quota.statusCode, 200)
+    assert.equal(quota.json().total, 2)
+    assert.equal(quota.json().roles[0].role, 'pm')
+
+    // includeArchived / since 透传
+    const withArchived = await call('GET', '/fang/api/decisions?includeArchived=1&since=3')
+    assert.equal(withArchived.statusCode, 200)
+    assert.equal(listCalls.at(-1).includeArchived, true)
+    assert.equal(listCalls.at(-1).since, 3)
+
+    const forks = await call('GET', '/fang/api/decisions/forks')
+    assert.equal(forks.statusCode, 200)
+    assert.equal(forks.json().forks[0].forkId, 'fork-a')
+
+    const producers = await call('GET', '/fang/api/decisions/producers')
+    assert.equal(producers.statusCode, 200)
+    assert.equal(producers.json().version, 1)
+    assert.equal(producers.json().producers[0].producer, 'PJM')
+
+    // AI 流式：POST /fang/api/decisions/ai/advise/stream → SSE start/delta/done
+    const aiStreamRes = {
+      statusCode: 0, headers: {}, body: '', ended: false,
+      writeHead(code, headers) { this.statusCode = code; Object.assign(this.headers, headers ?? {}) },
+      setHeader(name, value) { this.headers[String(name).toLowerCase()] = value },
+      flushHeaders() {},
+      write(chunk) { this.body += String(chunk); return true },
+      end() { this.ended = true },
+      on() {},
+    }
+    const aiStreamReq = makeReq({ id: 'dec_1' }, 'POST')
+    aiStreamReq.url = '/fang/api/decisions/ai/advise/stream'
+    await webServer.find('POST', '/fang/api/decisions/ai/advise/stream').handler(aiStreamReq, aiStreamRes)
+    assert.equal(aiStreamRes.statusCode, 200)
+    assert.match(aiStreamRes.headers['content-type'], /text\/event-stream/)
+    assert.match(aiStreamRes.body, /event: start/)
+    assert.match(aiStreamRes.body, /event: delta/)
+    assert.match(aiStreamRes.body, /"delta":"he"/)
+    assert.match(aiStreamRes.body, /event: done/)
+    assert.equal(aiStreamRes.ended, true)
+
+    // fork 轮询单票：GET /fang/api/decisions/item?id=...
+    const item = await call('GET', '/fang/api/decisions/item?id=dec_1')
+    assert.equal(item.statusCode, 200)
+    assert.equal(item.json().ticket.id, 'dec_1')
+    const missingItem = await call('GET', '/fang/api/decisions/item?id=missing')
+    assert.equal(missingItem.statusCode, 404)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: decision-center routes map 400/404/409 and parse includeArchived/since', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-decision-http-'))
+  const listOptions = []
+  const center = {
+    list(options) { listOptions.push(options); return { items: [], counts: {}, total: 0, active: 0, rev: 9 } },
+    resolve(id) {
+      if (id === 'missing') return { ok: false, reason: 'not-found' }
+      if (id === 'settled') return { ok: false, reason: 'not-pending' }
+      return { ok: false, reason: 'unknown-option' }
+    },
+  }
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer, [SERVICE.decisionCenter]: center } })
+  const call = async (method, routePath, body, url) => {
+    const res = makeRes()
+    const req = makeReq(body, method)
+    if (url) req.url = url
+    await webServer.find(method, routePath).handler(req, res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const listed = await call('GET', '/fang/api/decisions', undefined, '/fang/api/decisions?includeArchived=1&since=5')
+    assert.equal(listed.statusCode, 200)
+    assert.equal(listed.json().rev, 9)
+    assert.deepEqual(listOptions[0], { includeArchived: true, since: 5 })
+
+    const missing = await call('POST', '/fang/api/decisions/resolve', { id: 'missing' })
+    assert.equal(missing.statusCode, 404)
+    const settled = await call('POST', '/fang/api/decisions/resolve', { id: 'settled' })
+    assert.equal(settled.statusCode, 409)
+    const badOption = await call('POST', '/fang/api/decisions/resolve', { id: 'pending' })
+    assert.equal(badOption.statusCode, 400)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: approvals aggregate local pending and decide without faking success', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-approvals-route-'))
+  const decisions = []
+  const approver = {
+    pending() {
+      return [{ id: 'apr_1', title: 'promote', risk: 'red', kind: 'promotion', createdAt: 1, deadlineAt: 2 }]
+    },
+    decide(id, outcome, options) {
+      decisions.push({ id, outcome, options })
+      return id === 'apr_1'
+        ? { ok: true, id, outcome, by: options.by }
+        : { ok: false, reason: 'not-pending' }
+    },
+  }
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer, [SERVICE.approver]: approver } })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    await webServer.find(method, routePath.split('?')[0]).handler(makeReq(body, method), res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const listed = await call('GET', '/fang/api/approvals')
+    assert.equal(listed.statusCode, 200)
+    const body = listed.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.degraded, false)
+    assert.equal(body.items.length, 1)
+    assert.equal(body.items[0].source, 'mother')
+    assert.equal(body.items[0].approvalId, 'apr_1')
+    assert.equal(body.items[0].adapterOk, true)
+
+    const approved = await call('POST', '/fang/api/approvals/decide', {
+      source: 'mother', approvalId: 'apr_1', outcome: 'approved', by: 'tester',
+    })
+    assert.equal(approved.statusCode, 200)
+    assert.equal(approved.json().outcome, 'approved')
+    assert.equal(decisions.length, 1)
+    assert.equal(decisions[0].options.by, 'tester')
+
+    const stale = await call('POST', '/fang/api/approvals/decide', {
+      source: 'mother', approvalId: 'apr_missing', outcome: 'denied',
+    })
+    assert.equal(stale.statusCode, 409)
+
+    const bad = await call('POST', '/fang/api/approvals/decide', {
+      source: 'mother', approvalId: 'apr_1', outcome: 'maybe',
+    })
+    assert.equal(bad.statusCode, 400)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: autostartForks respawns stopped tasks, skips archived/running, exposes HTTP route', async () => {
+  const webServer = makeWebServerStub()
+  const forker = makeFakeForker()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-autostart-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      adapterTimeoutMs: 100,
+      adapterPollMs: 40,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const a = await svc.createTask({ title: 'autostart-a' })
+    const b = await svc.createTask({ title: 'autostart-b' })
+    const archived = await svc.createTask({ title: 'autostart-archived' })
+    assert.equal(a.ok, true)
+    assert.equal(b.ok, true)
+    assert.equal(archived.ok, true)
+
+    await forker.stop(a.taskId)
+    await forker.stop(b.taskId)
+    const arch = await svc.archiveTask(archived.taskId)
+    assert.equal(arch.ok, true)
+    await forker.stop(archived.taskId)
+
+    const out = await svc.autostartForks()
+    assert.equal(out.ok, true)
+    assert.deepEqual(out.started.map(item => item.taskId).sort(), [a.taskId, b.taskId].sort())
+    assert.ok(out.skipped.some(item => item.taskId === archived.taskId && item.reason === 'archived'))
+    assert.equal(forker.status(a.taskId).running, true)
+    assert.equal(forker.status(b.taskId).running, true)
+    assert.equal(forker.status(archived.taskId).running, false, 'archived must stay stopped')
+
+    // 第二次：已运行的不重复 spawn
+    const spawnsBefore = forker.calls.spawn.length
+    const again = await svc.autostartForks()
+    assert.ok(again.skipped.some(item => item.taskId === a.taskId && item.reason === 'already-running'))
+    assert.equal(forker.calls.spawn.length, spawnsBefore, 'running tasks must not be spawned twice')
+
+    // HTTP 路由：POST /fang/api/forks/autostart
+    const handler = webServer.find('POST', '/fang/api/forks/autostart')
+    assert.ok(handler, 'POST /fang/api/forks/autostart must be registered')
+    const res = makeRes()
+    await handler.handler(makeReq({}, 'POST'), res)
+    assert.equal(res.statusCode, 200, res.body)
+    const body = res.json()
+    assert.equal(body.ok, true)
+    assert.ok(Array.isArray(body.started))
+    assert.ok(Array.isArray(body.failed))
+    assert.ok(Array.isArray(body.skipped))
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: fork supervision toggles persist and apply to the forker', async () => {
+  const webServer = makeWebServerStub()
+  const applied = []
+  let fakeSupervise = false
+  const forker = makeFakeForker({
+    getSupervision() { return { enabled: fakeSupervise, configured: false, maxRestarts: 3 } },
+    setSupervise(enabled) { applied.push(enabled); fakeSupervise = enabled; return { ok: true, enabled } },
+  })
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-supervision-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, { dataRoot, routes: { enabled: true, prefix: '/fang' }, authToken: TEST_AUTH_TOKEN })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const out = svc.setForkSupervision({ autostartForks: false, supervise: true })
+    assert.equal(out.ok, true)
+    assert.equal(out.effective.autostartForks, false)
+    assert.equal(out.effective.supervise, true)
+    assert.deepEqual(applied, [true], 'forker.setSupervise must be called immediately')
+    assert.equal(readForkSupervisionSettings(dataRoot).autostartForks, false)
+    assert.equal(readForkSupervisionSettings(dataRoot).supervise, true)
+
+    // HTTP：POST 应用 + GET 读取
+    const post = makeRes()
+    const req = makeReq({ autostartForks: true, supervise: false }, 'POST')
+    req.url = '/fang/api/forks/supervision'
+    await webServer.find('POST', '/fang/api/forks/supervision').handler(req, post)
+    assert.equal(post.statusCode, 200, post.body)
+    assert.equal(post.json().effective.autostartForks, true)
+    assert.deepEqual(applied, [true, false])
+
+    const get = makeRes()
+    const getReq = makeReq(null, 'GET')
+    getReq.url = '/fang/api/forks/supervision'
+    await webServer.find('GET', '/fang/api/forks/supervision').handler(getReq, get)
+    assert.equal(get.statusCode, 200, get.body)
+    assert.equal(get.json().ok, true)
+    assert.equal(get.json().persisted.autostartForks, true)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: no duplicate exact route paths (host keys by path only)', () => {
+  // DSH webServer.register keys exact routes by path; a second same-path registration
+  // throws and silently drops every later route. Unit tests use a permissive stub, so
+  // this source-level guard catches the class of bug e2e found (branches/composer lost).
+  const source = fs.readFileSync(new URL('../src/plugins/orchestrator.mjs', import.meta.url), 'utf8')
+  const paths = new Map()
+  const add = (routePath, method) => {
+    if (!paths.has(routePath)) paths.set(routePath, [])
+    paths.get(routePath).push(method)
+  }
+  let match
+  const one = /route\('(GET|POST|PUT|PATCH|DELETE)',\s*`\$\{prefix\}([^`]*)`/g
+  while ((match = one.exec(source))) add(match[2], match[1])
+  const both = /routeMethods\(`\$\{prefix\}([^`]*)`/g
+  while ((match = both.exec(source))) add(match[1], 'GET+POST')
+  const duplicates = [...paths.entries()].filter(([, methods]) => methods.length > 1)
+  assert.deepEqual(duplicates, [], `duplicate exact routes: ${JSON.stringify(duplicates)}`)
+})
+
+test('orchestrator: decision HTTP routes map 400/404/409 correctly', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-decision-status-'))
+  const center = {
+    list() { return { items: [], counts: {}, rev: 1 } },
+    resolve(id, option) {
+      if (id === 'missing') return { ok: false, reason: 'not-found' }
+      if (id === 'bad') return { ok: false, reason: 'unknown-option' }
+      return { ok: false, reason: 'not-pending' }
+    },
+    ingest(body) {
+      if (!body?.title) return { ok: false, reason: 'title-required' }
+      return { ok: false, reason: 'conflict' }
+    },
+  }
+  const ctx = makeCtx({ services: { webServer, [SERVICE.forker]: makeFakeForker(), [SERVICE.decisionCenter]: center } })
+  const call = async (method, routePath, body) => {
+    const res = makeRes()
+    const req = makeReq(body, method)
+    req.url = routePath
+    await webServer.find(method, routePath.split('?')[0]).handler(req, res)
+    return res
+  }
+  try {
+    orchestrator.apply(ctx, { dataRoot, authToken: TEST_AUTH_TOKEN })
+    assert.equal((await call('POST', '/fang/api/decisions/resolve', { id: 'missing' })).statusCode, 404)
+    assert.equal((await call('POST', '/fang/api/decisions/resolve', { id: 'bad', option: 'x' })).statusCode, 400)
+    assert.equal((await call('POST', '/fang/api/decisions/resolve', { id: 'pending', option: 'x' })).statusCode, 409)
+    assert.equal((await call('POST', '/fang/api/decisions/ingest', {})).statusCode, 400)
+    assert.equal((await call('POST', '/fang/api/decisions/ingest', { title: 'x' })).statusCode, 409)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: officialSourceUrl manifest adapter performs a real upgrade', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    async text() {
+      return JSON.stringify({
+        version: '9.9.9',
+        files: {
+          'package.json': JSON.stringify({ name: 'fake-profile', version: '9.9.9' }),
+          'cordis.patch.yml': 'insert: []\n',
+          'version.json': JSON.stringify({ version: '9.9.9' }),
+        },
+      })
+    },
+  })
+  const submitted = []
+  const center = {
+    list() { return { items: [], counts: {}, rev: 1 } },
+    submit(spec) { submitted.push(spec); return { ok: true, ticket: { id: 'dec_x' } } },
+    ingest() { return { ok: true, ticket: { id: 'ext_x' } } },
+  }
+  const { ctx, dataRoot } = await boot({
+    extraServices: { [SERVICE.decisionCenter]: center },
+    config: {
+      officialSourceUrl: 'http://127.0.0.1:9999',
+      compatGate: async () => ({ ok: true, checkedAt: Date.now(), findings: [] }),
+    },
+  })
+  try {
+    const mirror = ctx.get(SERVICE.mirror)
+    const check = await mirror.checkUpdate()
+    assert.equal(check.latest, '9.9.9')
+    assert.equal(check.available, true)
+    const out = await mirror.upgrade({ autoBackup: false, autoRollback: false })
+    assert.equal(out.ok, true)
+    assert.equal(out.to, '9.9.9')
+    assert.equal(out.reason, undefined)
+    const active = path.join(dataRoot, 'mirror', 'active')
+    assert.equal(fs.existsSync(path.join(active, 'package.json')), true)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(active, 'package.json'), 'utf8')).version, '9.9.9')
+    // 升级成功 → 红色 restart ticket（action confirm_restart）
+    const restartTicket = submitted.find((spec) => spec.level === 'red')
+    assert.ok(restartTicket, 'successful upgrade must raise a red restart ticket')
+    assert.match(String(restartTicket.title), /需重启宿主/)
+    assert.equal(restartTicket.actions?.[0]?.id, 'confirm_restart')
+  } finally {
+    globalThis.fetch = originalFetch
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: fake officialSource + failing compat gate yields a compat decision ticket', async () => {
+  const submitted = []
+  const center = {
+    list() { return { items: [], counts: {}, rev: 1 } },
+    submit(spec) { submitted.push(spec); return { ok: true, ticket: { id: 'dec_compat_1' } } },
+    ingest() { return { ok: true, ticket: { id: 'ext_x' } } },
+  }
+  const downloaded = []
+  const officialSource = {
+    getLatestVersion: () => '9.9.9',
+    download: (version, staging) => {
+      downloaded.push({ version, staging })
+      fs.mkdirSync(staging, { recursive: true })
+      fs.writeFileSync(path.join(staging, 'package.json'), JSON.stringify({ name: 'fake-mirror', version }), 'utf8')
+      fs.writeFileSync(path.join(staging, 'cordis.patch.yml'), 'insert: []\n', 'utf8')
+    },
+  }
+  const { ctx, dataRoot } = await boot({
+    extraServices: { [SERVICE.decisionCenter]: center },
+    config: {
+      officialSource,
+      compatGate: async () => ({ ok: false, checkedAt: Date.now(), findings: [{ code: 'unit', severity: 'error', message: 'forced' }] }),
+    },
+  })
+  try {
+    const mirror = ctx.get(SERVICE.mirror)
+    const out = await mirror.upgrade({ autoBackup: false, autoRollback: false })
+    assert.equal(out.ok, true)
+    assert.equal(out.to, '9.9.9')
+    assert.equal(out.reason, 'compat-gate-failed')
+    assert.equal(downloaded.length, 1)
+    assert.equal(submitted.length, 1)
+    assert.equal(submitted[0].level, 'yellow')
+    assert.match(String(submitted[0].title), /兼容门禁未通过/)
+    assert.match(String(submitted[0].context), /findings=1/)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: real EssenceManager conflicted/failed recompute raises a decision ticket', async () => {
+  const submitted = []
+  const center = {
+    list() { return { items: [], counts: {}, rev: 1 } },
+    submit(spec) { submitted.push(spec); return { ok: true, ticket: { id: 'dec_essence_real_1' } } },
+    ingest() { return { ok: true, ticket: { id: 'ext_x' } } },
+  }
+  const { ctx, dataRoot } = await boot({ extraServices: { [SERVICE.decisionCenter]: center } })
+  try {
+    const mirror = ctx.get(SERVICE.mirror)
+    const layout = resolveFangLayout({ dataRoot })
+    const created = mirror.createEssence({ name: 'real-conflict' })
+    assert.ok(created?.id, 'essence created')
+    const root = path.join(layout.essenceRoot, created.id)
+    // 真实冲突：镜像锁定 plugin，原身 overlay 试图禁用 → fatal LOCKED_PLUGIN_DISABLED
+    const mirrorRoot = path.join(dataRoot, 'mirror')
+    fs.mkdirSync(path.join(mirrorRoot, 'active', 'profile'), { recursive: true })
+    fs.writeFileSync(path.join(mirrorRoot, 'mirror-locked.json'), JSON.stringify({ locked: ['locked-x'] }), 'utf8')
+    fs.writeFileSync(path.join(mirrorRoot, 'active', 'profile', 'cordis.patch.yml'), 'insert:\n  - id: locked-x\n    disabled: false\n', 'utf8')
+    fs.writeFileSync(path.join(root, 'overlay', 'cordis.patch.yml'), 'insert:\n  - id: locked-x\n    disabled: true\n', 'utf8')
+    const metaFile = path.join(root, 'meta.json')
+    fs.writeFileSync(metaFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(metaFile, 'utf8')), status: 'stale', lastMergedFingerprint: null }), 'utf8')
+    // 真实失败：overlay 路径是文件 → loadOverlay ensureDir 抛错 → recomputeAll.failed
+    const brokenRoot = path.join(layout.essenceRoot, 'essence-broken-test')
+    fs.mkdirSync(brokenRoot, { recursive: true })
+    fs.writeFileSync(path.join(brokenRoot, 'meta.json'), JSON.stringify({
+      id: 'essence-broken-test', name: 'broken', tier: 'local', createdAt: 1, updatedAt: 1,
+      status: 'stale', lastMergedFingerprint: null,
+    }), 'utf8')
+    fs.writeFileSync(path.join(brokenRoot, 'overlay'), 'not-a-directory', 'utf8')
+
+    const out = await mirror.syncEssences({})
+    assert.equal(out.ok, true)
+    assert.ok(out.conflicted.includes(created.id), 'real conflict detected')
+    assert.ok(out.failed.some((item) => item.id === 'essence-broken-test'), 'real failure detected')
+    assert.equal(submitted.length, 1)
+    assert.equal(submitted[0].level, 'red', 'failed>0 => red')
+    assert.match(String(submitted[0].title), /元主合并冲突/)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: MirrorUpgrade failure/compat/throw map to decision tickets and stage events', async () => {
+  const submitted = []
+  const center = {
+    list() { return { items: [], counts: {}, rev: 1 } },
+    submit(spec) { submitted.push(spec); return { ok: true, ticket: { id: `dec_mirror_${submitted.length}` } } },
+    ingest() { return { ok: true, ticket: { id: 'ext_x' } } },
+  }
+  const stages = []
+  const onStage = (payload) => stages.push(payload)
+  bus.on('fang/mirror-upgrade-stage', onStage)
+  const original = MirrorManager.prototype.upgrade
+  const { ctx, dataRoot } = await boot({ extraServices: { [SERVICE.decisionCenter]: center } })
+  try {
+    const mirror = ctx.get(SERVICE.mirror)
+
+    // 1) 升级失败 → yellow ticket
+    MirrorManager.prototype.upgrade = async ({ onProgress } = {}) => {
+      onProgress?.('checking')
+      onProgress?.('downloading')
+      return { ok: false, from: '3.1.0', to: null, reason: 'download-failed', rolledBack: false }
+    }
+    const failed = await mirror.upgrade({})
+    assert.equal(failed.ok, false)
+    assert.ok(stages.some((item) => item.stage === 'checking'))
+    assert.ok(stages.some((item) => item.stage === 'downloading'))
+    assert.equal(submitted.length, 1)
+    assert.equal(submitted[0].level, 'yellow')
+    assert.match(String(submitted[0].title), /镜像升级失败/)
+    assert.equal(submitted[0].source.taskName, 'MirrorUpgrade')
+
+    // 2) compat-gate-failed → yellow ticket
+    MirrorManager.prototype.upgrade = async ({ onProgress } = {}) => {
+      onProgress?.('done')
+      return { ok: true, from: '3.1.0', to: '3.2.0', reason: 'compat-gate-failed', compat: { findings: [{ code: 'x' }, { code: 'y' }] } }
+    }
+    const compat = await mirror.upgrade({})
+    assert.equal(compat.reason, 'compat-gate-failed')
+    assert.equal(submitted.length, 2)
+    assert.equal(submitted[1].level, 'yellow')
+    assert.match(String(submitted[1].title), /兼容门禁未通过/)
+    assert.match(String(submitted[1].context), /findings=2/)
+
+    // 3) 升级抛错 → red ticket + rethrow
+    MirrorManager.prototype.upgrade = async () => { throw new Error('boom-upgrade') }
+    await assert.rejects(mirror.upgrade({}), /boom-upgrade/)
+    assert.equal(submitted.length, 3)
+    assert.equal(submitted[2].level, 'red')
+    assert.match(String(submitted[2].context), /boom-upgrade/)
+  } finally {
+    MirrorManager.prototype.upgrade = original
+    bus.off?.('fang/mirror-upgrade-stage', onStage)
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: EssenceManager conflicted/failed recompute raises a decision ticket', async () => {
+  const submitted = []
+  const center = {
+    list() { return { items: [], counts: {}, rev: 1 } },
+    submit(spec) { submitted.push(spec); return { ok: true, ticket: { id: 'dec_essence_1' } } },
+    ingest() { return { ok: true, ticket: { id: 'ext_x' } } },
+  }
+  const original = EssenceManager.prototype.recomputeAll
+  EssenceManager.prototype.recomputeAll = async () => ({ recomputed: 1, skipped: 0, conflicted: 2, failed: 1, aborted: false })
+  const { ctx, dataRoot } = await boot({ extraServices: { [SERVICE.decisionCenter]: center } })
+  try {
+    const mirror = ctx.get(SERVICE.mirror)
+    const out = await mirror.syncEssences({})
+    assert.equal(out.ok, true)
+    assert.equal(submitted.length, 1, 'conflicted/failed must produce exactly one ticket')
+    const spec = submitted[0]
+    assert.equal(spec.level, 'red', 'failed>0 => red')
+    assert.equal(spec.actions[0].id, 'review')
+    assert.match(String(spec.title), /元主合并冲突/)
+    assert.equal(spec.source.taskName, 'EssenceManager')
+  } finally {
+    EssenceManager.prototype.recomputeAll = original
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: mirror upgrade failure raises a decision ticket instead of only logging', async () => {
+  const submitted = []
+  const center = {
+    list() { return { items: [], counts: {}, rev: 1 } },
+    submit(spec) { submitted.push(spec); return { ok: true, ticket: { id: 'dec_mirror_1' } } },
+    ingest() { return { ok: true, ticket: { id: 'ext_x' } } },
+  }
+  const { ctx, svc, dataRoot } = await boot({ extraServices: { [SERVICE.decisionCenter]: center } })
+  try {
+    let out = null
+    try {
+      out = await ctx.get(SERVICE.mirror).upgrade({ autoBackup: false, autoRollback: false })
+    } catch { /* 升级抛错也应先 ticket 再抛 */ }
+    assert.ok(submitted.length >= 1, `upgrade failure/throw must produce a ticket (out=${JSON.stringify(out)})`)
+    const spec = submitted[0]
+    assert.match(String(spec.title), /升级/)
+    assert.equal(spec.source?.roleTrusted, true)
+    assert.equal(spec.source?.agentRole, 'system')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
 })

@@ -76,6 +76,7 @@ test('registers fangScorer; module shape, v1 exports and v2 threshold policy are
   assert.equal(typeof service.scoreDir, 'function')
   assert.equal(typeof service.scoreIntent, 'function')
   assert.deepEqual(service.policy.allowlist, ['left-pad'])
+  assert.equal(service.policy.allowlistUsedForScoring, false)
   assert.deepEqual(scorer.DIM_WEIGHT, { D1: 28, D2: 22, D3: 18, D4: 14, D5: 10, D6: 8 })
   assert.equal(Object.values(scorer.DIM_WEIGHT).reduce((a, b) => a + b, 0), 100, 'D1–D6 weights sum to 100')
 
@@ -396,6 +397,70 @@ test('v1 math: scoreDir without an entry fails closed (E/degraded/red, no veto)'
   ctx.dispose()
 })
 
+test('v2: service threshold overrides are strict-only and basis reports the applied bands', () => {
+  const { service, ctx } = fresh()
+  const relaxed = service.scoreSource(VM_SRC, {}, { thresholds: { a: 100, b: 100, c: 100, d: 100 } })
+  assert.equal(relaxed.grade, 'B', 'callers must not be able to loosen configured bands')
+  assert.deepEqual(relaxed.basis.thresholds, { a: 20, b: 40, c: 60, d: 80 })
+  const tightened = service.scoreSource(VM_SRC, {}, { thresholds: { a: 10, b: 40, c: 60, d: 80 } })
+  assert.equal(tightened.basis.thresholds.a, 10)
+  assert.equal(tightened.grade, 'B')
+  ctx.dispose()
+})
+
+test('v2: entry candidates outside the plugin root are rejected', () => {
+  const { service, ctx } = fresh()
+  const plugin = writePluginDir(
+    { name: '@local/t6-escape', version: '1.0.0', type: 'module', main: '../secret.js' },
+  )
+  fs.writeFileSync(path.join(path.dirname(plugin), 'secret.js'), CHILD_PROCESS_SRC, 'utf8')
+  assert.equal(scorer.resolvePluginFile(plugin, '../secret.js'), null)
+  assert.equal(scorer.resolvePluginFile(plugin, '/absolute/secret.js'), null)
+  const out = service.scoreDir(plugin)
+  assert.equal(out.entry, null)
+  assert.equal(out.grade, 'E')
+  assert.equal(out.error, 'no-entry-file')
+  ctx.dispose()
+})
+
+test('v2: C3 grace is explicit in the result (count/core/graced/applied)', () => {
+  const small = scorer.scoreScan([{ id: 'C3-services', weight: 22, evidence: { services: ['a', 'b'] } }], {})
+  assert.equal(small.c3.applied, true)
+  assert.equal(small.c3.graced, true)
+  assert.equal(small.c3.count, 2)
+  assert.equal(small.S, 0)
+  assert.ok(small.reasons.includes('C3-services:C3-service-grace'))
+
+  const many = scorer.scoreScan([{ id: 'C3-services', weight: 22, evidence: { services: Array.from({ length: 9 }, (_, i) => 's' + i) } }], {})
+  assert.equal(many.c3.graced, false)
+  assert.equal(many.c3.count, 9)
+  assert.ok(many.reasons.some((reason) => reason.includes('C3-service-risk')))
+
+  const core = scorer.scoreScan([{ id: 'C3-services', weight: 22, evidence: { services: ['sessions'] } }], {})
+  assert.equal(core.c3.core, true)
+  assert.equal(core.c3.graced, false)
+})
+
+test('v2: scoreSource audit is opt-in on the hot path', () => {
+  const calls = []
+  const ctx = makeCtx()
+  const auditor = { append(kind, data) { calls.push({ kind, data }) } }
+  const bare = makeCtx({ services: { [SERVICE.auditor]: auditor } })
+  try {
+    scorer.apply(bare, scorer.Config({}))
+    const service = bare.get(SERVICE.scorer)
+    service.scoreSource(VM_SRC)
+    assert.equal(calls.length, 0, 'default hot path must not write a ledger row')
+    service.scoreSource(VM_SRC, {}, { audit: true })
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].kind, AUDIT.SCORE)
+    assert.equal(calls[0].data.scope, 'source')
+  } finally {
+    ctx.dispose()
+    bare.dispose()
+  }
+})
+
 test('v1 behavior: scoreIntent action light is unchanged and now carries basis', () => {
   const { service, ctx } = fresh()
   const base = service.scoreIntent({})
@@ -439,6 +504,37 @@ test('audit is used when fangAudit exists (with environment) and tolerated when 
   assert.doesNotThrow(() => bare.get(SERVICE.scorer).scoreDir(dir))
   bare.dispose()
   ctx.dispose()
+})
+
+test('deep scan covers non-entry call sites and reports coverage honestly', () => {
+  const { ctx, service } = fresh()
+  const dir = writePluginDir(
+    { name: '@local/t6-deep', version: '1.0.0', type: 'module', main: 'index.js' },
+    {
+      'index.js': 'export const clean = true\n',
+      'lib/exec.mjs': "import { exec } from 'node:child_process'\nexport const run = () => exec('id')\n",
+      'lib/dynamic.mjs': "const name = './x'\nexport const load = () => import(name)\n",
+      'lib/variable.mjs': "import * as cp from 'node:child_process'\nconst spawn = cp.spawn\nspawn('node', ['-v'])\n",
+      'lib/export.mjs': "export { spawn } from 'node:child_process'\n",
+    },
+  )
+  try {
+    const fast = service.scoreDir(dir)
+    assert.equal(fast.coverage, 'import-only')
+    const deep = service.scoreDir(dir, null, { deep: true })
+    assert.equal(deep.coverage, 'deep-import+call')
+    assert.ok(deep.scannedFiles >= 5)
+    assert.ok(deep.signals.some((signal) => signal.id === 'S1-child_process_call'))
+    assert.ok(deep.callSites.some((site) => site.file === 'lib/exec.mjs' && site.kind === 'exec'))
+    assert.ok(deep.signals.some((signal) => signal.id === 'S8-dynamic_import_nonliteral'))
+    assert.equal(typeof deep.degraded, 'boolean')
+
+    const source = service.scoreSource("const name = './x'; import(name)\n", {}, { deep: true })
+    assert.equal(source.coverage, 'import+call')
+    assert.ok(source.signals.some((signal) => signal.id === 'S8-dynamic_import_nonliteral'))
+  } finally {
+    ctx.dispose()
+  }
 })
 
 test('apply registers once, is disposed cleanly, and a duplicate registration throws', () => {

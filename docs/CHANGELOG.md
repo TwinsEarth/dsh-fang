@@ -4,6 +4,71 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.1.2（2026-11-09）
+
+**主题：把 v3.1.1 未发布的启动韧性/自检/更新器门禁收口，并完成首次四方发布。**
+
+### 新增
+- **boot-guard**：bundle 行解析、重复 id、子进程 `import()`/`apply()` 冒烟；`--apply` 禁用失败行（profile patch 备份）、`--safe-mode` 全禁用；`--candidate-dir` 供更新器做候选包冒烟。
+- **启动入口自动自检**：`desktop-launch` / `restart-watchdog` 默认自动跑 boot-guard；未给 profile 时自动探测 `DSH_PROFILE_DIR` / `DSH_HOME/profiles/<profile>`；失败 + execute → 安全模式，dry-run 只报告。
+- **运行时崩溃记录/熔断**：restart-guard `boot-state.json`（booting/running/clean/crashed）+ `runtime-crash.jsonl`（`uncaughtExceptionMonitor`）；launcher 检测上次 booting/crashed 且 pid 已死 → 自动安全模式。
+- **restart-guard selfCheck**：`GET /fang/api/restart/selfcheck`（state/HMAC/清单/supervisor/unclean-boot/crash-ledger）。
+- **持久化**：多代快照（`snapshotGenerations` 默认 3，A–J）+ 崩溃 journal（request/settled/orphaned，重启只标 orphaned）。
+- **重装/毒数据 drill**：同一 DSH_HOME 覆盖安装 + 16 类毒文件后二次 boot。
+
+### 修复
+- 无效/旧盘 `fang-home.txt` 迁移指针自动回退本机布局，避免 apply 阶段 ensureDir 抛错。
+- 真实 EssenceManager 冲突不出票（`recomputeAll()` 数组长度），未读计数口径，drawer `requestAnimationFrame` guard。
+- 重复路由注册导致后续路由静默丢失（`/api/forks/supervision`、`/api/essence/default`）。
+
+### 测试/门禁
+- `preflight --e2e` **GREEN**：1026 tests / 1015 pass / 0 fail / 1 skip / 10 todo（179.9s）；e2e **81/81**（16.9s）；allow-list routes=104 findings=0；compat COMPATIBLE；syntax vet 0 失败。
+- 安装 drill **10/10**（boot-guard precheck、client half、19 行、零残留）；reinstall drill **7/7**（覆盖安装 + 16 类毒数据后二次 boot）；healthz **HEALTHY @3.1.2**。
+- 产物：`dist/dsh-fang-3.1.2.tgz`（510,726 B / 135 entries）sha256 `558a81da140005879c830a80048e4a89a00e2562fee2e782de8dfe2586b809b2`。
+
+### 已知边界
+- PluginUpdater / SuperAgent / HarnessMM / PJM / Worker **本体未接**；契约/client/CLI/fork tool/boot-guard 候选门禁已就绪。
+- DSH 宿主内其他插件 apply 硬失败无法当场拦截；只能记录 + 下次启动熔断。
+- npm 发布依赖仓库 `NPM_TOKEN` secret；私有镜像 verify 依赖 `MIRROR_TOKEN`/`MIRROR_REQUIRED`；自托管 e2e runner 需在线。
+
+## v3.1.1（2026-11-09）
+
+**主题：决策中心（注意力收件箱）+ fork outbox/ingest + AI 流式/多模型/SSRF + 镜像官方源 + 重启监督闭环 + 分身看护 UI。**
+**诚实说明：外部业务生产者本体（PluginUpdater/SuperAgent/HarnessMM/PJM/Worker）仍未接入；本版只交付契约、客户端与测试。**
+
+### 新增
+- **决策中心**：红/黄/蓝/绿/灰 ticket、会话日配额、注意力预算、红票硬上限、批量 resolve/abandon、动作执行钩子、SSE 推送、AI 建议/采纳审计、执行状态 chip。
+- **AI**：token 级流式建议（SSE）、多模型/多 provider/多 Key 路由（`profiles/routes`）、私网 allowlist、SSRF 防护（元数据/私网字面量 + 请求前 DNS 预检）。
+- **fork 转发**：fork outbox（失败落盘/退避/flush）、独立进程 ingest client/CLI、`ADAPTER_OP.DECISION_INGEST`、`request_human_decision`/`report_pjm_timeout`/`report_worker_deviation` 工具、母体 `originForkId/taskId` 标签与跨 fork 聚合（含 AI 建议采纳统计）。
+- **业务生产者**：统一 producer 契约 v1（`normalizeProducerPayload`/`createProducerSubmitter`/`producerCatalog`）+ 目录路由；MirrorUpgrade、EssenceManager、PM、umbrella 已接线；PJM/Worker 客户端与工具就绪（本体未调用）。
+- **镜像升级**：officialSource manifest adapter（`officialSourceUrl`/`officialSourceToken`）、真实下载/替换、成功 → 红色 restart ticket（`confirm_restart`）。
+- **重启监督**：HMAC 签名清单/回执、supervisor/watchdog、desktop launcher、启动恢复与执行回执校验。
+- **客户端**：独立收件箱侧栏入口 + 右侧 pane / 固定 drawer 回退；五色分组折叠、分组头三态全选、键盘导航、批量失败逐条 UI、AI 流式、分身看护开关；主面板移除旧决策中心渲染。
+- **持久化**：approver 快照从 A/B 扩展为多代（`snapshotGenerations` 默认 3，A–J 可回滚；index v2 跨重启保留）；新增 `dsh-approval-journal.jsonl` 崩溃 journal（request/settled/orphaned），重启把未结 request 标记 orphaned，不复活已死 Promise。
+- **启动韧性**：无效/旧盘 `fang-home.txt` 迁移指针自动忽略回退；新增真实重装 drill（同一 DSH_HOME 覆盖安装 + 毒数据后二次 boot）。
+- **启动自检**：`tools/boot-guard.mjs`（bundle 行解析/重复 id/子进程 import 冒烟；`--apply` 禁用失败行、`--safe-mode` 全禁用；`--candidate-dir` 候选包冒烟）；restart-guard `selfCheck()` + `GET /fang/api/restart/selfcheck`；`tools/desktop-launch.mjs` 与 `tools/restart-watchdog.mjs` 已自动接 boot-guard（自动探测 profile；失败 + execute → 安全模式；dry-run 只报告；watchdog 可 `--no-boot-guard`/`--no-safe-mode`）。
+- **运行时崩溃记录/熔断**：restart-guard 写 `boot-state.json`（booting/running/clean/crashed）+ `runtime-crash.jsonl`（`uncaughtExceptionMonitor`，不改变宿主退出）；launcher 检测上次 booting/crashed 且 pid 已死 → 自动安全模式，避免启动期崩溃循环。
+- **更新器门禁**：boot-guard 新增候选包 `smokePackage()` / `--candidate-dir`（子进程 import + 导出 apply）；更新器可按“快照 → 候选冒烟 → 转正/回滚”接线（PluginUpdater 本体仍不在本仓）。
+- **测试**：jsdom 客户端 DOM harness（13 项）；SSRF、producer 契约、outbox、streaming、restart HMAC、fork 聚合、多代快照/崩溃 journal 等用例。
+
+### 修复
+- **真实 EssenceManager 冲突不出票**：`recomputeAll()` 返回的是 id 数组，旧代码 `Number(array)=NaN` 导致 conflicted/failed 统计为 0；改为数组长度并补真实冲突/失败测试。
+- **未读计数口径不一致**：侧栏/tab 用 `rev>seenRev`，收件箱标题用 pending；统一为 pending，`seenRev` 仅做新票提醒去重。
+- **无 `requestAnimationFrame` 环境的 drawer ReferenceError**：增加 guard，jsdom 下不再抛错。
+- **路由数保持 84**：新增 `/api/forks/supervision`（GET+POST 单注册）后同步删掉重复注册的 `/api/essence/default`；`compat`/allow-list/门禁同步，避免宿主 duplicate-path 抛错导致后续路由静默丢失。
+- 其他：AI Key 持久化说明、fork umbrella `decisionTicketPromise` 异步回传、三态全选不误触折叠。
+
+### 测试/门禁
+- `preflight --e2e` **GREEN**：1026 tests / 1015 pass / 0 fail / 1 skip / 10 todo（176.8s）；e2e **81/81**（17.4s）；allow-list routes=104 findings=0；compat COMPATIBLE；syntax vet 0 失败。
+- 干净 profile 实机安装 drill：**GREEN 9/9**（client half、version=3.1.1、19 行、zero-residue temp home/port）；healthz HEALTHY。
+- 产物：`dist/dsh-fang-3.1.1.tgz`（510,730 B / 135 entries）sha256 `385951cd8d1910fe243b190e57f8ebe7fbcba5bf29b573394a578c71d1b53e34`；package-smoke PASS；allow-list(pkg) 117 files。
+- **六方发布未执行**：本机缺 npm/GitHub 凭据、工作树未 commit、tag 未落在 main、.exe 安装器不在本仓构建链。详见 `docs/AUDIT-v3.1.1.md`。
+
+### 已知边界
+- PluginUpdater / SuperAgent / HarnessMM / PJM / Worker **本体未接**：契约、client/CLI、fork tool、adapter op 已就绪，需外部进程实际调用。
+- Agent Loop hook、真实官方 manifest 源、真实 .exe 安装器与桌面壳真机验证未完成。
+- 多 Agent 投票/仲裁不做；WebSocket 不做（SSE 足够）。
+
 ## v3.1.0（2026-11-07）
 
 **主题：元主运行态继承本机插件/设置；修复 essence 派生 JSON 补丁导致的 `spawn-failed`、派生会话丢失、元主设置 EPERM；隔离迁移遗留会话。**

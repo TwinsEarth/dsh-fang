@@ -24,6 +24,7 @@ import {
   parseYamlSubset,
   validateRuleConfig,
   watchRuleConfigFile,
+  watchRuleConfigFiles,
 } from '../src/lib/rule-registry.mjs'
 import * as umbrellaPlugin from '../src/plugins/umbrella.mjs'
 
@@ -383,6 +384,59 @@ test('热加载管线：重读文件 → 应用；坏文件 → 保留旧规则'
 })
 
 // ── 插件接线 ────────────────────────────────────────────────────────────────
+
+test('硬规则锁：tags 与 priority 不能削弱', () => {
+  const registry = createRuleRegistry(DEFAULT_ACTION_RULES)
+  const baseline = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: credential-access
+    enabled: true
+    light: red
+    tags: [hard-deny, non-negotiable]
+`).value)
+  assert.equal(registry.applyLayer(baseline.config).applied, true)
+
+  const stripped = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: credential-access
+    tags: [ci-strict]
+`).value)
+  const stripResult = registry.applyLayer(stripped.config)
+  assert.equal(stripResult.applied, false)
+  assert.ok(stripResult.errors.some((e) => e.includes('locked tags cannot be removed')))
+
+  const later = validateRuleConfig(parseYamlSubset(`version: 1
+rules:
+  - id: credential-access
+    priority: 9998
+`).value)
+  const laterResult = registry.applyLayer(later.config)
+  assert.equal(laterResult.applied, false)
+  assert.ok(laterResult.errors.some((e) => e.includes('priority cannot move later')))
+})
+
+test('watchRuleConfigFiles covers every layer file and debounces a single reload callback', async () => {
+  const dir = tmpDir('fang-rules-multi-watch-')
+  try {
+    const first = path.join(dir, 'baseline.yaml')
+    const second = path.join(dir, 'project.yaml')
+    writeRules(first, `${CONFIG_HEADER}rules:\n  - id: dynamic-import\n    enabled: false\n`)
+    writeRules(second, `${CONFIG_HEADER}rules:\n  - id: exec-read-only\n    enabled: false\n`)
+    let calls = 0
+    const watcher = watchRuleConfigFiles([first, second], () => { calls += 1 }, { debounceMs: 5 })
+    try {
+      assert.deepEqual(watcher.files, [first, second])
+      watcher.reload()
+      assert.equal(calls, 0, 'reload must be debounced')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      assert.equal(calls, 1)
+    } finally {
+      watcher.stop()
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('插件：rulesFile 生效、reloadRules 重读、ruleConfigStatus 报告来源', async () => {
   const dir = tmpDir('fang-rules-plugin-')

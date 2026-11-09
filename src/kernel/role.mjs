@@ -29,6 +29,7 @@ export const MATRIX = {
   sessionBridge: ['mother'],
   sessionSync: ['mother', 'consumer'],
   sessionRouter: ['mother'],
+  decisionCenter: ['mother', 'fork'],
 }
 
 const VALID_ROLES = new Set([ROLE.MOTHER, ROLE.FORK, ROLE.CONSUMER])

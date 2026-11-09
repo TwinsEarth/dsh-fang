@@ -195,6 +195,26 @@ test('network egress: allowlisted is blue, unknown host is yellow', () => {
   assert.deepEqual(pick(lightOf({ tool: 'http', args: { url: 'not a url' } })), ['yellow', 'network-egress'])
 })
 
+test('network allowlist URL prefixes respect host and path boundaries', () => {
+  const originPolicy = normalizePolicy({ bufferRoot: BUF, networkAllowlist: ['https://api.example.com'] })
+  assert.equal(baseLight({ tool: 'web_fetch', target: { kind: 'url', value: 'https://api.example.com/v1' } }, originPolicy).matchedRule, 'network-allowlisted')
+  assert.equal(baseLight({ tool: 'web_fetch', target: { kind: 'url', value: 'https://api.example.com.evil/v1' } }, originPolicy).matchedRule, 'network-egress')
+
+  const pathPolicy = normalizePolicy({ bufferRoot: BUF, networkAllowlist: ['https://api.example.com/v1'] })
+  assert.equal(baseLight({ tool: 'web_fetch', target: { kind: 'url', value: 'https://api.example.com/v1/x' } }, pathPolicy).matchedRule, 'network-allowlisted')
+  assert.equal(baseLight({ tool: 'web_fetch', target: { kind: 'url', value: 'https://api.example.com/v1' } }, pathPolicy).matchedRule, 'network-allowlisted')
+  assert.equal(baseLight({ tool: 'web_fetch', target: { kind: 'url', value: 'https://api.example.com/v1evil' } }, pathPolicy).matchedRule, 'network-egress')
+})
+
+test('exec read-only prefix does not survive chained commands or substitution', () => {
+  const p = normalizePolicy({ bufferRoot: BUF })
+  for (const command of ['cat x; rm -rf /', 'cat x | tee y', 'cat x && echo y', 'cat $(rm x)', 'cat `rm x`']) {
+    const out = baseLight({ tool: 'bash', args: { command } }, p)
+    assert.notEqual(out.matchedRule, 'exec-read-only', command)
+  }
+  assert.equal(baseLight({ tool: 'bash', args: { command: 'git status' } }, p).matchedRule, 'exec-read-only')
+})
+
 test('dynamic import is yellow and exec splits into read-only blue vs side-effect yellow', () => {
   assert.deepEqual(pick(lightOf({ tool: 'import', args: { specifier: './x.mjs' } })), ['yellow', 'dynamic-import'])
   assert.deepEqual(pick(lightOf({ tool: 'bash', args: { command: 'git status' } })), ['blue', 'exec-read-only'])
@@ -358,6 +378,77 @@ test('cache evicts the oldest entry when full and invalidate() forces a rescan',
   assert.equal(umb.cacheStats().size, 0)
 })
 
+test('cache key separates pluginId by dir and invalidate removes all dir variants', () => {
+  const root = tmpDir('fang-umbrella-cache-')
+  const dirA = path.join(root, 'a')
+  const dirB = path.join(root, 'b')
+  try {
+    for (const dir of [dirA, dirB]) {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'same', version: '1.0.0', main: 'index.js' }), 'utf8')
+      fs.writeFileSync(path.join(dir, 'index.js'), 'export const a = 1\n', 'utf8')
+    }
+    let scans = 0
+    const scorer = {
+      scoreDir(dir) {
+        scans += 1
+        return { grade: 'B', S: 28, color: 'blue', veto: false, degraded: false, signals: [], reasons: [], basis: {}, dir, entry: 'index.js' }
+      },
+    }
+    const umb = createUmbrella({ scorer })
+    assert.equal(umb.assessPlugin({ pluginId: 'same', dir: dirA }).fromCache, false)
+    assert.equal(umb.assessPlugin({ pluginId: 'same', dir: dirB }).fromCache, false, 'same id in another dir must not share cache')
+    assert.equal(scans, 2)
+    assert.equal(umb.assessPlugin({ pluginId: 'same', dir: dirA }).fromCache, true)
+    assert.ok(umb.invalidate('same') >= 2)
+    assert.equal(umb.assessPlugin({ pluginId: 'same', dir: dirA }).fromCache, false)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('cache fingerprint includes package.json mtime', () => {
+  const dir = tmpDir('fang-umbrella-pkg-')
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'pkg-cache', version: '1.0.0', main: 'index.js' }), 'utf8')
+    fs.writeFileSync(path.join(dir, 'index.js'), 'export const a = 1\n', 'utf8')
+    const scorer = {
+      scoreDir(target) {
+        return { grade: 'B', S: 28, color: 'blue', veto: false, degraded: false, signals: [], reasons: [], basis: {}, dir: target, entry: 'index.js' }
+      },
+    }
+    const umb = createUmbrella({ scorer })
+    assert.equal(umb.assessPlugin({ pluginId: 'pkg-cache', dir }).fromCache, false)
+    assert.equal(umb.assessPlugin({ pluginId: 'pkg-cache', dir }).fromCache, true)
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'pkg-cache', version: '1.0.1', main: 'index.js' }), 'utf8')
+    const later = new Date(Date.now() + 5000)
+    fs.utimesSync(path.join(dir, 'package.json'), later, later)
+    assert.equal(umb.assessPlugin({ pluginId: 'pkg-cache', dir }).fromCache, false, 'package change must invalidate even when entry mtime is unchanged')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('withinPath resolves symlinked parents and blocks buffer escape', () => {
+  const root = tmpDir('fang-umbrella-realpath-')
+  const buffer = path.join(root, 'buffer')
+  const outside = path.join(root, 'outside')
+  try {
+    fs.mkdirSync(buffer, { recursive: true })
+    fs.mkdirSync(outside, { recursive: true })
+    assert.equal(baseLight({ tool: 'write', args: { path: path.join(buffer, 'inside.txt') } }, normalizePolicy({ bufferRoot: buffer })).matchedRule, 'write-in-buffer')
+    try {
+      fs.symlinkSync(outside, path.join(buffer, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      return // symlink creation can require privileges; the direct path case above still ran
+    }
+    const escaped = baseLight({ tool: 'write', args: { path: path.join(buffer, 'link', 'secret.txt') } }, normalizePolicy({ bufferRoot: buffer }))
+    assert.equal(escaped.matchedRule, 'write-outside-buffer')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('missing scorer fails closed to E with a degraded reason', () => {
   const umb = createUmbrella({ scorer: null, policy: { bufferRoot: BUF } })
   const a = umb.assessPlugin({ pluginId: 'x', source: 'export const a = 1' })
@@ -398,6 +489,91 @@ test('assessAction couples plugin grade into the action light', () => {
   assert.equal(viaCache.pluginGrade, 'C')
   assert.equal(viaCache.gradeBasis, 'cached-plugin-grade')
   assert.equal(viaCache.light, 'blue')
+})
+
+test('umbrella ASK emits a decision-center ticket when the service is available', () => {
+  const submitted = []
+  const center = { submit(item) { submitted.push(item); return { ok: true, ticket: { id: `dec_${submitted.length}` } } } }
+  const umb = createUmbrella({ decisionCenter: center, policy: normalizePolicy({ bufferRoot: BUF }) })
+  const green = umb.decideAction({ tool: 'read', args: { path: path.join(BUF, 'x') } }, { grade: 'A' })
+  assert.equal(green.decision, 'allow')
+  assert.equal(submitted.length, 0)
+
+  const yellow = umb.decideAction({ tool: 'write', args: { path: path.resolve('C:/outside/x.txt') } }, { grade: 'A' })
+  assert.equal(yellow.decision, 'ask')
+  assert.equal(submitted.length, 1)
+  assert.equal(submitted[0].level, 'yellow')
+  assert.equal(submitted[0].source, 'System')
+  assert.equal(yellow.decisionTicketId, 'dec_1')
+  assert.equal(yellow.decisionRecord.decisionTicketId, 'dec_1')
+
+  const red = umb.decideAction({ tool: 'bash', args: { command: 'rm -rf build' } }, { grade: 'A' })
+  assert.equal(red.decision, 'ask')
+  assert.equal(red.severity, 'critical')
+  assert.equal(submitted.length, 2)
+  assert.equal(submitted[1].level, 'red')
+  // 去重键：同一 action 重复 ASK 必须带同一个 dedupeKey，供决策中心合并。
+  assert.ok(submitted[0].dedupeKey && submitted[0].dedupeKey.startsWith('umbrella:'))
+  const repeat = umb.decideAction({ tool: 'write', args: { path: path.resolve('C:/outside/x.txt') } }, { grade: 'A' })
+  assert.equal(repeat.decision, 'ask')
+  assert.equal(submitted[2].dedupeKey, submitted[0].dedupeKey)
+})
+
+test('umbrella ASK links an async decision ticket (fork proxy/outbox)', async () => {
+  const submitted = []
+  const center = {
+    async submit(item) { submitted.push(item); return { ok: true, ticket: { id: 'dec_async_fork' } } },
+  }
+  const umb = createUmbrella({ decisionCenter: center, policy: normalizePolicy({ bufferRoot: BUF }) })
+  const out = umb.decideAction({ tool: 'write', args: { path: path.resolve('C:/outside/async.txt') } }, { grade: 'A' })
+  assert.equal(out.decision, 'ask')
+  assert.equal(out.decisionTicketId, null, 'async submit cannot fill the sync field')
+  assert.equal(typeof out.decisionTicketPromise?.then, 'function')
+  const linked = await out.decisionTicketPromise
+  assert.equal(linked.ticket.id, 'dec_async_fork')
+  assert.equal(out.decisionRecord.decisionTicketId, 'dec_async_fork')
+  assert.equal(submitted.length, 1)
+
+  // 异步 submit 失败不能产生 unhandled rejection；promise 解析为 null。
+  const offline = {
+    async submit() { throw new Error('mother offline') },
+  }
+  const umb2 = createUmbrella({ decisionCenter: offline, policy: normalizePolicy({ bufferRoot: BUF }) })
+  const failed = umb2.decideAction({ tool: 'write', args: { path: path.resolve('C:/outside/async-offline.txt') } }, { grade: 'A' })
+  assert.equal(failed.decision, 'ask')
+  assert.equal(await failed.decisionTicketPromise, null)
+  assert.equal(failed.decisionRecord.decisionTicketId, null)
+})
+
+test('evidence.trusted is an explicit caller assertion, never inferred', () => {
+  const p = normalizePolicy({ bufferRoot: BUF })
+  const evidence = { tool: 'read', args: { path: path.join(BUF, 'a.txt') } }
+  assert.equal(baseLight(evidence, p).trusted, false)
+  assert.equal(baseLight({ ...evidence, trusted: true }, p).trusted, true)
+
+  const umb = createUmbrella({ scorer: null, policy: p })
+  const action = umb.assessAction({ ...evidence, trusted: true }, { grade: 'A' })
+  assert.equal(action.trusted, true)
+  const decision = umb.decideAction({ ...evidence, trusted: true }, { grade: 'A' })
+  assert.equal(decision.trusted, true)
+  assert.equal(decision.decisionRecord.trusted, true)
+})
+
+test('decideAction marks auditDegraded when the auditor is missing', () => {
+  const previous = process.env.DSH_FANG_ROLE
+  process.env.DSH_FANG_ROLE = 'mother'
+  const ctx = makeCtx()
+  try {
+    umbrellaPlugin.apply(ctx, { baselineFile: ':none:', rulesWatch: false })
+    const svc = ctx.get(SERVICE.umbrella)
+    const out = svc.decideAction({ tool: 'read', args: { path: path.join(BUF, 'x') } }, { grade: 'A' })
+    assert.equal(out.auditDegraded, true)
+    assert.equal(out.decisionRecord.auditDegraded, true)
+  } finally {
+    ctx.dispose()
+    if (previous === undefined) delete process.env.DSH_FANG_ROLE
+    else process.env.DSH_FANG_ROLE = previous
+  }
 })
 
 test('decideAction audits exactly one umbrella-decision record with the full trail', () => {

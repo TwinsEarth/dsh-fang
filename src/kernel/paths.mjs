@@ -47,7 +47,15 @@ export function resolveFangHome(env = process.env) {
     const pointer = path.join(resolveDshHome(env), 'fang', 'fang-home.txt')
     if (fs.existsSync(pointer)) {
       const first = fs.readFileSync(pointer, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/)[0].trim()
-      if (first && path.isAbsolute(first)) return path.resolve(first)
+      if (first && path.isAbsolute(first)) {
+        // 迁移指针可能是旧盘/旧目录：根不存在或指向普通文件时忽略，回退到本机布局，
+        // 避免 ensureDir(dataDir) 在插件 apply 阶段抛错导致“必须删 .dsh”才能启动。
+        const root = path.parse(first).root
+        const rootUsable = Boolean(root) && fs.existsSync(root)
+        let targetUsable = true
+        try { if (fs.existsSync(first) && !fs.statSync(first).isDirectory()) targetUsable = false } catch { targetUsable = false }
+        if (rootUsable && targetUsable) return path.resolve(first)
+      }
     }
   } catch { /* ignore */ }
   // 兼容：已有 $DSH_HOME/fang/<tag> 数据的安装不搬家，继续旧布局。
