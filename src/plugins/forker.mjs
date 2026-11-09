@@ -371,6 +371,8 @@ export function apply(ctx, config) {
   const bundleName = String(rawConfig.bundleName ?? DEFAULTS.bundleName).trim() || DEFAULTS.bundleName
   const forkProfileTag = safeProfile(rawConfig.forkProfileTag)
   const cfg = { ...rawConfig, portPool, allocatePorts, cleanTemplate, bundleName, forkProfileTag }
+  // 运行时 supervise 开关：patch/config 的初值 + 可在不重启宿主的情况下切换（UI/API）。
+  let runtimeSupervise = cfg.supervise === true
 
   const logger = ctx?.logger ?? { debug() {}, info() {}, warn() {}, error() {} }
   const logWarn = (line) => {
@@ -1114,7 +1116,7 @@ export function apply(ctx, config) {
           writeForkMetaOf(rec)
           persist()
         }
-        if (!rec.intentionalStop && cfg.supervise && !disposed) {
+        if (!rec.intentionalStop && runtimeSupervise && !disposed) {
           const plan = planRestart(exitInfo, rec, {
             maxRestarts: cfg.maxRestarts, baseMs: cfg.backoffBaseMs,
             maxMs: cfg.backoffMaxMs, jitter: cfg.backoffJitter,
@@ -1359,6 +1361,23 @@ export function apply(ctx, config) {
     },
     get config() {
       return { ...cfg }
+    },
+    /** 运行时看护状态；enabled 可在不重启宿主的情况下切换。 */
+    getSupervision() {
+      return {
+        enabled: runtimeSupervise,
+        configured: cfg.supervise === true,
+        maxRestarts: cfg.maxRestarts,
+        backoffBaseMs: cfg.backoffBaseMs,
+        backoffMaxMs: cfg.backoffMaxMs,
+        backoffJitter: cfg.backoffJitter,
+        healthPath: cfg.healthPath,
+      }
+    },
+    setSupervise(enabled) {
+      runtimeSupervise = enabled === true
+      try { audit(AUDIT.FORK_SUPERVISION, { enabled: runtimeSupervise }) } catch { /* audit optional */ }
+      return { ok: true, enabled: runtimeSupervise }
     },
   }
 

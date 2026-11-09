@@ -28,9 +28,11 @@ const KEEP = process.argv.includes('--keep')
 const TIMEOUT_MS = Number((process.argv.find(a => a.startsWith('--timeout=')) ?? '').split('=')[1] ?? 240000)
 
 const CLI_CANDIDATES = [
+  process.env.DSH_CLI_PATH,
   'E:\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd',
+  'E:\\DSH\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd',
   'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
-]
+].filter(Boolean)
 const CLI = CLI_CANDIDATES.find(p => { try { return fs.existsSync(p) } catch { return false } })
 if (!CLI) {
   console.error('SKIP: dsh CLI not found')
@@ -419,6 +421,33 @@ async function main() {
       const kinds = new Set(lines.map(r => r.kind))
       check('audit records task-created', lines.some(r => String(r.kind).includes('fork-created')))
       check('audit records adapter handshake', kinds.has('adapter-handshake'))
+    }
+
+    // ── decision center: real submit → list → resolve → 落库断言 ──────────
+    const decisionIngest = await api('/fang/api/decisions/ingest', {
+      method: 'POST',
+      body: JSON.stringify({
+        producer: 'HarnessMM', kind: 'harnessmm-suggestion', level: 'yellow',
+        title: 'e2e decision ticket', context: 'e2e real logic',
+        options: [{ value: 'ack', label: 'OK' }, { value: 'ignore', label: 'Ignore' }],
+      }),
+    })
+    check('decision ingest accepted', decisionIngest.status === 200 && decisionIngest.body?.ok === true, JSON.stringify(decisionIngest.body?.reason ?? decisionIngest.status))
+    const decisionId = String(decisionIngest.body?.ticket?.id ?? '')
+    check('decision ingest returns ticket id', decisionId.startsWith('dec_'), decisionId)
+    const decisionList = await api('/fang/api/decisions?includeArchived=1')
+    check('decision appears in inbox list', decisionList.body?.items?.some((item) => item.id === decisionId) === true)
+    const decisionResolve = await api('/fang/api/decisions/resolve', {
+      method: 'POST', body: JSON.stringify({ id: decisionId, option: 'ack', by: 'e2e' }),
+    })
+    check('decision resolve accepted', decisionResolve.status === 200 && decisionResolve.body?.ok === true, JSON.stringify(decisionResolve.body?.reason ?? decisionResolve.status))
+    const decisionStore = path.join(motherData, 'decision-center.json')
+    check('decision center store flushed', fs.existsSync(decisionStore), decisionStore)
+    if (fs.existsSync(decisionStore)) {
+      let stored = null
+      try { stored = JSON.parse(fs.readFileSync(decisionStore, 'utf8')) } catch { stored = null }
+      const storedTicket = (stored?.tickets ?? []).find((item) => item.id === decisionId)
+      check('decision resolution persisted to disk', storedTicket?.status === 'resolved', String(storedTicket?.status ?? 'missing'))
     }
 
     // ── fork homes removed by delete-archive ───────────────────────────

@@ -56,7 +56,7 @@ try {
   const patchPath = path.join(pkgDir, 'cordis.patch.yml')
   const patch = fs.existsSync(patchPath) ? fs.readFileSync(patchPath, 'utf8') : ''
   const rowIds = [...patch.matchAll(/^\s*-\s*id:\s*['"]?([A-Za-z0-9_-]+)/gm)].map((m) => m[1])
-  check('cordis rows = 18', rowIds.length === 18, `rows=${rowIds.length}`)
+  check('cordis rows = 19', rowIds.length === 19, `rows=${rowIds.length}`)
   check('no invalid ui-fang loader row', !rowIds.includes('ui-fang'))
 
   const pluginsDir = path.join(pkgDir, 'src', 'plugins')

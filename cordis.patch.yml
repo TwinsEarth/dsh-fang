@@ -124,6 +124,15 @@
         bridgeEnabled: true
         needsRealtime: false
 
+    - id: fang-decision-center
+      name: '@local/dsh-fang/decision-center'
+      config:
+        maxTickets: 500
+        maxPendingRed: 30
+        defaultTimeoutMinutes: 360
+        tickMs: 5000
+        registerTool: true
+
     - id: fang-orchestrator
       name: '@local/dsh-fang'
       config:

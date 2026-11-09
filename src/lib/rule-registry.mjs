@@ -777,6 +777,23 @@ export function createRuleRegistry(builtinRules = DEFAULT_ACTION_RULES, options 
             lockViolation = true
             continue
           }
+          if (entry.tags !== undefined) {
+            const requiredTags = (base.tags ?? []).filter((tag) => NON_NEGOTIABLE_TAGS.includes(tag))
+            const missingTags = requiredTags.filter((tag) => !Array.isArray(entry.tags) || !entry.tags.includes(tag))
+            if (missingTags.length > 0) {
+              layerErrors.push(`rule "${entry.id}" is non-negotiable; locked tags cannot be removed: ${missingTags.join(',')}`)
+              lockViolation = true
+              continue
+            }
+          }
+          if (entry.priority !== undefined) {
+            const currentPriority = priorities[base.id] ?? defaultPriorities[base.id] ?? 500
+            if (entry.priority > currentPriority) {
+              layerErrors.push(`rule "${entry.id}" is non-negotiable; priority cannot move later than ${currentPriority}`)
+              lockViolation = true
+              continue
+            }
+          }
         }
 
         if (entry.enabled === false) {
@@ -973,6 +990,58 @@ export function loadRuleConfigFile(file) {
   if (parsed.errors.length > 0) return { config: null, errors: parsed.errors, found: true }
   const validated = validateRuleConfig(parsed.value)
   return { config: validated.config, errors: validated.errors, found: true }
+}
+
+export function watchRuleConfigFiles(files, onChange = () => {}, options = {}) {
+  const debounceMs = Number(options.debounceMs) > 0 ? Number(options.debounceMs) : 200
+  const logger = options.logger ?? null
+  const list = [...new Set((Array.isArray(files) ? files : [files])
+    .filter((file) => typeof file === 'string' && file.length > 0))]
+  const watchers = []
+  let timer = null
+  let stopped = false
+
+  const schedule = () => {
+    if (stopped) return
+    if (timer !== null) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = null
+      if (stopped) return
+      try { onChange() } catch (error) {
+        try { logger?.warn?.(`[umbrella-rules] reload callback failed: ${error?.message ?? error}`) } catch { /* ignore */ }
+      }
+    }, debounceMs)
+  }
+
+  for (const file of list) {
+    try {
+      watchers.push(fs.watch(file, schedule))
+      continue
+    } catch { /* missing file: watch its directory */ }
+    try {
+      const dir = path.dirname(file)
+      const base = path.basename(file)
+      watchers.push(fs.watch(dir, (_event, name) => {
+        if (!name || String(name) === base) schedule()
+      }))
+    } catch (error) {
+      try { logger?.warn?.(`[umbrella-rules] cannot watch ${file}: ${error?.message ?? error}`) } catch { /* ignore */ }
+    }
+  }
+
+  return {
+    files: list,
+    reload: schedule,
+    stop() {
+      stopped = true
+      if (timer !== null) clearTimeout(timer)
+      timer = null
+      for (const watcher of watchers) {
+        try { watcher.close() } catch { /* ignore */ }
+      }
+      watchers.length = 0
+    },
+  }
 }
 
 /**

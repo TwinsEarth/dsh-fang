@@ -444,6 +444,23 @@ export function apply(ctx, config) {
     }
   }
 
+  const orphanedApprovalItems = () => {
+    const approver = safeGet(SERVICE.approver)
+    if (!approver || typeof approver.orphaned !== 'function') return []
+    try {
+      const items = approver.orphaned()
+      return Array.isArray(items) ? items : []
+    } catch {
+      return []
+    }
+  }
+
+  const approvalItemsWithOrphans = () => {
+    const pending = approvalItems()
+    if (pending === null) return null
+    return [...pending, ...orphanedApprovalItems()]
+  }
+
   const auditHead = () => {
     const auditor = safeGet(SERVICE.auditor)
     if (!auditor || typeof auditor.read !== 'function') {
@@ -663,7 +680,7 @@ export function apply(ctx, config) {
   }
 
   const approvals = () => {
-    const items = approvalItems()
+    const items = approvalItemsWithOrphans()
     if (items === null) return { ok: false, code: 'service-unavailable', error: 'service-unavailable', items: [] }
     return { ok: true, items }
   }
@@ -771,6 +788,18 @@ export function apply(ctx, config) {
       }
     }],
 
+    [ADAPTER_OP.DECISION_INGEST, async (payload) => {
+      const center = safeGet(SERVICE.decisionCenter)
+      if (!center || typeof center.submit !== 'function') return unavailable()
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return badRequest('payload-required')
+      try {
+        const out = await center.submit({ producer: 'adapter', ...payload })
+        return out && typeof out === 'object' ? out : { ok: true }
+      } catch (e) {
+        return { ok: false, code: 'handler-threw', error: `decision-ingest-failed:${msgOf(e)}` }
+      }
+    }],
+
     [ADAPTER_OP.READ_PLUGIN, (payload) => readPlugin(payload)],
 
     [ADAPTER_OP.ROUTE_CONFIRM, async (payload) => {
@@ -781,7 +810,7 @@ export function apply(ctx, config) {
     }],
 
     [ADAPTER_OP.APPROVALS, () => {
-      const items = approvalItems()
+      const items = approvalItemsWithOrphans()
       if (items === null) return unavailable()
       return { items }
     }],

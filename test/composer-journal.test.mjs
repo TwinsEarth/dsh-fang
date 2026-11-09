@@ -20,6 +20,20 @@ test('composer journal persists draft and queue across instances', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('composer journal lists every recoverable entry newest first', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-journal-'))
+  const store = new ComposerJournal(dir)
+  store.save('a', { draft: 'a' })
+  store.save('b', { draft: 'b' })
+  const all = store.load()
+  all.a.updatedAt = '2026-01-01T00:00:00.000Z'
+  all.b.updatedAt = '2026-01-02T00:00:00.000Z'
+  store.saveFile(all)
+  const entries = new ComposerJournal(dir).list()
+  assert.deepEqual(entries.map((entry) => entry.key), ['b', 'a'])
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('composer journal bounds draft, queue and NUL bytes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-journal-'))
   const store = new ComposerJournal(dir)

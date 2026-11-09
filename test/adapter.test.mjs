@@ -1235,3 +1235,29 @@ test('纯函数：normalizePrefix / resolveInside 的边界', () => {
   assert.equal(resolveInside(root, '\\server\\x').ok, false)
   assert.equal(resolveInside(root, 'C:\\x').ok, false)
 })
+
+test('adapter: decision-ingest command forwards to decision-center service', async () => {
+  const submitted = []
+  const center = {
+    submit: async (payload) => {
+      submitted.push(payload)
+      if (!payload?.title) return { ok: false, reason: 'title-required' }
+      return { ok: true, ticket: { id: 'dec_adapter_1' }, merged: false }
+    },
+  }
+  const { ctx, service } = applyAsFork({ taskId: 'task_decision' }, { [SERVICE.decisionCenter]: center })
+  try {
+    const out = await service.command({ op: ADAPTER_OP.DECISION_INGEST, payload: { level: 'yellow', title: 'from adapter', context: 'x', options: [{ value: 'a', label: 'A' }] } })
+    assert.equal(out.ok, true)
+    assert.equal(out.result.ticket.id, 'dec_adapter_1')
+    assert.equal(submitted.length, 1)
+    assert.equal(submitted[0].producer, 'adapter')
+    assert.equal(submitted[0].title, 'from adapter')
+
+    const missing = await service.command({ op: ADAPTER_OP.DECISION_INGEST })
+    assert.equal(missing.ok, false)
+    assert.equal(missing.result.reason, 'title-required')
+  } finally {
+    ctx.dispose()
+  }
+})

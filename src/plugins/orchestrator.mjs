@@ -14,7 +14,7 @@ import path from 'node:path'
 import {
   z, roleGate, resolveFangLayout, resolveProfileDir, resolveSessionsLayout,
   SERVICE, AUDIT, TASK_STATUS, FORK_STATUS, FANG_VERSION, ADAPTER_OP,
-  exists, ensureDir, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree,
+  exists, ensureDir, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree, digestTree,
   newId, iso, nowMs, bus, sleep, parseWebUrl, probeWebUrl,
   invokeCommercial, commercialConfigSchemaDefaults,
 } from '../kernel/index.mjs'
@@ -28,8 +28,12 @@ import { EssenceManager, OFFICIAL_ESSENCE_ID, VIP_QUOTAS } from '../lib/essence.
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
+import { createBusinessProducers } from '../lib/business-producers.mjs'
+import { createManifestOfficialSource } from '../lib/mirror-official-source.mjs'
+import { readForkSupervisionSettings, writeForkSupervisionSettings } from '../lib/fork-supervision-settings.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
+import { openDecisionEventStream } from '../lib/decision-events.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
@@ -37,12 +41,57 @@ import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
 import zlib from 'node:zlib'
 
+/**
+ * Commit a promoted directory by copy → digest → directory swap.
+ * The old target is only removed after the new tree has been verified and renamed in.
+ */
+export function atomicReplaceDir(sourceDir, targetDir) {
+  const suffix = newId('promote')
+  const tmp = `${targetDir}.tmp-${suffix}`
+  const old = `${targetDir}.old-${suffix}`
+  const digestOf = (dir) => {
+    const tree = digestTree(dir)
+    const keys = Object.keys(tree).sort()
+    return sha256(keys.map((key) => `${key}\u0000${tree[key]}`).join('\n'))
+  }
+  try {
+    removeTree(tmp)
+    removeTree(old)
+    copyTree(sourceDir, tmp)
+    const digest = digestOf(tmp)
+    if (digest !== digestOf(sourceDir)) throw new Error('promote-digest-mismatch')
+    const hadOld = exists(targetDir)
+    if (hadOld) fs.renameSync(targetDir, old)
+    try {
+      fs.renameSync(tmp, targetDir)
+    } catch (error) {
+      if (hadOld && !exists(targetDir)) {
+        try { fs.renameSync(old, targetDir) } catch { /* best effort restore */ }
+      }
+      throw error
+    }
+    if (hadOld) removeTree(old)
+    return { digest }
+  } catch (error) {
+    removeTree(tmp)
+    if (exists(old) && !exists(targetDir)) {
+      try { fs.renameSync(old, targetDir) } catch { /* best effort restore */ }
+    }
+    throw error
+  }
+}
+
+
 export const name = 'fang-orchestrator'
 export const inject = []
 
 export const Config = z.object({
   role: z.union([z.const('mother'), z.const('fork')]).default('mother')
     .description('配置层角色；环境 DSH_FANG_ROLE 优先（forker 派生的分身自动为 fork）'),
+  officialSourceUrl: z.string().default('')
+    .description('官方源 manifest 基础 URL（https；留空 = 无官方源，升级显式 official-source-unavailable）'),
+  officialSourceToken: z.string().default('')
+    .description('官方源 Bearer token（可选；不会写进日志/状态）'),
   maxForks: z.number().min(1).max(64).default(8)
     .description('同时存活的任务/分身上限'),
   motherProfile: z.string().default('')
@@ -109,14 +158,28 @@ export function stripUrlToken(url) {
 }
 
 /** Find a runnable dsh launcher. `.cmd` wrappers are spawned through a shell by the forker. */
-export function resolveCliPath(explicit = '', env = process.env) {
+export function resolveCliPath(explicit = '', env = process.env, execPath = process.execPath) {
   const candidates = []
   if (explicit) candidates.push(explicit)
   if (env.DSH_CLI) candidates.push(env.DSH_CLI)
+  if (env.DSH_INSTALL_DIR) candidates.push(path.join(env.DSH_INSTALL_DIR, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'))
   for (const dir of String(env.PATH ?? env.Path ?? '').split(path.delimiter)) {
     if (!dir) continue
     candidates.push(path.join(dir, 'dsh.cmd'), path.join(dir, 'dsh.exe'), path.join(dir, 'dsh'))
   }
+  // 新版桌面安装目录不一定叫 E:\DS；从当前宿主可执行文件反推安装根目录：
+  //   <install>\DeepSeek Harness.exe -> <install>\resources\runtime\cli\bin\dsh.cmd
+  // 同时向上探测 4 层，兼容 node.exe 等位于 runtime/ 下的启动器。
+  try {
+    let dir = path.dirname(String(execPath ?? ''))
+    for (let i = 0; i < 5 && dir; i += 1) {
+      candidates.push(path.join(dir, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'))
+      candidates.push(path.join(dir, 'runtime', 'cli', 'bin', 'dsh.cmd'))
+      const parent = path.dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+  } catch { /* keep legacy candidates */ }
   candidates.push(
     'E:\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd',
     'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
@@ -183,6 +246,35 @@ export function apply(ctx, config) {
   }
 
   const safeGet = (key) => { try { return ctx.get(key) } catch { return undefined } }
+  /**
+   * 宿主内部生产者 → 决策中心（best-effort，绝不改变原流程结果）。
+   * 用于 MirrorUpgrade / EssenceManager 这类仓内对象；外部系统（PM/PJM/Worker/
+   * HarnessMM/PluginUpdater/SuperAgent）走 POST /fang/api/decisions/ingest 桥。
+   */
+  const raiseDecisionTicket = (spec = {}) => {    try {
+      const center = safeGet(SERVICE.decisionCenter)
+      if (!center || typeof center.submit !== 'function') return null
+      const submitted = center.submit({
+        level: spec.level ?? 'yellow',
+        title: spec.title,
+        context: spec.context,
+        options: spec.options,
+        actions: spec.actions,
+        timeoutMinutes: spec.timeoutMinutes ?? 1440,
+        dedupeKey: spec.dedupeKey,
+        source: {
+          sessionId: String(spec.sessionId ?? 'orchestrator'),
+          agentRole: spec.agentRole ?? 'system',
+          roleSource: 'host:orchestrator',
+          roleTrusted: true,
+          taskName: String(spec.sourceName ?? spec.producer ?? 'orchestrator'),
+        },
+        metadata: spec.metadata,
+      })
+      return submitted?.ok ? submitted.ticket : null
+    } catch { return null }
+  }
+  const businessProducers = createBusinessProducers({ submit: (spec) => raiseDecisionTicket(spec) })
   const audit = (kind, data) => {
     try { safeGet(SERVICE.auditor)?.append(kind, data) } catch { /* auditor optional */ }
     try { bus.emit('fang/audit', { kind, data }) } catch { /* ignore */ }
@@ -531,6 +623,47 @@ export function apply(ctx, config) {
     } catch { return null }
   }
 
+  /**
+   * 只读：重启守卫 + supervisor 契约状态。
+   * status() 只带摘要（Client Header 用），/fang/api/restart 带完整视图。
+   * 任何字段缺失都按「不可用/未知」返回，绝不伪造已武装或已执行。
+   */
+  const restartView = () => {
+    const guard = safeGet(SERVICE.restart)
+    if (!guard) return { available: false }
+    try {
+      const state = typeof guard.state === 'function' ? guard.state() : null
+      const policy = typeof guard.policy === 'function' ? guard.policy() : null
+      const contract = typeof guard.executionContract === 'function' ? guard.executionContract() : null
+      const approvals = typeof guard.approvals === 'function' ? guard.approvals({ limit: 20 }) : null
+      return { available: true, state, policy, contract, approvals, decisionOnly: true, executed: false }
+    } catch (error) {
+      return { available: true, error: 'restart-guard-status-failed', detail: String(error?.message ?? error) }
+    }
+  }
+
+  const restartSummary = (view) => {
+    if (!view?.available) return { available: false }
+    if (view.error) return { available: true, error: view.error }
+    const s = view.state ?? {}
+    const p = view.policy ?? {}
+    return {
+      available: true,
+      state: s.state ?? null,
+      pending: s.pending ?? null,
+      mode: p.mode ?? s.mode ?? null,
+      authMode: p.authMode ?? s.authMode ?? null,
+      strictRedLine: p.strictRedLine ?? null,
+      redLineAutoAllowed: p.redLineAutoAllowed === true || s.redLineAutoAllowed === true,
+      allowProcessRestart: p.allowProcessRestart === true || s.allowProcessRestart === true,
+      tempEffectiveManual: p.tempEffectiveManual === true || s.tempEffectiveManual === true,
+      decisionOnly: true,
+      contractVersion: s.contractVersion ?? null,
+      manifestTtlMs: p.manifestTtlMs ?? s.manifestTtlMs ?? null,
+      approvals: view.approvals?.counts ?? null,
+    }
+  }
+
   const service = {
     role,
     version: FANG_VERSION,
@@ -600,9 +733,17 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           profileTemplate,
-          // 从原身派生：配置必须真的来自原身 merged（不能被 clean template 覆盖），
-          // node_modules 仍 junction 到母体模块树。
-          ...(sourceEssence ? { cleanTemplate: false, nodeModulesSource: path.join(templateDir(), 'node_modules') } : {}),
+          // 从原身派生：配置必须真的来自原身 merged（不能被 clean template 覆盖）。
+          // node_modules：优先元主自己的模块树；默认元宝/新建原身可能尚未物化 node_modules，
+          // 此时回退母体模块树，保证分身仍能解析 @local/dsh-fang（否则是僵尸分身）。
+          ...(sourceEssence ? {
+            cleanTemplate: false,
+            nodeModulesSource: (() => {
+              const essenceModules = path.join(profileTemplate, 'node_modules')
+              if (exists(essenceModules)) return essenceModules
+              return path.join(templateDir(), 'node_modules')
+            })(),
+          } : {}),
         })
         if (provisioned && provisioned.ok === false) {
           task.status = TASK_STATUS.FAILED
@@ -789,6 +930,44 @@ export function apply(ctx, config) {
       return service.listTasks()
     },
 
+    /** 分身看护开关：持久化设置 + forker 运行时 supervise 状态。 */
+    forkSupervision() {
+      const persisted = readForkSupervisionSettings(layout.dataDir)
+      const f = forker()
+      const live = f && typeof f.getSupervision === 'function' ? f.getSupervision() : null
+      return {
+        ok: true,
+        persisted: {
+          autostartForks: persisted.autostartForks,
+          supervise: persisted.supervise,
+          updatedAt: persisted.updatedAt,
+          exists: persisted.exists,
+        },
+        effective: {
+          autostartForks: persisted.autostartForks,
+          supervise: live ? live.enabled : persisted.supervise,
+        },
+        forker: live,
+      }
+    },
+
+    /** 更新看护开关；supervise 会立即应用到 forker，无需重启宿主。 */
+    setForkSupervision(input = {}) {
+      const patch = {}
+      if (typeof input?.autostartForks === 'boolean') patch.autostartForks = input.autostartForks
+      if (typeof input?.supervise === 'boolean') patch.supervise = input.supervise
+      if (!Object.keys(patch).length) return { ok: false, error: 'no-settings' }
+      const written = writeForkSupervisionSettings(layout.dataDir, patch)
+      if (!written.ok) return written
+      let applied = null
+      if (patch.supervise !== undefined) {
+        const f = forker()
+        if (f && typeof f.setSupervise === 'function') applied = f.setSupervise(patch.supervise)
+      }
+      try { audit(AUDIT.FORK_SUPERVISION, { ...patch, applied: applied?.enabled ?? null }) } catch { /* audit optional */ }
+      return { ...service.forkSupervision(), applied }
+    },
+
     async getTaskStatus(taskId) {
       const task = tasks.get(String(taskId ?? ''))
       if (!task) return { ok: false, error: 'unknown-task' }
@@ -861,22 +1040,25 @@ export function apply(ctx, config) {
       // Materialize the fetched source into a mother-side work dir, then re-score with
       // the MOTHER threshold policy (母体更严格，且这是真正写进生产的判定).
       const workDir = path.join(layout.dataDir, 'work', `${id}-${plugin}`)
+      const discardWorkDir = () => { try { removeTree(workDir) } catch { /* best effort */ } }
       try {
         removeTree(workDir)
         ensureDir(workDir)
         for (const [rel, content] of Object.entries(files)) {
           const target = resolveInside(workDir, rel)
-          if (!target) return { ok: false, error: 'unsafe-plugin-path', detail: rel }
+          if (!target) { discardWorkDir(); return { ok: false, error: 'unsafe-plugin-path', detail: rel } }
           writeFileAtomic(target, String(content))
         }
       } catch (e) {
+        discardWorkDir()
         return { ok: false, error: 'materialize-failed', detail: String(e?.message ?? e) }
       }
 
       const scorer = safeGet(SERVICE.scorer)
-      const motherAssessment = scorer?.scoreDir ? scorer.scoreDir(workDir, null, { environment: 'mother' }) : null
-      if (!motherAssessment) return { ok: false, error: 'scorer-unavailable' }
+      const motherAssessment = scorer?.scoreDir ? scorer.scoreDir(workDir, null, { environment: 'mother', deep: true }) : null
+      if (!motherAssessment) { discardWorkDir(); return { ok: false, error: 'scorer-unavailable' } }
       if (motherAssessment.grade === 'D' || motherAssessment.grade === 'E') {
+        discardWorkDir()
         return { ok: false, error: 'grade-too-low', grade: motherAssessment.grade, score: motherAssessment.S }
       }
 
@@ -889,11 +1071,12 @@ export function apply(ctx, config) {
         })
         : null
       if (route && route.route !== 'sandbox') {
+        discardWorkDir()
         return { ok: false, error: 'route-refused', route: route.route, reason: route.reason }
       }
 
       const approver = safeGet(SERVICE.approver)
-      if (!approver) return { ok: false, error: 'approver-unavailable' }
+      if (!approver) { discardWorkDir(); return { ok: false, error: 'approver-unavailable' } }
 
       // 团队权限钩子（无 provider 时放行并记录 basis）。
       let teamBasis = { commercial: false }
@@ -903,7 +1086,7 @@ export function apply(ctx, config) {
           method: 'check', args: [{ action: 'promote', group: plugin }],
         })
         teamBasis = { commercial: true, ...(check.ok ? check.value : { allowed: true, error: check.error }) }
-        if (teamBasis.allowed === false) return { ok: false, error: 'team-denied', basis: teamBasis }
+        if (teamBasis.allowed === false) { discardWorkDir(); return { ok: false, error: 'team-denied', basis: teamBasis } }
       }
 
       const decision = typeof approver.requestPromotion === 'function'
@@ -922,23 +1105,28 @@ export function apply(ctx, config) {
         })
       const outcome = decision?.outcome ?? 'timeout'
       audit(AUDIT.APPROVAL_DECIDED, { kind: 'promotion', taskId: id, pluginId: plugin, outcome })
-      if (outcome !== 'approved') return { ok: false, error: 'denied', outcome }
+      if (outcome !== 'approved') { discardWorkDir(); return { ok: false, error: 'denied', outcome } }
 
       const target = path.join(layout.dataDir, 'promoted', plugin)
       try {
         if (exists(target)) {
-          approver.snapshot?.({ tag: plugin, dir: target })
-          removeTree(target)
+          const snap = await approver.snapshot?.({ tag: plugin, dir: target })
+          if (!snap || snap.ok === false) {
+            discardWorkDir()
+            return { ok: false, error: 'snapshot-failed', detail: String(snap?.error ?? snap?.reason ?? 'snapshot unavailable') }
+          }
         }
-        copyTree(workDir, target)
+        const commit = atomicReplaceDir(workDir, target)
+        discardWorkDir()
+        audit(AUDIT.PROMOTE_COMMITTED, {
+          taskId: id, pluginId: plugin, target, digest: commit.digest,
+          forkGrade: forkAssessment?.grade ?? null, motherGrade: motherAssessment.grade,
+        })
       } catch (e) {
+        discardWorkDir()
         audit(AUDIT.PROMOTE_FAILED, { taskId: id, pluginId: plugin, error: String(e?.message ?? e) })
         return { ok: false, error: 'promote-failed', detail: String(e?.message ?? e) }
       }
-      audit(AUDIT.PROMOTE_COMMITTED, {
-        taskId: id, pluginId: plugin, target,
-        forkGrade: forkAssessment?.grade ?? null, motherGrade: motherAssessment.grade,
-      })
 
       // 商用钩子：云备份（不阻塞、失败只记录）。
       let backup = { ok: false, error: 'not-configured' }
@@ -992,14 +1180,16 @@ export function apply(ctx, config) {
       const target = path.join(layout.dataDir, 'promoted', String(pluginId))
       try {
         if (exists(target)) {
-          approver.snapshot?.({ tag: String(pluginId), dir: target })
-          removeTree(target)
+          const snap = await approver.snapshot?.({ tag: String(pluginId), dir: target })
+          if (!snap || snap.ok === false) {
+            return { ok: false, error: 'snapshot-failed', detail: String(snap?.error ?? snap?.reason ?? 'snapshot unavailable') }
+          }
         }
-        copyTree(src, target)
+        const commit = atomicReplaceDir(src, target)
+        audit(AUDIT.PROMOTE_COMMITTED, { forkId, pluginId, target, digest: commit.digest })
       } catch (e) {
         return { ok: false, error: 'promote-failed', detail: String(e?.message ?? e) }
       }
-      audit(AUDIT.PROMOTE_COMMITTED, { forkId, pluginId, target })
       return { ok: true, outcome: 'approved', target, pluginId, assessment }
     },
 
@@ -1269,6 +1459,90 @@ export function apply(ctx, config) {
       return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard }
     },
 
+    /**
+     * watchdog 启动时的恢复入口：把「已登记但进程没在跑」的非归档任务重新 spawn。
+     * 不创建新任务、不动归档任务；失败的任务不重试（避免崩溃循环），只如实报告。
+     * @param {{taskIds?: string[]}} [input]
+     */
+    async autostartForks(input = {}) {
+      const f = forker()
+      if (!f || typeof f.spawn !== 'function') {
+        return { ok: false, error: 'forker-unavailable', started: [], failed: [], skipped: [] }
+      }
+      const wanted = Array.isArray(input?.taskIds) && input.taskIds.length
+        ? new Set(input.taskIds.map(String))
+        : null
+      const report = { ok: true, started: [], failed: [], skipped: [] }
+      for (const task of tasks.values()) {
+        const id = task.taskId
+        if (wanted && !wanted.has(id)) continue
+        if (task.status === TASK_STATUS.ARCHIVED) {
+          report.skipped.push({ taskId: id, reason: 'archived' })
+          continue
+        }
+        let live = null
+        try { live = f.status?.(id) ?? null } catch { live = null }
+        if (live?.running === true || live?.state === 'running') {
+          report.skipped.push({ taskId: id, reason: 'already-running' })
+          continue
+        }
+        if (!task.homeDir || !exists(task.homeDir) || !task.profile) {
+          report.failed.push({ taskId: id, error: 'home-missing' })
+          continue
+        }
+        try { assertInside(layout.forkHomesDir, task.homeDir, 'fork-home') } catch {
+          report.failed.push({ taskId: id, error: 'path-escape' })
+          continue
+        }
+        const forkBundle = path.join(task.homeDir, 'profiles', task.profile, 'node_modules', '@local', 'dsh-fang')
+        if (!exists(forkBundle)) {
+          report.failed.push({ taskId: id, error: 'fork-bundle-unavailable' })
+          continue
+        }
+        task.status = TASK_STATUS.PROVISIONING
+        persist()
+        let started
+        try {
+          started = await f.spawn({
+            forkId: id,
+            homeDir: task.homeDir,
+            profile: task.profile,
+            cliPath: cliPath(),
+            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+          })
+        } catch (error) {
+          started = { ok: false, error: String(error?.message ?? error) }
+        }
+        if (!started || started.ok === false) {
+          task.status = TASK_STATUS.FAILED
+          persist()
+          audit(AUDIT.FORK_CRASHED, { taskId: id, error: started?.error ?? 'spawn-failed', reason: 'autostart' })
+          report.failed.push({ taskId: id, error: started?.error ?? 'spawn-failed' })
+          continue
+        }
+        task.status = TASK_STATUS.RUNNING
+        task.pid = started.pid ?? null
+        task.port = started.port ?? null
+        task.url = started.url ?? null
+        task.token = started.token ?? extractTokenSafe(task.url)
+        task.adapter = { ok: false, error: 'handshaking' }
+        persist()
+        audit(AUDIT.FORK_STARTED, { taskId: id, pid: task.pid, port: task.port, profile: task.profile, reason: 'autostart' })
+        bus.emit('fang/fork-started', { taskId: id, forkId: id, pid: task.pid, port: task.port })
+        report.started.push({ taskId: id, pid: task.pid, port: task.port })
+        // 握手放到后台：watchdog 的启动请求不应该被 N 个分身的启动时间串行阻塞。
+        void handshake(task).then((adapter) => {
+          if (!adapter?.ok) return
+          const current = tasks.get(id)
+          if (!current || current.pid !== task.pid) return
+          current.status = TASK_STATUS.READY
+          current.adapter = adapter
+          persist()
+        }).catch(() => {})
+      }
+      return report
+    },
+
     /** 永久删除存档：reap（杀进程 + 删 home + 删记录）；forker 记录已丢时按 home 兜底清理。 */
     async deleteArchivedTask(taskId) {
       const id = String(taskId ?? '')
@@ -1362,6 +1636,8 @@ export function apply(ctx, config) {
           commercial: !!safeGet(SERVICE.commercial),
           sessionCatalog: !!safeGet(SERVICE.sessionCatalog),
         },
+        // 重启守卫摘要（只读）：Client Header 用它显示 mode/红灯策略；无守卫时 available:false。
+        restart: restartSummary(restartView()),
       }
     },
 
@@ -1377,11 +1653,21 @@ export function apply(ctx, config) {
         scope: 'mother',
         origin: 'fang:orchestrator',
       })
-      return { ok: decision?.outcome === 'approved', ...decision }
+      // auto-allow is a successful policy decision, not a denial.
+      const allowed = decision?.outcome === 'approved' || decision?.outcome === 'auto-allow'
+      return { ok: allowed, ...decision }
     },
   }
 
   ctx.effect(() => ctx.provide(SERVICE.orchestrator, service))
+  // 启动时把持久化的 supervise 开关应用到已经挂载的 forker（插件顺序可能晚于本插件）。
+  ctx.inject([SERVICE.forker], (child) => {
+    try {
+      const f = child?.get?.(SERVICE.forker) ?? child?.[SERVICE.forker] ?? child?.forker ?? null
+      const stored = readForkSupervisionSettings(layout.dataDir)
+      if (f && typeof f.setSupervise === 'function' && stored.supervise === true) f.setSupervise(true)
+    } catch { /* forker optional */ }
+  })
 
   // ── v2.9.0 母体连接：只描述 + 只读探测，不持有连接状态 ──────────────────
   const linkProfileDir = () => {
@@ -1414,7 +1700,14 @@ export function apply(ctx, config) {
   // v3.0.3：客户端升级后的兼容性门禁（模块导入 + 路由契约；失败保持子插件关闭）
   const compatRoot = fileURLToPath(new URL('../../', import.meta.url))
   let compatWebServer = null
+  const rawConfig = config && typeof config === 'object' ? config : {}
   const runCompatCheck = async () => {
+    if (typeof rawConfig.compatGate === 'function') {
+      // 测试/嵌入注入点：不改变生产默认（bundle 配置无法携带函数）。
+      const injected = await rawConfig.compatGate()
+      writeCompatStatus(layout.dataDir, injected)
+      return injected
+    }
     const status = await runCompatGate({
       rootDir: compatRoot,
       expectedRouteCount: DEFAULT_EXPECTED_ROUTE_COUNT,
@@ -1426,8 +1719,24 @@ export function apply(ctx, config) {
     return status
   }
   let upgradeCoordinator = null
+  // 官方源：rawConfig.officialSource 优先（测试/嵌入可注入对象）；否则按 URL 构建 manifest adapter。
+  let officialSource = rawConfig.officialSource ?? null
+  if (officialSource === null && String(cfg.officialSourceUrl ?? '').trim()) {
+    try {
+      officialSource = createManifestOfficialSource({
+        baseUrl: cfg.officialSourceUrl,
+        token: cfg.officialSourceToken,
+        headers: {},
+      })
+    } catch (error) {
+      try { ctx.logger?.warn?.(`[mirror] official source disabled: ${String(error?.message ?? error)}`) } catch { /* ignore */ }
+      officialSource = null
+    }
+  }
   const mirrorManager = new MirrorManager({
     mirrorRoot,
+    // 测试/嵌入注入点：官方源与 compat gate 都可替换；生产 bundle 可配置 manifest URL。
+    officialSource,
     logger: ctx.logger ?? {},
     usageProvider: () => ({
       activeEssenceCount: 0,
@@ -1437,7 +1746,20 @@ export function apply(ctx, config) {
     }),
     compatGate: () => runCompatCheck(),
     onCompatResult: (compat) => { writeCompatStatus(layout.dataDir, compat) },
-    postUpgradeHook: () => { if (upgradeCoordinator !== null) void upgradeCoordinator.onUpgradeSuccess() },
+    postUpgradeHook: () => {
+      if (upgradeCoordinator === null) return
+      // 升级成功 → 元主重算；失败必须让人看见（决策中心 ticket），不吞掉。
+      Promise.resolve(upgradeCoordinator.onUpgradeSuccess()).catch((error) => {
+        raiseDecisionTicket({
+          level: 'yellow',
+          title: '升级后元主重算失败',
+          context: `镜像升级成功，但元主重算失败：${String(error?.message ?? error)}`,
+          options: [{ value: 'retry', label: '重试重算' }, { value: 'ignore', label: '忽略' }],
+          dedupeKey: 'mirror-upgrade:recompute-failed',
+          sourceName: 'MirrorUpgrade',
+        })
+      })
+    },
   })
   mirrorManager.ensureLayout()
   const preferencesStore = new PreferencesStore({ mirrorRoot, logger: ctx.logger ?? {} })
@@ -1783,9 +2105,10 @@ export function apply(ctx, config) {
     importEssence: (input = {}) => essenceManager.importBundle(input?.bundle ?? input, {
       name: input?.name, tier: input?.tier, parentId: input?.parentId ?? null,
     }),
-    // v3.0.9 原身运行态：用元主 merged/profile 起一个**隔离 home** 的配置态实例。
-    // 隔离边界：DSH_HOME = essences/<id>/runtime/home（自己的 sessions/storages），
-    // 不写母体 sessions；node_modules 通过 junction 指向母体模块树（不复制）。
+    // v3.1.0 元主运行态：用元主 merged/profile 起一个**隔离 home** 的配置态实例。
+    // 隔离边界：DSH_HOME = sessions/<essenceId>/home（自己的 sessions/storages），
+    // node_modules 也属于元主自己（D: 盘），不再 junction 到母体 C: 盘模块树；
+    // 分身才复用元主/母体的 node_modules junction。
     startEssenceRuntime: async (essenceId, input = {}) => {
       const id = String(essenceId ?? '').trim()
       const meta = essenceManager.getMeta(id)
@@ -1801,15 +2124,43 @@ export function apply(ctx, config) {
       if (!exists(merged)) throw new Error('merged-profile-missing')
       assertInside(layout.essenceRoot, merged, 'essence-merged')
       const motherModules = path.join(templateDir(), 'node_modules')
-      const link = path.join(merged, 'node_modules')
-      if (exists(motherModules) && !exists(link)) {
-        try { fs.symlinkSync(motherModules, link, 'junction') } catch { /* 已存在或权限不足时继续，forker 会再尝试 */ }
+      const essenceModules = path.join(merged, 'node_modules')
+      // 元主自己的 node_modules：必须是 D: 盘真实目录，不能是到母体 C: 盘的 junction。
+      // 旧布局/新建元主可能缺失；首次打开时从母体复制一份，之后各自独立升级。
+      if (!exists(essenceModules)) {
+        try {
+          if (exists(motherModules)) copyTree(motherModules, essenceModules)
+          else ensureDir(essenceModules)
+        } catch (error) {
+          throw new Error(`essence-node-modules-copy-failed: ${String(error?.message ?? error)}`)
+        }
       }
+      // 复制来的模块树记录了母体 store；元主/运行态的 pnpm 必须显式用同一个 store，
+      // 否则项目在 D: 盘、模块来自 C: store 时会报 ERR_PNPM_UNEXPECTED_STORE。
+      const writeModuleStoreConfig = (profileDir) => {
+        try {
+          const modulesYaml = fs.readFileSync(path.join(essenceModules, '.modules.yaml'), 'utf8')
+          const store = /^storeDir:\s*(.+)$/m.exec(modulesYaml)?.[1]?.trim()
+          if (!store) return
+          ensureDir(profileDir)
+          const file = path.join(profileDir, '.npmrc')
+          if (exists(file) && fs.readFileSync(file, 'utf8').includes('store-dir=')) return
+          fs.writeFileSync(file, `store-dir=${store}\npackage-import-method=copy\n`, 'utf8')
+        } catch { /* missing modules metadata is non-fatal */ }
+      }
+      writeModuleStoreConfig(merged)
       const forkId = runtimeForkId(id)
       // v3.0.9 三区：运行态 home 在 runtimeRoot 下（FANG_HOME 时是 sessions/<essenceId>/home），
       // 原身文件夹只保留配置，项目/会话/任务文件不落原身目录。
       const homeDir = runtimeHomeFor(id)
       assertInside(layout.runtimeRoot, homeDir, 'runtime-home')
+      // 运行态 profile 的 node_modules 必须重新指向该元主自己的模块树。
+      // makeJunction 对已存在的链接不会替换，所以先安全移除旧 junction（不进入目标）。
+      const runtimeProfileDir = path.join(homeDir, 'profiles', 'essence-runtime')
+      const runtimeModules = path.join(runtimeProfileDir, 'node_modules')
+      if (exists(runtimeModules)) {
+        try { if (fs.lstatSync(runtimeModules).isSymbolicLink()) removeTree(runtimeModules) } catch { /* ignore */ }
+      }
       const legacyHomes = [
         path.join(layout.dataDir, 'runtime', forkId, 'home'),
         path.join(essenceManager.essenceRoot(id), 'runtime', 'home'),
@@ -1826,9 +2177,10 @@ export function apply(ctx, config) {
         // 元主运行态必须继承元主的插件/设置；clean template 只用于空白分身，
         // 否则官方/用户元主打开后看不到本机插件列表（v3.0.10 实测）。
         cleanTemplate: false,
-        nodeModulesSource: motherModules,
+        nodeModulesSource: essenceModules,
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
+      writeModuleStoreConfig(runtimeProfileDir)
       // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
       const importedSessions = importSessionsInto(homeDir, input?.sessionIds)
       // 注意：forker.spawn 需要显式 homeDir/profile（它不从 provision 记录里猜）。
@@ -1984,6 +2336,17 @@ export function apply(ctx, config) {
       const essenceId = String(input?.essenceId ?? '').trim()
       if (!essenceId) {
         const out = await essenceManager.recomputeAll({ concurrency: Number(input?.concurrency) || 2 })
+        // recomputeAll 返回的是 id 数组（recomputed/skipped/conflicted/failed），不是计数。
+        const conflictedCount = Array.isArray(out?.conflicted) ? out.conflicted.length : (Number(out?.conflicted) || 0)
+        const failedCount = Array.isArray(out?.failed) ? out.failed.length : (Number(out?.failed) || 0)
+        // EssenceManager：批量重算出现冲突/失败时，必须变成人类可见的 ticket。
+        if (conflictedCount > 0 || failedCount > 0) {
+          const conflicts = Array.from({ length: conflictedCount }, () => ({ kind: 'recompute-conflict', severity: 'warning' }))
+          await businessProducers.essenceConflict({
+            essenceId: 'all', conflicts,
+            severity: failedCount > 0 ? 'fatal' : 'warning',
+          })
+        }
         return { ok: true, mode: 'all', ...out }
       }
       const meta = essenceManager.getMeta(essenceId)
@@ -2006,12 +2369,68 @@ export function apply(ctx, config) {
     recomputeStatus: () => upgradeCoordinator.getRecomputeStatus(),
     compatStatus: () => readCompatStatus(layout.dataDir),
     runCompatCheck,
-    upgrade: (input = {}) => mirrorManager.upgrade({
-      autoBackup: input?.autoBackup !== false,
-      autoRollback: input?.autoRollback !== false,
-    }),
+    upgrade: async (input = {}) => {
+      const emitStage = (stage) => {
+        try { bus.emit('fang/mirror-upgrade-stage', { stage, at: Date.now() }) } catch { /* ignore */ }
+        try { audit('mirror-upgrade-stage', { stage }) } catch { /* ignore */ }
+      }
+      try {
+        const out = await mirrorManager.upgrade({
+          autoBackup: input?.autoBackup !== false,
+          autoRollback: input?.autoRollback !== false,
+          onProgress: emitStage,
+        })
+        if (out?.ok === false) {
+          await businessProducers.mirrorUpgradeFailed({
+            from: out.from, to: out.to,
+            reason: String(out?.error ?? out?.reason ?? 'unknown'),
+          })
+        } else if (out?.reason === 'compat-gate-failed') {
+          const findings = Array.isArray(out?.compat?.findings) ? out.compat.findings.length : 0
+          raiseDecisionTicket({
+            level: 'yellow',
+            title: '镜像升级后兼容门禁未通过',
+            context: `镜像已切到 ${String(out?.to ?? '新版本')}，但 compat 门禁未通过（findings=${findings}），子插件保持关闭。`,
+            options: [{ value: 'retry', label: '重试升级' }, { value: 'ignore', label: '暂不处理' }],
+            dedupeKey: 'mirror-upgrade:compat-gate-failed',
+            sourceName: 'MirrorUpgrade',
+          })
+        } else if (out?.ok === true && out?.to && out.from !== out.to && !out.reason) {
+          // 升级成功：新镜像要重启宿主才完全生效 → 红色 restart ticket（动作 confirm_restart）。
+          await businessProducers.mirrorUpgradeRestartRequired({ from: out.from, to: out.to })
+        }
+        return out
+      } catch (error) {
+        await businessProducers.mirrorUpgradeFailed({
+          from: 'unknown', reason: String(error?.message ?? error), level: 'red',
+        })
+        throw error
+      }
+    },
   }
   ctx.effect(() => ctx.provide(SERVICE.mirror, mirrorService))
+
+  // 特殊动作执行钩子：confirm_restart 不再只落库，交给 restart-guard 的 request
+  // （它自己的审批/三重门禁/外部 supervisor 仍然生效；决策中心只负责触发）。
+  try {
+    const decisionCenterService = safeGet(SERVICE.decisionCenter)
+    if (decisionCenterService && typeof decisionCenterService.registerActionHandler === 'function') {
+      const unregisterAction = decisionCenterService.registerActionHandler('confirm_restart', async ({ ticket, payload } = {}) => {
+        const restart = safeGet(SERVICE.restart)
+        if (!restart || typeof restart.request !== 'function') return { ok: false, reason: 'restart-unavailable' }
+        const input = payload && typeof payload === 'object' ? payload : {}
+        return restart.request({
+          reason: input.reason ?? `decision:${ticket?.id ?? 'unknown'}`,
+          risk: input.risk ?? 'yellow',
+          scope: input.scope ?? 'mother',
+          origin: 'decision-center',
+          digests: Array.isArray(input.digests) ? input.digests : undefined,
+          forcedApproval: input.forcedApproval === true,
+        })
+      })
+      ctx.effect(() => () => { try { unregisterAction?.() } catch { /* ignore */ } })
+    }
+  } catch { /* decision center optional */ }
   // 启动后自检一次；兼容状态默认 subPluginsEnabled=false，直到门禁通过
   const compatBootTimer = setTimeout(() => { void runCompatCheck() }, 1500)
   compatBootTimer.unref?.()
@@ -2232,6 +2651,16 @@ export function apply(ctx, config) {
       })
 
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
+      // 重启守卫 / supervisor 契约（只读）。不触发重启；写操作仍只走审批 + 外部 supervisor。
+      route('GET', `${prefix}/api/restart`, (req, res) => {
+        const view = restartView()
+        return json(res, 200, { ok: view.available === true && !view.error, ...view })
+      })
+      route('GET', `${prefix}/api/restart/selfcheck`, (req, res) => {
+        const guard = safeGet(SERVICE.restart)
+        if (!guard || typeof guard.selfCheck !== 'function') return json(res, 503, { ok: false, error: 'restart-guard-unavailable' })
+        return json(res, 200, guard.selfCheck())
+      })
       route('GET', `${prefix}/api/upgrade/status`, (req, res) => {
         let mirror = null
         let essences = []
@@ -2244,6 +2673,300 @@ export function apply(ctx, config) {
         return json(res, 200, buildUpgradeStatus({ version: FANG_VERSION, mirror, essences, compat, tasks: { failed: failedTasks } }))
       })
       route('GET', `${prefix}/api/tasks`, (req, res) => json(res, 200, { ok: true, tasks: service.listTasks() }))
+
+      // Decision center (瓮城·决策中心): one inbox for human attention. The plugin
+      // owns tickets; this route is only the authenticated read/write surface.
+      route('GET', `${prefix}/api/decisions`, (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.list !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const out = center.list({
+          includeArchived: query.get('includeArchived') === '1' || query.get('includeArchived') === 'true',
+          since: Number(query.get('since')) || 0,
+        })
+        return json(res, 200, { ok: true, ...out })
+      })
+      route('GET', `${prefix}/api/decisions/quota`, (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.quotaStatus !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        return json(res, 200, center.quotaStatus())
+      })
+      route('GET', `${prefix}/api/decisions/item`, (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.get !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+        const ticket = center.get(String(query.get('id') ?? ''))
+        return ticket ? json(res, 200, { ok: true, ticket }) : json(res, 404, { ok: false, error: 'not-found' })
+      })
+      route('GET', `${prefix}/api/decisions/forks`, (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.forkAggregation !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        return json(res, 200, center.forkAggregation())
+      })
+      route('GET', `${prefix}/api/decisions/producers`, (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.producerCatalog !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        return json(res, 200, center.producerCatalog())
+      })
+      // 外部生产者桥（PM/PJM/Worker/HarnessMM/PluginUpdater/SuperAgent）：
+      // 只做带鉴权的 ingest；ticket 来源标记 external:<producer>，roleTrusted=false。
+      route('POST', `${prefix}/api/decisions/ingest`, async (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.ingest !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        const body = await readBody(req)
+        const out = center.ingest(body && typeof body === 'object' ? body : {})
+        const status = out.ok ? 200
+          : out.reason === 'title-required' || out.reason === 'options-required' || out.reason === 'gray-is-terminal' ? 400
+            : 409
+        return json(res, status, out)
+      })
+      // 决策中心实时推送：SSE。bus 事件 → 一条已鉴权流；无 SSE 时客户端仍可轮询。
+      const decisionStreams = new Set()
+      route('GET', `${prefix}/api/decisions/events`, (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.list !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        if (decisionStreams.size >= 20) return json(res, 429, { ok: false, error: 'too-many-event-streams' })
+        const stream = openDecisionEventStream({ req, res, bus, center })
+        decisionStreams.add(stream)
+        const cleanup = () => {
+          if (!decisionStreams.delete(stream)) return
+          try { stream.close() } catch { /* ignore */ }
+        }
+        try { req.on?.('close', cleanup) } catch { /* ignore */ }
+        try { res.on?.('close', cleanup) } catch { /* ignore */ }
+        return undefined
+      })
+      try { child.effect?.(() => () => { for (const stream of decisionStreams) { try { stream.close() } catch { /* ignore */ } } decisionStreams.clear() }) } catch { /* fake webServer in tests */ }
+      route('POST', `${prefix}/api/decisions/resolve`, async (req, res) => {
+        const body = await readBody(req)
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.resolve !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        if (Array.isArray(body?.ids)) {
+          if (typeof center.resolveMany !== 'function') return json(res, 503, { ok: false, error: 'decision-center-batch-unavailable' })
+          const out = center.resolveMany(body.ids, { option: body?.option, by: body?.by ?? 'fang-api', note: body?.note })
+          return json(res, 200, out)
+        }
+        const out = (body?.actionId !== undefined && typeof center.resolveAction === 'function')
+          ? center.resolveAction(body?.id, body.actionId, body?.payload, { by: body?.by ?? 'fang-api', note: body?.note })
+          : center.resolve(body?.id, body?.option, { by: body?.by ?? 'fang-api', note: body?.note })
+        const status = out.ok ? 200
+          : out.reason === 'not-found' ? 404
+            : out.reason === 'option-required' || out.reason === 'unknown-option' ? 400
+              : 409
+        return json(res, status, out)
+      })
+      route('POST', `${prefix}/api/decisions/abandon`, async (req, res) => {
+        const body = await readBody(req)
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.abandon !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        if (Array.isArray(body?.ids)) {
+          if (typeof center.abandonMany !== 'function') return json(res, 503, { ok: false, error: 'decision-center-batch-unavailable' })
+          const out = center.abandonMany(body.ids, { by: body?.by ?? 'fang-api', note: body?.note })
+          return json(res, 200, out)
+        }
+        const out = center.abandon(body?.id, { by: body?.by ?? 'fang-api', note: body?.note })
+        return json(res, out.ok ? 200 : (out.reason === 'not-found' ? 404 : 409), out)
+      })
+
+      route('GET', `${prefix}/api/decisions/ai`, (req, res) => {
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.aiStatus !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        return json(res, 200, { ok: true, ...center.aiStatus() })
+      })
+      route('POST', `${prefix}/api/decisions/ai/test`, async (req, res) => {
+        const body = await readBody(req)
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.testAi !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        const out = await center.testAi(body ?? {})
+        return json(res, out.ok ? 200 : (out.status === 429 ? 429 : 400), out)
+      })
+      route('POST', `${prefix}/api/decisions/ai/config`, async (req, res) => {
+        const body = await readBody(req)
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.configureAi !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        const out = center.configureAi(body ?? {})
+        return json(res, out.ok ? 200 : 400, out)
+      })
+      route('POST', `${prefix}/api/decisions/ai/advise/stream`, async (req, res) => {
+        const body = await readBody(req)
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.advise !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-accel-buffering': 'no',
+          connection: 'keep-alive',
+        })
+        try { res.flushHeaders?.() } catch { /* fake res */ }
+        let closed = false
+        let wrote = 0
+        const send = (event, data) => {
+          if (closed) return false
+          try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); wrote += 1; return true } catch { return false }
+        }
+        try {
+          send('start', { id: String(body?.id ?? '') })
+          const out = typeof center.adviseStream === 'function'
+            ? await center.adviseStream(body?.id, (delta, text) => { send('delta', { delta, text }) })
+            : await center.advise(body?.id)
+          send(out.ok ? 'done' : 'error', out.ok ? { advice: out.advice, ticket: out.ticket } : out)
+        } catch (error) {
+          send('error', { ok: false, error: String(error?.message ?? error) })
+        } finally {
+          closed = true
+          try { res.end() } catch { /* ignore */ }
+        }
+      })
+      route('POST', `${prefix}/api/decisions/ai/advise`, async (req, res) => {
+        const body = await readBody(req)
+        const center = safeGet(SERVICE.decisionCenter)
+        if (!center || typeof center.advise !== 'function') return json(res, 503, { ok: false, error: 'decision-center-unavailable' })
+        const out = await center.advise(body?.id)
+        const limited = out?.reason === 'ai-rate-limited' || out?.reason === 'ai-circuit-open' || out?.reason === 'ai-daily-quota-exceeded'
+        if (limited && Number.isFinite(out?.retryAfterMs) && out.retryAfterMs > 0) {
+          try { res.setHeader?.('retry-after', String(Math.ceil(out.retryAfterMs / 1000))) } catch { /* fake res */ }
+        }
+        return json(res, out.ok ? 200 : (out.reason === 'not-found' ? 404 : limited ? 429 : 409), out)
+      })
+
+      // Mother-side approval aggregation: local approver + every live fork adapter.
+      // A failed adapter is reported as degraded, never as an empty approval list.
+      route('GET', `${prefix}/api/approvals`, async (req, res) => {
+        const items = []
+        const failed = []
+        const approver = safeGet(SERVICE.approver)
+        try {
+          if (approver && typeof approver.pending === 'function') {
+            for (const item of approver.pending() ?? []) {
+              items.push({
+                source: 'mother',
+                taskId: null,
+                approvalId: String(item?.id ?? ''),
+                title: String(item?.title ?? ''),
+                risk: String(item?.risk ?? 'unknown'),
+                kind: String(item?.kind ?? 'unknown'),
+                state: item?.state ?? 'pending',
+                createdAt: item?.createdAt ?? null,
+                deadlineAt: item?.deadlineAt ?? null,
+                adapterOk: true,
+              })
+            }
+            if (typeof approver.orphaned === 'function') {
+              for (const item of approver.orphaned() ?? []) {
+                items.push({
+                  source: 'mother',
+                  taskId: null,
+                  approvalId: String(item?.id ?? ''),
+                  title: String(item?.title ?? ''),
+                  risk: String(item?.risk ?? 'unknown'),
+                  kind: String(item?.kind ?? 'unknown'),
+                  state: 'orphaned',
+                  createdAt: item?.createdAt ?? null,
+                  deadlineAt: item?.deadlineAt ?? null,
+                  adapterOk: true,
+                })
+              }
+            }
+          } else {
+            failed.push({ taskId: null, error: 'approver-unavailable' })
+          }
+        } catch (error) {
+          failed.push({ taskId: null, error: String(error?.message ?? error) })
+        }
+
+        const forkResults = await Promise.all([...tasks.values()]
+          .filter((task) => task?.url)
+          .map(async (task) => {
+            if (task.adapter && task.adapter.ok === false) {
+              return { task, ok: false, error: task.adapter.error ?? 'adapter-unavailable' }
+            }
+            const client = await remoteFor(task)
+            if (!client) return { task, ok: false, error: 'remote-unavailable' }
+            const result = await client.command(ADAPTER_OP.APPROVALS, {})
+            const data = result?.data?.result ?? result?.data ?? {}
+            if (!result?.ok || data?.ok === false) {
+              return { task, ok: false, error: data?.error ?? result?.error ?? 'adapter-failed' }
+            }
+            const list = Array.isArray(data?.items) ? data.items
+              : Array.isArray(data?.result?.items) ? data.result.items
+                : []
+            return { task, ok: true, items: list }
+          }))
+        for (const result of forkResults) {
+          if (!result.ok) {
+            failed.push({ taskId: result.task.taskId, error: result.error })
+            continue
+          }
+          for (const item of result.items) {
+            items.push({
+              source: 'fork',
+              taskId: result.task.taskId,
+              approvalId: String(item?.id ?? item?.approvalId ?? ''),
+              title: String(item?.title ?? ''),
+              risk: String(item?.risk ?? 'unknown'),
+              kind: String(item?.kind ?? 'unknown'),
+              state: item?.state ?? 'pending',
+              createdAt: item?.createdAt ?? null,
+              deadlineAt: item?.deadlineAt ?? null,
+              adapterOk: true,
+            })
+          }
+        }
+        items.sort((a, b) => (Number(a.deadlineAt) || Number.MAX_SAFE_INTEGER) - (Number(b.deadlineAt) || Number.MAX_SAFE_INTEGER))
+        return json(res, 200, { ok: true, degraded: failed.length > 0, items, failed })
+      })
+
+      // Decide one approval by source. The response is the real adapter/approver result;
+      // stale or unknown approvals return 409 instead of pretending success.
+      route('POST', `${prefix}/api/approvals/decide`, async (req, res) => {
+        const body = await readBody(req)
+        const source = String(body?.source ?? '')
+        const taskId = body?.taskId === undefined || body?.taskId === null ? null : String(body.taskId)
+        const approvalId = String(body?.approvalId ?? '').trim()
+        const raw = body?.outcome ?? body?.decision
+        const outcome = raw === 'approve' ? 'approved' : raw === 'deny' ? 'denied' : String(raw ?? '')
+        const by = String(body?.by ?? 'fang-api')
+        const note = body?.note === undefined || body?.note === null ? null : String(body.note)
+        if (!approvalId) return json(res, 400, { ok: false, error: 'approval-id-required' })
+        if (outcome !== 'approved' && outcome !== 'denied') return json(res, 400, { ok: false, error: 'bad-outcome', allowed: ['approved', 'denied'] })
+
+        if (source === 'mother') {
+          const approver = safeGet(SERVICE.approver)
+          if (!approver || typeof approver.decide !== 'function') {
+            return json(res, 503, { ok: false, source, error: 'approver-unavailable' })
+          }
+          try {
+            const result = approver.decide(approvalId, outcome, { by, note })
+            if (!result || result.ok === false) {
+              const stale = result?.reason === 'not-found' || result?.reason === 'not-pending'
+              return json(res, stale ? 409 : 400, { ok: false, source, approvalId, error: result?.reason ?? 'decide-failed' })
+            }
+            audit(AUDIT.APPROVAL_DECIDED, { source, taskId: null, approvalId, outcome, by, note })
+            return json(res, 200, { ok: true, source, taskId: null, approvalId, outcome, by, result })
+          } catch (error) {
+            return json(res, 500, { ok: false, source, approvalId, error: String(error?.message ?? error) })
+          }
+        }
+
+        if (source === 'fork') {
+          if (!taskId) return json(res, 400, { ok: false, source, error: 'task-id-required' })
+          const task = tasks.get(taskId)
+          if (!task) return json(res, 404, { ok: false, source, taskId, error: 'unknown-task' })
+          const client = await remoteFor(task)
+          if (!client) return json(res, 503, { ok: false, source, taskId, error: 'remote-unavailable' })
+          const result = await client.command(ADAPTER_OP.APPROVAL_DECIDE, { id: approvalId, outcome, by, note })
+          const data = result?.data?.result ?? result?.data ?? {}
+          if (!result?.ok || data?.ok === false) {
+            const stale = data?.code === 'not-found' || data?.code === 'conflict'
+            return json(res, stale ? 409 : 502, { ok: false, source, taskId, approvalId, error: data?.error ?? result?.error ?? 'adapter-failed' })
+          }
+          audit(AUDIT.APPROVAL_DECIDED, { source, taskId, approvalId, outcome, by, note })
+          return json(res, 200, { ok: true, source, taskId, approvalId, outcome, by, result: data })
+        }
+
+        return json(res, 400, { ok: false, error: 'bad-source', allowed: ['mother', 'fork'] })
+      })
+
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
         try {
@@ -2314,6 +3037,21 @@ export function apply(ctx, config) {
       })
       // v1 兼容路由
       route('GET', `${prefix}/api/forks`, (req, res) => json(res, 200, { ok: true, forks: service.listForks() }))
+      routeMethods(`${prefix}/api/forks/supervision`, {
+        GET: (req, res) => json(res, 200, service.forkSupervision()),
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const out = service.setForkSupervision(body ?? {})
+          return json(res, out.ok ? 200 : 400, out)
+        },
+      })
+      // watchdog 启动时的分身自动恢复；只拉起已登记但没在跑的非归档任务。
+      route('POST', `${prefix}/api/forks/autostart`, async (req, res) => {
+        const body = await readBody(req)
+        const taskIds = Array.isArray(body?.taskIds) ? body.taskIds : null
+        const out = await service.autostartForks({ taskIds })
+        return json(res, out.ok ? 200 : 503, out)
+      })
       route('POST', `${prefix}/api/forks/create`, async (req, res) => {
         const body = await readBody(req)
         const out = await service.fork({ taskTitle: body?.taskTitle ?? body?.title })
@@ -2506,12 +3244,6 @@ export function apply(ctx, config) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) })
         }
       })
-      route('POST', `${prefix}/api/essence/default`, async (req, res) => {
-        const body = await readBody(req)
-        try { return json(res, 200, { ok: true, default: mirrorService.setDefaultEssence(String(body?.essenceId ?? '')) }) } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) })
-        }
-      })
       route('GET', `${prefix}/api/essence/download`, (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         try {
@@ -2658,7 +3390,12 @@ export function apply(ctx, config) {
       // so a restart/crash can offer recovery. Nothing is auto-sent.
       routeMethods(`${prefix}/api/composer/journal`, {
         GET: (req, res) => {
-          const key = new URL(String(req.url ?? '/'), 'http://x').searchParams.get('key') || ''
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          const key = query.get('key') || ''
+          // list=1 is the recovery list: every saved session draft/queue, newest first.
+          if (!key && query.get('list') === '1') {
+            return json(res, 200, { ok: true, entries: composerJournal.list() })
+          }
           if (!key) return json(res, 400, { ok: false, error: 'journal-key-required' })
           return json(res, 200, { ok: true, entry: composerJournal.get(key) })
         },
@@ -2674,6 +3411,37 @@ export function apply(ctx, config) {
         },
       })
 
+      // Restore saved queue rows into the official Session inbox WITHOUT waking the
+      // agent. The queue journal is a recovery surface; it must not send messages.
+      route('POST', `${prefix}/api/composer/queue`, async (req, res) => {
+        const body = await readBody(req)
+        const sessionId = String(body?.sessionId ?? '').trim()
+        const items = Array.isArray(body?.items) ? body.items : []
+        if (!sessionId) return json(res, 400, { ok: false, error: 'session-id-required' })
+        if (items.length === 0) return json(res, 200, { ok: true, queued: 0, failed: 0 })
+        const agents = safeGet('agents')
+        const agent = agents?.get?.(sessionId)
+        if (!agent || typeof agent.send !== 'function') {
+          return json(res, 409, { ok: false, error: 'session-not-live' })
+        }
+        let queued = 0
+        let failed = 0
+        for (const item of items.slice(0, 100)) {
+          const text = String(item?.text ?? '').trim().slice(0, 4000)
+          if (!text) { failed += 1; continue }
+          try {
+            agent.send({
+              id: newId('msg'),
+              role: 'user',
+              content: [{ type: 'text', text }],
+              source: { kind: 'user' },
+            }, 'next-turn', false)
+            queued += 1
+          } catch { failed += 1 }
+        }
+        return json(res, 200, { ok: true, queued, failed })
+      })
+
       // v3.0.8 contract: an unknown /fang/api/* path must be a JSON 404 under the
       // same Host/Origin/token gate — not an unauthenticated empty 404 from the host.
       // Exact routes above win because the webServer matches exact before prefix.
@@ -2686,6 +3454,10 @@ export function apply(ctx, config) {
       route('POST', `${prefix}/api/essence/default`, async (req, res) => {
         const body = await readBody(req)
         try {
+          // 同一路径两用：显式 essenceId = 设为默认；否则走默认元宝 ensure（apply/force/mode）。
+          if (body?.essenceId) {
+            return json(res, 200, { ok: true, default: mirrorService.setDefaultEssence(String(body.essenceId)) })
+          }
           const out = await mirrorService.ensureDefaultEssence({ apply: body?.apply === true, force: body?.force === true, mode: body?.mode === 'preset' ? 'preset' : 'copy-local' })
           return json(res, out.ok === false ? 409 : 200, out)
         } catch (error) {

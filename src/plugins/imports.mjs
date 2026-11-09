@@ -168,6 +168,54 @@ export function scanSource(src) {
   return { imports, warnings, tokenCount: tokens.length }
 }
 
+/**
+ * Deep scan: import layer + a deliberately small call-layer signal set.
+ * This is still token-based, not an AST/call graph: it detects direct call tokens
+ * (and the existing dynamic-import warning), and reports that coverage honestly.
+ */
+const CHILD_CALLS = new Set(['exec', 'execSync', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork'])
+const VM_CALLS = new Set(['runInContext', 'runInNewContext', 'runInThisContext', 'compileFunction'])
+
+export function scanDeep(src) {
+  const scan = scanSource(src)
+  const tokens = tokenize(src)
+  const signals = [...importsToSignals(scan).signals]
+  const callSites = []
+  const seen = new Set()
+  const add = (id, weight, kind, line) => {
+    const key = `${id}@${line}`
+    if (seen.has(key)) return
+    seen.add(key)
+    callSites.push({ kind, line })
+    signals.push({ id, weight, evidence: { calls: [{ kind, line }] } })
+  }
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    if (token.t !== 'word') continue
+    const next = tokens[i + 1]
+    if (next?.t === 'punct' && next.v === '(') {
+      if (CHILD_CALLS.has(token.v)) add('S1-child_process_call', 30, token.v, token.line)
+      else if (token.v === 'eval') add('S7-eval_call', 35, 'eval', token.line)
+      else if (VM_CALLS.has(token.v)) add('S4-vm_call', 25, token.v, token.line)
+    }
+    if (token.v === 'new' && tokens[i + 1]?.t === 'word' && tokens[i + 1].v === 'Function'
+      && tokens[i + 2]?.t === 'punct' && tokens[i + 2].v === '(') {
+      add('S7-eval_call', 35, 'new Function', token.line)
+    }
+  }
+  for (const warning of scan.warnings) {
+    if (warning.reason === 'dynamic-import-nonliteral') add('S8-dynamic_import_nonliteral', 12, 'dynamic-import', warning.line)
+  }
+  return {
+    imports: scan.imports,
+    warnings: scan.warnings,
+    tokenCount: scan.tokenCount,
+    signals,
+    callSites,
+    coverage: 'import+call',
+  }
+}
+
 // ─────────── 说明符 → 信号（只做 import 层） ───────────
 const CHILD_PROCESS = new Set(['child_process', 'node:child_process'])
 const NETWORK = new Set(['net', 'node:net', 'http', 'node:http', 'https', 'node:https',

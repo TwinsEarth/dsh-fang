@@ -171,10 +171,28 @@ function compilePatterns(patterns) {
 }
 
 /** 指针：`[/\\]` 已覆盖两种分隔符，`resolve` 之后这里只做大小写与包含判断。 */
+/** Resolve a path through the nearest existing ancestor so symlinked parents are real. */
+function realPathWithMissing(value) {
+  let current = path.resolve(String(value))
+  const suffix = []
+  for (;;) {
+    try {
+      const real = fs.realpathSync(current)
+      return suffix.length === 0 ? real : path.join(real, ...suffix)
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return path.resolve(String(value))
+      suffix.unshift(path.basename(current))
+      current = parent
+    }
+  }
+}
+
+/** 路径 containment：realpath 后再比较，避免 symlink/junction 逃出 root。 */
 function withinPath(child, parent) {
   if (!child || !parent) return false
-  const c = process.platform === 'win32' ? child.toLowerCase() : child
-  const p = process.platform === 'win32' ? parent.toLowerCase() : parent
+  const c = process.platform === 'win32' ? realPathWithMissing(child).toLowerCase() : realPathWithMissing(child)
+  const p = process.platform === 'win32' ? realPathWithMissing(parent).toLowerCase() : realPathWithMissing(parent)
   if (c === p) return true
   const withSep = p.endsWith(path.sep) ? p : p + path.sep
   return c.startsWith(withSep)
@@ -351,22 +369,41 @@ export function isReadOnly(evidence = {}) {
 
 function networkAllowed(hostText, policy) {
   if (!hostText) return false
+  const rawText = String(hostText)
   let host = ''
   let hostPort = ''
+  let parsedUrl = null
   try {
-    const url = new URL(hostText)
-    host = url.hostname.toLowerCase()
-    hostPort = `${url.hostname}:${url.port || (url.protocol === 'https:' ? '443' : '80')}`.toLowerCase()
+    parsedUrl = new URL(rawText)
+    host = parsedUrl.hostname.toLowerCase()
+    hostPort = `${parsedUrl.hostname}:${parsedUrl.port || (parsedUrl.protocol === 'https:' ? '443' : '80')}`.toLowerCase()
   } catch {
-    host = hostText.toLowerCase()
+    host = rawText.toLowerCase()
     hostPort = host
   }
   for (const raw of asStringList(policy.networkAllowlist)) {
-    const entry = raw.trim().toLowerCase()
+    const rawEntry = raw.trim()
+    const entry = rawEntry.toLowerCase()
     if (!entry) continue
+    // URL-prefix entries must match an origin/path boundary; startsWith on the raw URL
+    // lets https://example.com allowlist https://example.com.evil.
+    if (rawEntry.includes('://')) {
+      let allow = null
+      try { allow = new URL(rawEntry) } catch { continue }
+      if (parsedUrl === null) continue
+      if (allow.protocol !== parsedUrl.protocol || allow.hostname.toLowerCase() !== host) continue
+      const allowPort = allow.port || (allow.protocol === 'https:' ? '443' : '80')
+      const targetPort = parsedUrl.port || (parsedUrl.protocol === 'https:' ? '443' : '80')
+      if (allowPort !== targetPort) continue
+      const allowPath = allow.pathname || '/'
+      const targetPath = parsedUrl.pathname || '/'
+      if (allowPath === '/' || targetPath === allowPath) return true
+      if (targetPath.startsWith(allowPath)
+        && (allowPath.endsWith('/') || ['/', '?', '#'].includes(targetPath[allowPath.length]))) return true
+      continue
+    }
     if (entry === host || entry === hostPort) return true
     if (entry.startsWith('*.') && host.endsWith(entry.slice(1))) return true
-    if (hostText.toLowerCase().startsWith(entry)) return true
   }
   return false
 }
@@ -387,6 +424,12 @@ function execLooksReadOnly(evidence, policy) {
   const text = target.kind === 'command' ? target.value : String(evidence?.args?.command ?? '')
   if (!text) return false
   if (WRITE_REDIRECT_RE.test(text)) return false
+  // A read-only prefix only applies to a single simple command. Any command separator,
+  // pipeline, substitution or backtick can smuggle a side-effect into "cat x; rm ...".
+  const lex = tokenizeShell(text)
+  if (lex.errors.length > 0) return false
+  if (lex.tokens.some((token) => token.type === 'op' && SHELL_SEPARATORS.has(token.value))) return false
+  if (text.includes('`') || /\$\(/.test(text)) return false
   return matchesAny(compilePatterns(policy.readOnlyExecPatterns), text)
 }
 
@@ -804,6 +847,7 @@ export function buildActionContext(evidence = {}, policyInput = {}) {
     parseError: redirects.parseError,
     heredocs: redirects.heredocs,
     warnings: redirects.warnings,
+    trusted: evidence?.trusted === true,
     policy,
   }
 }
@@ -1146,6 +1190,7 @@ export function baseLight(evidence = {}, policyInput = {}, ruleSet = DEFAULT_RUL
     tags: [...(rule.tags ?? [])],
     lifecycle: rule.id === 'dsh-lifecycle',
     credential: rule.id === 'credential-access',
+    trusted: ctx.trusted === true,
     target: ctx.target ?? NO_TARGET,
     path: ctx.targetPath ?? (detail.targets?.[0] ?? null),
     reason: rule.reason,
@@ -1215,8 +1260,11 @@ function mtimeOf(file) {
 }
 
 function pluginKeyOf(input) {
-  if (typeof input.pluginId === 'string' && input.pluginId.length > 0) return `id:${input.pluginId}`
-  if (typeof input.dir === 'string' && input.dir.length > 0) return `dir:${path.resolve(input.dir)}`
+  const id = typeof input.pluginId === 'string' && input.pluginId.length > 0 ? input.pluginId : ''
+  const dir = typeof input.dir === 'string' && input.dir.length > 0 ? path.resolve(input.dir) : ''
+  if (id && dir) return `id:${id}|dir:${dir}`
+  if (id) return `id:${id}`
+  if (dir) return `dir:${dir}`
   if (typeof input.source === 'string') return `src:${sha1(input.source)}`
   return null
 }
@@ -1240,7 +1288,7 @@ export function createUmbrella(options = {}) {
     floorTable = DEFAULT_FLOOR_TABLE,
     cacheSize = 200,
     now = () => Date.now(),
-    audit = null,
+    decisionCenter = null,    audit = null,
     onPluginScored = null,
     rules: initialRules = null,
     registry = null,
@@ -1274,8 +1322,19 @@ export function createUmbrella(options = {}) {
   const stats = { hits: 0, misses: 0, evictions: 0, invalidations: 0, pluginScans: 0 }
 
   function auditRecord(record) {
-    if (typeof audit !== 'function') return
-    try { audit(record) } catch { /* 审计失败不得影响评分 */ }
+    if (typeof audit !== 'function') return { ok: true, skipped: true }
+    try {
+      const result = audit(record)
+      if (result && result.ok === false) {
+        record.auditDegraded = true
+        return result
+      }
+      return { ok: true }
+    } catch (error) {
+      record.auditDegraded = true
+      record.auditError = String(error?.message ?? error)
+      return { ok: false, error: record.auditError }
+    }
   }
 
   function emitPluginScored(assessment) {
@@ -1315,7 +1374,11 @@ export function createUmbrella(options = {}) {
     if (entry.entryFile) {
       const current = mtimeOf(entry.entryFile)
       if (current === null) return true
-      return current !== entry.fingerprint
+      if (current !== entry.fingerprint) return true
+    }
+    if (entry.packageFile) {
+      const currentPackage = mtimeOf(entry.packageFile)
+      if (currentPackage !== entry.packageFingerprint) return true
     }
     return false
   }
@@ -1358,7 +1421,9 @@ export function createUmbrella(options = {}) {
     stats.pluginScans += 1
     const scored = runScorer(input)
     const entryFile = scored?.dir && scored?.entry ? path.join(scored.dir, scored.entry) : null
+    const packageFile = scored?.dir ? path.join(scored.dir, 'package.json') : null
     const fingerprint = entryFile ? mtimeOf(entryFile) : sha1(String(input.source ?? ''))
+    const packageFingerprint = packageFile ? mtimeOf(packageFile) : null
     const grade = normalizeGrade(scored?.grade)
     const assessment = {
       pluginId: String(input.pluginId ?? (input.dir ? path.basename(path.resolve(input.dir)) : 'inline')),
@@ -1379,7 +1444,7 @@ export function createUmbrella(options = {}) {
       fromCache: false,
     }
     rememberGrade(assessment)
-    store(key, { assessment, entryFile, fingerprint })
+    store(key, { assessment, entryFile, fingerprint, packageFile, packageFingerprint })
     emitPluginScored(assessment)
     return assessment
   }
@@ -1420,6 +1485,7 @@ export function createUmbrella(options = {}) {
       tags: base.tags,
       lifecycle: base.lifecycle,
       credential: base.credential,
+      trusted: base.trusted === true,
       reason: base.reason,
       evidence: base.evidence,
       tool: String(evidence?.tool ?? ''),
@@ -1447,13 +1513,69 @@ export function createUmbrella(options = {}) {
       light: assessment.light,
       matchedRule: assessment.matchedRule,
       category: assessment.category,
+      trusted: assessment.trusted === true,
       evidence: assessment.evidence,
       decision: decision.decision,
       severity: decision.severity,
       durationMs: Math.max(0, now() - started),
     }
-    auditRecord(record)
-    return { ...assessment, decision: decision.decision, severity: decision.severity, decisionRecord: record }
+    const auditState = auditRecord(record)
+    let decisionTicketId = null
+    let decisionTicketPromise = null
+    // Umbrella's ASK is exactly the yellow/red attention event the decision center
+    // exists for. Keep it best-effort: a missing decision center must never change
+    // the umbrella decision itself.
+    if (decision.decision === 'ask') {
+      try {
+        const center = typeof decisionCenter === 'function' ? decisionCenter() : decisionCenter
+        if (center && typeof center.submit === 'function') {
+          const level = assessment.light === 'red' || decision.severity === 'critical' ? 'red' : 'yellow'
+          const submitted = center.submit({
+            level,
+            title: `保护伞请求确认：${assessment.matchedRule ?? 'unknown-action'}`,
+            description: `${assessment.tool || 'tool'} → ${assessment.target?.kind || 'none'}:${String(assessment.target?.value || '').slice(0, 500)}`,
+            source: 'System',
+            // 同一 action 的重复 ASK 在决策中心 pending 期内合并，避免重复开票。
+            dedupeKey: `umbrella:${assessment.tool ?? ''}:${assessment.target?.kind ?? ''}:${String(assessment.target?.value ?? '').slice(0, 120)}:${assessment.matchedRule ?? ''}`.slice(0, 200),
+            actions: [
+              { id: 'ack', label: '知悉', type: 'default' },
+              { id: 'ignore', label: '忽略', type: 'default' },
+            ],
+            metadata: {
+              tool: assessment.tool || null,
+              target: assessment.target ?? null,
+              light: assessment.light,
+              matchedRule: assessment.matchedRule ?? null,
+              category: assessment.category ?? null,
+            },
+          })
+          const link = (result) => {
+            if (result?.ok === true && result.ticket?.id) {
+              decisionTicketId = result.ticket.id
+              record.decisionTicketId = decisionTicketId
+            }
+            return result ?? null
+          }
+          // fork 代理的 submit 是异步（outbox/HTTP）；不能丢 Promise，否则 fork 里
+          // decisionTicketId 永远为 null 且可能出现 unhandled rejection。
+          if (submitted && typeof submitted.then === 'function') {
+            decisionTicketPromise = Promise.resolve(submitted).then(link).catch(() => null)
+          } else {
+            link(submitted)
+          }
+        }
+      } catch { /* decision-center is optional */ }
+    }
+    record.decisionTicketId = decisionTicketId
+    return {
+      ...assessment,
+      decision: decision.decision,
+      severity: decision.severity,
+      decisionTicketId,
+      decisionTicketPromise,
+      decisionRecord: record,
+      auditDegraded: auditState?.ok === false || record.auditDegraded === true,
+    }
   }
 
   function cacheStats() {
@@ -1464,7 +1586,10 @@ export function createUmbrella(options = {}) {
     const text = String(keyOrPluginId ?? '')
     let removed = 0
     for (const key of [...cache.keys()]) {
-      if (key === text || key.endsWith(`:${text}`)) {
+      if (key === text
+        || key.endsWith(`:${text}`)
+        || key.startsWith(`id:${text}|`)
+        || key === `id:${text}`) {
         cache.delete(key)
         removed += 1
       }

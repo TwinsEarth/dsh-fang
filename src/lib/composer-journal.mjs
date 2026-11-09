@@ -36,6 +36,14 @@ export class ComposerJournal {
     return entry && typeof entry === 'object' ? entry : null
   }
 
+  /** All recoverable journal entries, newest first (bounded by the same 100-session cap). */
+  list() {
+    const all = this.load()
+    return Object.values(all)
+      .filter((entry) => entry && typeof entry === 'object')
+      .sort((a, b) => String(b?.updatedAt || '').localeCompare(String(a?.updatedAt || '')))
+  }
+
   save(key, input = {}) {
     const id = cleanText(key, 200)
     if (!id) throw new Error('journal-key-required')
