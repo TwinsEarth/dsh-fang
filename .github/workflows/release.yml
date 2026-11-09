@@ -174,7 +174,7 @@ jobs:
           version="${RELEASE_TAG#v}"
           pkg=$(node -p "require('./package.json').name")
           # 幂等：版本已存在（例如手动补发/网络重试后的重跑）视为成功，不把发布流水线打红。
-          if npm view "$pkg@${version}" version >/dev/null 2>&1; then
+          if node -e "const p=require('./package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
             echo "::notice::$pkg@${version} 已存在，跳过 npm publish"
             echo "published=true" >> "$GITHUB_OUTPUT"
             exit 0
