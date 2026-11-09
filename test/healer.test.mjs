@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 // T2 — fangHealer 测试：selfCheck / evidence / G1–G12 门禁（pass+fail+unknown 阻断）/ suggestFix / 不写盘。
+// 安全回归：入口与 G10 patch 路径 containment；suggestFix 不得自动 approve install scripts。
 // 静态 fixture 在 test/fixtures/t2/{clean-plugin,risky-plugin}；边界目录用 mkdtemp 现场生成。
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -152,6 +153,15 @@ test('gates(clean, {stage:"promote"}) fails closed on missing host facts', () =>
   ctx.dispose()
 })
 
+test('gates(clean, {stage:"promote"}) treats missing observedAt as unknown', () => {
+  const { service, ctx } = fresh()
+  const gs = service.gates(CLEAN, { stage: 'promote', facts: { application: 'applied', signals: [], score: 0 } })
+  const g11 = gs.gates.find((gate) => gate.id === 'G11')
+  assert.equal(g11.verdict, 'unknown')
+  assert.equal(gs.pass, false, 'fail-closed: missing freshness evidence must block')
+  ctx.dispose()
+})
+
 test('gates(clean, {stage:"promote", facts}) passes once host evidence is supplied', () => {
   const { service, ctx } = fresh()
   const gs = service.gates(CLEAN, { stage: 'promote', facts: FACTS })
@@ -230,6 +240,29 @@ test('evidence(clean) is structured JSON with contract sections', () => {
   ctx.dispose()
 })
 
+test('suggestFix never auto-approves build scripts or emits an escaping patch target', () => {
+  const { service, ctx } = fresh()
+  const dir = writePluginDir({
+    name: '@local/t2-suggest-safety',
+    version: '1.0.0',
+    type: 'module',
+    scripts: { postinstall: 'node install.js' },
+    dsh: { buildApproved: [], bundle: { patch: '../secret.yml' } },
+  }, { 'index.js': CLEAN_MIN_SRC })
+  const out = service.suggestFix(dir)
+  const g8 = out.patches.find((patch) => patch.why.startsWith('G8'))
+  assert.ok(g8, 'G8 should produce a review patch')
+  assert.match(g8.yaml, /<script-name-after-review>/)
+  assert.doesNotMatch(g8.yaml, /postinstall/, 'must not pre-approve the exact install script')
+  assert.equal(g8.requiresHumanReview, true)
+  const g10 = out.patches.find((patch) => patch.why.startsWith('G10'))
+  assert.ok(g10)
+  assert.equal(g10.target, 'cordis.patch.yml')
+  assert.equal(out.applied, false)
+  assert.deepEqual(out.after.projectedGates, [], 'no G4 signal was removed')
+  ctx.dispose()
+})
+
 test('suggestFix(risky) returns patches and writes nothing to disk', () => {
   const { service, ctx } = fresh()
   const before = digestTree(RISKY)
@@ -283,6 +316,35 @@ test('audit is used when fangAudit exists and tolerated when absent', () => {
   healer.apply(bare, healer.Config({}))
   assert.doesNotThrow(() => bare.get(SERVICE.healer).selfCheck(CLEAN))
   bare.dispose()
+  ctx.dispose()
+})
+
+test('healer: entry candidates outside the plugin root are rejected', () => {
+  const { service, ctx } = fresh()
+  const dir = tempDir()
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: '@local/t2-escape', version: '1.0.0', type: 'module', main: '../secret.js',
+  }), 'utf8')
+  fs.writeFileSync(path.join(path.dirname(dir), 'secret.js'), CLEAN_MIN_SRC, 'utf8')
+  const model = healer.readModel(dir)
+  assert.equal(model.entry, null)
+  const gates = service.gates(dir)
+  assert.equal(gates.gates.find((gate) => gate.id === 'G2').verdict, 'fail')
+  ctx.dispose()
+})
+
+test('healer: G10 rejects a bundle patch declared outside the plugin root', () => {
+  const { service, ctx } = fresh()
+  const dir = tempDir()
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: '@local/t2-g10-escape', version: '1.0.0', type: 'module',
+    dsh: { bundle: { patch: '../secret.yml' } },
+  }), 'utf8')
+  fs.writeFileSync(path.join(path.dirname(dir), 'secret.yml'), '- id: evil\n', 'utf8')
+  const gates = service.gates(dir)
+  const g10 = gates.gates.find((gate) => gate.id === 'G10')
+  assert.equal(g10.verdict, 'fail')
+  assert.match(g10.detail, /unsafe|missing/)
   ctx.dispose()
 })
 

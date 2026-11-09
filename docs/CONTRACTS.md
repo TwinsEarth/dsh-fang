@@ -213,13 +213,31 @@ health() -> {windowMs, samples, lastDiff}
 
 ### 5.9 `fangRestart`（T4）
 ```js
-request({reason, risk, scope, origin, digests?, forcedApproval?, impact?}) -> Promise<{id, outcome:'approved'|'denied'|'timeout'|'auto-allow', decision, risk}>
+request({reason, risk, scope, origin, digests?, forcedApproval?, impact?}) -> Promise<{id, outcome:'approved'|'denied'|'timeout'|'auto-allow', decision, risk, execution, authorization}>
 decideOnly(req) -> {decision:'auto-allow'|'needs-approval', risk}
-state() -> {state:'idle'|'collecting'|'awaiting'|'executing', pending, mode}
+state() -> {state:'idle'|'collecting'|'awaiting'|'executing', pending, mode, manifestTtlMs, approvalDir, executionDir, lastManifest, supervisorPresent, executionArmed, execution:{executed:false}}
 impact() -> {activeForks:[], pendingPromotes:[], dirtyBuffers:[], activeSessions:0}
-policy() -> {mode, authMode, strictRedLine}
+policy() -> {mode, authMode, strictRedLine, decisionOnly, manifestTtlMs, supervisorPresent, executionArmed}
+executionContract() -> {version, decisionOnly, guardExecuted, supervisorPresent, executionArmed, approval:{kind,dir}, receipt:{kind,dir}, supervisor:{armedWhen,handoffWhen,mayExecuteWhen,receiptRequirements}, rule}
+approvals({limit?, now?}) -> {items:[summary], counts:{total,authorized,executed,stale,invalid}}
+executionStatus(id, {now?}) -> {found, valid, expired, executed, authorized, stale, receiptState, manifest, receipt, ...}
+verifyApproval(id, {now?}) -> {ok, reason, expired, digestValid, authorized, executed, stale, receiptState}
 ```
 只服务母体重启；单飞状态机；决策矩阵照抄 `classifyRisk/decide`（与 approval 的旧实现同构，parity 测试守住）。
+每次 `approved` / `auto-allow` 都会原子写一份 durable 授权清单到 `<dataDir>/restart/approved/<id>.json`；
+清单里 `execution.executed` 恒为 `false`（守卫从不重启自己）。清单同时记录 `guard.mode` 与
+`guard.allowProcessRestart`：只有 `mode==='enforce'` 且 `allowProcessRestart===true` 才算 armed，
+未武装的批准照常落盘、可审计，但 supervisor 不得执行。外部 supervisor 执行后写
+`<dataDir>/restart/executed/<id>.json`，回执的 `execution.executed === true` 是唯一的执行证明。
+两阶段字段、校验规则、信任边界与未完成项见 `docs/RESTART-SUPERVISOR-CONTRACT.md`。
+
+执行侧入口（均默认 dry-run、手动运行、不自动启动、不被插件调用）：
+
+- `tools/restart-supervisor.mjs`：包装并监督一条命令，只有 `--execute` + armed 清单才会重启它；
+- `tools/restart-watchdog.mjs`（C 方案外部看护）：轮询 `<dataDir>/fang.pid`，宿主死亡后验证清单再重启；
+  它写 `<dataDir>/restart/supervisor.present` 心跳，守卫据此判断 supervisor 在位。
+  三重门禁（`mode==='enforce'` ∧ `allowProcessRestart===true` ∧ supervisor 在位）齐了，守卫才会在批准后
+  `exit(75)` 交接；默认三门禁全关，进程继续运行。
 
 ### 5.10 `fang`（orchestrator，Lead）
 ```js
@@ -228,9 +246,10 @@ reap(forkId) -> Promise<{ok}>
 listForks() -> ForkInfo[]
 getForkHealth(forkId) -> {ok, url, pid, status, ...}
 promote(forkId, pluginId) -> Promise<{ok, outcome}>
-status() -> {role, forks, mother:{...}}
+autostartForks({taskIds?}) -> {ok, started:[{taskId,pid,port}], failed:[{taskId,error}], skipped:[{taskId,reason}]}
+status() -> {role, tasks, forks, restart:{available, state, mode, authMode, strictRedLine, redLineAutoAllowed, ...}}
 ```
-HTTP（`ctx.inject(['webServer'], ...)`）：`GET /fang/panel`、`GET /fang/api/forks`、`POST /fang/api/forks/create`（GET/POST 同路径会被 exact 路由吞掉，故分开）、`POST /fang/api/forks/:id/promote`、`GET /fang/api/status`。
+HTTP（`ctx.inject(['webServer'], ...)`）：`GET /fang/panel`、`GET /fang/api/forks`、`POST /fang/api/forks/create`（GET/POST 同路径会被 exact 路由吞掉，故分开）、`POST /fang/api/forks/autostart`（watchdog 启动时恢复分身）、`POST /fang/api/forks/:id/promote`、`GET /fang/api/status`、`GET /fang/api/restart`（只读：重启守卫 + supervisor 契约，不触发重启）。
 **webServer API 不确定**：先看 t1 遗留实现（`dsh-hot-update/packages/restart-guard/index.js` 的 `ctx.inject(['webServer']` 段），照它写。
 
 ---
@@ -247,6 +266,7 @@ HTTP（`ctx.inject(['webServer'], ...)`）：`GET /fang/panel`、`GET /fang/api/
 | `fang/buffer-settled` | `{dir, changed:[]}` | buffer-keeper |
 | `fang/restart-requested` | `{id, risk}` | restart-guard |
 | `fang/restart-resolved` | `{id, outcome}` | restart-guard |
+| `fang/restart-approved` | `{id, outcome, risk, execution:{executed:false,...}, authorization:{manifestId, digest, expiresAt}}` | restart-guard（advisory；durable 依据是 `approved/<id>.json`） |
 | `fang/approval-decided` | `{id, outcome}` | approver |
 
 监听方必须容错（没有监听者时 emit 返回 0，不报错）。

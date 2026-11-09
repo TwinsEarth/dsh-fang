@@ -29,7 +29,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { SERVICE, AUDIT, z, readJson, listFiles, sha256, exists } from '../kernel/index.mjs'
 import { scanSource, importsToSignals } from './imports.mjs'
-import { scoreScan, familyOf, entryCandidates } from './scorer.mjs'
+import { scoreScan, familyOf, entryCandidates, resolvePluginFile } from './scorer.mjs'
 import { roleGate } from '../kernel/index.mjs'
 
 export const name = 'fang-healer'
@@ -133,11 +133,14 @@ function depAllowed(dep, cfg) {
  */
 export function readModel(dir, opts = {}) {
   const abs = path.resolve(String(dir ?? ''))
-  const pkg = readJson(path.join(abs, 'package.json'), null)
-  const manifest = opts.manifest ?? readJson(path.join(abs, 'manifest.json'), null)
+  const pkgFile = resolvePluginFile(abs, 'package.json')
+  const pkg = pkgFile ? readJson(pkgFile, null) : null
+  const manifestFile = opts.manifest === undefined ? resolvePluginFile(abs, 'manifest.json') : null
+  const manifest = opts.manifest ?? (manifestFile ? readJson(manifestFile, null) : null)
   let entry = null
   for (const rel of entryCandidates(pkg ?? {}, manifest)) {
-    const file = path.join(abs, rel)
+    const file = resolvePluginFile(abs, rel)
+    if (!file) continue
     try {
       const st = fs.statSync(file)
       if (!st.isFile()) continue
@@ -327,8 +330,11 @@ function makeGates(model, cfg, opts = {}) {
   if (typeof patchRel !== 'string' || patchRel === '') {
     add('G10', 'bundle-patch', 'skip', 'not a bundle (no dsh.bundle.patch)')
   } else {
-    const ok = exists(path.join(model.abs, patchRel))
-    add('G10', 'bundle-patch', ok ? 'pass' : 'fail', ok ? patchRel : `declared bundle patch missing: ${patchRel}`, { patch: patchRel })
+    // The declared patch is plugin-relative and must stay inside the plugin root.
+    const patchFile = resolvePluginFile(model.abs, patchRel)
+    const ok = patchFile !== null
+    add('G10', 'bundle-patch', ok ? 'pass' : 'fail',
+      ok ? patchRel : `declared bundle patch missing/unsafe: ${patchRel}`, { patch: patchRel })
   }
 
   // G11 激活证据：静态预检查看不了激活（load 之后才可观测）→ deferred/SKIP（ci-gate G7 同构）；
@@ -339,7 +345,9 @@ function makeGates(model, cfg, opts = {}) {
     add('G11', 'activation-evidence', 'unknown', 'no host facts (activation not observed)')
   } else if (facts.application !== 'applied') {
     add('G11', 'activation-evidence', 'fail', `facts.application=${JSON.stringify(facts.application ?? null)} (expected "applied")`)
-  } else if (typeof facts.observedAt === 'number' && model.entry && facts.observedAt < model.entry.mtimeMs) {
+  } else if (!Number.isFinite(facts.observedAt) || facts.observedAt <= 0) {
+    add('G11', 'activation-evidence', 'unknown', 'facts.observedAt missing/invalid; freshness cannot be established')
+  } else if (model.entry && facts.observedAt < model.entry.mtimeMs) {
     add('G11', 'activation-evidence', 'fail', `facts stale: observedAt=${facts.observedAt} < entry.mtimeMs=${model.entry.mtimeMs}`)
   } else {
     add('G11', 'activation-evidence', 'pass', 'facts.application=applied and fresh enough')
@@ -418,8 +426,8 @@ function evidenceOf(model, cfg) {
 
 // ─────────────────────────────── suggestFix ───────────────────────────────
 
-function patch(target, yaml, why) {
-  return { target, yaml, why }
+function patch(target, yaml, why, extra = {}) {
+  return { target, yaml, why, ...extra }
 }
 
 function suggestFixOf(model, cfg, opts = {}) {
@@ -441,14 +449,16 @@ function suggestFixOf(model, cfg, opts = {}) {
   if (g1 && !g1.ok && g1.verdict === 'fail') {
     add(patch('package.json',
       JSON.stringify({ name: model.pkg?.name ?? '@local/<plugin-name>', version: '1.0.0', type: 'module' }, null, 2),
-      `G1 manifest-fields: ${g1.detail}`))
+      `G1 manifest-fields: ${g1.detail} — merge these fields into the existing package.json; do not replace the file`,
+      { apply: 'merge', mergeInto: 'package.json' }))
   }
 
   const g2 = gate('G2')
   if (g2 && !g2.ok) {
     add(patch('package.json',
       JSON.stringify({ exports: { '.': './index.js' } }, null, 2),
-      `G2 entry-exists: ${g2.detail} — create the entry file and point exports/main at it`))
+      `G2 entry-exists: ${g2.detail} — create the entry file and merge this exports field`,
+      { apply: 'merge', mergeInto: 'package.json' }))
   }
 
   const g3 = gate('G3')
@@ -486,9 +496,16 @@ function suggestFixOf(model, cfg, opts = {}) {
 
   const g8 = gate('G8')
   if (g8 && g8.verdict === 'fail') {
+    // Never auto-approve install scripts: that would turn a security finding into a
+    // one-line bypass. The placeholder requires a human review step.
     add(patch('package.json',
-      JSON.stringify({ dsh: { buildApproved: (g8.missing ?? g8.present ?? []) } }, null, 2),
-      `G8 build-scripts: ${g8.detail} — either remove the install script or list it in dsh.buildApproved`))
+      JSON.stringify({
+        dsh: {
+          buildApproved: ['<script-name-after-review>'],
+        },
+      }, null, 2),
+      `G8 build-scripts: ${g8.detail} — review each install script; only merge names you explicitly approve. An auto-filled buildApproved list would bypass this gate.`,
+      { apply: 'manual-review', mergeInto: 'package.json', requiresHumanReview: true }))
   }
 
   const g9 = gate('G9')
@@ -500,16 +517,22 @@ function suggestFixOf(model, cfg, opts = {}) {
 
   const g10 = gate('G10')
   if (g10 && g10.verdict === 'fail') {
-    add(patch(g10.patch ?? 'cordis.patch.yml',
-      '# create the declared bundle patch file and make sure it matches dsh.bundle.patch',
-      `G10 bundle-patch: ${g10.detail}`))
+    const declared = typeof g10.patch === 'string' ? g10.patch : ''
+    const safeTarget = declared && !path.isAbsolute(declared) && !declared.split(/[\\/]/).includes('..')
+      ? declared
+      : 'cordis.patch.yml'
+    add(patch(safeTarget,
+      '# create the declared bundle patch file; the declaration must stay inside the plugin root',
+      `G10 bundle-patch: ${g10.detail}`,
+      { apply: 'manual-create', declaredPatch: declared || null }))
   }
 
   const g7 = gate('G7')
   if (g7 && g7.verdict === 'fail') {
     add(patch('package.json',
-      JSON.stringify({ dsh: { exempted: [{ gate: 'G3', reason: 'reviewed: <why this risk is acceptable>' }] } }, null, 2),
-      `G7 exemption-honesty: ${g7.detail}`))
+      JSON.stringify({ dsh: { exempted: [{ gate: '<gate-id>', reason: 'reviewed: <why this risk is acceptable>' }] } }, null, 2),
+      `G7 exemption-honesty: ${g7.detail} — merge only after a real review; a placeholder exemption must not be copied blindly`,
+      { apply: 'manual-review', mergeInto: 'package.json', requiresHumanReview: true }))
   }
 
   const fx = finding('inject-missing')
@@ -527,9 +550,13 @@ function suggestFixOf(model, cfg, opts = {}) {
 
   const before = gradeOfModel(model)
   let afterGrade = before.grade
+  const projectedGates = []
   if (model.entry) {
     const addressed = new Set()
-    if (g4 && g4.verdict === 'fail') addressed.add('S1')
+    if (g4 && g4.verdict === 'fail') {
+      addressed.add('S1')
+      projectedGates.push('G4')
+    }
     const kept = before.signals.filter(s => !addressed.has(familyOf(s.id)))
     const projected = scoreScan(kept, {
       ...(model.pkg ?? {}),
@@ -541,7 +568,13 @@ function suggestFixOf(model, cfg, opts = {}) {
   return {
     patches,
     before: { grade: before.grade, S: before.S },
-    after: { grade: afterGrade, note: 'projected from static fixes only; host-fact gates (G11/G12) are unaffected' },
+    after: {
+      grade: afterGrade,
+      note: projectedGates.length > 0
+        ? 'projected only by removing G4/S1 signals; G3/G5/G6/G7/G8/G9/G10 are not represented and host-fact gates (G11/G12) are unaffected'
+        : 'static projection only; no score-affecting patch was applied and host-fact gates (G11/G12) are unaffected',
+      projectedGates,
+    },
     dir: model.abs,
     applied: false,
   }

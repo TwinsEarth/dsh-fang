@@ -6,6 +6,7 @@
 //       A-B 双备 snapshot+轮换+rollback / monitor 报警 / pending 列表 / 文件桥 / dispose 清理。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -247,6 +248,101 @@ test('strictRedLine：红灯不被 authMode=auto 绕过；非红自动放行', a
   }
 })
 
+test('pending queue recovers as orphaned after restart, never fake pending', () => {
+  const root = tempRoot()
+  const pendingFile = path.join(root, 'data', 'dsh-approval-pending.json')
+  try {
+    const ctx1 = makeBridgeCtx(root)
+    try {
+      const first = ctx1.get(SERVICE.approver)
+      void first.request({ kind: 'promotion', risk: 'red', title: 'before restart', ttlMs: 60000 })
+      assert.ok(exists(pendingFile))
+      var snapshot = fs.readFileSync(pendingFile, 'utf8')
+    } finally {
+      ctx1.dispose()
+    }
+    fs.writeFileSync(pendingFile, snapshot)
+    const ctx2 = makeBridgeCtx(root)
+    try {
+      const second = ctx2.get(SERVICE.approver)
+      assert.equal(second.status().pending, 0)
+      assert.equal(second.status().orphaned, 1)
+      const orphaned = second.orphaned()
+      assert.equal(orphaned.length, 1)
+      assert.equal(orphaned[0].state, 'orphaned')
+      assert.equal(orphaned[0].by, 'restart')
+      assert.deepEqual(second.pending(), [])
+      assert.deepEqual(JSON.parse(fs.readFileSync(pendingFile, 'utf8')), [])
+      assert.equal(second.decide(orphaned[0].id, 'approved').reason, 'not-pending')
+    } finally {
+      ctx2.dispose()
+    }
+  } finally {
+    removeTree(root)
+  }
+})
+
+test('generic request() blocks mother-only kinds on fork scope', async () => {
+  const root = tempRoot()
+  const previous = process.env.DSH_FANG_ROLE
+  process.env.DSH_FANG_ROLE = 'fork'
+  try {
+    const ctx = makeBridgeCtx(root)
+    try {
+      const service = ctx.get(SERVICE.approver)
+      assert.equal(service.scope, 'fork')
+      const denied = await service.request({ kind: 'promotion', risk: 'red', title: 'escaped gate' })
+      assert.equal(denied.outcome, 'denied')
+      assert.equal(denied.by, 'scope')
+      assert.equal(denied.reason, 'mother-only')
+      assert.deepEqual(service.pending(), [])
+      const restart = await service.request({ kind: 'restart', risk: 'red', title: 'escaped restart' })
+      assert.equal(restart.outcome, 'denied')
+      assert.equal(restart.reason, 'mother-only')
+      const promise = service.request({ kind: 'action', risk: 'yellow', title: 'fork local' })
+      const [item] = service.pending()
+      assert.ok(item)
+      assert.equal(service.decide(item.id, 'denied').ok, true)
+      assert.equal((await promise).outcome, 'denied')
+    } finally {
+      ctx.dispose()
+    }
+  } finally {
+    if (previous === undefined) delete process.env.DSH_FANG_ROLE
+    else process.env.DSH_FANG_ROLE = previous
+    removeTree(root)
+  }
+})
+
+test('snapshot index persists across restart so rollback still works', () => {
+  const root = tempRoot()
+  const work = path.join(root, 'work')
+  try {
+    copyTree(FIXTURE_TREE, work)
+    const ctx1 = makeBridgeCtx(root)
+    try {
+      const first = ctx1.get(SERVICE.approver)
+      assert.equal(first.snapshot({ tag: 'persisted', dir: work }).tag, 'persisted')
+      assert.ok(exists(path.join(root, 'data', 'snapshots', 'index.json')))
+    } finally {
+      ctx1.dispose()
+    }
+    const ctx2 = makeBridgeCtx(root)
+    try {
+      const second = ctx2.get(SERVICE.approver)
+      assert.equal(second.status().snapshots, 1, 'index must be loaded after restart')
+      fs.writeFileSync(path.join(work, 'a.txt'), 'junk\n')
+      const rolled = second.rollback({ tag: 'persisted', dir: work })
+      assert.equal(rolled.ok, true)
+      assert.equal(fs.readFileSync(path.join(work, 'a.txt'), 'utf8'), 'alpha\n')
+    } finally {
+      ctx2.dispose()
+    }
+  } finally {
+    removeTree(root)
+  }
+})
+
 test('A/B 双备：snapshot 落盘 / 轮换保留上一代 / rollback 恢复内容并校验 digest', () => {
   const root = tempRoot()
   const auditor = makeAuditor()
@@ -309,6 +405,116 @@ test('A/B 双备：snapshot 落盘 / 轮换保留上一代 / rollback 恢复内�
   } finally {
     ctx.dispose()
     removeTree(root)
+  }
+})
+
+test('多代快照：保留 3 代、可回滚 C，index 重启后仍可恢复', () => {
+  const root = tempRoot()
+  const work = path.join(root, 'work')
+  try {
+    copyTree(FIXTURE_TREE, work)
+    const ctx1 = makeBridgeCtx(root, { snapshotGenerations: 3 })
+    try {
+      const first = ctx1.get(SERVICE.approver).snapshot({ tag: 'multi', dir: work })
+      assert.equal(first.ok, undefined)
+      assert.equal(first.A.digest.length, 64)
+      assert.equal(first.generations.length, 1)
+      fs.writeFileSync(path.join(work, 'a.txt'), 'alpha-v2\n')
+      const second = ctx1.get(SERVICE.approver).snapshot({ tag: 'multi', dir: work })
+      assert.equal(second.generations.length, 2)
+      fs.writeFileSync(path.join(work, 'a.txt'), 'alpha-v3\n')
+      const third = ctx1.get(SERVICE.approver).snapshot({ tag: 'multi', dir: work })
+      assert.deepEqual(third.generations.map(g => g.slot), ['A', 'B', 'C'])
+      assert.notEqual(third.A.digest, third.B.digest)
+      assert.notEqual(third.B.digest, third.C.digest)
+      const rolled = ctx1.get(SERVICE.approver).rollback({ tag: 'multi', dir: work, to: 'C' })
+      assert.equal(rolled.ok, true)
+      assert.equal(rolled.restored.slot, 'C')
+      assert.equal(fs.readFileSync(path.join(work, 'a.txt'), 'utf8'), 'alpha\n')
+    } finally {
+      ctx1.dispose()
+    }
+    // 重启后 index 仍保留 C 代
+    const ctx2 = makeBridgeCtx(root, { snapshotGenerations: 3 })
+    try {
+      const service = ctx2.get(SERVICE.approver)
+      assert.equal(service.rollback({ tag: 'multi', dir: work, to: 'C' }).ok, true)
+      assert.equal(fs.readFileSync(path.join(work, 'a.txt'), 'utf8'), 'alpha\n')
+    } finally {
+      ctx2.dispose()
+    }
+  } finally {
+    removeTree(root)
+  }
+})
+
+test('多代快照：snapshotGenerations=2 时只保留 A/B', () => {
+  const root = tempRoot()
+  const work = path.join(root, 'work')
+  try {
+    copyTree(FIXTURE_TREE, work)
+    const ctx = makeBridgeCtx(root, { snapshotGenerations: 2 })
+    try {
+      const service = ctx.get(SERVICE.approver)
+      service.snapshot({ tag: 'two', dir: work })
+      fs.writeFileSync(path.join(work, 'a.txt'), 'alpha-v2\n')
+      const second = service.snapshot({ tag: 'two', dir: work })
+      assert.deepEqual(second.generations.map(g => g.slot), ['A', 'B'])
+      assert.equal(exists(path.join(root, 'data', 'snapshots', 'two', 'C')), false)
+      assert.equal(service.rollback({ tag: 'two', dir: work, to: 'C' }).reason, 'slot-empty')
+    } finally {
+      ctx.dispose()
+    }
+  } finally {
+    removeTree(root)
+  }
+})
+
+test('崩溃 journal：request/settled 落盘；未结请求重启后标记 orphaned', async () => {
+  const root = tempRoot()
+  const ctx = makeBridgeCtx(root)
+  try {
+    const service = ctx.get(SERVICE.approver)
+    const pending = service.request({ kind: 'promotion', risk: 'red', title: 'journal-crash', ttlMs: 5000 })
+    const journalFile = path.join(root, 'data', 'dsh-approval-journal.jsonl')
+    assert.ok(exists(journalFile))
+    const read = () => fs.readFileSync(journalFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    const requestLine = read().find(line => line.type === 'request')
+    assert.equal(requestLine.kind, 'promotion')
+    const id = requestLine.id
+    service.decide(id, 'approved', { by: 'tester' })
+    await pending
+    assert.equal(read().some(line => line.type === 'settled' && line.id === id && line.outcome === 'approved'), true)
+  } finally {
+    ctx.dispose()
+    removeTree(root)
+  }
+
+  // 模拟“进程在 pending 期间崩溃”：只剩 journal 的 request，没有 pending.json。
+  const crashRoot = tempRoot()
+  try {
+    const dataDir = path.join(crashRoot, 'data')
+    fs.mkdirSync(dataDir, { recursive: true })
+    const crashedAt = Date.now() - 1000
+    fs.writeFileSync(path.join(dataDir, 'dsh-approval-journal.jsonl'), JSON.stringify({
+      at: new Date(crashedAt).toISOString(), type: 'request', id: 'apr_crashed', kind: 'restart', risk: 'red',
+      title: 'crashed request', detail: 'x', taskId: 't1', pluginId: null,
+      createdAt: crashedAt, deadlineAt: crashedAt + 5000, ttlMs: 5000,
+    }) + '\n')
+    const ctx2 = makeBridgeCtx(crashRoot)
+    try {
+      const service = ctx2.get(SERVICE.approver)
+      assert.equal(service.status().orphaned, 1)
+      const rows = service.orphaned()
+      assert.equal(rows[0].id, 'apr_crashed')
+      assert.equal(rows[0].state, 'orphaned')
+      assert.equal(rows[0].by, 'restart')
+      assert.equal(service.pending().length, 0)
+    } finally {
+      ctx2.dispose()
+    }
+  } finally {
+    removeTree(crashRoot)
   }
 })
 
@@ -404,6 +610,44 @@ test('文件桥：command / pending / status / answer json 供 CLI 驱动', asyn
     assert.equal(last.outcome, 'approved')
     assert.equal(last.by, 'cli')
     assert.equal(exists(path.join(dataDir, BRIDGE_FILES.answer)), false)
+  } finally {
+    ctx.dispose()
+    removeTree(root)
+  }
+})
+
+test('文件桥：bridgeSecret 要求 HMAC，未签名命令/答案被拒绝', async () => {
+  const root = tempRoot()
+  const secret = 'test-bridge-secret'
+  const ctx = makeBridgeCtx(root, { fileBridgePollMs: 20, bridgeAclCheck: false, bridgeSecret: secret })
+  const service = ctx.get(SERVICE.approver)
+  const dataDir = path.join(root, 'data')
+  const stableStringify = (value) => {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value)
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+  }
+  const sign = (payload) => {
+    const copy = { ...payload }
+    delete copy.signature
+    return { ...copy, signature: crypto.createHmac('sha256', secret).update(stableStringify(copy)).digest('hex') }
+  }
+  try {
+    fs.mkdirSync(dataDir, { recursive: true })
+    fs.writeFileSync(path.join(dataDir, BRIDGE_FILES.command), JSON.stringify({ action: 'request', kind: 'unsigned', risk: 'yellow', title: 'x' }))
+    await sleep(120)
+    assert.equal(service.pending().length, 0, 'unsigned command must not execute')
+    assert.equal(exists(path.join(dataDir, BRIDGE_FILES.command)), false)
+
+    fs.writeFileSync(path.join(dataDir, BRIDGE_FILES.command), JSON.stringify(sign({ action: 'request', kind: 'signed', risk: 'yellow', title: 'signed', ttlMs: 5000 })))
+    assert.equal(await waitFor(() => service.pending().length === 1), true)
+    const item = service.pending()[0]
+    fs.writeFileSync(path.join(dataDir, BRIDGE_FILES.answer), JSON.stringify({ id: item.id, decision: 'approve', by: 'unsigned' }))
+    await sleep(120)
+    assert.equal(service.pending().length, 1, 'unsigned answer must not decide')
+    fs.writeFileSync(path.join(dataDir, BRIDGE_FILES.answer), JSON.stringify(sign({ id: item.id, decision: 'approve', by: 'signed' })))
+    assert.equal(await waitFor(() => service.pending().length === 0), true)
+    assert.equal(service.status().lastDecisions.at(-1).by, 'signed')
   } finally {
     ctx.dispose()
     removeTree(root)
@@ -532,6 +776,7 @@ test('v2 summary：本地 pending + 多 remote 并发汇总，单 remote 失败�
 
     const onlyLocal = await service.summary()
     assert.equal(onlyLocal.ok, true)
+    assert.equal(onlyLocal.complete, true)
     assert.deepEqual(onlyLocal.remote, [])
     assert.equal(onlyLocal.local.length, 1)
     assert.equal(onlyLocal.total, 1)
@@ -574,6 +819,7 @@ test('v2 summary：本地 pending + 多 remote 并发汇总，单 remote 失败�
     assert.equal(result.ok, true, '汇总本身完成即 ok')
     assert.equal(result.failed, 3, '抛错 / ok:false / 无 fetchApprovals 都是降级但不阻塞')
     assert.equal(result.degraded, true)
+    assert.equal(result.complete, false, 'ok=true only means aggregation completed; complete=false exposes remote failures')
     assert.equal(result.local.length, 1)
     assert.equal(result.local[0].kind, 'promotion')
     assert.equal(result.local[0].taskId, 'task-local')
@@ -628,6 +874,67 @@ test('v2 summary：remote 是并发拉取（不是顺序 await）', async () => 
     assert.equal(result.failed, 0)
     assert.equal(result.total, 3)
     assert.deepEqual(result.remote.map((entry) => entry.taskId), ['a', 'b'])
+  } finally {
+    ctx.dispose()
+    removeTree(root)
+  }
+})
+
+test('v2 hardening: safeTag collisions, invalid answers, summary.complete, mother-only entries', async () => {
+  // Distinct raw tags must not share a snapshot directory.
+  const root = tempRoot()
+  const work = path.join(root, 'work')
+  copyTree(FIXTURE_TREE, work)
+  const ctx = makeBridgeCtx(root)
+  const service = ctx.get(SERVICE.approver)
+  try {
+    const slash = service.snapshot({ tag: 'a/b', dir: work })
+    const underscore = service.snapshot({ tag: 'a_b', dir: work })
+    assert.notEqual(slash.tag, underscore.tag)
+    assert.ok(exists(path.join(root, 'data', 'snapshots', slash.tag, 'A')))
+    assert.ok(exists(path.join(root, 'data', 'snapshots', underscore.tag, 'A')))
+
+    const local = await service.summary()
+    assert.equal(local.complete, true)
+
+    const prev = process.env.DSH_FANG_ROLE
+    process.env.DSH_FANG_ROLE = 'fork'
+    try {
+      const forkCtx = makeBridgeCtx(root, { role: 'fork' })
+      const forkService = forkCtx.get(SERVICE.approver)
+      try {
+        const promotion = await forkService.requestPromotion({ pluginId: 'p', taskId: 't' })
+        assert.equal(promotion.outcome, 'denied')
+        assert.equal(promotion.by, 'scope')
+        assert.equal(promotion.reason, 'mother-only')
+        const restart = await forkService.requestRestart({ reason: 'x' })
+        assert.equal(restart.outcome, 'denied')
+        assert.equal(restart.reason, 'mother-only')
+        assert.equal(forkService.pending().length, 0)
+      } finally {
+        forkCtx.dispose()
+      }
+    } finally {
+      if (prev === undefined) delete process.env.DSH_FANG_ROLE
+      else process.env.DSH_FANG_ROLE = prev
+    }
+  } finally {
+    ctx.dispose()
+    removeTree(root)
+  }
+})
+
+test('v2 hardening: invalid/unknown answer files are consumed instead of polled forever', async () => {
+  const root = tempRoot()
+  const ctx = makeBridgeCtx(root, { fileBridgePollMs: 20 })
+  const dataDir = path.join(root, 'data')
+  try {
+    fs.mkdirSync(dataDir, { recursive: true })
+    const answer = path.join(dataDir, BRIDGE_FILES.answer)
+    fs.writeFileSync(answer, '{ not json', 'utf8')
+    assert.equal(await waitFor(() => !exists(answer)), true, 'malformed answer must be consumed')
+    fs.writeFileSync(answer, JSON.stringify({ id: 'apr_missing', decision: 'approve' }), 'utf8')
+    assert.equal(await waitFor(() => !exists(answer)), true, 'unknown answer must be consumed')
   } finally {
     ctx.dispose()
     removeTree(root)

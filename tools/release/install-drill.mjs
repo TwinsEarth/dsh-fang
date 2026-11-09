@@ -8,7 +8,8 @@ import { spawn, execFileSync } from 'node:child_process'
 import net from 'node:net'
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..')
-const CLI = ['E:/DS/resources/runtime/cli/bin/dsh.cmd', 'E:/DS/resources/runtime/cli/bin/dsh.exe']
+const CLI = [process.env.DSH_CLI_PATH, 'E:/DS/resources/runtime/cli/bin/dsh.cmd', 'E:/DSH/DS/resources/runtime/cli/bin/dsh.cmd', 'C:/Program Files/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd']
+  .filter(Boolean)
   .find((p) => fs.existsSync(p))
 if (!CLI) { console.error('SKIP install-drill: dsh CLI not found'); process.exit(2) }
 const NO_POPUP = process.argv.includes('--no-popup')
@@ -22,6 +23,7 @@ const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-drill-'))
 const profile = path.join(home, 'profiles', 'drill')
 const pkgDir = path.join(profile, 'node_modules', '@twinsearth', 'dsh-fang')
+let drillPort = 0
 
 let child = null
 const checks = []
@@ -53,7 +55,18 @@ try {
   }, null, 2) + '\n', 'utf8')
   fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), '[]\n', 'utf8')
   check('tarball installed into clean profile', fs.existsSync(path.join(pkgDir, 'src', 'index.mjs')))
-  child = spawn(CLI, ['--profile', 'drill', '--port', String(await freePort()), '--no-open'], { env, cwd: home, shell: true, windowsHide: true })
+  // 启动前自检：bundle 行/模块解析/隔离 import 冒烟；失败时 install drill 直接红。
+  try {
+    const guard = execFileSync(process.execPath, [path.join(ROOT, 'tools', 'boot-guard.mjs'), '--profile-dir', profile, '--json'], { encoding: 'utf8', timeout: 120000 })
+    const parsed = JSON.parse(guard)
+    check('boot-guard precheck PASS', parsed.ok === true, `checked=${parsed.checked ?? '?'} findings=${(parsed.findings ?? []).length}`)
+  } catch (error) {
+    let detail = String(error?.message ?? error)
+    try { detail = String(JSON.parse(String(error.stdout ?? '{}')).findings?.map((f) => f.code).join(',')) } catch { /* keep */ }
+    check('boot-guard precheck PASS', false, detail.slice(0, 300))
+  }
+  drillPort = await freePort()
+  child = spawn(CLI, ['--profile', 'drill', '--port', String(drillPort), '--no-open'], { env, cwd: home, shell: true, windowsHide: true })
   let stdout = ''
   let stderr = ''
   let exitCode = null
@@ -109,7 +122,7 @@ try {
 
   const dump = execFileSync(CLI, ['--profile', 'drill', '--dump-config'], { env, encoding: 'utf8', cwd: home, shell: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024 })
   const rows = [...new Set([...dump.matchAll(/\bid:\s*['"]?(fang-[a-z0-9-]+)/g)].map((m) => m[1]))]
-  check('16 fang-* rows composed', rows.length >= 16, `rows=${rows.length}`)
+  check('19 fang-* rows composed (>=17)', rows.length >= 17, `rows=${rows.length}`)
   const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
   check('browser client half enabled', pkg.dsh?.client?.platform === 'web', JSON.stringify(pkg.dsh?.client ?? null))
 
@@ -141,9 +154,22 @@ try {
     if (process.platform === 'win32') { try { execFileSync('taskkill.exe', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore' }) } catch { /* already gone */ } }
     try { child.kill() } catch { /* already gone */ }
   }
+  const failedBeforeCleanup = checks.filter((c) => !c.ok).length
+  if (!failedBeforeCleanup) {
+    // 零残留：成功后删除临时 home，并确认 drill 端口已释放（进程树 kill 后 300ms）。
+    try { fs.rmSync(home, { recursive: true, force: true }) } catch { /* ignore */ }
+    await sleep(300)
+    check('zero-residue: temp home removed', !fs.existsSync(home), home)
+    const portFree = await new Promise((resolve) => {
+      const probe = net.createServer()
+      probe.once('error', () => resolve(false))
+      probe.listen(drillPort, '127.0.0.1', () => probe.close(() => resolve(true)))
+      setTimeout(() => resolve(false), 1500).unref?.()
+    })
+    check('zero-residue: drill port released', portFree, String(drillPort))
+  }
   const failed = checks.filter((c) => !c.ok).length
   console.log(`\n${failed ? 'RED' : 'GREEN'}  install drill ${checks.length - failed}/${checks.length}`)
   console.log('home:', home)
-  if (!failed) { try { fs.rmSync(home, { recursive: true, force: true }) } catch { /* ignore */ } }
   process.exit(failed ? 1 : 0)
 }

@@ -26,7 +26,7 @@ import {
   createRuleRegistry,
   isLockedRule,
   loadRuleConfigFile,
-  watchRuleConfigFile,
+  watchRuleConfigFiles,
 } from '../lib/rule-registry.mjs'
 
 export const name = 'fang-umbrella'
@@ -227,17 +227,12 @@ export function apply(ctx, config) {
   let ruleWatcher = null
   const reloadRules = () => applyAllLayers()
 
-  const watchedFile = projectFilePath || envFilePath || baselinePath
-  if (watchedFile.length > 0 && cfg.rulesWatch) {
-    ruleWatcher = watchRuleConfigFile(watchedFile, ruleRegistry, (result) => {
-      ruleConfigStatus = {
-        ...ruleConfigStatus,
-        applied: result.applied === true,
-        ruleCount: ruleRegistry.ids().length,
-        warnings: result.warnings ?? ruleConfigStatus.warnings,
-        errors: result.errors ?? [],
-        appliedAt: Date.now(),
-      }
+  const watchedFiles = layerCandidates.map((layer) => layer.file)
+  if (watchedFiles.length > 0 && cfg.rulesWatch) {
+    ruleWatcher = watchRuleConfigFiles(watchedFiles, () => {
+      // Re-read every layer, not just the file that changed: later layers override
+      // earlier ones by id, so a single-layer applyConfig would discard the stack.
+      applyAllLayers()
     }, { debounceMs: cfg.rulesDebounceMs, logger: ctx.logger })
     ctx.effect(() => () => { try { ruleWatcher?.stop?.() } catch { /* ignore */ } })
   }
@@ -248,9 +243,17 @@ export function apply(ctx, config) {
     floorTable: cfg.gradeFloorTable,
     cacheSize: cfg.cacheSize,
     registry: ruleRegistry,
+    decisionCenter: () => safeGet(ctx, SERVICE.decisionCenter),
     audit(record) {
-      if (!cfg.auditDecisions) return
-      try { safeGet(ctx, SERVICE.auditor)?.append?.(AUDIT.UMBRELLA_DECISION, record) } catch { /* 审计缺失不影响决策 */ }
+      if (!cfg.auditDecisions) return { ok: true, skipped: true }
+      const auditor = safeGet(ctx, SERVICE.auditor)
+      if (!auditor || typeof auditor.append !== 'function') return { ok: false, reason: 'auditor-unavailable' }
+      try {
+        auditor.append(AUDIT.UMBRELLA_DECISION, record)
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, reason: 'audit-failed', error: String(error?.message ?? error) }
+      }
     },
   })
 
@@ -333,6 +336,7 @@ export function apply(ctx, config) {
         matchedRule: base.matchedRule,
         category: base.category,
         tags: base.tags,
+        trusted: base.trusted === true,
         reason: base.reason,
         evidence: base.evidence,
         target: base.target,

@@ -20,6 +20,7 @@ import * as orchestrator from './plugins/orchestrator.mjs'
 import * as sessionBridge from './plugins/session-bridge.mjs'
 import * as sessionSync from './plugins/session-sync.mjs'
 import * as sessionRouter from './plugins/session-router.mjs'
+import * as decisionCenter from './plugins/decision-center.mjs'
 
 export const name = 'fang-compose'
 export const inject = []
@@ -40,6 +41,7 @@ export const Config = z.object({
   sessionBridge: z.object({}).default({}).description('桥接（实时驱动 PC 会话）配置'),
   sessionSync: z.object({}).default({}).description('同步（勾选会话搬运）配置'),
   sessionRouter: z.object({}).default({}).description('混合路由配置'),
+  decisionCenter: z.object({}).default({}).description('决策中心配置'),
 }).description('dsh-Fang 单行装载模式配置')
 
 export function apply(ctx, config) {
@@ -59,6 +61,7 @@ export function apply(ctx, config) {
   ctx.plugin(sessionBridge, cfg.sessionBridge ?? {})
   ctx.plugin(sessionSync, cfg.sessionSync ?? {})
   ctx.plugin(sessionRouter, cfg.sessionRouter ?? {})
+  ctx.plugin(decisionCenter, cfg.decisionCenter ?? {})
 }
 
-export const _modules = { auditor, forker, bufferKeeper, scorer, umbrella, healer, router, approver, hotReloader, restartGuard, adapter, orchestrator, sessionBridge, sessionSync, sessionRouter }
+export const _modules = { auditor, forker, bufferKeeper, scorer, umbrella, healer, router, approver, hotReloader, restartGuard, adapter, orchestrator, sessionBridge, sessionSync, sessionRouter, decisionCenter }

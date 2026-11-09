@@ -89,6 +89,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: install jsdom for client DOM harness
+        run: npm install --no-save --no-audit --no-fund --ignore-scripts jsdom@^31.0.0
       - run: node --test --test-concurrency=1 "test/*.test.mjs"
       - run: node test/licensing.test.mjs
 
@@ -201,6 +203,8 @@ jobs:
   docker:
     name: docker image (healthz)
     needs: build
+    # Docker Hub 凭据是可选外部依赖；未显式开启时跳过，避免无凭据的发布流水线变红。
+    if: vars.ENABLE_DOCKER == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

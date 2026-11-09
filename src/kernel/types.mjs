@@ -24,6 +24,7 @@ export const SERVICE = {
   sessionRouter: 'fangSessionRouter',
   link: 'fangLink',
   mirror: 'fangMirror',
+  decisionCenter: 'fangDecisionCenter',
 }
 
 /** Loader row ids used by cordis.patch.yml. */
@@ -43,6 +44,7 @@ export const ROW = {
   sessionBridge: 'fang-session-bridge',
   sessionSync: 'fang-session-sync',
   sessionRouter: 'fang-session-router',
+  decisionCenter: 'fang-decision-center',
 }
 
 export const FORK_STATUS = {
@@ -96,6 +98,7 @@ export const AUDIT = {
   FORK_CREATED: 'fork-created',
   FORK_STARTED: 'fork-started',
   FORK_CRASHED: 'fork-crashed',
+  FORK_SUPERVISION: 'fork-supervision',
   FORK_REAPED: 'fork-reaped',
   FORK_HEALTH: 'fork-health',
   PROMOTE_REQUESTED: 'promote-requested',
@@ -125,7 +128,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '3.1.0'
+export const FANG_VERSION = '3.1.2'
 
 /**
  * @typedef {object} ForkInfo
@@ -182,6 +185,7 @@ export const ADAPTER_OP = {
   APPROVAL_DECIDE: 'approval-decide',
   ARCHIVE: 'archive',
   FORK_SESSION: 'fork-session',
+  DECISION_INGEST: 'decision-ingest',
 }
 
 /** Adapter HTTP route suffixes (fork side). */

@@ -330,9 +330,16 @@ export class MirrorManager {
     this.ensureLayoutWithoutRecursion()
     const current = this.readMeta().version
     if (this.officialSource === null) return { ok: false, current, latest: null, available: false, reason: 'official-source-unavailable' }
+    const settle = (latest) => ({ ok: true, current, latest: String(latest ?? null), available: latest !== null && latest !== current })
     try {
       const latest = this.officialSource.getLatestVersion()
-      return { ok: true, current, latest: String(latest ?? null), available: latest !== null && latest !== current }
+      if (latest && typeof latest.then === 'function') {
+        return latest.then(settle).catch((error) => ({
+          ok: false, current, latest: null, available: false,
+          reason: String(error instanceof Error ? error.message : error),
+        }))
+      }
+      return settle(latest)
     } catch (error) {
       return { ok: false, current, latest: null, available: false, reason: String(error instanceof Error ? error.message : error) }
     }
@@ -356,7 +363,7 @@ export class MirrorManager {
     }
     stage(UPGRADE_STAGE.CHECKING)
     let latest
-    try { latest = String(this.officialSource.getLatestVersion() ?? '') } catch (error) {
+    try { latest = String((await Promise.resolve(this.officialSource.getLatestVersion())) ?? '') } catch (error) {
       return { ok: false, from, to: from, backupId: null, rolledBack: false, reason: `fetch-latest-failed: ${error instanceof Error ? error.message : error}` }
     }
     if (latest.length === 0) return { ok: false, from, to: from, backupId: null, rolledBack: false, reason: 'latest-version-unknown' }
@@ -371,7 +378,7 @@ export class MirrorManager {
     const staging = path.join(this.mirrorRoot, `.staging-${this.now()}-${sha256(`${latest}:${Math.random()}`).slice(0, 6)}`)
     try {
       stage(UPGRADE_STAGE.DOWNLOADING)
-      this.officialSource.download(latest, staging)
+      await Promise.resolve(this.officialSource.download(latest, staging))
       stage(UPGRADE_STAGE.SWAPPING)
       this.swapActive(staging)
       stage(UPGRADE_STAGE.FINALIZING)

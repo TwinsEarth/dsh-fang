@@ -75,6 +75,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: install jsdom for client DOM harness
+        run: npm install --no-save --no-audit --no-fund --ignore-scripts jsdom@^31.0.0
       - name: full unit + integration suite
         run: node --test --test-concurrency=1 "test/*.test.mjs"
       - name: offline status (informational, clean runner has no profile)
