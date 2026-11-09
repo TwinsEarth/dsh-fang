@@ -788,7 +788,9 @@ export function apply(ctx, config) {
       cloned = cloneProfileConfig(sourceTemplateDir, profileDir)
     }
     // 生产盘锁定：关闭插件安装 / 设置 UI（派生时写入 profile patch）。
-    const configLock = applyForkConfigLock(profileDir)
+    // essence-runtime 是元宝的“配置态实例”，必须保留插件管理能力，不能套生产盘锁。
+    const configInstance = path.basename(String(profileDir)) === 'essence-runtime'
+    const configLock = configInstance ? { ok: true, skipped: true, runtime: true } : applyForkConfigLock(profileDir)
     if (configLock.ok !== true) warnings.push('fork-config-lock-failed')
     // 配置文件只读：防误写（DSH_FANG_FORK_PROFILE_RO=0 可关）。
     const profileReadonly = setProfileConfigReadonly(profileDir, true)

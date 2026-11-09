@@ -55,7 +55,7 @@ function streamResponse(frames) {
   }
 }
 
-function makeHarness({ tickets = [], onResolve = null, onAbandon = null, sseFrames = [], services = {} } = {}) {
+function makeHarness({ tickets = [], onResolve = null, onAbandon = null, sseFrames = [], services = {}, essences = null } = {}) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/', runScripts: 'dangerously' })
   const { window } = dom
   window.TextDecoder = TextDecoder
@@ -64,6 +64,9 @@ function makeHarness({ tickets = [], onResolve = null, onAbandon = null, sseFram
   window.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init })
     if (String(url).includes('/fang/api/auth-token')) return jsonResponse({ token: 'test-token' })
+    if (essences && String(url).includes('/fang/api/essence/list')) {
+      return jsonResponse({ ok: true, essences, defaultId: essences[0]?.id ?? '', staleCount: 0 })
+    }
     if (String(url).includes('/fang/api/decisions/events')) return streamResponse(sseFrames)
     if (String(url).includes('/fang/api/decisions/ai')) return jsonResponse({ ok: true, configured: false, providers: [] })
     if (String(url).includes('/fang/api/decisions/resolve')) {
@@ -125,8 +128,8 @@ function mountInbox(harness) {
   return host
 }
 
-function mountSlot(harness, name) {
-  const registration = harness.registrations.find((item) => item.meta?.name === name)
+function mountSlot(harness, name, key = null) {
+  const registration = harness.registrations.find((item) => item.meta?.name === name && (key === null || item.meta?.key === key))
   assert.ok(registration, `${name} slot must be registered`)
   const element = typeof registration.render === 'function' ? registration.render({}) : registration.render
   const mount = element?.props?.mount
@@ -544,5 +547,19 @@ test('client DOM: HTTP 409 shows error and does not fake success', async () => {
     harness.dom.window.close()
   }
 })
+
+test('client DOM: essence cards use independent two-row boxes with YaHei 16px name and sync time', () => {
+  // 元宝卡片：grid 独立方框；第一行名称；第二行生成/同步时间；操作为图标。
+  assert.match(source, /\.essence-list\{display:grid;grid-template-columns:repeat\(auto-fill,minmax\(320px,1fr\)\)/)
+  assert.match(source, /\.essence-card\{[^}]*border:1px solid var\(--f-border\)/)
+  assert.match(source, /\.essence-card-name\{font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:16px/)
+  assert.match(source, /function renderEssenceCard/)
+  assert.match(source, /essence-card-times/)
+  assert.match(source, /生成 \$\{created\}/)
+  assert.match(source, /同步 \$\{synced\}/)
+  assert.match(source, /essence-card-actions/)
+})
+
+
 
 } // end jsdom-available block

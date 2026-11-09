@@ -30,6 +30,7 @@ import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { createBusinessProducers } from '../lib/business-producers.mjs'
 import { createManifestOfficialSource } from '../lib/mirror-official-source.mjs'
+import { clearForkConfigLock } from '../lib/fork-config-lock.mjs'
 import { readForkSupervisionSettings, writeForkSupervisionSettings } from '../lib/fork-supervision-settings.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
@@ -1928,8 +1929,19 @@ export function apply(ctx, config) {
         const stale = mirrorFingerprint.length > 0 && meta.archived !== true
           && String(meta.lastMergedFingerprint ?? '') !== mirrorFingerprint
         const sessionQuota = countEssenceSessions(meta.id, meta)
+        // 元宝卡片第二行：生成时间 + 最后一次与母体同步时间（merged/fingerprint.json）。
+        let lastMergedAt = null
+        try {
+          const fingerprint = readJson(path.join(essenceManager.essenceRoot(meta.id), 'merged', 'fingerprint.json'), null)
+          const value = Number(fingerprint?.mergedAt)
+          if (Number.isFinite(value) && value > 0) lastMergedAt = value
+        } catch { /* profile 尚未物化 */ }
+        if (!lastMergedAt && Number(meta.updatedAt) > 0) lastMergedAt = Number(meta.updatedAt)
         return {
           ...meta,
+          createdAt: Number(meta.createdAt) || null,
+          lastMergedAt,
+          lastSyncAt: lastMergedAt,
           locked: meta.locked === true,
           official: meta.official === true,
           archived: meta.archived === true,
@@ -2195,6 +2207,8 @@ export function apply(ctx, config) {
         nodeModulesSource: essenceModules,
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
+      // 历史版本把生产盘锁写进了 essence-runtime；配置实例必须能管理插件，升级后清掉。
+      try { clearForkConfigLock(runtimeProfileDir) } catch { /* best effort */ }
       // provision 若看到旧 junction 可能不替换；这里以 essenceModules 为准做最后自愈。
       if (!exists(runtimeModules)) {
         try {

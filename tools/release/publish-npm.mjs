@@ -81,8 +81,12 @@ async function putRegistry(url, token, body) {
 
 const registryPath = pkg.name.startsWith('@') ? pkg.name.replace('/', '%2F') : encodeURIComponent(pkg.name)
 const res = await putRegistry(`https://registry.npmjs.org/${registryPath}`, token, payload)
-if (res.status === 200 || res.status === 201) {
+if (res.status === 200 || res.status === 201 || res.status === 202) {
   console.log(`\nPUBLISHED ${pkg.name}@${pkg.version}`)
+  console.log(`registry: https://www.npmjs.com/package/${pkg.name}/v/${pkg.version}`)
+} else if ((res.status === 403 || res.status === 409) && /previously published/i.test(String(res.data?.error ?? ''))) {
+  // 幂等：版本已发布（手动补发/工作流重跑）视为成功，避免发布流水线被重复发布打红。
+  console.log(`\nALREADY PUBLISHED ${pkg.name}@${pkg.version}`)
   console.log(`registry: https://www.npmjs.com/package/${pkg.name}/v/${pkg.version}`)
 } else {
   console.error(`\nFAIL npm publish: HTTP ${res.status}`)

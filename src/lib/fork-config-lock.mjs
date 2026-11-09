@@ -74,8 +74,7 @@ function withLockRows(entries, ids) {
   return { entries: out, added }
 }
 
-export function applyForkConfigLock(profileDir, options = {}) {
-  if (String(process.env.DSH_FANG_FORK_CONFIG_LOCK ?? '1') === '0') return { ok: true, skipped: true }
+export function applyForkConfigLock(profileDir, options = {}) {  if (String(process.env.DSH_FANG_FORK_CONFIG_LOCK ?? '1') === '0') return { ok: true, skipped: true }
   const file = path.join(String(profileDir), 'cordis.patch.yml')
   let text = ''
   try { text = fs.readFileSync(file, 'utf8') } catch { text = '' }
@@ -114,4 +113,31 @@ export function applyForkConfigLock(profileDir, options = {}) {
     ? '' : '# fang: fork is production-only (plugin install / settings disabled)\n'
   fs.writeFileSync(file, `${prefix}${comment}${lines.join('\n')}\n`, 'utf8')
   return { ok: true, entries: ids.length }
+}
+
+/**
+ * 解除 fork 生产盘锁（只删 disabled:true 的锁定行，不碰其他配置）。
+ * 元宝运行态 essence-runtime 是配置实例，升级后需要清掉历史 provision 写入的锁。
+ */
+export function clearForkConfigLock(profileDir, options = {}) {
+  const file = path.join(String(profileDir), 'cordis.patch.yml')
+  let text = ''
+  try { text = fs.readFileSync(file, 'utf8') } catch { return { ok: true, removed: 0 } }
+  const ids = options.ids ?? FORK_LOCKED_ENTRY_IDS
+  const jsonEntries = jsonPatchEntries(text)
+  if (jsonEntries !== null) {
+    const wanted = new Set(ids)
+    const kept = jsonEntries.filter((entry) => !(entry && typeof entry === 'object' && wanted.has(entry.id) && entry.disabled === true))
+    if (kept.length === jsonEntries.length) return { ok: true, removed: 0 }
+    fs.writeFileSync(file, `${JSON.stringify(kept, null, 2)}\n`, 'utf8')
+    return { ok: true, removed: jsonEntries.length - kept.length }
+  }
+  let removed = 0
+  for (const id of ids) {
+    const escaped = String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`(^|\\n)\\s*-\\s*id:\\s*${escaped}\\s*\\n\\s*disabled:\\s*true\\s*(?=\\n|$)`, 'g')
+    text = text.replace(re, (match, lead) => { removed += 1; return lead })
+  }
+  if (removed > 0) fs.writeFileSync(file, text, 'utf8')
+  return { ok: true, removed }
 }
