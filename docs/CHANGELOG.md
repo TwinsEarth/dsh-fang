@@ -4,6 +4,23 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.1.4（2026-11-09）
+
+**主题：元宝工作区卡片 UI + 元宝运行态插件管理修复 + 发布流水线幂等。**
+
+### 新增/修复
+- **元宝工作区卡片**：每个元宝独立方框，两行信息；第一行名称（微软雅黑 16px），第二行“生成时间 / 最后一次与母体同步时间”；操作收为图标按钮，不再挤在一起。
+- **元宝运行态不再套生产盘锁**：`essence-runtime` 是配置实例，跳过 `applyForkConfigLock`；新增 `clearForkConfigLock()` 清理历史 provision 写入的 `tool-plugin-manager disabled:true`，避免插件设置被锁。
+- **发布流水线幂等**：npm publish 对已发布版本（202/403 previously published）视为成功；final verify checkout 增加 `fetch-tags: true`，annotated tag 不再被误判 lightweight。
+- **queue-journal 0.1.3** 继续锁定（恢复列表）。
+
+### 测试/门禁
+- 发布前重跑 `preflight --e2e`、install/reinstall drill；证据见 `docs/AUDIT-v3.1.4.md`。
+
+### 已知边界
+- DSH 设置页插件列表只读；行级激活需“能唯一定位的 profile patch 行”，第三方插件建议走侧边栏「插件」页。
+- PluginUpdater/SuperAgent/HarnessMM/PJM/Worker 本体未接。
+
 ## v3.1.3（2026-11-09）
 
 **主题：新机器迁移修复 + 排队消息列表恢复真正生效。**

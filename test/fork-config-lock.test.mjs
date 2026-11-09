@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { applyForkConfigLock, FORK_LOCKED_ENTRY_IDS, setProfileConfigReadonly } from '../src/lib/fork-config-lock.mjs'
+import { applyForkConfigLock, clearForkConfigLock, FORK_LOCKED_ENTRY_IDS, setProfileConfigReadonly } from '../src/lib/fork-config-lock.mjs'
 
 const tmpProfile = () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-lock-'))
@@ -13,6 +13,34 @@ const tmpProfile = () => {
   fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '[]\n', 'utf8')
   return dir
 }
+
+test('fork-config-lock: clear 只解除生产盘锁，不碰其他 patch', () => {
+  const dir = tmpProfile()
+  applyForkConfigLock(dir)
+  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), JSON.stringify([
+    { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat', config: { transcriptView: 'standard' } },
+    { id: FORK_LOCKED_ENTRY_IDS[0], disabled: true },
+  ], null, 2), 'utf8')
+  const out = clearForkConfigLock(dir)
+  assert.equal(out.ok, true)
+  assert.equal(out.removed, 1)
+  const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'))
+  assert.equal(parsed.some((entry) => entry.id === FORK_LOCKED_ENTRY_IDS[0]), false)
+  assert.equal(parsed.some((entry) => entry.id === 'ui-chat'), true)
+  assert.equal(clearForkConfigLock(dir).removed, 0, '幂等')
+
+  // YAML 形态同样只删锁行
+  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), [
+    '- id: ui-chat', '  name: "@deepseek-ai/dsh-client-ui-chat"',
+    `- id: ${FORK_LOCKED_ENTRY_IDS[0]}`, '  disabled: true',
+    '- id: keep-me', '  config: {}',
+  ].join('\n') + '\n', 'utf8')
+  const yaml = clearForkConfigLock(dir)
+  assert.equal(yaml.removed, 1)
+  const text = fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
+  assert.doesNotMatch(text, new RegExp(`id: ${FORK_LOCKED_ENTRY_IDS[0]}`))
+  assert.match(text, /id: keep-me/)
+})
 
 test('fork-config-lock: 写入禁用条目且幂等', () => {
   const dir = tmpProfile()

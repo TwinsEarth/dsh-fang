@@ -725,6 +725,16 @@ window.__ModuleLoader__.load({
 .mother-control-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12.5px;font-weight:600;color:var(--f-text)}
 .mother-control-sub{font-size:10.5px;color:var(--f-text-4);line-height:15px}
 .mother-list{display:flex;flex-direction:column;gap:2px;padding:0 2px}
+.essence-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;padding:6px 8px}
+.essence-card{display:flex;flex-direction:column;gap:6px;box-sizing:border-box;min-width:0;
+  border:1px solid var(--f-border);border-radius:10px;background:var(--f-surface);
+  padding:9px 11px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.essence-card-head{display:flex;align-items:center;gap:6px;min-height:24px;flex-wrap:wrap}
+.essence-card-name{font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:16px;font-weight:600;
+  line-height:24px;color:var(--f-text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.essence-card-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;line-height:20px;color:var(--f-text-3)}
+.essence-card-times{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.essence-card-actions{display:inline-flex;align-items:center;gap:2px;margin-left:auto}
 .mother-row{border:1px solid transparent;border-radius:14px;transition:background .12s ease,border-color .12s ease,box-shadow .12s ease}
 .mother-row:hover{background:var(--f-surface-2);border-color:var(--f-border)}
 .mother-row.is-open{background:var(--f-surface-2);border-color:var(--f-border)}
@@ -2605,7 +2615,7 @@ window.__ModuleLoader__.load({
         'aria-describedby': opts.describedBy,
         dataset: opts.dataKey ? { key: opts.dataKey } : undefined,
         onClick: opts.onClick,
-      }, leading, label, opts.spin ? icon('spinner', 13) : null, trailing)
+      }, leading, opts.iconOnly ? null : label, opts.spin ? icon('spinner', 13) : null, trailing)
       if (opts.softDisabled) node.style.opacity = '.45'
       if (opts.iconOnly) {
         node.setAttribute('aria-label', opts.ariaLabel || opts.title || '')
@@ -2971,6 +2981,72 @@ window.__ModuleLoader__.load({
         .map((value) => String(value ?? '').toLowerCase()).join(' ')
     }
 
+    /**
+     * 元宝卡片：一个独立方框，两行信息（名称 / 生成+同步时间），操作图标收在第二行右侧。
+     */
+    function renderEssenceCard(S, app, essence, defaultEssenceId) {
+      const name = essence.name || essence.id
+      const created = Number(essence.createdAt) > 0 ? fmtClock(essence.createdAt) : '—'
+      const synced = Number(essence.lastSyncAt ?? essence.lastMergedAt) > 0
+        ? fmtClock(essence.lastSyncAt ?? essence.lastMergedAt)
+        : '从未'
+      const action = (label, iconName, options = {}) => button(label, {
+        size: 'sm', variant: 'ghost', iconOnly: true, icon: icon(iconName, 12),
+        ariaLabel: label, title: options.title || label, dataBtnId: options.dataBtnId,
+        disabled: options.disabled, fk: options.fk, onClick: options.onClick,
+      })
+      const actions = [
+        essence.stale && essence.locked !== true
+          ? action('同步', 'refresh', { dataBtnId: 'E-03', title: '重放该元主的插件/设置到新母体（配置不变）', onClick: () => void app.syncEssence(essence.id) })
+          : null,
+        essence.archived === true ? null : action('派生', 'plus', { dataBtnId: 'E-05', title: '派生：以该元主为模板创建分身', onClick: () => void app.deriveFromEssence(essence) }),
+        essence.archived === true
+          ? action('还原', 'refresh', { dataBtnId: 'E-15', title: '解冻（恢复活跃态），不还原备份内容', onClick: () => void app.unfreezeEssence(essence) })
+          : action(essence.runtime?.running === true ? '停止' : '打开', essence.runtime?.running === true ? 'disc' : 'play', {
+            dataBtnId: 'E-06',
+            title: essence.runtime?.running === true ? '停止该元主的运行实例' : '打开&设置：启动隔离配置态实例',
+            onClick: () => essence.runtime?.running === true ? void app.stopEssenceRuntime(essence) : void app.openEssence(essence.id),
+          }),
+        essence.runtime?.running === true && essence.archived !== true
+          ? action('进入', 'external', { dataBtnId: 'E-21', title: '在新标签打开运行中的实例', onClick: () => void app.openEssence(essence.id) })
+          : null,
+        essence.archived === true
+          ? null
+          : action('复制', 'copy', { dataBtnId: 'E-07', title: '深复制整份沙盒到新文件夹（不含凭据/备份）', disabled: essence.actions?.copy?.enabled === false, onClick: () => void app.copyEssence(essence) }),
+        essence.archived === true
+          ? null
+          : action('归档', 'archive', { dataBtnId: 'E-08', title: '归档元主（冻结，只改元数据）', disabled: essence.actions?.archive?.enabled === false, onClick: () => void app.archiveEssence(essence) }),
+        action('删除', 'trash', { dataBtnId: 'E-09', title: '永久删除 essences/<id>（须先归档；不删会话）', disabled: essence.actions?.delete?.enabled === false, onClick: () => void app.deleteEssence(essence) }),
+        essence.archived === true
+          ? null
+          : action('备份', 'disc', { dataBtnId: 'E-12', title: '在 essences/<id>/Backup 存档（只保留一份）', onClick: () => void app.essenceBackup(essence) }),
+        essence.archived === true
+          ? null
+          : action('还原备份', 'refresh', { dataBtnId: 'E-13', title: '用最新 Backup 覆盖当前 overlay/merged（需二次确认）', onClick: () => void app.essenceRestore(essence) }),
+        essence.archived === true
+          ? null
+          : action('下载', 'download', { dataBtnId: 'E-10', title: '下载元主整包 JSON（不含凭据）', disabled: essence.actions?.download?.enabled === false, onClick: () => void app.downloadEssence(essence) }),
+      ].filter(Boolean)
+
+      return h('div', { class: 'essence-card', 'data-essence-id': essence.id, role: 'listitem' },
+        h('div', { class: 'essence-card-head' },
+          h('span', { class: 'essence-card-name' },
+            essence.locked
+              ? h('span', { title: name }, name)
+              : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: name })),
+          essence.id === defaultEssenceId ? chip('info', '默认', { dot: false }) : null,
+          essence.locked ? chip('neutral', '锁定', { dot: false }) : null,
+          essence.stale ? chip('warn', '🔼 待同步', { dot: false, title: '母体镜像已变化，此元主仍在旧镜像上' }) : null,
+          essence.status === 'conflicted' ? chip('bad', '冲突', { dot: false }) : null,
+          essence.archived === true ? chip('neutral', '冻结', { dot: false, title: '已归档（冻结）：只能还原或删除' }) : null),
+        h('div', { class: 'essence-card-meta' },
+          h('span', { class: 'essence-card-times' },
+            h('span', null, `生成 ${created}`),
+            h('span', { title: '最后一次与母体同步时间' }, `同步 ${synced}`)),
+          h('span', { style: { flex: '1' } }),
+          h('div', { class: 'essence-card-actions' }, ...actions)))
+    }
+
     function renderMotherPanel(S, app) {
       const freshness = freshnessOf(S)
       const all = S.sessions.items
@@ -3124,84 +3200,11 @@ window.__ModuleLoader__.load({
           title: '克隆母体 profile 的可写层（插件补丁/依赖/设置）生成新元主；不复制凭据与会话',
           onClick: () => void app.captureEssence(),
         }))
-      const essenceList = h('div', { class: 'essence-list', 'data-zone': 'essence-list', style: { display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '4px 8px' } },
+      const essenceList = h('div', { class: 'essence-list', 'data-zone': 'essence-list' },
         essences.length === 0
           ? h('span', { class: 'hint' }, '还没有自定义元主；点上方「从母体生成元主」克隆当前母体配置。')
           : null,
-        ...essences.map((essence) => h('div', { class: 'essence-row', 'data-essence-id': essence.id, style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
-          essence.locked
-            ? h('span', { class: 'hint' }, essence.name || essence.id)
-            : editableText(S, app, { key: 'essence:' + essence.id, label: '元主', value: essence.name || essence.id }),
-          essence.id === defaultEssenceId ? h('span', { class: 'chip' }, '默认') : null,
-          essence.locked ? h('span', { class: 'chip' }, '锁定') : null,
-          essence.stale ? h('span', { class: 'chip', title: '母体镜像已变化，此元主仍在旧镜像上' }, '🔼 待同步') : null,
-          essence.stale && essence.locked !== true
-            ? button('同步', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-03',
-              title: '重放该元主的插件/设置到新母体（配置不变）',
-              onClick: () => void app.syncEssence(essence.id),
-            })
-            : null,
-          essence.status === 'conflicted' ? h('span', { class: 'chip' }, '冲突') : null,
-          essence.archived === true ? h('span', { class: 'chip', title: '已归档（冻结）：只能还原或删除' }, '冻结') : null,
-          h('span', { style: { display: 'inline-flex', gap: 4 } },
-            essence.archived === true ? null : button('派生', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-05',
-              title: '派生：以该元主为模板创建分身（继承其插件&配置），可复制一个现有会话进分身沙箱',
-              onClick: () => void app.deriveFromEssence(essence),
-            }),
-            essence.archived === true
-              ? button('还原', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-15',
-                title: '解冻（恢复活跃态，可打开/设置/派生）；不还原备份内容',
-                onClick: () => void app.unfreezeEssence(essence),
-              })
-              : button(essence.runtime?.running === true ? '停止' : '打开', {
-                size: 'sm', variant: 'ghost', dataBtnId: 'E-06',
-                title: essence.runtime?.running === true
-                  ? '停止该元主的运行实例（端口释放；会话/沙盒文件保留）'
-                  : '打开&设置：启动或打开该元主的隔离配置态实例（不写母体 sessions）',
-                onClick: () => essence.runtime?.running === true ? void app.stopEssenceRuntime(essence) : void app.openEssence(essence.id),
-              }),
-            essence.runtime?.running === true && essence.archived !== true ? button('进入', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-21',
-              title: '在新标签打开运行中的实例（临时 token，不落盘）',
-              onClick: () => void app.openEssence(essence.id),
-            }) : null,
-            essence.archived === true ? null : button('复制', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-07',
-              title: essence.actions?.copy?.reason || '深复制整份沙盒到新文件夹（不含凭据/运行态/备份）',
-              disabled: essence.actions?.copy?.enabled === false,
-              onClick: () => void app.copyEssence(essence),
-            }),
-            essence.archived === true ? null : button('归档', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-08',
-              title: essence.actions?.archive?.reason || '归档元主（冻结，只改元数据）',
-              disabled: essence.actions?.archive?.enabled === false,
-              onClick: () => void app.archiveEssence(essence),
-            }),
-            button('删除', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-09',
-              title: essence.actions?.delete?.reason || '永久删除 essences/<id>（须先归档；不删会话）',
-              disabled: essence.actions?.delete?.enabled === false,
-              onClick: () => void app.deleteEssence(essence),
-            }),
-            essence.archived === true ? null : button('备份', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-12',
-              title: '在 essences/<id>/Backup 存档（只保留一份，旧备份覆盖）',
-              onClick: () => void app.essenceBackup(essence),
-            }),
-            essence.archived === true ? null : button('还原备份', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-13',
-              title: '用最新 Backup 覆盖当前 overlay/merged（需二次确认）',
-              onClick: () => void app.essenceRestore(essence),
-            }),
-            essence.archived === true ? null : button('下载', {
-              size: 'sm', variant: 'ghost', dataBtnId: 'E-10',
-              title: essence.actions?.download?.reason || '下载元主整包 JSON（不含凭据）',
-              disabled: essence.actions?.download?.enabled === false,
-              onClick: () => void app.downloadEssence(essence),
-            })))))
+        ...essences.map((essence) => renderEssenceCard(S, app, essence, defaultEssenceId)))
 
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,
