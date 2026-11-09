@@ -9,6 +9,10 @@ export const FORK_LOCKED_ENTRY_IDS = Object.freeze([
   // 禁用 config-editor / ui-settings 会移除 configForms 服务，导致 locale 及之后
   // 50 个客户端插件永久 pending（实测：web boot 50 entries did not activate）。
   'tool-plugin-manager',
+  // 分身=生产盘：隐藏侧边栏「插件」页和设置页的插件清单，避免用户点启用后
+  // 因 package.json 只读而收到 EPERM。
+  'ui-plugin-manager',
+  'ui-settings-plugin-inventory',
 ])
 
 /** DSH first-run notice needs a durable ui-settings-general config form in every fork profile. */

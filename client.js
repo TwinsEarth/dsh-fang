@@ -1404,6 +1404,15 @@ window.__ModuleLoader__.load({
 
       async function refresh(options = {}) {
         if (refreshingLock) return
+        // 分身 Web UI 不请求任何母体 API；404 是预期，不应落成错误状态/横幅。
+        const role = await detectRole()
+        if (!alive) return
+        if (role !== 'mother') {
+          S.lastRefreshAt = Date.now()
+          if (options.manual) S.refreshing = false
+          if (!options.silent) schedule()
+          return
+        }
         refreshingLock = true
         const seq = ++refreshSeq
         if (options.manual) { S.refreshing = true; schedule() }
@@ -4265,6 +4274,11 @@ window.__ModuleLoader__.load({
 
     function renderApp(S, app) {
       const frag = document.createDocumentFragment()
+      // 分身 Web UI 只有一条宿主机说明：母体 API 的 404 是预期，不渲染任何错误横幅/母体控件。
+      if (S.role.value === 'fork') {
+        frag.append(renderHostNotice(S, app))
+        return frag
+      }
       frag.append(renderHeader(S, app))
       for (const node of renderNotices(S, app)) frag.append(node)
       for (const node of renderApprovals(S, app)) frag.append(node)

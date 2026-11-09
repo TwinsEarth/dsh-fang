@@ -55,7 +55,7 @@ function streamResponse(frames) {
   }
 }
 
-function makeHarness({ tickets = [], onResolve = null, onAbandon = null, sseFrames = [], services = {}, essences = null } = {}) {
+function makeHarness({ tickets = [], onResolve = null, onAbandon = null, sseFrames = [], services = {}, essences = null, forkRole = false } = {}) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/', runScripts: 'dangerously' })
   const { window } = dom
   window.TextDecoder = TextDecoder
@@ -63,6 +63,8 @@ function makeHarness({ tickets = [], onResolve = null, onAbandon = null, sseFram
   const calls = []
   window.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init })
+    if (forkRole && String(url).includes('/fang/api/status')) return jsonResponse({ error: 'http-404' }, 404)
+    if (forkRole && String(url).includes('/fang/adapter/hello')) return jsonResponse({ ok: true, role: 'fork' })
     if (String(url).includes('/fang/api/auth-token')) return jsonResponse({ token: 'test-token' })
     if (essences && String(url).includes('/fang/api/essence/list')) {
       return jsonResponse({ ok: true, essences, defaultId: essences[0]?.id ?? '', staleCount: 0 })
@@ -561,5 +563,24 @@ test('client DOM: essence cards use independent two-row boxes with YaHei 16px na
 })
 
 
+
+test('client DOM: fork role renders only the host notice, never mother 404 error banners', async () => {
+  const harness = makeHarness({ forkRole: true })
+  try {
+    mountSlot(harness, 'main', 'fang')
+    const notice = await waitFor(() => {
+      const text = harness.window.document.body.textContent || ''
+      return text.includes('当前页面是分身的 Web UI') ? text : null
+    }, { timeout: 4000 })
+    assert.match(notice, /当前页面是分身的 Web UI/)
+    const doc = harness.window.document
+    assert.equal(doc.querySelectorAll('.notice--warn,.notice--bad').length, 0, 'fork must not render mother error banners')
+    assert.equal(doc.querySelector('.fang-body'), null, 'fork must not render mother/fork split panels')
+    const motherCalls = harness.calls.filter((call) => /\/fang\/api\/(tasks|sessions|essence|approvals)/.test(call.url))
+    assert.deepEqual(motherCalls, [], 'fork must not request mother-only APIs')
+  } finally {
+    try { harness.dispose() } catch { /* ignore */ }
+  }
+})
 
 } // end jsdom-available block

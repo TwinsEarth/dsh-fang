@@ -65,7 +65,13 @@ export function collect ({ tag, base = 'main' }) {
     tag,
     version,
     tagSha: tagSha.status === 0 ? tagSha.out : '',
-    annotated: tagObject.out === 'tag',
+    annotated: (() => {
+      if (tagObject.out === 'tag') return true
+      // actions/checkout 可能把 annotated tag 重写成同名的 lightweight 本地 ref；
+      // 以远端为准：annotated tag 在 ls-remote 中会出现 ^{} 解引用行。
+      const remote = git(['ls-remote', '--tags', 'origin', `refs/tags/${tag}`], { allowFail: true })
+      return remote.status === 0 && /^\S+\s+refs\/tags\/.+\^\{\}$/m.test(remote.out)
+    })(),
     onMain: tagSha.status === 0 && baseSha.status === 0 ? firstParentHas(baseRef, tagSha.out) : false,
     base: baseRef,
     previous,
