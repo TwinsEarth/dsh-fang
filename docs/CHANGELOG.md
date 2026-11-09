@@ -4,6 +4,23 @@
 > 此后不得再覆盖“不跳号”规则——任何跳版本必须单独申请并经人工手动豁免、书面记录。详见 docs/RELEASE-WAIVER-v3.0.7.md。
 
 
+## v3.1.3（2026-11-09）
+
+**主题：新机器迁移修复 + 排队消息列表恢复真正生效。**
+
+### 修复
+- **queue-journal 0.1.3**：恢复列表代码此前只在仓库里，npm 仍发 0.1.2（只能恢复单草稿）；本版把 `@twinsearth/dsh-fang-queue-journal` 锁到 **0.1.3**，支持“恢复全部 (n)”把队列逐条放回官方输入队列。
+- **npm 安装名分身检查**：`fork-bundle-unavailable` 硬编码只认 `@local/dsh-fang`；现在同时接受 `@twinsearth/dsh-fang`，npm 安装的新机器不再误判。
+- **运行态 node_modules 自愈**：迁移后 runtime profile 的 junction 可能指向不存在的 `merged/profile/node_modules`；现在检测 broken junction、重建到 `essenceModules`，元宝不再因 `cannot resolve profile bundle` 丢插件。
+- **迁移 profile 的旧机器路径**：后续版本继续过滤 `file:`/`link:`/绝对路径依赖与不可解析 bundle。
+
+### 测试/门禁
+- 发布前重跑 `preflight --e2e`、install drill、reinstall drill；证据见 `docs/AUDIT-v3.1.3.md`。
+
+### 已知边界
+- 旧机器迁移数据仍可能含不可移植依赖；建议用新机器重新安装插件，或按 `docs/AUDIT-v3.1.3.md` 的修复步骤处理。
+- PluginUpdater/SuperAgent/HarnessMM/PJM/Worker 本体未接。
+
 ## v3.1.2（2026-11-09）
 
 **主题：把 v3.1.1 未发布的启动韧性/自检/更新器门禁收口，并完成首次四方发布。**

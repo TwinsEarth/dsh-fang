@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "3.1.2",
+  "version": "3.1.3",
   "private": true,
   "type": "module",
   "description": "dsh-Fang (瓮城) — mother/fork plugin development environment for DeepSeek Harness: one readonly mother, a disposable child dsh-Web per task, 1 orchestrator + 12 sub-plugins.",
@@ -80,7 +80,7 @@
     "node": ">=22"
   },
   "optionalDependencies": {
-    "@twinsearth/dsh-fang-queue-journal": "0.1.2",
+    "@twinsearth/dsh-fang-queue-journal": "0.1.3",
     "@twinsearth/dsh-fang-web-entry": "0.1.1"
   },
   "devDependencies": {

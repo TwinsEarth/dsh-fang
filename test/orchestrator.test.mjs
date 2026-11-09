@@ -1757,6 +1757,24 @@ test('orchestrator: template resolver prefers a profile that actually resolves t
   }
 })
 
+test('orchestrator: npm-installed @twinsearth/dsh-fang satisfies the fork bundle check', async () => {
+  const forker = makeFakeForker()
+  const realProvision = forker.provision.bind(forker)
+  forker.provision = async (args) => {
+    const out = await realProvision(args)
+    const profileDir = path.join(args.homeDir, 'profiles', args.profile)
+    fs.rmSync(path.join(profileDir, 'node_modules'), { recursive: true, force: true })
+    fs.mkdirSync(path.join(profileDir, 'node_modules', '@twinsearth', 'dsh-fang'), { recursive: true })
+    return out
+  }
+  const { ctx, svc, forker: f, dataRoot } = await boot({ forker })
+  const out = await svc.createTask({ title: 'npm-installed' })
+  assert.equal(out.ok, true, JSON.stringify(out))
+  assert.equal(f.calls.reap.length, 0)
+  assert.equal(f.calls.spawn.length, 1)
+  cleanup(ctx, dataRoot)
+})
+
 test('orchestrator: a fork that cannot resolve the bundle is reaped instead of becoming a zombie', async () => {
   const forker = makeFakeForker()
   const realProvision = forker.provision.bind(forker)
