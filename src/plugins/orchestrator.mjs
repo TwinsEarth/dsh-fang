@@ -20,6 +20,7 @@ import {
 } from '../kernel/index.mjs'
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-store.mjs'
+import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
 import { MirrorManager } from '../lib/mirror.mjs'
@@ -2144,6 +2145,21 @@ export function apply(ctx, config) {
       if (sessionQuota.over) throw new Error(`session-quota-exceeded: ${sessionQuota.used}/${sessionQuota.limit}`)
       const f = forker()
       if (!f || typeof f.provision !== 'function' || typeof f.spawn !== 'function') throw new Error('forker-unavailable')
+      const forkId = runtimeForkId(id)
+      const runtimeProfileDirEarly = path.join(runtimeHomeFor(id), 'profiles', 'essence-runtime')
+      // v3.1.8：上次运行态里的插件安装/更新/卸载先捕获回元宝（overlay + merged + 模块树），
+      // 否则 ensureFresh/provision 会用旧的元宝配置重放，把用户的工作静默丢掉。
+      let capture = null
+      try {
+        const runtimeStatus = f.status?.(forkId) ?? null
+        if (runtimeStatus?.running !== true && exists(runtimeProfileDirEarly)) {
+          capture = captureRuntimeProfileIntoEssence({
+            essenceManager, essenceId: id, runtimeProfileDir: runtimeProfileDirEarly, logger: ctx.logger,
+          })
+        }
+      } catch (error) {
+        capture = { ok: false, captured: false, error: 'capture-threw', detail: String(error?.message ?? error) }
+      }
       await essenceManager.ensureFresh(id)
       const merged = essenceManager.mergedProfileDir(id)
       if (!exists(merged)) throw new Error('merged-profile-missing')
@@ -2165,14 +2181,13 @@ export function apply(ctx, config) {
       // v3.1.8：pnpm 11 只从 pnpm-workspace.yaml 读取非鉴权设置（.npmrc 只剩鉴权/网络键），
       // 且 modules manifest 里记录的 virtual store 仍是母体路径；两处都由
       // ensureEssenceRuntimePnpmConfig 在运行态 profile 上修正（见下方 spawn 前）。
-      const forkId = runtimeForkId(id)
       // v3.0.9 三区：运行态 home 在 runtimeRoot 下（FANG_HOME 时是 sessions/<essenceId>/home），
       // 原身文件夹只保留配置，项目/会话/任务文件不落原身目录。
       const homeDir = runtimeHomeFor(id)
       assertInside(layout.runtimeRoot, homeDir, 'runtime-home')
       // 运行态 profile 的 node_modules 必须重新指向该元主自己的模块树。
       // makeJunction 对已存在的链接不会替换，所以先安全移除旧 junction（不进入目标）。
-      const runtimeProfileDir = path.join(homeDir, 'profiles', 'essence-runtime')
+      const runtimeProfileDir = runtimeProfileDirEarly
       const runtimeModules = path.join(runtimeProfileDir, 'node_modules')
       // 迁移/旧版本可能留下“指向不存在 merged/profile/node_modules”的 junction；
       // fs.existsSync 对 broken junction 返回 false，必须用 lstat 才能发现并清掉。
@@ -2240,15 +2255,26 @@ export function apply(ctx, config) {
         sandboxHome: homeDir,
         importedSessions,
         pnpmConfig,
+        capture,
       }
     },
-    stopEssenceRuntime: (essenceId) => {
+    stopEssenceRuntime: async (essenceId) => {
       const id = String(essenceId ?? '').trim()
       const f = forker()
       if (!f || typeof f.stop !== 'function') return { ok: false, error: 'forker-unavailable' }
       const forkId = runtimeForkId(id)
       const out = f.stop(forkId)
-      return { ok: true, essenceId: id, forkId, stopped: out?.ok !== false }
+      // v3.1.8：停止后把运行态最后一次保存的插件配置捕获回元宝；捕获失败不改变停止结果。
+      let capture = null
+      try {
+        const runtimeProfileDir = path.join(runtimeHomeFor(id), 'profiles', 'essence-runtime')
+        capture = captureRuntimeProfileIntoEssence({
+          essenceManager, essenceId: id, runtimeProfileDir, logger: ctx.logger,
+        })
+      } catch (error) {
+        capture = { ok: false, captured: false, error: 'capture-threw', detail: String(error?.message ?? error) }
+      }
+      return { ok: true, essenceId: id, forkId, stopped: out?.ok !== false, capture }
     },
     essenceRuntimeStatus: (essenceId) => {
       const id = String(essenceId ?? '').trim()
