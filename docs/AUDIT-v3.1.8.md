@@ -8,6 +8,7 @@
 | 问题 | 根因 | 修复 |
 |---|---|---|
 | 元宝运行态无法更新/升级/卸载插件：`[ERR_PNPM_UNEXPECTED_STORE]`，pnpm 想用 `D:\.pnpm-store\v11` | ① DSH 0.2.2-rc.1 自带 pnpm 11.28.5，项目 `.npmrc` 只读鉴权/网络键，`store-dir`/`package-import-method` 已被移到 `pnpm-workspace.yaml`（camelCase）；Fang 旧逻辑只写 `.npmrc`，等于没生效 → 按盘符默认 store；② 运行态 `node_modules/.modules.yaml` 复制自元主，`storeDir`/`virtualStoreDir` 仍记母体路径，pnpm 兼容性检查拒绝 | 新增 `src/lib/pnpm-store.mjs`：写 `pnpm-workspace.yaml`（`nodeLinker: hoisted`、`storeDir`、`packageImportMethod: copy`）+ 兼容 `.npmrc`，并把运行态 `.modules.yaml` 的 `storeDir`/`virtualStoreDir` 对齐为当前项目；`startEssenceRuntime` 每次打开自动应用 |
+| 元宝运行态的插件安装/更新/卸载不持久（下次打开按旧元宝配置重放） | 运行态 profile 每次打开都从元宝 merged 重放 `package.json`/`cordis*.yml`；元宝 overlay/merged/模块树从不回写 | 新增 `src/lib/runtime-capture.mjs`：stop 与下次 start 在重放前捕获 `package.json`、差异 patch 条目、pnpm 锁/设置文件到 overlay；重算 merged（`materializeMerged` 保留既有模块树并投影 overlay pnpm 文件）；把 pnpm 重新物化的包目录 hardlink 进元宝模块树、删除已卸载包；指纹幂等跳过无变更场景 |
 | （CI 偶发）buffer-keeper `pending-high-risk` 状态 `lastEventAt` 为 null | `state()` 的 digest 兜底可能先于 watch/poll 事件看到 pending；此时 `quietMs` 回退到 `startedAt`，可能在无事件时间戳时报 high-risk | 观察到 pending 时补记 `lastEventAt = nowMs()`；删除无读者的 `startedAt` |
 
 ### 关键设计边界
@@ -31,6 +32,8 @@
         无 ERR_PNPM_UNEXPECTED_STORE / ERR_PNPM_UNEXPECTED_VIRTUAL_STORE
 新单测：test/pnpm-store.test.mjs 6/6 通过（manifest 读取、settings 保序 upsert、.npmrc 更新、manifest 对齐幂等、端到端 ensure）
 受影响既有套件：kernel / forker / orchestrator / role-extensions / plugins-shape 通过
+运行态捕获：test/runtime-capture.test.mjs 6/6（package/patch/pnpm 文件写回 overlay、模块 hardlink 回流、已卸载包删除、幂等跳过）；
+             essence：模块树在 recompute 后保留 + overlay pnpm 文件投影；orchestrator 62/62 通过
 ```
 
 ## 3. 发布
@@ -43,6 +46,7 @@
 
 ## 4. 已知边界
 
-- 元宝运行态的插件改动**不写回元宝配置**：每次打开运行态会从元宝 merged profile 重放 `package.json`/`cordis*.yml`；关闭重开后插件恢复元宝原配置。本版只解除 pnpm 操作阻塞；“运行态插件变更捕获回元宝”为下一版需求。
-- 运行态/元主的模块树仍是共享/镜像结构，pnpm 在运行态内的写入会落在共享 `.pnpm` 虚拟 store；跨元宝一致性由后续“变更捕获”版处理。
+- 捕获时机是「停止运行态」与「下次打开运行态」；运行中的插件操作不会实时回流，宿主异常退出后由下次打开先捕获再重放。
+- 模块回流按「包名+版本」比较；同版本内手工替换包内容不会被 hardlink 覆盖（pnpm 安装/升级都会改版本号）。
+- 运行态/元主模块树仍是镜像共享结构，捕获只 hardlink 被 pnpm 重新物化的条目；跨元宝派生的一致性来自捕获后的元宝模块树。
 - 已有运行态 profile 在升级后首次打开时自动应用本修复；修复前的运行态若仍开着，需重开一次（或重启宿主后重开）。
