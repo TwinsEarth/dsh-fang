@@ -12,13 +12,13 @@
 无法移除 0.28.0
 [ERR_PNPM_UNEXPECTED_STORE] Unexpected store location
 The dependencies at "...\essence-runtime\node_modules" are currently linked from the store at
-"C:\Users\fangw\AppData\Local\pnpm\store\v11". pnpm now wants to use the store at "D:\.pnpm-store\v11"
+"C:\Users\<user>\AppData\Local\pnpm\store\v11". pnpm now wants to use the store at "D:\.pnpm-store\v11"
 ```
 
 ### 根因（两层，均已定位到代码）
 
 1. **pnpm 11 不再从项目 `.npmrc` 读取非鉴权设置。** DSH 0.2.2-rc.1 自带的 pnpm 11.28.5 只把 `.npmrc` 当鉴权/网络配置；`store-dir`、`package-import-method` 等必须写在 `pnpm-workspace.yaml`（camelCase：`storeDir`、`packageImportMethod`）。Fang 旧逻辑只写 `.npmrc`，等于没生效：D: 盘项目按 pnpm 的“按盘符默认 store”选了 `D:\.pnpm-store\v11`。
-2. **模块树 manifest 记录的是母体路径。** 运行态 `node_modules` 来自元主模块树复制，`.modules.yaml` 里的 `storeDir`/`virtualStoreDir` 仍指向母体（`C:\Users\fangw\.dsh\profiles\desktop\node_modules\.pnpm`）。即便把 store 指回 C:，pnpm 的兼容性检查还会因 virtual store 不一致拒绝。
+2. **模块树 manifest 记录的是母体路径。** 运行态 `node_modules` 来自元主模块树复制，`.modules.yaml` 里的 `storeDir`/`virtualStoreDir` 仍指向母体（`C:\Users\<user>\.dsh\profiles\desktop\node_modules\.pnpm`）。即便把 store 指回 C:，pnpm 的兼容性检查还会因 virtual store 不一致拒绝。
 
 ### 修复
 
@@ -34,7 +34,7 @@ The dependencies at "...\essence-runtime\node_modules" are currently linked from
 
 ```text
 修复前（官方元宝运行态 profile）：pnpm store path = D:\.pnpm-store\v11
-修复后                          ：pnpm store path = C:\Users\fangw\AppData\Local\pnpm\store\v11
+修复后                          ：pnpm store path = C:\Users\<user>\AppData\Local\pnpm\store\v11
 modules manifest                ：storeDir=C: store，virtualStoreDir=<run-profile>\node_modules\.pnpm
 隔离副本（相同 package.json/pnpm-lock.yaml/pnpm-workspace.yaml）：
   pnpm remove dsh-better-sidebar → 成功（13.7s），无 ERR_PNPM_UNEXPECTED_STORE / UNEXPECTED_VIRTUAL_STORE
