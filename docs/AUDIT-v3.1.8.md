@@ -8,6 +8,7 @@
 | 问题 | 根因 | 修复 |
 |---|---|---|
 | 元宝运行态无法更新/升级/卸载插件：`[ERR_PNPM_UNEXPECTED_STORE]`，pnpm 想用 `D:\.pnpm-store\v11` | ① DSH 0.2.2-rc.1 自带 pnpm 11.28.5，项目 `.npmrc` 只读鉴权/网络键，`store-dir`/`package-import-method` 已被移到 `pnpm-workspace.yaml`（camelCase）；Fang 旧逻辑只写 `.npmrc`，等于没生效 → 按盘符默认 store；② 运行态 `node_modules/.modules.yaml` 复制自元主，`storeDir`/`virtualStoreDir` 仍记母体路径，pnpm 兼容性检查拒绝 | 新增 `src/lib/pnpm-store.mjs`：写 `pnpm-workspace.yaml`（`nodeLinker: hoisted`、`storeDir`、`packageImportMethod: copy`）+ 兼容 `.npmrc`，并把运行态 `.modules.yaml` 的 `storeDir`/`virtualStoreDir` 对齐为当前项目；`startEssenceRuntime` 每次打开自动应用 |
+| （CI 偶发）buffer-keeper `pending-high-risk` 状态 `lastEventAt` 为 null | `state()` 的 digest 兜底可能先于 watch/poll 事件看到 pending；此时 `quietMs` 回退到 `startedAt`，可能在无事件时间戳时报 high-risk | 观察到 pending 时补记 `lastEventAt = nowMs()`；删除无读者的 `startedAt` |
 
 ### 关键设计边界
 
