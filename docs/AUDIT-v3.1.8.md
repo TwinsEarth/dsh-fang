@@ -40,9 +40,13 @@
 
 | 方 | 状态 |
 |---|---|
-| GitHub Release | 待执行 |
-| npm | 待执行 |
-| CI | 待执行 |
+| GitHub Release | 已发布：https://github.com/TwinsEarth/dsh-fang/releases/tag/v3.1.8（4 assets） |
+| npm | 已发布 `@twinsearth/dsh-fang@3.1.8`（latest） |
+| CI | 成功：release run 42790474055（attempt 3；attempt 1/2 因 npm 传播延迟 healthz 失败，重跑后全绿）；main ci/compat 成功（cd2243d） |
+
+发布物（CI build job 实测）：`dsh-fang-3.1.8.tgz` 524,762 B / 137 entries，
+sha256 `9a6c197a6df2a31c24a7dd85b6a43c9939cdbdba761d80ff4b0642a0aa4b6f42`；
+CI 门禁 tests pass=1020 / fail=0 / skip=3，e2e 81/81（67.6s），preflight GREEN。
 
 ## 4. 已知边界
 
