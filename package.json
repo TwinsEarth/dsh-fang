@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "3.1.9",
+  "version": "3.1.10",
   "private": true,
   "type": "module",
   "description": "dsh-Fang (瓮城) — mother/fork plugin development environment for DeepSeek Harness: one readonly mother, a disposable child dsh-Web per task, 1 orchestrator + 12 sub-plugins.",
@@ -40,6 +40,8 @@
     "tools/desktop-launch.mjs",
     "tools/boot-guard.mjs",
     "cordis.patch.yml",
+    "docs/WORKFLOW-UI.md",
+    "docs/CRASH-SAFETY.md",
     "locale/*.json",
     "icon.svg",
     "LICENSE-CORE",
