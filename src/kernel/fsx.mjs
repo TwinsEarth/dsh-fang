@@ -176,6 +176,47 @@ export function isLink(p) {
   }
 }
 
+/**
+ * Copy a tree with hardlinked files: directories are recreated, ordinary files are
+ * hardlinked (same volume only; falls back to a copy), and links are recreated as links
+ * rather than traversed. Used when the essence runtime's touched packages must be
+ * materialized into the essence module tree without duplicating file bytes and without
+ * junction cycles (the runtime mirror would otherwise point back at the essence tree).
+ * @param {string} from Source directory.
+ * @param {string} to Destination directory (created; expected to be empty/new).
+ * @returns {string} The destination.
+ */
+export function hardlinkTree(from, to) {
+  let names
+  try { names = fs.readdirSync(from) } catch {
+    ensureDir(to)
+    return to
+  }
+  ensureDir(to)
+  for (const name of names) {
+    const src = path.join(from, name)
+    const dst = path.join(to, name)
+    let st
+    try { st = fs.lstatSync(src) } catch { continue }
+    if (st.isSymbolicLink()) {
+      let target = ''
+      try { target = fs.readlinkSync(src) } catch { continue }
+      try {
+        const absolute = path.isAbsolute(target) ? target : path.resolve(from, target)
+        const stTarget = fs.lstatSync(absolute)
+        if (stTarget.isDirectory()) fs.symlinkSync(absolute, dst, 'junction')
+        else fs.copyFileSync(absolute, dst)
+      } catch { /* an unmirrorable link is skipped */ }
+      continue
+    }
+    if (st.isDirectory()) { hardlinkTree(src, dst); continue }
+    try { fs.linkSync(src, dst) } catch {
+      try { fs.copyFileSync(src, dst) } catch { /* skip */ }
+    }
+  }
+  return to
+}
+
 /** Create (or replace) a Windows junction / POSIX dir symlink. */
 export function makeJunction(target, linkPath) {
   ensureDir(path.dirname(linkPath))
