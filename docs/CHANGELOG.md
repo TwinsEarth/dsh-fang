@@ -1,3 +1,32 @@
+## v3.1.13（2026-11-11）
+
+**主题：决策中心深入每个会话 —— 右侧「待选」悬浮入口 + 从右向左的决策栏（选项/自定义输入）。**
+
+### 新增
+- **会话内决策中继**：母体 Web 中，当前会话存在 pending 决策时，右侧边缘出现红色
+  「◈ 待选 N」悬浮按钮；点击从右向左滑出决策栏：
+  - 只显示 `source.sessionId` 匹配当前会话的 ticket（其他会话/分身的票仍在收件箱）；
+  - 预置选项按 **A/B/C/D**（超过 4 个续 E/F…）展示，点击即提交；
+  - 也可直接**输入决定**（如「按 B 方案，先灰度 10%」），作为 custom decision 提交；
+  - 无选项的绿票显示「确认收到（ACK）」；`Esc` / 遮罩关闭；无待决策时按钮隐藏。
+- **总界面仍在母体**：收件箱（侧栏入口 + 右侧抽屉）不变，继续汇总所有来源的待决策。
+- 服务端：`POST /fang/api/decisions/resolve` 新增 **仅显式** `custom` 字段
+  （trim、≤2000 字符）；`resolvedOption = custom`、`customInput: true`、
+  `resolutionNote = custom`；未传 custom 的未知 option 仍 fail-closed。
+- Agent 侧：`request_human_decision` 的 `selectedValue` 即用户选择/输入，Agent 按此继续任务。
+- 文档：`docs/DECISION-RELAY.md`（行为、协议语义、边界），随 tarball 发布。
+
+### 测试/门禁
+- `test/decision-relay-dom.test.mjs` 5/5：入口出现/隐藏、面板滑出、A/B 选项提交、
+  自定义输入提交、其他会话过滤、fork 角色不挂载、socket 接线；
+- `test/decision-center.test.mjs` 新增：custom 解析（resolvedOption/customInput/note）+
+  未知 option 仍拒绝；
+- 版本断言随 3.1.13 更新；发布走 `preflight --e2e`（含 crash-safety 与打包后门禁）。
+
+### 发布说明
+- v3.1.12 的产物（npm/GitHub Release）由上一轮发布流程已产出；按人类要求 **v3.1.12 不发布**：
+  本版发布后会把 npm 3.1.12 标记 deprecated、删除其 GitHub Release 页面，正式版本以 3.1.13 为准。
+
 ## v3.1.12（2026-11-11）
 
 **主题：Web 端身份徽标（母体 / 元主 / 分身）+ 派生分身默认第三方插件种子。**
