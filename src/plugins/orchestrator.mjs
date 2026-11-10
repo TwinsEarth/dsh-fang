@@ -2816,8 +2816,8 @@ export function apply(ctx, config) {
           return json(res, 200, out)
         }
         const out = (body?.actionId !== undefined && typeof center.resolveAction === 'function')
-          ? center.resolveAction(body?.id, body.actionId, body?.payload, { by: body?.by ?? 'fang-api', note: body?.note })
-          : center.resolve(body?.id, body?.option, { by: body?.by ?? 'fang-api', note: body?.note })
+          ? center.resolveAction(body?.id, body.actionId, body?.payload, { by: body?.by ?? 'fang-api', note: body?.note, custom: body?.custom })
+          : center.resolve(body?.id, body?.option, { by: body?.by ?? 'fang-api', note: body?.note, custom: body?.custom })
         const status = out.ok ? 200
           : out.reason === 'not-found' ? 404
             : out.reason === 'option-required' || out.reason === 'unknown-option' ? 400
