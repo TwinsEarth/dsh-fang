@@ -2246,7 +2246,7 @@ export function apply(ctx, config) {
         homeDir,
         profile: 'essence-runtime',
         cliPath: cliPath(),
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId },
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1' },
       })
       if (!started.ok) throw new Error(`runtime-spawn-failed: ${started.error ?? 'unknown'} (forkId=${forkId}, homeDir=${homeDir}, profile=essence-runtime)`)
       return {
