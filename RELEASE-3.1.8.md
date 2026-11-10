@@ -80,6 +80,9 @@ pnpm add @twinsearth/dsh-fang@3.1.8
 
 ## 门禁
 
-- 本地：新增单测 6/6；受影响套件（kernel/forker/orchestrator/role-extensions/plugins-shape）通过；
-- CI：PR/发布流水线全量测试 + e2e（见 Release run 与 `docs/AUDIT-v3.1.8.md`）；
-- artifact / sha256 以 release workflow 产物为准。
+- 本地：新增单测 6/6（pnpm-store）+ 6/6（runtime-capture）；受影响套件 kernel/essence/forker/orchestrator/role-extensions/plugins-shape 全部通过；
+- CI：release run 42790474055（attempt 3 全绿）——tests pass=1020 / fail=0 / skip=3，e2e 81/81（67.6s），preflight GREEN，npm publish、GitHub Release、private mirror verify、healthz、final verify 成功；
+- 发布物：`dsh-fang-3.1.8.tgz` 524,762 B / 137 entries，
+  sha256 `9a6c197a6df2a31c24a7dd85b6a43c9939cdbdba761d80ff4b0642a0aa4b6f42`；
+- npm：`@twinsearth/dsh-fang@3.1.8`（latest）；GitHub Release：
+  https://github.com/TwinsEarth/dsh-fang/releases/tag/v3.1.8 。
