@@ -145,7 +145,7 @@ test('ensureEssenceRuntimePnpmConfig: pnpm 11 settings + modules manifest for a 
     writeModules(sourceModulesDir)
     writeModules(modulesDir)
     fs.mkdirSync(profileDir, { recursive: true })
-    fs.writeFileSync(path.join(profileDir, PNPM_WORKSPACE_FILE), 'autoInstallPeers: false\nminimumReleaseAge: 0\n')
+    fs.writeFileSync(path.join(profileDir, PNPM_WORKSPACE_FILE), 'autoInstallPeers: false\n')
     fs.writeFileSync(path.join(root, 'mother-pnpm-workspace.yaml'), 'nodeLinker: hoisted\n')
 
     const report = ensureEssenceRuntimePnpmConfig({
@@ -161,6 +161,8 @@ test('ensureEssenceRuntimePnpmConfig: pnpm 11 settings + modules manifest for a 
 
     const workspace = fs.readFileSync(path.join(profileDir, PNPM_WORKSPACE_FILE), 'utf8')
     assert.match(workspace, /^autoInstallPeers: false$/m)
+    // v3.1.11: the runtime disables pnpm's supply-chain observation window; otherwise a
+    // just-released own plugin is rejected with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION.
     assert.match(workspace, /^minimumReleaseAge: 0$/m)
     assert.match(workspace, /^nodeLinker: hoisted$/m)
     assert.match(workspace, new RegExp(`^storeDir: ${STORE.replace(/\\/g, '\\\\')}$`, 'm'))
@@ -180,6 +182,7 @@ test('ensureEssenceRuntimePnpmConfig: pnpm 11 settings + modules manifest for a 
     const workspace2 = fs.readFileSync(path.join(profileDir, PNPM_WORKSPACE_FILE), 'utf8')
     assert.equal((workspace2.match(/^storeDir:/gm) ?? []).length, 1)
     assert.equal((workspace2.match(/^packageImportMethod:/gm) ?? []).length, 1)
+    assert.equal((workspace2.match(/^minimumReleaseAge:/gm) ?? []).length, 1)
 
     // Missing modules manifest is reported, never guessed.
     const bare = ensureEssenceRuntimePnpmConfig({ profileDir, modulesDir: path.join(root, 'nope'), nodeLinker: 'hoisted' })
