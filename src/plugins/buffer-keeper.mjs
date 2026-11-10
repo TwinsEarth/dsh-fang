@@ -118,7 +118,6 @@ export function apply(ctx, config) {
   let settledDigests = {}
   let lastEventAt = null
   let lastFlushAt = null
-  let startedAt = null
   let forcedHighRisk = false
   let dirty = new Set()
   let flushQueue = Promise.resolve()
@@ -220,7 +219,6 @@ export function apply(ctx, config) {
     stop()
     ensureDir(next)
     dir = next
-    startedAt = nowMs()
     lastEventAt = null
     lastFlushAt = null
     forcedHighRisk = false
@@ -238,7 +236,6 @@ export function apply(ctx, config) {
     dir = ''
     dirty = new Set()
     lastEventAt = null
-    startedAt = null
     lastFlushAt = null
     forcedHighRisk = false
     baselineDigests = {}
@@ -265,7 +262,12 @@ export function apply(ctx, config) {
     if (!pending.length) {
       return { state: BUFFER_STATE.SETTLED, dir, lastEventAt, pending: [], highRisk: [], mode, lastFlushAt }
     }
-    const quietMs = nowMs() - (lastEventAt ?? startedAt ?? nowMs())
+    // A pending change can be observed before any watcher/poller event timestamp exists
+    // (the digest fallback in currentDiff() sees it first). Stamping the observation time
+    // keeps the quiet window honest: without it, the quiet window has no start bound and
+    // state() could report pending-high-risk with a null lastEventAt.
+    if (lastEventAt === null) lastEventAt = nowMs()
+    const quietMs = nowMs() - lastEventAt
     const judged =
       forcedHighRisk || quietMs >= settleMs()
         ? BUFFER_STATE.PENDING_HIGH_RISK
