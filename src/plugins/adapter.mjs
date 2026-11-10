@@ -655,6 +655,11 @@ export function apply(ctx, config) {
     ok: true,
     role,
     taskId,
+    // Web 端身份徽标用：母体 / 元主（元宝运行态）/ 分身（任务）。
+    // 元宝运行态由 orchestrator 注入 DSH_FANG_ESSENCE=1；旧运行态按 rt- 前缀兜底。
+    kind: role === 'mother'
+      ? 'mother'
+      : ((typeof process !== 'undefined' && process.env?.DSH_FANG_ESSENCE === '1') || String(taskId ?? '').startsWith('rt-') ? 'essence' : 'fork'),
     version: FANG_VERSION,
     protocol: ADAPTER_PROTOCOL_VERSION,
     sessionId,

@@ -26,6 +26,10 @@ import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const KEEP = process.argv.includes('--keep')
 const TIMEOUT_MS = Number((process.argv.find(a => a.startsWith('--timeout=')) ?? '').split('=')[1] ?? 240000)
+// v3.1.12: the e2e drill verifies the fork lifecycle, not the default plugin seed
+// (downloading the seed on every CI run would be slow and flaky). Seeding is covered
+// by test/fork-seed.test.mjs with an injected installer.
+process.env.DSH_FANG_FORK_SEED = process.env.DSH_FANG_FORK_SEED ?? '0'
 
 const CLI_CANDIDATES = [
   process.env.DSH_CLI_PATH,

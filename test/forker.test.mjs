@@ -86,7 +86,9 @@ async function deadPid() {
 }
 function newForkContext(config = {}) {
   const ctx = makeCtx()
-  const service = forker.apply(ctx, config)
+  // Unit tests must never download the default fork plugin seed; the seed itself is
+  // covered by test/fork-seed.test.mjs with an injected installer.
+  const service = forker.apply(ctx, { forkSeed: { enabled: false }, ...config })
   return { ctx, service }
 }
 const readFile = (file) => fs.readFileSync(file, 'utf8')
@@ -324,7 +326,7 @@ test('roleGate: forker is mother-only — no service and no directories in a for
     // fork role (env wins): apply() must return before registering anything.
     process.env.DSH_FANG_ROLE = 'fork'
     const forkCtx = makeCtx()
-    const forkService = forker.apply(forkCtx, { dataRoot })
+    const forkService = forker.apply(forkCtx, { dataRoot, forkSeed: { enabled: false } })
     assert.equal(forkService, undefined)
     assert.equal(forkCtx.get(SERVICE.forker), undefined, 'a fork must never register the mother-only forker')
     assert.equal(exists(dataRoot), false, 'a fork must not create the mother data dir')
@@ -339,7 +341,7 @@ test('roleGate: forker is mother-only — no service and no directories in a for
 
     // mother role: registers normally.
     const motherCtx = makeCtx()
-    const service = forker.apply(motherCtx, { dataRoot })
+    const service = forker.apply(motherCtx, { dataRoot, forkSeed: { enabled: false } })
     assert.ok(service)
     assert.equal(service.role, 'mother')
     assert.equal(motherCtx.get(SERVICE.forker), service)

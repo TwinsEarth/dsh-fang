@@ -61,6 +61,7 @@ import {
 } from '../kernel/index.mjs'
 import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
+import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
 
 export const name = 'fang-forker'
 export const inject = []
@@ -145,6 +146,16 @@ export const Config = z
       .description('true：用内置干净模板（不继承母体脏 profile）；false：沿用 profileTemplate'),
     bundleName: z.string().default('@local/dsh-fang').description('干净模板 profile.bundles 的第三个 bundle'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),
+    // v3.1.12：新机器/新用户的干净分身默认不带第三方插件；这里按“安装不激活 /
+    // 安装并激活”两组清单给每个新分身装默认插件（开关可关；失败不阻塞分身启动）。
+    forkSeed: z
+      .object({
+        enabled: z.boolean().default(true).description('派生新分身时安装默认第三方插件种子'),
+        install: z.array(z.string()).default([...DEFAULT_FORK_SEED.install]).description('只安装、不加入 profile bundles 的插件包名'),
+        activate: z.array(z.string()).default([...DEFAULT_FORK_SEED.activate]).description('安装并加入 profile bundles 的插件包名'),
+      })
+      .default({})
+      .description('派生分身的默认第三方插件种子'),
     supervise: z.boolean().default(false)
       .description('restart a crashed (already-ready) fork with exponential backoff; the patch layer enables it'),
     maxRestarts: z.natural().default(SUPERVISION_DEFAULTS.maxRestarts)
@@ -1052,6 +1063,30 @@ export function apply(ctx, config) {
     } catch (e) {
       rec.nodeModulesMirror = { ok: false, changed: false, error: msgOf(e) }
     }
+    // v3.1.12：默认第三方插件种子。install=只安装；activate=安装并激活（写入 bundles）。
+    // 种子安装在独立 seed home（dsh 自带 pnpm），模块以 hardlink 合并进分身 node_modules；
+    // 同一指纹只装一次。失败不阻塞分身启动，但结果保留在 rec.forkSeed 供 UI 诊断。
+    rec.forkSeed = null
+    if (cfg.forkSeed?.enabled !== false && !String(profile).startsWith('essence-') && process.env.DSH_FANG_FORK_SEED !== '0') {
+      const seedRoot = path.join(path.dirname(path.resolve(homeDir)), '.plugin-seed')
+      try { setProfileConfigReadonly(rec.profileDir, false) } catch { /* ignore */ }
+      try {
+        rec.forkSeed = await applyForkSeedToProfile({
+          seed: cfg.forkSeed ?? DEFAULT_FORK_SEED,
+          profileDir: rec.profileDir,
+          seedRoot,
+          cliPath,
+          logger: ctx?.logger,
+        })
+      } catch (e) {
+        rec.forkSeed = { ok: false, error: 'fork-seed-threw', detail: msgOf(e) }
+      } finally {
+        try { setProfileConfigReadonly(rec.profileDir, true) } catch { /* ignore */ }
+      }
+      if (rec.forkSeed?.ok === false) {
+        audit(AUDIT.FORK_CREATED, { forkId, forkSeedError: rec.forkSeed.error, forkSeedDetail: String(rec.forkSeed.detail ?? '').slice(0, 600) })
+      }
+    }
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
     // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。
@@ -1205,6 +1240,7 @@ export function apply(ctx, config) {
           url: rec.url,
           token: rec.token,
           ...(expectedPort > 0 ? { allocatedPort: expectedPort } : {}),
+          ...(rec.forkSeed ? { forkSeed: rec.forkSeed } : {}),
         })
       }
       // The tokenized banner is normally on stdout; scanning stderr too costs nothing.

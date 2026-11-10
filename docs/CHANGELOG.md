@@ -1,3 +1,34 @@
+## v3.1.12（2026-11-11）
+
+**主题：Web 端身份徽标（母体 / 元主 / 分身）+ 派生分身默认第三方插件种子。**
+
+### 新增
+- **侧栏身份徽标**：在侧栏 HARNESS 词标右侧用红字显示当前 Web 端身份 ——
+  `母体`（`/fang/api/status` 返回 role=mother）、`元主`（元宝运行态）、`分身`（任务）。
+  不替换宿主 `sidebar.brand.name` 单槽（避免抹掉官方词标），而是在词标后追加只读徽标；
+  宿主重渲染摘掉节点时自动补回；识别失败时隐藏，不显示错误身份。
+- **adapter hello 增加 `kind`**：`mother` / `essence` / `fork`；元宝运行态由 orchestrator
+  注入 `DSH_FANG_ESSENCE=1`，旧运行态按 `rt-` forkId 前缀兜底。客户端据此区分元主与分身。
+- **派生分身默认插件种子**（新机器/新用户不再“裸奔”）：`forkSeed` 配置两组清单，
+  默认值即用户给定列表：
+  - 安装不激活：`@twinsearth/dsh-2xray`、`@michengai/dsh-agency-agents`、`dsh-better-sidebar`、
+    `dsh-context`、`@liustack/modlens`、`@liustack/modsearch`；
+  - 安装并激活：`dshmarket`、`@twinsearth/dsh-im2a-plugin`、`@openviking/dsh-memory-plugin`、
+    `@twinsearth/w2m-dsh-plugin`。
+  种子在独立 seed home 用 DSH 自带 pnpm 安装（按指纹缓存），模块 hardlink 合并进分身
+  `node_modules`；install 只写 dependencies，activate 额外写入 `dsh.profile.bundles` 随分身启动加载。
+  两种派生入口（开发者推荐 / 绿色“派生新分身”）都走同一 Forker.spawn，因此行为一致。
+  失败不阻塞分身启动，结果保留在 spawn 返回值 `forkSeed` 与审计里。
+- 配置项：`fang-forker` Config 的 `forkSeed.enabled/install/activate`；环境变量
+  `DSH_FANG_FORK_SEED=0` 可全局关闭（e2e/CI 使用）。
+
+### 测试/门禁
+- `test/fork-seed.test.mjs` 6/6：默认清单、归一化、profile patch、scope 合并、装一次缓存、
+  **每次 spawn 重放模板后重新打 patch 且不重复安装**、禁用 no-op；
+- `test/client-role-badge-dom.test.mjs` 5/5：母体/元主/分身/前缀兜底/适配器字段；
+- `test/forker.test.mjs` 29/29（单测禁用种子，避免联网）；
+- 既有全量 + crash-safety + 打包后门禁由 `preflight --e2e` 复跑。
+
 ## v3.1.11（2026-11-11）
 
 **主题：修复元宝运行态「更新/卸载插件」被 pnpm 供应链观察期拦截（ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION）。**
