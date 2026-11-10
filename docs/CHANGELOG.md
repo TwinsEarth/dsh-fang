@@ -1,3 +1,19 @@
+## v3.1.8（2026-11-10）
+**主题：元宝运行态内 pnpm 插件更新/卸载修复（ERR_PNPM_UNEXPECTED_STORE）。**
+
+### 修复
+- **元宝运行态无法更新/升级/移除插件**：DSH 0.2.2-rc.1 自带 pnpm 11，pnpm 11 的 `.npmrc` 只读鉴权/网络键，`store-dir`、`package-import-method` 等非鉴权设置改为从 `pnpm-workspace.yaml`（camelCase）读取；Fang 旧逻辑只写 `.npmrc`，于是运行态 pnpm 选了“按盘符默认 store”（D: 项目 → `D:\.pnpm-store\v11`），而模块树记录的是母体 C: store → `[ERR_PNPM_UNEXPECTED_STORE]`。新增 `src/lib/pnpm-store.mjs`：写入 `pnpm-workspace.yaml` 的 `nodeLinker: hoisted` / `storeDir` / `packageImportMethod: copy`（保留原设置与注释），同步 `.npmrc` 兼容旧工具链，并把运行态 `node_modules/.modules.yaml` 的 `storeDir`/`virtualStoreDir` 对齐为“本项目自己的 `.pnpm`”（复制来的 manifest 仍写着母体 virtual store）。
+- 每次打开元宝运行态（`startEssenceRuntime`）都会自动应用，返回体新增 `pnpmConfig` 诊断字段；失败不阻塞实例启动。
+- 回归保护：新增 `test/pnpm-store.test.mjs`（6 例：manifest 读取、settings upsert 保序、.npmrc 更新、manifest 对齐幂等、端到端 ensure）。
+
+### 测试/门禁
+- 发布前重跑 `preflight --e2e`；证据见 `docs/AUDIT-v3.1.8.md`。
+- 现场证据：官方元宝运行态 profile 修复后 `pnpm store path` 返回 C: store；以相同依赖图/锁文件的隔离副本执行 `pnpm remove dsh-better-sidebar` 成功（13.7s，storeDir=C:、virtualStoreDir=副本路径，无 store/virtual-store 报错）。
+
+### 已知边界
+- 元宝运行态的插件改动当前仍会在下次打开时按元宝 merged 配置重放（不写回元宝配置），本版只解除 pnpm 操作阻塞；“运行态插件变更捕获回元宝”列为下一版需求。
+
+## v3.1.7（2026-11-10）
 ## v3.1.7（2026-11-10）
 **主题：分身/元主运行态的模块解析与无头 Web 目录选择修复。**
 
