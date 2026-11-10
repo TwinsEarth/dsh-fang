@@ -9,9 +9,8 @@ export const FORK_LOCKED_ENTRY_IDS = Object.freeze([
   // 禁用 config-editor / ui-settings 会移除 configForms 服务，导致 locale 及之后
   // 50 个客户端插件永久 pending（实测：web boot 50 entries did not activate）。
   'tool-plugin-manager',
-  // 分身=生产盘：隐藏侧边栏「插件」页和设置页的插件清单，避免用户点启用后
-  // 因 package.json 只读而收到 EPERM。
-  'ui-plugin-manager',
+  // 只隐藏设置页的插件清单；不能禁用 ui-plugin-manager：它提供 pluginNavigation，
+  // 禁掉会让 dsh-client-ui-plugin-recommendations 永久 pending（v3.1.5 实测）。
   'ui-settings-plugin-inventory',
 ])
 
@@ -25,7 +24,11 @@ const WELCOME_NOTICE_ENTRY = Object.freeze({
 // cordis.yml 不加只读：DSH 启动时会打开它做规范化写入，只读会导致 EPERM 启动失败。
 export const PROFILE_CONFIG_FILES = Object.freeze(['package.json', 'cordis.patch.yml'])
 
-/** 把分身 profile 的配置文件设为只读（防止误写；不防有意绕过）。 */
+/** v3.1.5 曾错误禁用 ui-plugin-manager（它提供 pluginNavigation）；升级时自动移除该历史锁。 */
+export const LEGACY_LOCKED_ENTRY_IDS = Object.freeze(['ui-plugin-manager'])
+
+/**
+ * 把分身 profile 的配置文件设为只读（防止误写；不防有意绕过）。 */
 export function setProfileConfigReadonly(profileDir, readonly = true) {
   if (String(process.env.DSH_FANG_FORK_PROFILE_RO ?? '1') === '0') return { ok: true, skipped: true, changed: [] }
   // essence-runtime 是元主的配置态实例：DSH 设置/内置插件开关需要原子写 package.json。
@@ -78,7 +81,10 @@ function withLockRows(entries, ids) {
   return { entries: out, added }
 }
 
-export function applyForkConfigLock(profileDir, options = {}) {  if (String(process.env.DSH_FANG_FORK_CONFIG_LOCK ?? '1') === '0') return { ok: true, skipped: true }
+export function applyForkConfigLock(profileDir, options = {}) {
+  if (String(process.env.DSH_FANG_FORK_CONFIG_LOCK ?? '1') === '0') return { ok: true, skipped: true }
+  // 自动修复 v3.1.5 遗留的 ui-plugin-manager disabled:true（会断 pluginNavigation）。
+  try { clearForkConfigLock(profileDir, { ids: LEGACY_LOCKED_ENTRY_IDS }) } catch { /* best effort */ }
   const file = path.join(String(profileDir), 'cordis.patch.yml')
   let text = ''
   try { text = fs.readFileSync(file, 'utf8') } catch { text = '' }

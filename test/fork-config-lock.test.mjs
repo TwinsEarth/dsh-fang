@@ -42,6 +42,20 @@ test('fork-config-lock: clear 只解除生产盘锁，不碰其他 patch', () =>
   assert.match(text, /id: keep-me/)
 })
 
+test('fork-config-lock: 自动移除 v3.1.5 遗留的 ui-plugin-manager 锁', () => {
+  const dir = tmpProfile()
+  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), JSON.stringify([
+    { id: 'ui-plugin-manager', disabled: true },
+    { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat', config: { transcriptView: 'standard' } },
+  ], null, 2), 'utf8')
+  const out = applyForkConfigLock(dir)
+  assert.equal(out.ok, true)
+  const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'))
+  assert.equal(parsed.some((entry) => entry.id === 'ui-plugin-manager' && entry.disabled === true), false, '不能禁 ui-plugin-manager（pluginNavigation 提供者）')
+  assert.equal(parsed.some((entry) => entry.id === 'ui-chat'), true)
+  for (const id of FORK_LOCKED_ENTRY_IDS) assert.equal(parsed.some((entry) => entry.id === id && entry.disabled === true), true)
+})
+
 test('fork-config-lock: 写入禁用条目且幂等', () => {
   const dir = tmpProfile()
   const first = applyForkConfigLock(dir)
