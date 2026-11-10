@@ -1,3 +1,15 @@
+## v3.1.7（2026-11-10）
+**主题：分身/元主运行态的模块解析与无头 Web 目录选择修复。**
+
+### 修复
+- **分身内“下任务&指令失败”**：`Invalid schema for function 'w2m_report'`。根因是分身 profile 的 `node_modules` 是“整树 junction”到母体 profile 树，DSH 的 profile-scope 解析器只对 profile 树内或 linked-root（逐条目链接）下的 importer 供给安装包，导致插件里的 `import('@deepseek-ai/dsh-tools')` 落到插件自带离线 shim；w2m shim 把参数默认值写成 `required:false` 属性注解，供应商拒绝整次请求。forker 现在把 `node_modules` 物化为**逐条目 junction 镜像**（`mirrorModuleTree`），并在每次 spawn 就地修复历史 junction（`ensureModuleMirror`）；元主运行态同样处理。
+- **分身/元主 Web“选择工作区失败”**：分身在 `dsh.cmd --no-open`（无 Electron 壳）下由 `directory-picker-auto` 解析为 `native`，原生目录对话框没有窗口可弹。spawn 现在写入 `fang-headless.patch.yml` 并以 `--patch` 传入，固定为 `directory-picker-browse`（浏览器对话框）+ 对应客户端面；安装缺 browse 包时保持 DSH 默认，可用 `DSH_FANG_HEADLESS_PICKER_PATCH=0` 关闭。
+- **回归保护**：kernel 新增 `mirrorModuleTree` / `ensureModuleMirror` 单测；forker 新增 `--patch` argv、overlay 内容与安装门禁单测；provision/template 断言从“整树 junction”改为“逐条目镜像”。
+
+### 测试/门禁
+- 发布前重跑 `preflight --e2e`、install/reinstall drill；证据见 `docs/AUDIT-v3.1.7.md`。
+- 本地 live 验证明细：真实 `dsh.cmd` 子进程以逐条目镜像启动母体插件全集（含 w2m）无 `ERR_MODULE_NOT_FOUND`；探针插件在子进程内成功 `import('@deepseek-ai/dsh-tools')`。
+
 ## v3.1.6（2026-11-10）
 
 **主题：回滚 v3.1.5 的两个回归（元宝运行态启动失败、分身 client 插件 pending）。**

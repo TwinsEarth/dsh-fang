@@ -179,6 +179,15 @@ test('module surface + pure helpers (Config defaults / buildSpawnArgs / classify
   ])
   assert.equal(forker.buildSpawnArgs({ profile: 'web', noOpen: false }).includes('--no-open'), false)
   assert.deepEqual(forker.buildSpawnArgs({ profile: 'dev', port: 0 }), ['--profile', 'dev', '--port', '0', '--no-open'])
+  // v3.1.7: launcher overlays (`--patch`) go before the app arguments; blanks are dropped.
+  assert.deepEqual(forker.buildSpawnArgs({ profile: 'web', port: 18042, patchPaths: ['C:\\p\\overlay.yml'] }), [
+    '--profile', 'web', '--patch', 'C:\\p\\overlay.yml', '--port', '18042', '--no-open',
+  ])
+  assert.deepEqual(forker.buildSpawnArgs({ profile: 'web', patchPaths: ['', '  '] }), ['--profile', 'web', '--port', '0', '--no-open'])
+  assert.deepEqual(
+    forker.buildLaunchSpec({ cliPath: 'C:\\bin\\dsh.mjs', profile: 'web', port: 18042, patchPaths: ['C:\\p\\a.yml', 'C:\\p\\b.yml'] }).args,
+    ['C:\\bin\\dsh.mjs', '--profile', 'web', '--patch', 'C:\\p\\a.yml', '--patch', 'C:\\p\\b.yml', '--port', '18042', '--no-open'],
+  )
 
   const normal = forker.classifyExit(0)
   assert.equal(normal.kind, 'normal')
@@ -213,6 +222,15 @@ test('launch spec: .cmd needs shell:true, .exe spawns directly, .mjs goes throug
   assert.deepEqual(cmd.args, args)
   assert.equal(cmd.windowsHide, true)
 
+  // shell:true concatenates argv: whitespace-bearing paths must be quoted by the spec builder.
+  const spaced = forker.buildLaunchSpec({
+    cliPath: 'C:\\bin\\dsh.cmd', profile: 'web', port: 18042,
+    patchPaths: ['C:\\Users\\Foo Bar\\fork home\\fang-headless.patch.yml'],
+  })
+  assert.deepEqual(spaced.args, [
+    '--profile', 'web', '--patch', '"C:\\Users\\Foo Bar\\fork home\\fang-headless.patch.yml"', '--port', '18042', '--no-open',
+  ])
+
   const exe = forker.buildLaunchSpec({ cliPath: 'C:\\bin\\dsh.exe', profile: 'web' })
   assert.equal(exe.shell, false)
   assert.equal(exe.command, 'C:\\bin\\dsh.exe')
@@ -227,6 +245,35 @@ test('launch spec: .cmd needs shell:true, .exe spawns directly, .mjs goes throug
   // v2: the allocated pool port is what reaches argv.
   const viaNodePort = forker.buildLaunchSpec({ cliPath: 'C:\\bin\\dsh.mjs', profile: 'web', port: 18042 })
   assert.deepEqual(viaNodePort.args.slice(1), ['--profile', 'web', '--port', '18042', '--no-open'])
+})
+
+test('headless directory-picker overlay: content, installation gate, and file write', () => {
+  // The overlay pins the picker to the browser dialog for a `dsh.cmd --no-open` host.
+  assert.match(forker.HEADLESS_PICKER_OVERLAY, /- id: directory-picker\n  disabled: true/)
+  assert.match(forker.HEADLESS_PICKER_OVERLAY, /id: directory-picker-browse/)
+  assert.match(forker.HEADLESS_PICKER_OVERLAY, /@deepseek-ai\/dsh-host-directory-picker-browse/)
+  assert.match(forker.HEADLESS_PICKER_OVERLAY, /@deepseek-ai\/dsh-client-ui-directory-picker-browse/)
+
+  const dir = tmp()
+  // Unknown installation (plain node in the test runner): no browse pair → no patch file.
+  assert.equal(forker.headlessPickerSupported({ cliPath: path.join(dir, 'nope', 'dsh.cmd') }), false)
+  assert.equal(forker.writeHeadlessPickerOverlay(dir, { cliPath: path.join(dir, 'nope', 'dsh.cmd') }), null)
+  assert.equal(exists(path.join(dir, forker.HEADLESS_PICKER_OVERLAY_FILE)), false)
+
+  // Known installation (injected): the overlay is written and is a stable path in the profile.
+  const written = forker.writeHeadlessPickerOverlay(dir, { supported: true })
+  assert.equal(written, path.join(dir, forker.HEADLESS_PICKER_OVERLAY_FILE))
+  assert.equal(readFile(written), forker.HEADLESS_PICKER_OVERLAY)
+  // Refresh rewrites the same file (idempotent) and an opt-out disables it.
+  assert.equal(forker.writeHeadlessPickerOverlay(dir, { supported: true }), written)
+  const previous = process.env.DSH_FANG_HEADLESS_PICKER_PATCH
+  process.env.DSH_FANG_HEADLESS_PICKER_PATCH = '0'
+  try {
+    assert.equal(forker.writeHeadlessPickerOverlay(dir, { supported: true }), null)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_FANG_HEADLESS_PICKER_PATCH
+    else process.env.DSH_FANG_HEADLESS_PICKER_PATCH = previous
+  }
 })
 
 test('fake CLI echoes --port N, reports fork identity env, and stays scan-safe', async () => {
@@ -387,7 +434,10 @@ test('provision in cleanTemplate mode builds the fork profile from a forker-owne
     assert.doesNotMatch(forkPatch, /^\s*\[\s*\]\s*$/m, '空数组必须被移除，否则 YAML 非法')
     assert.match(forkPatch, /id: tool-plugin-manager/)
     assert.doesNotMatch(forkPatch, /id: config-editor/, '不能禁用 config-editor：会移除 configForms，客户端 50 个插件 pending')
-    assert.equal(isLink(path.join(result.profileDir, 'node_modules')), true, 'node_modules must be a junction to the mother modules')
+    const forkModules = path.join(result.profileDir, 'node_modules')
+    assert.equal(isLink(forkModules), false, 'v3.1.7: node_modules is a per-entry mirror directory, not a whole-tree junction')
+    assert.equal(fs.statSync(forkModules).isDirectory(), true)
+    assert.equal(readFile(path.join(forkModules, 'mother-dep.txt')).trim(), 'mother-only', 'mirror copies root files')
     assert.equal(exists(path.join(result.profileDir, 'README.md')), false, 'only package.json + cordis*.yml are cloned')
     assert.ok(result.cloned.includes('package.json'))
     assert.ok(result.cloned.includes('cordis.yml'))
@@ -426,7 +476,10 @@ test('provision with cleanTemplate=false keeps the v1 clone-from-profileTemplate
     assert.equal(result.template, path.resolve(template), 'legacy mode clones straight from profileTemplate')
     assert.equal(JSON.parse(readFile(path.join(result.profileDir, 'package.json'))).name, 'mother-profile-fixture')
     assert.equal(exists(path.join(result.profileDir, 'README.md')), false)
-    assert.equal(isLink(path.join(result.profileDir, 'node_modules')), true)
+    const legacyModules = path.join(result.profileDir, 'node_modules')
+    assert.equal(isLink(legacyModules), false, 'v3.1.7: node_modules is a per-entry mirror directory')
+    assert.equal(fs.statSync(legacyModules).isDirectory(), true)
+    assert.equal(readFile(path.join(legacyModules, 'mother-dep.txt')).trim(), 'mother-only')
     assert.deepEqual(result.warnings, [])
     assert.ok(result.cloned.includes('package.json'))
     assert.ok(result.cloned.includes('cordis.patch.yml'))
@@ -498,7 +551,7 @@ test('ensureTemplate writes the clean profile contract and is idempotent', () =>
   const { ctx, service } = newForkContext({ dataRoot, bundleName: '@local/custom-bundle' })
   try {
     const modules = path.join(root, 'modules-src')
-    fs.mkdirSync(modules, { recursive: true })
+    fs.mkdirSync(path.join(modules, 'pkg-a'), { recursive: true })
     fs.writeFileSync(path.join(modules, 'dep.txt'), 'x\n')
     const dir = path.join(root, 'clean-template')
 
@@ -518,17 +571,21 @@ test('ensureTemplate writes the clean profile contract and is idempotent', () =>
     ])
     assert.equal(readFile(path.join(dir, 'cordis.yml')).trim(), '[]')
     assert.match(readFile(path.join(dir, 'cordis.patch.yml')), /- id: ui-settings-general/)
-    assert.equal(isLink(path.join(dir, 'node_modules')), true)
+    const templateModules = path.join(dir, 'node_modules')
+    assert.equal(isLink(templateModules), false, 'v3.1.7: the template carries the per-entry mirror, not a junction')
+    assert.equal(fs.statSync(templateModules).isDirectory(), true)
+    assert.equal(readFile(path.join(templateModules, 'dep.txt')).trim(), 'x', 'root files are copied into the mirror')
+    assert.equal(isLink(path.join(templateModules, 'pkg-a')), true, 'directories are linked, one entry each')
     assert.equal(
-      path.resolve(fs.realpathSync(path.join(dir, 'node_modules'))).toLowerCase(),
-      path.resolve(fs.realpathSync(modules)).toLowerCase(),
-      'node_modules must junction to nodeModulesSource',
+      path.resolve(fs.realpathSync(path.join(templateModules, 'pkg-a'))).toLowerCase(),
+      path.resolve(fs.realpathSync(path.join(modules, 'pkg-a'))).toLowerCase(),
+      'each mirrored directory must point at nodeModulesSource',
     )
 
     // Idempotent: the same call is a no-op success (no nested junction, no throw).
     const again = service.ensureTemplate({ templateDir: dir, nodeModulesSource: modules })
     assert.equal(again.ok, true)
-    assert.equal(isLink(path.join(dir, 'node_modules')), true)
+    assert.equal(isLink(templateModules), false)
     assert.equal(JSON.parse(readFile(path.join(dir, 'package.json'))).private, true)
 
     // Absent node_modules source degrades with the contract warning.
