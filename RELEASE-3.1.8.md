@@ -28,6 +28,7 @@ The dependencies at "...\essence-runtime\node_modules" are currently linked from
   - 对齐运行态 `node_modules/.modules.yaml`：`storeDir` + 本项目的 `virtualStoreDir`（`<profile>/node_modules/.pnpm`）。
 - `startEssenceRuntime` 在 provision/mirror 之后、拉起实例之前自动应用；返回体新增 `pnpmConfig` 诊断；失败不阻塞实例启动。
 - 新增 `test/pnpm-store.test.mjs`（6 例）。
+- 附带：`buffer-keeper` `state()` 的时间戳竞态修复（digest 兜底先看到 pending 时补记 `lastEventAt`，避免 CI Node 22 偶发 `pending-high-risk` 无时间戳断言失败）。
 
 ## 现场验证
 
