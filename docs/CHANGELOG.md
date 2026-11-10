@@ -1,3 +1,15 @@
+## v3.1.6（2026-11-10）
+
+**主题：回滚 v3.1.5 的两个回归（元宝运行态启动失败、分身 client 插件 pending）。**
+
+### 修复
+- **元宝运行态启动失败**：v3.1.5 在 `forker.spawn` 里跳过 essence-runtime 的生产盘锁并解锁，导致 DSH 启用 plugin-manager 后因运行态模块树不完整退出（`runtime-spawn-failed: exited`）。恢复 v3.1.4 行为：spawn 重新写入锁并设置只读。
+- **分身 client pending**：v3.1.5 禁用了 `ui-plugin-manager`，而它提供 `pluginNavigation`，导致 `dsh-client-ui-plugin-recommendations` pending。改回只禁用 `ui-settings-plugin-inventory`；并自动移除历史 profile 里的 `ui-plugin-manager disabled:true`。
+- 保留 v3.1.5 的 queue-journal 0.1.4 排队列表恢复、分身 Web 说明页、元宝卡片等改动。
+
+### 测试/门禁
+- 发布前重跑 `preflight --e2e`、install/reinstall drill；证据见 `docs/AUDIT-v3.1.6.md`。
+
 # CHANGELOG
 
 > **发布豁免（人工批准，2026-11-03）**：v3.0.0–v3.0.6 **永不发布**，首个 Release 为 **v3.0.7**；

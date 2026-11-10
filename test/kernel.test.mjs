@@ -180,7 +180,7 @@ test('core: resource diff and shared vocabulary', () => {
   assert.equal(diff.leakedRefed, 2)
   assert.equal(totalResources({ a: 1, b: 2 }), 3)
   assert.equal(EXIT.RESTART, 75)
-  assert.equal(FANG_VERSION, '3.1.5')
+  assert.equal(FANG_VERSION, '3.1.6')
   assert.equal(SERVICE.orchestrator, 'fang')
   assert.equal(ROW.orchestrator, 'fang-orchestrator')
   assert.equal(FORK_STATUS.RUNNING, 'running')
