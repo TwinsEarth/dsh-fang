@@ -435,6 +435,109 @@ window.__ModuleLoader__.load({
       return { status: res.status, body, etag }
     }
 
+    // ── Web 端角色徽标（母体 / 元主 / 分身）──────────────────────────────
+    // 同一个 Fang 插件同时运行在三种 Web 实例里；侧栏 HARNESS 右侧用红字标出当前身份，
+    // 避免“每次进来不知道是哪个”。宿主侧栏品牌行是 DSH 壳自己的 DOM，单槽
+    // （sidebar.brand.name）替换会抹掉官方词标，因此这里在词标后**追加**一个只读徽标，
+    // 并在宿主重渲染把节点摘掉时自动补回。
+    const WEB_ROLE_LABEL = Object.freeze({ mother: '母体', essence: '元主', fork: '分身' })
+    const WEB_ROLE_BADGE_ID = 'fang-web-role-badge'
+    async function detectWebRole() {
+      // 母体：/fang/api/status 由母体路由提供，role=mother。
+      try {
+        const status = await api('/fang/api/status')
+        if (status.status === 200 && status.body && status.body.ok !== false) {
+          const role = String(status.body.role ?? 'mother')
+          if (role === 'mother') return 'mother'
+        }
+      } catch { /* fall through to adapter handshake */ }
+      // 元主 / 分身：两者都是 fork 角色的 DSH 实例；adapter hello 给出 kind。
+      try {
+        const hello = await api('/fang/adapter/hello')
+        if (hello.status === 200 && hello.body) {
+          const kind = String(hello.body.kind ?? '')
+          if (kind === 'mother' || kind === 'essence' || kind === 'fork') return kind
+          // 旧宿主没有 kind：元宝运行态的 forkId 是 rt-<essenceId>，任务是 task_/标题 id。
+          const taskId = String(hello.body.taskId ?? '')
+          return /^rt-/.test(taskId) ? 'essence' : 'fork'
+        }
+      } catch { /* unknown */ }
+      return ''
+    }
+    function mountWebRoleBadge() {
+      if (typeof document === 'undefined') return () => {}
+      try { injectStyle(document) } catch { /* style optional */ }
+      let role = ''
+      let timer = 0
+      let observer = null
+      let observed = null
+      const findBrandName = () => {
+        const candidates = document.querySelectorAll('[class*="brandName"]')
+        for (const node of candidates) {
+          if (node && node.parentElement && node.closest('[class*="brand"], [class*="brandIdentity"]')) return node
+        }
+        return candidates[0] ?? null
+      }
+      const paint = (el) => {
+        if (!el) return
+        const label = WEB_ROLE_LABEL[role] ?? ''
+        const hidden = label === ''
+        const title = label ? ('当前 Web 端：' + label) : '正在识别 Web 端身份…'
+        // Idempotent: the mutation observer watches this parent, so rewriting an
+        // unchanged text node would feed itself and spin forever.
+        if (el.textContent !== label) el.textContent = label
+        if (el.hidden !== hidden) el.hidden = hidden
+        if (el.dataset.fangWebRole !== role) el.dataset.fangWebRole = role
+        if (el.title !== title) el.title = title
+        if (el.getAttribute('aria-label') !== title) el.setAttribute('aria-label', title)
+      }
+      const place = () => {
+        if (!document || !document.body) return false
+        let el = document.getElementById(WEB_ROLE_BADGE_ID)
+        if (el && el.isConnected && el.parentElement) { paint(el); return true }
+        const brandName = findBrandName()
+        if (!brandName || !brandName.parentElement) return false
+        el = document.createElement('span')
+        el.id = WEB_ROLE_BADGE_ID
+        el.className = 'fang-web-role'
+        el.setAttribute('role', 'status')
+        el.setAttribute('aria-live', 'polite')
+        brandName.parentElement.insertBefore(el, brandName.nextSibling)
+        paint(el)
+        // 宿主重渲染只可能发生在品牌行内部：盯住它的父节点，摘掉就补回。
+        if (observer) { try { observer.disconnect() } catch { /* ignore */ } }
+        observer = new MutationObserver(() => { try { place() } catch { /* ignore */ } })
+        try { observer.observe(brandName.parentElement, { childList: true, subtree: true }) } catch { /* ignore */ }
+        observed = brandName.parentElement
+        return true
+      }
+      const install = () => {
+        if (place()) { if (timer) { clearInterval(timer); timer = 0 } return true }
+        return false
+      }
+      install()
+      // 侧栏可能晚于插件激活渲染；最多等 20s，不无限占定时器。
+      if (!document.getElementById(WEB_ROLE_BADGE_ID)) {
+        let tries = 0
+        timer = setInterval(() => {
+          tries += 1
+          if (install() || tries >= 80) { clearInterval(timer); timer = 0 }
+        }, 250)
+      }
+      void (async () => {
+        const detected = await detectWebRole()
+        if (!detected) return
+        role = detected
+        install()
+      })()
+      return () => {
+        if (timer) { clearInterval(timer); timer = 0 }
+        if (observer) { try { observer.disconnect() } catch { /* ignore */ } observer = null }
+        void observed
+        try { document.getElementById(WEB_ROLE_BADGE_ID)?.remove() } catch { /* ignore */ }
+      }
+    }
+
     function resolveMotherOrigin() {
       // In the Electron shell the panel origin is the loopback proxy, which only
       // serves /fang/api/*; the mother portal lives on the upstream DSH origin.
@@ -936,6 +1039,14 @@ window.__ModuleLoader__.load({
 .toast--bad{background:rgba(168,13,38,.96)}
 .toast--warn{background:rgba(120,58,6,.95)}
 .live{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+/* Web 端角色徽标：母体 / 元主 / 分身 —— 挂在侧栏品牌词右侧，仅用于识别当前实例身份。 */
+.fang-web-role{display:inline-flex;align-items:center;height:18px;margin-left:7px;padding:0 6px;border-radius:6px;
+  border:1px solid rgba(200,16,46,.32);background:rgba(200,16,46,.07);color:#C8102E;
+  font-size:11.5px;font-weight:700;letter-spacing:.02em;line-height:1;white-space:nowrap;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;vertical-align:middle;
+  -webkit-app-region:no-drag;user-select:none}
+.fang-web-role[hidden]{display:none}
+.fang-web-role--unknown{visibility:hidden}
 
 @media (max-width:760px){
   .fang-console{padding:12px 12px 18px}
@@ -6009,10 +6120,12 @@ window.__ModuleLoader__.load({
     // ── 插件入口 ──────────────────────────────────────────────────────────
     return {
       mountPanel,
-      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini } : {}),
+      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole } : {}),
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
+        // v3.1.12：侧栏 HARNESS 右侧的 Web 端身份徽标（母体 / 元主 / 分身）。
+        disposers.push(mountWebRoleBadge())
         // 母体 Web = DSH 主会话视图；Web 端直接切回 conversation 面板。
         const goMother = () => {
           try {
