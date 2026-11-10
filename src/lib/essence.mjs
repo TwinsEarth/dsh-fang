@@ -1144,19 +1144,42 @@ export class EssenceManager {
 
   /**
    * 物化 merged/profile：镜像骨架 + 合并后的 patch/package/settings + 原身凭据（镜像凭据剔除）。
+   * v3.1.8：保留已有 merged/profile/node_modules（元主模块树可能是 GB 级、且可能已包含运行态
+   * 捕获回来的插件变更，重建成本高）；overlay 里的 pnpm 锁/设置文件一并投影到 merged，供
+   * 运行态复用时保持可复现的依赖图。
    */
   materializeMerged(root, mirror, overlay, result) {
     const mergedRoot = path.join(root, 'merged')
     const mergedProfile = path.join(mergedRoot, 'profile')
+    const preservedModules = path.join(root, '.modules-preserve')
+    let hadModules = false
+    if (exists(preservedModules)) removeTree(preservedModules)
+    if (exists(path.join(mergedProfile, 'node_modules'))) {
+      try {
+        fs.renameSync(path.join(mergedProfile, 'node_modules'), preservedModules)
+        hadModules = true
+      } catch { hadModules = false }
+    }
     if (exists(mergedRoot)) removeTree(mergedRoot)
     ensureDir(mergedProfile)
     copyTree(mirror.root, mergedProfile)
+    if (hadModules) {
+      const freshModules = path.join(mergedProfile, 'node_modules')
+      if (exists(freshModules)) removeTree(freshModules)
+      fs.renameSync(preservedModules, freshModules)
+    }
     fs.writeFileSync(path.join(mergedProfile, 'cordis.patch.yml'), serializePatchEntries(result.mergedPatchEntries), 'utf8')
     writeJsonAtomic(path.join(mergedProfile, 'package.json'), result.mergedPackageJson)
     const settingsDir = path.join(mergedProfile, 'settings')
     ensureDir(settingsDir)
     for (const [name, value] of Object.entries(result.mergedSettings)) {
       fs.writeFileSync(path.join(settingsDir, `${name}.yaml`), `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    }
+    // v3.1.8：overlay 里保管的 pnpm 依赖图文件（运行态插件变更捕获）投影到 merged profile。
+    for (const name of ['pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc']) {
+      const source = path.join(root, 'overlay', name)
+      if (!exists(source)) continue
+      try { fs.copyFileSync(source, path.join(mergedProfile, name)) } catch { /* 单个文件失败不阻塞物化 */ }
     }
     // v3.0.5/B8：凭据永不进入 merged/profile —— 派生 profile 不携带任何 credentials
     const mergedCredentials = path.join(mergedProfile, 'credentials')

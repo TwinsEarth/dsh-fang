@@ -52,9 +52,31 @@ pnpm add @twinsearth/dsh-fang@3.1.8
 - 插件更新/卸载不再报 `ERR_PNPM_UNEXPECTED_STORE`；
 - `/fang/api/essence/runtime` 返回的 `pnpmConfig.ok` 为 true。
 
+## 运行态插件变更持久化回元宝（本版新增）
+
+`stopEssenceRuntime` 与下次 `startEssenceRuntime` 会在重放旧配置之前调用
+`captureRuntimeProfileIntoEssence()`：
+
+1. 把运行态 `package.json` 的 `dependencies` / `dsh.profile.bundles` 写回元宝 overlay；
+2. 把与元宝 merged 有差异的 `cordis.patch.yml` 条目写回 overlay（禁用/启用都保留）；
+3. 把 `pnpm-lock.yaml` / `pnpm-workspace.yaml` / `.npmrc` 保管进 overlay，并投影到 merged；
+4. 重算 merged（`materializeMerged` 现在保留既有模块树，不再每次重建 GB 级 node_modules）；
+5. 把 pnpm 重新物化的包目录 hardlink 复制进元宝模块树、删除已卸载的包——派生分身因此看到同一套插件。
+
+捕获用「运行态 profile 指纹」做幂等：没变更时零成本跳过。
+
 ## 已知边界（重要）
 
-元宝运行态的插件改动**当前仍不会写回元宝配置**：每次打开运行态都会从元宝 merged profile 重放 `package.json`/`cordis*.yml`，因此运行态内安装/更新/卸载的插件在关闭重开后会恢复为元宝原配置。本版只解除 pnpm 操作阻塞；“运行态插件变更捕获回元宝（含 node_modules 回流）”列为下一版需求——需要的话请确认，我们按该方向做。
+- 捕获时机是「停止运行态」与「下次打开运行态」；运行中的插件操作不会实时回流。
+- 模块回流按「包名+版本」比较；同版本内手工替换包内容不会被 hardlink 覆盖（pnpm 安装/升级都会改版本号）。
+- 运行态/元主模块树仍是镜像共享结构，捕获只 hardlink 被 pnpm 重新物化的条目。
+
+## 验收（含持久化）
+
+1. 打开元宝运行态 → 设置 → 插件，更新或卸载一个插件；
+2. 关闭运行态（或在瓮城面板停止），重新打开 → 插件列表应保持更新后的状态；
+3. 元宝详情页 / 派生新分身 → 应看到同一套插件与依赖；
+4. 捕获结果在 `POST /fang/api/essence/runtime`（stop）与 start 返回体的 `capture` 字段可见。
 
 ## 门禁
 

@@ -415,3 +415,21 @@ test('essence manager: recomputeAll 在镜像指纹变化后批量更新', async
   assert.equal(mergedPkg.dependencies.added, '^1.0.0')
   assert.notEqual(manager.getMeta(first.id).lastMergedFingerprint, before)
 })
+
+test('essence manager: recompute keeps the existing module tree and projects overlay pnpm files', () => {
+  const { manager } = makeFixture()
+  const meta = manager.create({ name: 'preserve-modules' })
+  const merged = manager.mergedProfileDir(meta.id)
+  const kept = path.join(merged, 'node_modules', 'kept')
+  fs.mkdirSync(kept, { recursive: true })
+  fs.writeFileSync(path.join(kept, 'index.js'), 'export default 1\n', 'utf8')
+  fs.writeFileSync(path.join(manager.essenceRoot(meta.id), 'overlay', 'pnpm-lock.yaml'), 'lock: v1\n', 'utf8')
+  fs.writeFileSync(path.join(manager.essenceRoot(meta.id), 'overlay', '.npmrc'), 'store-dir=C:\\store\n', 'utf8')
+
+  manager.recompute(meta.id)
+
+  assert.equal(fs.existsSync(path.join(merged, 'node_modules', 'kept', 'index.js')), true, 'an existing module tree survives a recompute')
+  assert.equal(fs.readFileSync(path.join(merged, 'pnpm-lock.yaml'), 'utf8'), 'lock: v1\n')
+  assert.equal(fs.readFileSync(path.join(merged, '.npmrc'), 'utf8'), 'store-dir=C:\\store\n')
+})
+

@@ -4,6 +4,7 @@
 ### 修复
 - **元宝运行态无法更新/升级/移除插件**：DSH 0.2.2-rc.1 自带 pnpm 11，pnpm 11 的 `.npmrc` 只读鉴权/网络键，`store-dir`、`package-import-method` 等非鉴权设置改为从 `pnpm-workspace.yaml`（camelCase）读取；Fang 旧逻辑只写 `.npmrc`，于是运行态 pnpm 选了“按盘符默认 store”（D: 项目 → `D:\.pnpm-store\v11`），而模块树记录的是母体 C: store → `[ERR_PNPM_UNEXPECTED_STORE]`。新增 `src/lib/pnpm-store.mjs`：写入 `pnpm-workspace.yaml` 的 `nodeLinker: hoisted` / `storeDir` / `packageImportMethod: copy`（保留原设置与注释），同步 `.npmrc` 兼容旧工具链，并把运行态 `node_modules/.modules.yaml` 的 `storeDir`/`virtualStoreDir` 对齐为“本项目自己的 `.pnpm`”（复制来的 manifest 仍写着母体 virtual store）。
 - 每次打开元宝运行态（`startEssenceRuntime`）都会自动应用，返回体新增 `pnpmConfig` 诊断字段；失败不阻塞实例启动。
+- **运行态插件变更持久化回元宝**：`stopEssenceRuntime` 与下次 `startEssenceRuntime` 会在重放前调用 `captureRuntimeProfileIntoEssence()`：把运行态 `package.json`（dependencies + `dsh.profile.bundles`）、有差异的 `cordis.patch.yml` 条目、`pnpm-lock.yaml`/`pnpm-workspace.yaml`/`.npmrc` 写回元宝 overlay，重算 merged（`materializeMerged` 现在保留既有模块树并投影 overlay 的 pnpm 文件），再把 pnpm 重新物化的包目录 hardlink 复制进元宝模块树、删掉已卸载的包；回归保护新增 `test/runtime-capture.test.mjs` 与 essence 的模块树保留测试。
 - 回归保护：新增 `test/pnpm-store.test.mjs`（6 例：manifest 读取、settings upsert 保序、.npmrc 更新、manifest 对齐幂等、端到端 ensure）。
 - **测试稳定性（buffer-keeper）**：`state()` 可能在 watch/poll 事件到达前先由 digest 兜底看到 pending，此时 `lastEventAt` 为 null，CI（Node 22 时序）偶发 `pending-high-risk` 但时间戳为 null 的断言失败；现在观察到 pending 时补记观察时间，并移除已无读者的 `startedAt`。
 
@@ -12,9 +13,10 @@
 - 现场证据：官方元宝运行态 profile 修复后 `pnpm store path` 返回 C: store；以相同依赖图/锁文件的隔离副本执行 `pnpm remove dsh-better-sidebar` 成功（13.7s，storeDir=C:、virtualStoreDir=副本路径，无 store/virtual-store 报错）。
 
 ### 已知边界
-- 元宝运行态的插件改动当前仍会在下次打开时按元宝 merged 配置重放（不写回元宝配置），本版只解除 pnpm 操作阻塞；“运行态插件变更捕获回元宝”列为下一版需求。
+- 捕获时机是「停止运行态」与「下次打开运行态」——运行中的插件操作不会实时回流；宿主异常退出后，下次打开会先捕获再重放。
+- 模块回流按「包名+版本」比较；同版本内容被就地替换（无版本号变化）的插件目录不会被 hardlink 覆盖（pnpm 正常安装/升级都会改版本号，命中该边界的是手工改包内容）。
+- 运行态/元主模块树仍是镜像共享结构，捕获只 hardlink 被 pnpm 重新物化的条目。
 
-## v3.1.7（2026-11-10）
 ## v3.1.7（2026-11-10）
 **主题：分身/元主运行态的模块解析与无头 Web 目录选择修复。**
 
