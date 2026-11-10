@@ -1,3 +1,21 @@
+## v3.1.9（2026-11-10）
+
+**主题：元主 / 分身工作区滚动（鼠标滚轮 + 可拖动滚动条），中间分隔条调节两栏宽度。**
+
+### 修复
+- **元主/分身变多后无法选中列表项**：控制台两栏原来没有可靠的高度约束——`.fang-console` 用 `min-height:100%`，`.panel` 用 `max-height:calc(100vh - 132px)`，而 DSH `main` 面板（`mainPanel` = `flex:1;min-height:0;overflow:hidden`）实际给的高度更小，整块内容被裁掉且没有滚动容器；同时左栏的元主卡片（`.essence-list`）在滚动区之外，卡片一多就把母体会话滚动区挤到几乎 0 高。现在：
+  - `main` 槽的 DOM 挂载节点改为 `display:flex;flex-direction:column;flex:1 1 auto;min-height:0;height:100%`，高度链贯通到 DSH 主面板；
+  - `.fang-console` = `height:100%;overflow:hidden`，`.fang-body` = `align-items:stretch;height:100%;overflow:hidden`，`.panel` = `height:100%`；
+  - 左栏把「元主卡片 + 母体会话」收进同一个 `.panel-scroll[data-sk="left"]`，右栏保持单一 `.panel-scroll[data-sk="right"]`；
+  - `.panel-scroll` 明确 `overflow-y:auto;scrollbar-gutter:stable`，滚动条 12px 宽、可拖动；鼠标滚轮 / 触控板滚动；
+  - 窄屏（≤1100px）改为整页滚动 + 每栏 `max-height:62vh` 内部滚动，中间分隔条隐藏。
+- **中间分隔条**：保持拖动调节两栏宽度（grid 列），左右两栏各自滚动、互不影响。
+
+### 测试/门禁
+- 新增 `test/client-layout-dom.test.mjs`（jsdom）：主槽高度链、两栏各一个滚动容器、元主卡片在左滚动区内、CSS 契约（overflow/滚动条/窄屏规则）、中间分隔条存在。
+- 本地 headless Edge 实测（1440×900，30 元主 + 30 分身）：左栏 wheel 0→420（scrollHeight 3056 / clientHeight 342）、右栏 wheel 0→420（5777 / 445），拖动中间手柄列宽 692/692 → 850/534。
+- 既有 client DOM/HTTP 套件 22/22 通过。
+
 ## v3.1.8（2026-11-10）
 **主题：元宝运行态内 pnpm 插件更新/卸载修复（ERR_PNPM_UNEXPECTED_STORE）。**
 
