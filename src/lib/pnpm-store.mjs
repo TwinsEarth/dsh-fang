@@ -168,6 +168,11 @@ export function ensureEssenceRuntimePnpmConfig({ profileDir, modulesDir, sourceM
     nodeLinker,
     storeDir,
     packageImportMethod: 'copy',
+    // v3.1.11：元宝运行态是“用户显式更新插件”的交互场景，pnpm 11 默认的
+    // minimumReleaseAge（供应链观察期）会把刚发布的自家插件判为过新：
+    // ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION（3.1.10 / queue-journal 0.1.4 实测）。
+    // 母体的供应链策略不在这里改动；只在运行态关闭观察期，保证插件更新/卸载可用。
+    minimumReleaseAge: '0',
   })
   const npmrc = upsertNpmrc(profile, { storeDir, packageImportMethod: 'copy' })
   const patched = patchModulesManifest(modules, { storeDir, virtualStoreDir })
