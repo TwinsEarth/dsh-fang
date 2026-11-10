@@ -64,8 +64,8 @@ curl -H "x-fang-auth: <token>" http://127.0.0.1:<port>/fang/api/status
 ## 门禁
 
 - `preflight --e2e`：GREEN；全量套件 1023 pass / 0 fail / 1 skip；e2e 81/81（真实 dsh mother + fork）；
-- 构建：`dist/dsh-fang-3.1.7.tgz`，516,261 B / 135 entries，
-  sha256 `79c2d43b3725fd899b823341805c9da137bf20326e31593bef5ecb8bbeb6fb7d`；
+- 构建：`dist/dsh-fang-3.1.7.tgz`，516,205 B / 135 entries，
+  sha256 `2975c6e8e2dbe1a9b71922e37ff4769e222deba0951d3577abb18f62465fbe4f`；
 - `package-smoke` PASS；`allow-list` routes=104 findings=0；
 - `reinstall-drill` GREEN 7/7；`install-drill` 自动化检查 8/8 PASS（交互式弹窗步骤需人工，无人值守时超时）；
 - 详见 `docs/AUDIT-v3.1.7.md` 与 `dist/preflight.json`。
