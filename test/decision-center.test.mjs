@@ -1973,3 +1973,27 @@ test('decision center: HTTP surface is registered by orchestrator', () => {
   // proves the service key exists and is importable by that plugin.
   assert.equal(typeof SERVICE.decisionCenter, 'string')
 })
+
+test('decision center: session relay custom input resolves without a preset option', () => {
+  const { ctx, service, root } = boot()
+  try {
+    const created = service.create({
+      level: 'yellow', title: 'choose a path', context: 'relay custom input',
+      options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }],
+    })
+    const custom = service.resolve(created.ticket.id, '', { by: 'fang-relay', custom: '按 B 方案处理，先灰度 10%' })
+    assert.equal(custom.ok, true)
+    const ticket = service.get(created.ticket.id)
+    assert.equal(ticket.status, 'resolved')
+    assert.equal(ticket.resolvedOption, '按 B 方案处理，先灰度 10%')
+    assert.equal(ticket.customInput, true)
+    assert.equal(ticket.resolutionNote, '按 B 方案处理，先灰度 10%')
+    // A malformed unknown option without custom must still be rejected (fail-closed).
+    const second = service.create({ level: 'blue', title: 'pick', options: [{ value: 'x', label: 'X' }] })
+    const rejected = service.resolve(second.ticket.id, 'not-an-option', { by: 'fang-relay' })
+    assert.equal(rejected.ok, false)
+    assert.equal(rejected.reason, 'unknown-option')
+  } finally {
+    drop(ctx, root)
+  }
+})
