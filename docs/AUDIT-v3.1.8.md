@@ -21,9 +21,9 @@
 ```text
 修复前：D:\...\essence-runtime > pnpm store path
         D:\.pnpm-store\v11
-        modules manifest：storeDir=C:\...\pnpm\store\v11（记录值），virtualStoreDir=C:\Users\fangw\.dsh\profiles\desktop\node_modules\.pnpm（母体路径）
+        modules manifest：storeDir=C:\...\pnpm\store\v11（记录值），virtualStoreDir=C:\Users\<user>\.dsh\profiles\desktop\node_modules\.pnpm（母体路径）
 修复后：pnpm store path
-        C:\Users\fangw\AppData\Local\pnpm\store\v11
+        C:\Users\<user>\AppData\Local\pnpm\store\v11
         modules manifest：storeDir=C:\...\pnpm\store\v11，virtualStoreDir=D:\ToFuture\sessions\essence-official-dev\home\profiles\essence-runtime\node_modules\.pnpm
 隔离副本（相同 package.json / pnpm-lock.yaml / pnpm-workspace.yaml）：
         pnpm install --frozen-lockfile → 因 lockfile 与 package.json specifier 不同而拒绝（预期，见边界）
