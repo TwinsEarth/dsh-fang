@@ -1,4 +1,29 @@
-## v3.1.10（未发布；等待人类授权）
+## v3.1.11（2026-11-11）
+
+**主题：修复元宝运行态「更新/卸载插件」被 pnpm 供应链观察期拦截（ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION）。**
+
+### 修复
+- **现象**：元宝 web 端更新/卸载插件报
+  `Lockfile failed supply-chain policy check`，点名 `@twinsearth/dsh-fang@3.1.10`、
+  `@twinsearth/dsh-fang-queue-journal@0.1.4` 落在 pnpm 11 `minimumReleaseAge`（24h）观察期内。
+  DSH 插件管理器只在**安装**成功时自动追加 `minimumReleaseAgeExclude`；更新/卸载或某些 profile 的
+  lockfile 校验会先被策略拦下。
+- **运行态修复**：`ensureEssenceRuntimePnpmConfig` 现在显式写
+  `minimumReleaseAge: 0`（仅元宝运行态；母体 profile 的供应链策略不动），
+  每次打开元宝运行态自动生效，更新/卸载自家刚发布插件不再被观察期拒绝。
+- **回归保护**：`test/pnpm-store.test.mjs` 覆盖「缺省时必须补上 `minimumReleaseAge: 0`」
+  与二次运行幂等（6/6）。
+- **环境处置（不入代码）**：本机 desktop profile 的 `minimumReleaseAgeExclude` 增加
+  `'@twinsearth/*'` 通配（备份 `pnpm-workspace.yaml.bak-policy-*`），元宝运行态 profile
+  同时写 `minimumReleaseAge: 0`；已安装 3.1.10 做了等价热补丁（备份
+  `pnpm-store.mjs.bak-releaseage-*`），本机可立即重试插件更新。
+- **边界**：母体 profile 由 DSH 管理，Fang 不修改其策略；第三方包仍受 24h 观察期保护。
+
+### 测试/门禁
+- `node --test test/pnpm-store.test.mjs` 6/6；版本一致性测试随 3.1.11 更新。
+- 发布走 `preflight --e2e`（含 crash-safety 与打包后门禁），证据见 `docs/AUDIT-v3.1.11.md`。
+
+## v3.1.10（2026-11-10）
 
 **主题：流程固化 + 把「瓮城防崩溃方案」变成可回归测试/打包/发布门禁。**
 
@@ -18,7 +43,7 @@
 - 2026-11-10 21:33 在**运行中**的 desktop profile 上执行 `dsh plugin add @twinsearth/dsh-fang@3.1.9`，DSH 崩溃且用户层被重置（bundles 回退为 base+web-app、`cordis.patch.yml` 被模板覆盖）。已从 `.bak-*` 恢复 bundles 与 patch，3.1.9 安装校验通过（boot-guard dry-run: 19 rows, ok）。升级运行中 profile 的正确步骤已写入 `docs/WORKFLOW-UI.md` §5。
 
 ### 发布状态
-- **未发布**：本版 3.1.10 的修改已完成并进入测试/打包/发布门禁，等待人类授权后再打 tag 并运行 release workflow。
+- **已发布**：v3.1.10 → npm `latest` / GitHub Release / tag 三渠道完成（release run 42836350924 attempt 2，全绿）。
 
 ## v3.1.9（2026-11-10）
 
