@@ -38,11 +38,12 @@ overlay                      : profile/fang-headless.patch.yml 已写入（Elect
 preflight --e2e : GREEN
 tests           : 1023 pass / 0 fail / 1 skip（331.4s；preflight 全量套件）
 e2e             : 81/81（62.5s，真实 dsh mother + fork，使用本版新代码）
+CI build job    : preflight green; tests pass=1007 fail=0 skip=3; e2e 81/81 (53.4s); tarball 516,205 B / 135 entries
 package smoke   : PASS
 allow-list      : routes=104 findings=0
 artifact        : dist/dsh-fang-3.1.7.tgz
-size            : 516,261 B / 135 entries
-sha256          : 79c2d43b3725fd899b823341805c9da137bf20326e31593bef5ecb8bbeb6fb7d
+size            : 516,205 B / 135 entries（CI 发布物）
+sha256          : 2975c6e8e2dbe1a9b71922e37ff4769e222deba0951d3577abb18f62465fbe4f
 install drill   : 自动化检查 8/8 PASS（干净 profile 安装、boot、client half、status=3.1.7、19 行 fang-* 组合）；
                   交互式弹窗步骤（请人在新 PowerShell 窗口选 1/2/3）在无人值守运行中超时，未计入通过
 reinstall drill : GREEN 7/7（重装+脏数据后启动、status=3.1.7）
@@ -52,9 +53,9 @@ reinstall drill : GREEN 7/7（重装+脏数据后启动、status=3.1.7）
 
 | 方 | 状态 |
 |---|---|
-| GitHub Release | 待执行 |
-| npm | 待执行 |
-| CI | 待执行 |
+| GitHub Release | 已发布：https://github.com/TwinsEarth/dsh-fang/releases/tag/v3.1.7（4 assets） |
+| npm | 已发布 `@twinsearth/dsh-fang@3.1.7`（latest） |
+| CI | 成功：release run 42748226212（attempt 2）；main ci/compat 成功 |
 
 ## 4. 已知边界
 
