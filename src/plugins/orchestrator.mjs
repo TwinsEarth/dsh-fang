@@ -19,6 +19,7 @@ import {
   invokeCommercial, commercialConfigSchemaDefaults,
 } from '../kernel/index.mjs'
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
+import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-store.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
 import { MirrorManager } from '../lib/mirror.mjs'
@@ -2161,18 +2162,9 @@ export function apply(ctx, config) {
       }
       // 复制来的模块树记录了母体 store；元主/运行态的 pnpm 必须显式用同一个 store，
       // 否则项目在 D: 盘、模块来自 C: store 时会报 ERR_PNPM_UNEXPECTED_STORE。
-      const writeModuleStoreConfig = (profileDir) => {
-        try {
-          const modulesYaml = fs.readFileSync(path.join(essenceModules, '.modules.yaml'), 'utf8')
-          const store = /^storeDir:\s*(.+)$/m.exec(modulesYaml)?.[1]?.trim()
-          if (!store) return
-          ensureDir(profileDir)
-          const file = path.join(profileDir, '.npmrc')
-          if (exists(file) && fs.readFileSync(file, 'utf8').includes('store-dir=')) return
-          fs.writeFileSync(file, `store-dir=${store}\npackage-import-method=copy\n`, 'utf8')
-        } catch { /* missing modules metadata is non-fatal */ }
-      }
-      writeModuleStoreConfig(merged)
+      // v3.1.8：pnpm 11 只从 pnpm-workspace.yaml 读取非鉴权设置（.npmrc 只剩鉴权/网络键），
+      // 且 modules manifest 里记录的 virtual store 仍是母体路径；两处都由
+      // ensureEssenceRuntimePnpmConfig 在运行态 profile 上修正（见下方 spawn 前）。
       const forkId = runtimeForkId(id)
       // v3.0.9 三区：运行态 home 在 runtimeRoot 下（FANG_HOME 时是 sessions/<essenceId>/home），
       // 原身文件夹只保留配置，项目/会话/任务文件不落原身目录。
@@ -2218,7 +2210,19 @@ export function apply(ctx, config) {
       } catch (error) {
         throw new Error(`runtime-node-modules-mirror-failed: ${String(error?.message ?? error)}`)
       }
-      writeModuleStoreConfig(runtimeProfileDir)
+      // v3.1.8：让运行态内的 pnpm 真正可用（元宝「插件」页更新/卸载插件走 DSH plugin manager）。
+      // 失败不阻塞实例启动（实例仍可跑会话），但要把原因带回给调用方/面板。
+      let pnpmConfig = null
+      try {
+        pnpmConfig = ensureEssenceRuntimePnpmConfig({
+          profileDir: runtimeProfileDir,
+          modulesDir: runtimeModules,
+          sourceModulesDir: essenceModules,
+          nodeLinker: readNodeLinker(templateDir()),
+        })
+      } catch (error) {
+        pnpmConfig = { ok: false, error: 'pnpm-config-threw', detail: String(error?.message ?? error) }
+      }
       // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
       const importedSessions = importSessionsInto(homeDir, input?.sessionIds)
       // 注意：forker.spawn 需要显式 homeDir/profile（它不从 provision 记录里猜）。
@@ -2235,6 +2239,7 @@ export function apply(ctx, config) {
         url: started.url, port: started.port, pid: started.pid,
         sandboxHome: homeDir,
         importedSessions,
+        pnpmConfig,
       }
     },
     stopEssenceRuntime: (essenceId) => {
