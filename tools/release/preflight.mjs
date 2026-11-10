@@ -29,6 +29,16 @@ add('package: dsh.client enabled', pkg.dsh?.client?.platform === 'web', JSON.str
 const clientParse = nodeRun(['--check', 'client.js'])
 add('client half: node --check client.js', clientParse.status === 0, clientParse.status === 0 ? 'green' : (clientParse.stderr || clientParse.stdout).slice(-300))
 
+// 防崩溃方案必须可回归：boot-guard / restart-guard / 分身监督 / role fail-closed /
+// 未清洁启动检测的不变量逐项校验（v3.1.10 固化，失败即 RED）。
+const crash = nodeRun(['tools/release/crash-safety.mjs', '--json'])
+let crashReport = null
+try { crashReport = JSON.parse(crash.stdout) } catch { crashReport = null }
+const crashFailed = crashReport ? crashReport.checks.filter((check) => !check.ok).map((check) => check.id) : []
+add('crash-safety: fail-safe invariants', crash.status === 0 && crashReport?.ok === true, crashReport
+  ? `checks=${crashReport.checks.length} failed=${crashFailed.length}${crashFailed.length ? ':' + crashFailed.join(',') : ''}`
+  : (crash.stderr || crash.stdout).slice(-300))
+
 const lic = nodeRun(['test/licensing.test.mjs'])
 add('license layering guard', lic.status === 0, lic.status === 0 ? 'green' : (lic.stderr || lic.stdout).slice(-300))
 

@@ -108,6 +108,15 @@ if (smoke.status !== 0) {
 }
 console.log('PASS  package smoke (tarball installability)')
 
+// v3.1.10 防崩溃门禁（打包后）：最终产物里必须有 boot-guard/restart-guard/分身监督等
+// 防线文件，且候选包入口能在隔离进程 import 并导出 apply()；manifest sha256 必须一致。
+const crash = run(process.execPath, ['tools/release/crash-safety.mjs', '--json', '--package', pkgDir, '--tarball', tarball], { timeoutMs: 180000 })
+if (crash.status !== 0) {
+  console.error('FAIL crash-safety (packaged artifact):\n' + (crash.stderr || crash.stdout).slice(-2000))
+  process.exit(crash.status ?? 1)
+}
+console.log('PASS  crash-safety (packaged artifact)')
+
 const allow = run(process.execPath, ['tools/release/allowlist.mjs', '--with-manifest', '--json'], { timeoutMs: 120000 })
 if (allow.status !== 0) {
   console.error('FAIL allow-list (package):\n' + (allow.stderr || allow.stdout).slice(-1500))

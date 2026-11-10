@@ -1,3 +1,25 @@
+## v3.1.10（未发布；等待人类授权）
+
+**主题：流程固化 + 把「瓮城防崩溃方案」变成可回归测试/打包/发布门禁。**
+
+### 新增
+- `docs/WORKFLOW-UI.md`：UI 改动与发版固定流程（先判定纯样式/结构、浏览器冒烟上限、合并前一次性验证、发版前置硬门禁、发布后不再移 tag、Token/时间预算、运行中 profile 升级安全规程、完成定义）。**发布必须由人类显式授权。**
+- `docs/CRASH-SAFETY.md`：防崩溃防线清单（boot-guard / RestartGuard / 分身监督与孤儿回收 / role fail-closed / 待处理缓冲 / 未清洁启动检测）、强制点矩阵、运行手册与边界。
+- `tools/release/crash-safety.mjs`：防崩溃门禁。源码模式校验防线文件/导出/插件闸门/client 半浏览器安全/文档与打包清单；打包模式在最终产物上校验必需防线文件、版本与 `dsh.client`、候选包 `apply()` 隔离冒烟、manifest sha256、tarball 内约束文档。
+- `test/crash-safety.test.mjs`：门禁自身的回归（源码绿灯、坏包必须红、fail-safe 导出、门禁接线与文档约束）。
+- 两篇约束文档进入 npm tarball（`files`），随产物一起发布、可审计。
+
+### 接线
+- `tools/release/preflight.mjs`：新增 `crash-safety: fail-safe invariants` 检查，发布前 RED 即阻断。
+- `tools/release/build.mjs`：tarball 生成后再跑 `crash-safety --package --tarball`，未过不进 GitHub Release / npm。
+- CI：全量测试包含 `crash-safety.test.mjs`；release build job 内置 preflight 与打包后门禁。
+
+### 事故记录（环境，不入代码）
+- 2026-11-10 21:33 在**运行中**的 desktop profile 上执行 `dsh plugin add @twinsearth/dsh-fang@3.1.9`，DSH 崩溃且用户层被重置（bundles 回退为 base+web-app、`cordis.patch.yml` 被模板覆盖）。已从 `.bak-*` 恢复 bundles 与 patch，3.1.9 安装校验通过（boot-guard dry-run: 19 rows, ok）。升级运行中 profile 的正确步骤已写入 `docs/WORKFLOW-UI.md` §5。
+
+### 发布状态
+- **未发布**：本版 3.1.10 的修改已完成并进入测试/打包/发布门禁，等待人类授权后再打 tag 并运行 release workflow。
+
 ## v3.1.9（2026-11-10）
 
 **主题：元主 / 分身工作区滚动（鼠标滚轮 + 可拖动滚动条），中间分隔条调节两栏宽度。**
