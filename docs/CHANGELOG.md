@@ -5,6 +5,7 @@
 - **元宝运行态无法更新/升级/移除插件**：DSH 0.2.2-rc.1 自带 pnpm 11，pnpm 11 的 `.npmrc` 只读鉴权/网络键，`store-dir`、`package-import-method` 等非鉴权设置改为从 `pnpm-workspace.yaml`（camelCase）读取；Fang 旧逻辑只写 `.npmrc`，于是运行态 pnpm 选了“按盘符默认 store”（D: 项目 → `D:\.pnpm-store\v11`），而模块树记录的是母体 C: store → `[ERR_PNPM_UNEXPECTED_STORE]`。新增 `src/lib/pnpm-store.mjs`：写入 `pnpm-workspace.yaml` 的 `nodeLinker: hoisted` / `storeDir` / `packageImportMethod: copy`（保留原设置与注释），同步 `.npmrc` 兼容旧工具链，并把运行态 `node_modules/.modules.yaml` 的 `storeDir`/`virtualStoreDir` 对齐为“本项目自己的 `.pnpm`”（复制来的 manifest 仍写着母体 virtual store）。
 - 每次打开元宝运行态（`startEssenceRuntime`）都会自动应用，返回体新增 `pnpmConfig` 诊断字段；失败不阻塞实例启动。
 - 回归保护：新增 `test/pnpm-store.test.mjs`（6 例：manifest 读取、settings upsert 保序、.npmrc 更新、manifest 对齐幂等、端到端 ensure）。
+- **测试稳定性（buffer-keeper）**：`state()` 可能在 watch/poll 事件到达前先由 digest 兜底看到 pending，此时 `lastEventAt` 为 null，CI（Node 22 时序）偶发 `pending-high-risk` 但时间戳为 null 的断言失败；现在观察到 pending 时补记观察时间，并移除已无读者的 `startedAt`。
 
 ### 测试/门禁
 - 发布前重跑 `preflight --e2e`；证据见 `docs/AUDIT-v3.1.8.md`。
