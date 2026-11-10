@@ -599,7 +599,7 @@ window.__ModuleLoader__.load({
   --f-focus:${TOKENS.focus}; --f-radius-panel:${TOKENS.radiusPanel}; --f-radius-card:${TOKENS.radiusCard}; --f-radius-ctl:${TOKENS.radiusCtl};
   --f-shadow-card:${TOKENS.shadowCard}; --f-shadow-panel:${TOKENS.shadowPanel}; --f-shadow-float:${TOKENS.shadowFloat};
   --f-font:${TOKENS.font}; --f-mono:${TOKENS.mono};
-  position:relative;color-scheme:light;min-height:100%;box-sizing:border-box;
+  position:relative;color-scheme:light;height:100%;min-height:0;box-sizing:border-box;overflow:hidden;
   display:flex;flex-direction:column;gap:16px;padding:18px 20px 22px;
   background:var(--f-bg);color:var(--f-text);font-family:var(--f-font);font-size:13px;line-height:1.5;
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
@@ -673,18 +673,18 @@ window.__ModuleLoader__.load({
 .chip--neutral{color:var(--f-text-3);background:var(--f-surface-2);border-color:var(--f-border)}
 
 /* layout */
-.fang-body{position:relative;display:grid;grid-template-columns:minmax(320px,50fr) minmax(0,50fr);gap:16px;align-items:start;min-height:0;flex:1 1 auto}
+.fang-body{position:relative;display:grid;grid-template-columns:minmax(320px,50fr) minmax(0,50fr);gap:16px;align-items:stretch;height:100%;min-height:0;flex:1 1 auto;overflow:hidden}
 .fang-body.is-resizing{cursor:col-resize;user-select:none}
 .fang-body.is-resizing *{user-select:none}
 .fang-split-handle{position:absolute;top:0;bottom:0;left:50%;width:10px;transform:translateX(-50%);cursor:col-resize;z-index:6;border-radius:6px;background:transparent;touch-action:none}
 .fang-split-handle::after{content:"";position:absolute;top:50%;left:50%;width:3px;height:46px;transform:translate(-50%,-50%);border-radius:3px;background:var(--f-border-strong,var(--f-border));opacity:.55;transition:opacity .15s,background .15s}
 .fang-split-handle:hover::after,.fang-split-handle:focus-visible::after,.fang-body.is-resizing .fang-split-handle::after{opacity:1;background:var(--f-blue,#3b82f6)}
 .fang-split-handle:focus-visible{outline:2px solid var(--f-blue,#3b82f6);outline-offset:2px}
-@media (max-width:1100px){.fang-body{grid-template-columns:1fr}.fang-split-handle{display:none}}
+@media (max-width:1100px){.fang-console{overflow:auto}.fang-body{grid-template-columns:1fr;align-items:start;height:auto;flex:1 0 auto;overflow:visible}.fang-split-handle{display:none}}
 .panel{background:var(--f-surface);border:1px solid var(--f-border);border-radius:var(--f-radius-panel);
   box-shadow:var(--f-shadow-card);display:flex;flex-direction:column;min-height:0;overflow:hidden;
-  max-height:calc(100vh - 132px)}
-@media (max-width:1100px){.panel{max-height:none}}
+  height:100%;max-height:100%}
+@media (max-width:1100px){.panel{height:auto;max-height:62vh}}
 .panel-head{flex:0 0 auto;padding:16px 16px 10px;display:flex;flex-direction:column;gap:10px}
 .panel-title-row{display:flex;align-items:center;gap:10px;min-height:28px}
 .panel-title{font-size:20px;font-weight:600;letter-spacing:-.014em;line-height:26px;margin:0}
@@ -692,11 +692,13 @@ window.__ModuleLoader__.load({
 .panel-count{margin-left:auto;display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;
   border:1px solid var(--f-border);border-radius:999px;background:var(--f-surface-2);
   font-size:11px;color:var(--f-text-3);font-variant-numeric:tabular-nums;white-space:nowrap}
-.panel-scroll{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;padding:0 10px 14px;
-  scrollbar-width:thin;scrollbar-color:rgba(16,17,20,.18) transparent}
-.panel-scroll::-webkit-scrollbar{width:10px;height:10px}
-.panel-scroll::-webkit-scrollbar-thumb{background:rgba(16,17,20,.14);border:3px solid #fff;border-radius:8px}
-.panel-scroll::-webkit-scrollbar-thumb:hover{background:rgba(16,17,20,.24)}
+.panel-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;
+  scrollbar-gutter:stable;padding:0 10px 14px;
+  scrollbar-width:thin;scrollbar-color:rgba(16,17,20,.32) rgba(16,17,20,.06)}
+.panel-scroll::-webkit-scrollbar{width:12px;height:12px}
+.panel-scroll::-webkit-scrollbar-track{background:rgba(16,17,20,.05);border-radius:999px}
+.panel-scroll::-webkit-scrollbar-thumb{background:rgba(16,17,20,.30);border:3px solid #fff;border-radius:999px;background-clip:padding-box}
+.panel-scroll::-webkit-scrollbar-thumb:hover{background:rgba(16,17,20,.46);border:2px solid #fff;background-clip:padding-box}
 
 /* search */
 .search{position:relative;display:flex;align-items:center}
@@ -3215,11 +3217,14 @@ window.__ModuleLoader__.load({
           : null,
         ...essences.map((essence) => renderEssenceCard(S, app, essence, defaultEssenceId)))
 
+      // v3.1.9：元主工作区只有一个滚动容器 —— 元主卡片（可能很多）与母体会话列表一起
+      // 滚动，鼠标滚轮/拖动滚动条都作用在同一列；否则卡片区会把会话滚动区挤到 0 高。
+      scroll.prepend(essenceList)
+      scroll.prepend(essenceHead)
+
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,
         h('div', { class: 'mother-slots' }, renderSlotStrip(projectCapacity(S.status.data, S.tasks.items))),
-        essenceHead,
-        essenceList,
         scroll)
     }
 
@@ -6045,7 +6050,7 @@ window.__ModuleLoader__.load({
           key: 'fang',
         }, () => React.createElement(DomMount, {
           mount: mountPanel,
-          style: { display: 'block', minWidth: 0 },
+          style: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0, minHeight: 0, height: '100%', overflow: 'hidden' },
         }))))
         // 输入框下方徽标
         disposers.push(ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
