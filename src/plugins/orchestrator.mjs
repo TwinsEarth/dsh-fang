@@ -14,7 +14,7 @@ import path from 'node:path'
 import {
   z, roleGate, resolveFangLayout, resolveProfileDir, resolveSessionsLayout,
   SERVICE, AUDIT, TASK_STATUS, FORK_STATUS, FANG_VERSION, ADAPTER_OP,
-  exists, ensureDir, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree, digestTree, makeJunction,
+  exists, ensureDir, ensureModuleMirror, readJson, writeJsonAtomic, writeFileAtomic, sha256, removeTree, copyTree, digestTree,
   newId, iso, nowMs, bus, sleep, parseWebUrl, probeWebUrl,
   invokeCommercial, commercialConfigSchemaDefaults,
 } from '../kernel/index.mjs'
@@ -2209,16 +2209,14 @@ export function apply(ctx, config) {
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
       // 历史版本把生产盘锁写进了 essence-runtime；配置实例必须能管理插件，升级后清掉。
       try { clearForkConfigLock(runtimeProfileDir) } catch { /* best effort */ }
-      // provision 若看到旧 junction 可能不替换；这里以 essenceModules 为准做最后自愈。
-      if (!exists(runtimeModules)) {
-        try {
-          const stat = fs.lstatSync(runtimeModules)
-          if (stat.isSymbolicLink()) removeTree(runtimeModules)
-        } catch { /* ignore */ }
-        if (!exists(essenceModules)) throw new Error('runtime-node-modules-source-missing')
-        try { makeJunction(essenceModules, runtimeModules) } catch (error) {
-          throw new Error(`runtime-node-modules-junction-failed: ${String(error?.message ?? error)}`)
-        }
+      // v3.1.7：运行态 profile 的 node_modules 必须是 per-entry mirror（不是整树 junction）。
+      // 整树 junction 会让插件 importer 落在 DSH profile 作用域之外，运行态内 w2m 等插件
+      // 无法解析 @deepseek-ai/*，退回离线 shim，工具 schema 非法 → 模型请求被供应商拒绝。
+      try {
+        const repaired = ensureModuleMirror(runtimeModules)
+        if (repaired.ok === false) throw new Error(repaired.error ?? 'unknown')
+      } catch (error) {
+        throw new Error(`runtime-node-modules-mirror-failed: ${String(error?.message ?? error)}`)
       }
       writeModuleStoreConfig(runtimeProfileDir)
       // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。

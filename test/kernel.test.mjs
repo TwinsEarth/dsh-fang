@@ -9,7 +9,7 @@ import path from 'node:path'
 import { tmpDir, writeTempFile } from './helpers.mjs'
 import {
   ensureDir, exists, readJson, writeJsonAtomic, appendJsonl, digestTree, diffDigests,
-  copyTree, removeTree, makeJunction, isLink, listFiles, sha256,
+  copyTree, removeTree, makeJunction, isLink, ensureModuleMirror, mirrorModuleTree, listFiles, sha256,
   parseWebUrl, detectProfileTag, resolveDshHome, resolveFangLayout,
   createRounds, appendChained, verifyChain, bus, diffResources, totalResources,
   EXIT, SERVICE, ROW, FORK_STATUS, FANG_VERSION,
@@ -58,6 +58,43 @@ test('fsx: removeTree is junction-safe (never enters the target)', () => {
   assert.equal(exists(home), false, 'fork home removed')
   assert.equal(exists(path.join(target, 'keep.txt')), true, 'junction target untouched')
   assert.equal(fs.readFileSync(path.join(target, 'keep.txt'), 'utf8'), 'do not delete me')
+  removeTree(root)
+})
+
+test('fsx: mirrorModuleTree links each top-level directory and repairs a whole-tree junction', () => {
+  const root = tmpDir()
+  const source = path.join(root, 'mother-modules')
+  ensureDir(path.join(source, 'pkg-a', 'lib'))
+  writeTempFile(path.join(source, 'pkg-a', 'lib', 'index.js'), 'export default 1\n')
+  ensureDir(path.join(source, '@scope', 'pkg-b'))
+  writeTempFile(path.join(source, '@scope', 'pkg-b', 'package.json'), '{"name":"@scope/pkg-b"}\n')
+  writeTempFile(path.join(source, '.modules.yaml'), 'storeDir: x\n')
+
+  const dest = path.join(root, 'profile', 'node_modules')
+  ensureDir(path.dirname(dest))
+  makeJunction(source, dest) // the v3.1.6 (and older) whole-tree junction layout
+
+  const repaired = ensureModuleMirror(dest)
+  assert.equal(repaired.ok, true)
+  assert.equal(repaired.changed, true)
+  assert.equal(isLink(dest), false, 'a whole-tree junction must become a real directory')
+  assert.equal(fs.statSync(dest).isDirectory(), true)
+  assert.equal(isLink(path.join(dest, 'pkg-a')), true, 'each package directory is its own link')
+  assert.equal(fs.realpathSync(path.join(dest, 'pkg-a')), fs.realpathSync(path.join(source, 'pkg-a')))
+  assert.equal(isLink(path.join(dest, '@scope')), true, 'scope directories are linked whole')
+  assert.equal(fs.readFileSync(path.join(dest, '.modules.yaml'), 'utf8'), 'storeDir: x\n', 'root files are copied')
+
+  // Source untouched; second pass is a no-op; removal never enters the source.
+  assert.equal(fs.readFileSync(path.join(source, 'pkg-a', 'lib', 'index.js'), 'utf8'), 'export default 1\n')
+  const again = ensureModuleMirror(dest)
+  assert.equal(again.ok, true)
+  assert.equal(again.changed, false)
+  removeTree(path.join(root, 'profile'))
+  assert.equal(exists(path.join(source, 'pkg-a', 'lib', 'index.js')), true, 'removing the mirror must not touch the source')
+
+  // Missing source / missing mirror are reported, not thrown.
+  assert.equal(mirrorModuleTree(path.join(root, 'nope'), path.join(root, 'out')).error, 'source-missing')
+  assert.equal(ensureModuleMirror(path.join(root, 'nope')).error, 'node-modules-missing')
   removeTree(root)
 })
 
@@ -180,7 +217,7 @@ test('core: resource diff and shared vocabulary', () => {
   assert.equal(diff.leakedRefed, 2)
   assert.equal(totalResources({ a: 1, b: 2 }), 3)
   assert.equal(EXIT.RESTART, 75)
-  assert.equal(FANG_VERSION, '3.1.6')
+  assert.equal(FANG_VERSION, '3.1.7')
   assert.equal(SERVICE.orchestrator, 'fang')
   assert.equal(ROW.orchestrator, 'fang-orchestrator')
   assert.equal(FORK_STATUS.RUNNING, 'running')

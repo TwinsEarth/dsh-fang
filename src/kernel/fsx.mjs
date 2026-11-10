@@ -185,6 +185,78 @@ export function makeJunction(target, linkPath) {
 }
 
 /**
+ * Replace `dest` with a real directory that mirrors `source`'s top-level entries:
+ * directories become junctions to their real targets, plain root files are copied.
+ * Package contents are never copied, so the module tree stays shared — but every
+ * entry is its own link. That is what DSH's profile-scope resolver needs: an
+ * importer below a linked root gets the installation's `@deepseek-ai/*` packages
+ * supplied (subject to the peer declaration), while a single whole-node_modules
+ * junction leaves the importer outside every known scope. Measured consequence of
+ * the whole-tree link: plugins that lazily `import('@deepseek-ai/dsh-tools')` in a
+ * fork fall back to their offline shim — w2m's shim stamps `required: false` into a
+ * property schema, and the provider rejects every request with
+ * `Invalid schema for function 'w2m_report'` (v3.1.7 report).
+ * Junction-safe: a reparse point in `dest` is unlinked, never entered; link targets
+ * are resolved with realpath first so a link-to-link (pnpm) also lands on a dir.
+ * @param {string} source Directory whose entries are mirrored (the module tree).
+ * @param {string} dest Directory to replace with the mirror.
+ * @returns {{ok:boolean, links:string[], files:string[], error?:string}}
+ */
+export function mirrorModuleTree(source, dest) {
+  const src = path.resolve(String(source ?? ''))
+  if (!exists(src)) return { ok: false, links: [], files: [], error: 'source-missing' }
+  let srcStat
+  try { srcStat = fs.lstatSync(src) } catch { return { ok: false, links: [], files: [], error: 'source-unreadable' } }
+  if (!srcStat.isDirectory() && !srcStat.isSymbolicLink()) return { ok: false, links: [], files: [], error: 'source-not-directory' }
+  removeTree(dest)
+  ensureDir(dest)
+  const links = []
+  const files = []
+  let names = []
+  try { names = fs.readdirSync(src) } catch { names = [] }
+  for (const name of names) {
+    const from = path.join(src, name)
+    const to = path.join(dest, name)
+    let real = from
+    try {
+      if (fs.lstatSync(from).isSymbolicLink()) real = fs.realpathSync(from)
+    } catch { continue }
+    let targetStat
+    try { targetStat = fs.statSync(real) } catch { continue }
+    if (targetStat.isDirectory()) {
+      try {
+        fs.symlinkSync(path.resolve(real), to, 'junction')
+        links.push(name)
+      } catch { /* an unmirrorable entry is skipped; the remaining tree still boots */ }
+      continue
+    }
+    try {
+      fs.copyFileSync(from, to)
+      files.push(name)
+    } catch { /* ignore */ }
+  }
+  return { ok: true, links, files }
+}
+
+/**
+ * Repair a profile `node_modules` that is still a whole-tree junction (v3.1.6 and
+ * older) into the per-entry mirror form. A real directory is left untouched.
+ * @param {string} modulesPath The profile's node_modules path.
+ * @returns {{ok:boolean, changed:boolean, links?:string[], files?:string[], source?:string, error?:string}}
+ */
+export function ensureModuleMirror(modulesPath) {
+  const p = String(modulesPath ?? '')
+  if (!p || !exists(p)) return { ok: false, changed: false, error: 'node-modules-missing' }
+  let st
+  try { st = fs.lstatSync(p) } catch { return { ok: false, changed: false, error: 'node-modules-unreadable' } }
+  if (!st.isSymbolicLink()) return { ok: true, changed: false, links: [], files: [] }
+  let source
+  try { source = fs.realpathSync(p) } catch { return { ok: false, changed: false, error: 'node-modules-target-missing' } }
+  const mirrored = mirrorModuleTree(source, p)
+  return { ...mirrored, changed: true, source }
+}
+
+/**
  * Remove a file or directory tree. Junction-safe: a reparse point is unlinked,
  * its target is never entered. This is the ONLY removal path plugins may use on
  * fork homes, because a fork home contains a node_modules junction to the mother.

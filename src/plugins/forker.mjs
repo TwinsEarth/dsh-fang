@@ -31,6 +31,8 @@
 // `shell: true`; `.mjs`/`.js` entries are launched through node; `.exe` directly.
 import { spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import net from 'node:net'
 import path from 'node:path'
 import {
@@ -41,10 +43,11 @@ import {
   bus,
   copyTree,
   ensureDir,
+  ensureModuleMirror,
   exists,
   iso,
   listFiles,
-  makeJunction,
+  mirrorModuleTree,
   newId,
   nowMs,
   parseWebUrl,
@@ -176,12 +179,19 @@ export function isShellLauncher(cliPath) {
  * Pure: argv appended to the CLI (CONTRACTS.md §5.1).
  * v2: with allocatePorts the forker passes the pre-allocated `--port <n>`; the v1 fallback
  * is still `--port 0` (OS picks a free port).
+ * v3.1.7: `patchPaths` are launcher layers (`--patch <path>`) handed to the child before
+ * its app args; the headless directory-picker overlay travels this way.
  * @returns {string[]}
  */
-export function buildSpawnArgs({ profile = 'default', port = 0, noOpen = true } = {}) {
+export function buildSpawnArgs({ profile = 'default', port = 0, noOpen = true, patchPaths = [] } = {}) {
   const n = Math.floor(Number(port))
   const p = Number.isInteger(n) && n >= 0 && n <= 65535 ? n : 0
-  const args = ['--profile', safeProfile(profile), '--port', String(p)]
+  const args = ['--profile', safeProfile(profile)]
+  for (const entry of Array.isArray(patchPaths) ? patchPaths : []) {
+    const patchPath = String(entry ?? '').trim()
+    if (patchPath) args.push('--patch', patchPath)
+  }
+  args.push('--port', String(p))
   if (noOpen) args.push('--no-open')
   return args
 }
@@ -194,11 +204,14 @@ export function buildSpawnArgs({ profile = 'default', port = 0, noOpen = true } 
  * Never touches the filesystem, so it is safe to unit-test without launching anything.
  * @returns {{command:string, args:string[], shell:boolean, windowsHide:boolean, nodeScript:boolean}}
  */
-export function buildLaunchSpec({ cliPath = '', profile = 'default', port = 0 } = {}) {
+export function buildLaunchSpec({ cliPath = '', profile = 'default', port = 0, patchPaths = [] } = {}) {
   const entry = String(cliPath ?? '').trim()
-  const args = buildSpawnArgs({ profile, port })
+  const args = buildSpawnArgs({ profile, port, patchPaths })
   if (isShellLauncher(entry)) {
-    return { command: entry, args, shell: true, windowsHide: true, nodeScript: false }
+    // `shell: true` concatenates argv without escaping (DEP0190); a profile home or overlay
+    // path containing whitespace would otherwise split into two child arguments.
+    const quoted = args.map((arg) => (/[\s"]/u.test(arg) ? `"${String(arg).replace(/"/g, '\\"')}"` : arg))
+    return { command: entry, args: quoted, shell: true, windowsHide: true, nodeScript: false }
   }
   if (/\.(mjs|cjs|js)$/i.test(entry)) {
     return { command: process.execPath, args: [entry, ...args], shell: false, windowsHide: true, nodeScript: true }
@@ -231,6 +244,91 @@ export function buildForkChildEnv(base = process.env, overrides = {}) {
     else delete env[key]
   }
   return env
+}
+
+/**
+ * The launch overlay that pins the directory picker to the browser dialog in every
+ * fork/ESSENCE-RUNTIME web host.
+ *
+ * `dsh-host-directory-picker-auto` resolves `native` on win32/darwin whenever the
+ * bind is loopback and the launch is not SSH — it has no way to know the host was
+ * started headless through `dsh.cmd` (ELECTRON_RUN_AS_NODE, no Electron shell), so
+ * the native chooser has no window to open and "选择工作区" fails in the fork Web UI
+ * (v3.1.7 report). The documented composition switch is an overlay that disables
+ * the auto row and mounts the browse backend + its client surface directly; both
+ * package names exist as installation dependencies of the same DSH release.
+ */
+export const HEADLESS_PICKER_OVERLAY = [
+  '# dsh-Fang v3.1.7: headless web host (dsh.cmd --no-open) has no native chooser window.',
+  '# Pin the directory-picker interaction to the browser dialog.',
+  '- id: directory-picker',
+  '  disabled: true',
+  '- insert:',
+  '    - id: directory-picker-browse',
+  "      name: '@deepseek-ai/dsh-host-directory-picker-browse'",
+  '    - id: ui-directory-picker-browse',
+  "      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'",
+  '',
+].join('\n')
+
+/** File name of the headless launch overlay inside the fork/essence-runtime profile. */
+export const HEADLESS_PICKER_OVERLAY_FILE = 'fang-headless.patch.yml'
+
+/** Whether this DSH installation carries the browse-picker pair the overlay mounts. */
+export function headlessPickerSupported({ cliPath = '' } = {}) {
+  const names = [
+    '@deepseek-ai/dsh-host-directory-picker-browse',
+    '@deepseek-ai/dsh-client-ui-directory-picker-browse',
+  ]
+  let require = null
+  try { require = createRequire(import.meta.url) } catch { require = null }
+  const anchors = []
+  // Desktop install: <root>/resources/app.asar/dsh/node_modules (asar-aware fs in the host).
+  try { anchors.push(path.join(path.dirname(process.execPath), 'resources', 'app.asar', 'dsh', 'node_modules')) } catch { /* ignore */ }
+  // Launcher-derived install root: .../resources/runtime/cli/bin/dsh.cmd → .../resources/app.asar/dsh/node_modules
+  const cli = String(cliPath ?? '').trim()
+  if (cli) {
+    const resources = path.resolve(path.dirname(cli), '..', '..', '..', '..', 'resources')
+    anchors.push(path.join(resources, 'app.asar', 'dsh', 'node_modules'))
+  }
+  for (const name of names) {
+    let found = false
+    if (require) {
+      try { require.resolve(name); found = true } catch { /* not resolvable here */ }
+    }
+    if (!found) {
+      for (const anchor of anchors) {
+        try {
+          if (fs.existsSync(path.join(anchor, ...name.split('/'), 'package.json'))) { found = true; break }
+        } catch { /* ignore */ }
+      }
+    }
+    if (!found) return false
+  }
+  return true
+}
+
+/**
+ * Write (or refresh) the headless-picker launch overlay in `profileDir`.
+ * `DSH_FANG_HEADLESS_PICKER_PATCH=0` opts out; an installation without the browse
+ * pair keeps the DSH default (native) so an unknown-version host is not patched blind.
+ * @param {string} profileDir The fork/essence-runtime profile directory.
+ * @param {{cliPath?: string, supported?: boolean}} [options] The launcher the fork will
+ *   be started with; `supported` overrides the installation probe (tests).
+ * @returns {string|null} The overlay path to pass as `--patch`, or null.
+ */
+export function writeHeadlessPickerOverlay(profileDir, { cliPath = '', supported } = {}) {
+  if (String(process.env.DSH_FANG_HEADLESS_PICKER_PATCH ?? '1') === '0') return null
+  if (!profileDir || !exists(profileDir)) return null
+  const available = typeof supported === 'boolean' ? supported : headlessPickerSupported({ cliPath })
+  if (!available) return null
+  const file = path.join(profileDir, HEADLESS_PICKER_OVERLAY_FILE)
+  try {
+    writeFileAtomic(file, HEADLESS_PICKER_OVERLAY)
+    return file
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -708,10 +806,12 @@ export function apply(ctx, config) {
       const link = path.join(templateDir, 'node_modules')
       if (source && exists(source)) {
         try {
-          makeJunction(source, link)
-          files.push('node_modules')
+          // v3.1.7: per-entry mirror instead of one whole-tree junction — see fsx.mirrorModuleTree.
+          const mirrored = mirrorModuleTree(source, link)
+          if (mirrored.ok !== true) warnings.push(`node-modules-mirror-failed: ${mirrored.error ?? 'unknown'}`)
+          else files.push('node_modules')
         } catch (e) {
-          warnings.push(`node-modules-junction-failed: ${msgOf(e)}`)
+          warnings.push(`node-modules-mirror-failed: ${msgOf(e)}`)
         }
       } else {
         warnings.push('node-modules-source-missing')
@@ -795,13 +895,21 @@ export function apply(ctx, config) {
     // 配置文件只读：防误写（DSH_FANG_FORK_PROFILE_RO=0 可关）。
     const profileReadonly = setProfileConfigReadonly(profileDir, true)
 
-    // node_modules junction in the fork profile (always to the mother's module tree).
+    // node_modules mirror in the fork profile (always to the mother's module tree).
+    // v3.1.7: one junction per top-level entry instead of a whole-tree junction. DSH's
+    // profile-scope resolver only supplies installation packages (`@deepseek-ai/*`) to an
+    // importer inside the profile tree or below a linked root; a whole-tree junction keeps
+    // the importer outside every scope, so lazy host imports fall back to plugin shims
+    // (w2m's shim emits `required: false` in a property schema → the provider rejects
+    // every request: "Invalid schema for function 'w2m_report'", v3.1.7 report).
     let nodeModules = null
     if (exists(nodeModulesSource)) {
       try {
-        nodeModules = makeJunction(nodeModulesSource, path.join(profileDir, 'node_modules'))
+        const mirrored = mirrorModuleTree(nodeModulesSource, path.join(profileDir, 'node_modules'))
+        if (mirrored.ok === true) nodeModules = nodeModulesSource
+        else warnings.push(`node-modules-mirror-failed: ${mirrored.error ?? 'unknown'}`)
       } catch (e) {
-        warnings.push(`node-modules-junction-failed: ${msgOf(e)}`)
+        warnings.push(`node-modules-mirror-failed: ${msgOf(e)}`)
       }
     } else if (!cleanTemplate) {
       // Degraded but still usable: the fork simply has no node_modules link to the mother.
@@ -928,6 +1036,22 @@ export function apply(ctx, config) {
     }
     try { rec.configLock = applyForkConfigLock(rec.profileDir) } catch { rec.configLock = { ok: false } }
     try { rec.profileReadonly = setProfileConfigReadonly(rec.profileDir, true) } catch { rec.profileReadonly = { ok: false } }
+    // v3.1.7: repair a whole-tree `node_modules` junction left by any previous release into
+    // the per-entry mirror. This is what makes the fork host resolve the installation's
+    // `@deepseek-ai/*` packages for profile plugins again; without it every agent request in
+    // the fork is rejected by the provider (w2m offline shim → invalid tool schema).
+    try {
+      const repaired = ensureModuleMirror(path.join(rec.profileDir, 'node_modules'))
+      rec.nodeModulesMirror = {
+        changed: repaired.changed === true,
+        ok: repaired.ok !== false,
+        source: repaired.source ?? null,
+        links: Array.isArray(repaired.links) ? repaired.links.length : 0,
+        error: repaired.error ?? null,
+      }
+    } catch (e) {
+      rec.nodeModulesMirror = { ok: false, changed: false, error: msgOf(e) }
+    }
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
     // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。
@@ -998,7 +1122,13 @@ export function apply(ctx, config) {
       }
       pendingSpawns.add(cleanup)
 
-      const spec = buildLaunchSpec({ cliPath, profile, port: expectedPort })
+      // v3.1.7: the headless web host (`dsh.cmd --no-open`, ELECTRON_RUN_AS_NODE) has no
+      // window for the native directory chooser; pin the browse interaction through a
+      // launcher overlay so "select workspace" works inside every fork Web UI.
+      const patchPaths = []
+      const headlessOverlay = writeHeadlessPickerOverlay(rec.profileDir, { cliPath })
+      if (headlessOverlay) patchPaths.push(headlessOverlay)
+      const spec = buildLaunchSpec({ cliPath, profile, port: expectedPort, patchPaths })
       const env = buildForkChildEnv(process.env, {
         DSH_HOME: homeDir,
         // Fork identity is injected by the forker (a fork must never be able to call itself mother).
