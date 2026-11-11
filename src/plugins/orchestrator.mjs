@@ -10,6 +10,7 @@
 // 绝不假装成功。orchestrator 自身只在 mother 角色激活（roleGate）。
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 
 import {
   z, roleGate, resolveFangLayout, resolveProfileDir, resolveSessionsLayout,
@@ -42,6 +43,7 @@ import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
+import { createContractServer, startFileContractServer, METHODS as CONTRACT_METHODS, CONTRACT_VERSION } from '../contract/index.js'
 import zlib from 'node:zlib'
 
 /**
@@ -151,6 +153,12 @@ export const Config = z.object({
     .description('v3.0.5/B1：安装级鉴权 token；留空 = 读 DSH_FANG_AUTH_TOKEN 或 <dataDir>/fang-auth.json（0600，自动生成）'),
   authEnabled: z.boolean().default(true)
     .description('v3.0.5/B1：是否要求 /fang/api 携带鉴权 token（默认开启；仅测试/本地调试可关）'),
+  contract: z.object({
+    enabled: z.boolean().default(true).description('v3.1.15：是否启用 fang-master 契约端点/服务'),
+    token: z.string().default('').description('契约 HTTP Bearer token（留空 = HTTP 契约端点禁用；不写日志/状态）'),
+    fileDir: z.string().default('').description('可选：文件 outbox 兜底目录（同机 fallback；留空 = 关闭）'),
+    pathPrefix: z.string().default('/fang/api/contract').description('契约路由前缀'),
+  }).default({}),
 })
 
 const HTML_ESCAPE = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
@@ -1675,6 +1683,71 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => ctx.provide(SERVICE.orchestrator, service))
+
+  // v3.1.15：fang-master 契约服务（dsh-Master 通过 local/http/file/legacy 四层传输调用）。
+  const contractCfg = {
+    enabled: true,
+    token: '',
+    fileDir: '',
+    pathPrefix: '/fang/api/contract',
+    ...(config && typeof config.contract === 'object' ? config.contract : {}),
+  }
+  const contractEnv = (env) => {
+    const out = {}
+    if (!env || typeof env !== 'object') return out
+    for (const [key, value] of Object.entries(env)) {
+      if (!String(key).startsWith('DSH_MASTER_')) continue
+      if (typeof value === 'string') out[String(key)] = value.slice(0, 32_000)
+    }
+    return out
+  }
+  const contractService = (key, method, required = true) => {
+    const found = safeGet(SERVICE[key])
+    if (found && typeof found[method] === 'function') return found
+    if (!required) return null
+    const error = new Error(`fang service ${key}.${method} is unavailable`)
+    error.code = 'fang-service-unavailable'
+    throw error
+  }
+  const contractServer = createContractServer({
+    role: gate.role,
+    instanceId: `fang-${gate.role}-${process.pid}`,
+    handlers: {
+      [CONTRACT_METHODS.FORK_SPAWN]: async (params) => {
+        const forker = contractService('forker', 'spawn')
+        const input = params && typeof params === 'object' ? params : {}
+        return await forker.spawn({ ...input, env: contractEnv(input.env) })
+      },
+      [CONTRACT_METHODS.FORK_STOP]: async (params) => {
+        const forker = contractService('forker', 'stop', false)
+        if (!forker) { const error = new Error('fang forker stop is unavailable'); error.code = 'fang-service-unavailable'; throw error }
+        return await forker.stop(String(params?.forkId ?? params?.taskId ?? ''))
+      },
+      [CONTRACT_METHODS.FORK_LIST]: async () => {
+        const forker = contractService('forker', 'list', false)
+        if (forker) return await forker.list()
+        return service.listForks()
+      },
+      [CONTRACT_METHODS.DECISION_CREATE]: async (params) => await contractService('decisionCenter', 'create').create(params ?? {}),
+      [CONTRACT_METHODS.DECISION_RESOLVE]: async (params) => await contractService('decisionCenter', 'resolve').resolve(params?.id, params?.option, { by: params?.by ?? 'dsh-master-contract', note: params?.note, custom: params?.custom }),
+      [CONTRACT_METHODS.SESSION_LIST]: async (params) => {
+        const catalog = contractService('sessionCatalog', 'list', false)
+        if (catalog) return await catalog.list(params ?? {})
+        const error = new Error('fang session catalog is unavailable'); error.code = 'fang-service-unavailable'; throw error
+      },
+      [CONTRACT_METHODS.ORCHESTRATOR_STATUS]: async () => service.status(),
+    },
+  })
+  try { ctx.effect(() => ctx.provide(SERVICE.contract, contractServer)) } catch { /* fake ctx */ }
+  if (contractCfg.enabled !== false && String(contractCfg.fileDir ?? '').trim()) {
+    try {
+      const fileServer = startFileContractServer({ dir: String(contractCfg.fileDir), server: contractServer, logger: ctx.logger })
+      ctx.effect(() => () => fileServer.stop())
+    } catch (error) {
+      try { ctx.logger?.warn?.(`[fang-contract] file fallback disabled: ${String(error?.message ?? error)}`) } catch { /* ignore */ }
+    }
+  }
+
   // 启动时把持久化的 supervise 开关应用到已经挂载的 forker（插件顺序可能晚于本插件）。
   ctx.inject([SERVICE.forker], (child) => {
     try {
@@ -2720,6 +2793,35 @@ export function apply(ctx, config) {
       })
 
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
+      // v3.1.15：fang-master 契约端点（HTTP fallback；token 未配置时禁用）。
+      if (contractCfg.enabled !== false) {
+        const contractPath = String(contractCfg.pathPrefix || `${prefix}/api/contract`).replace(/\/+$/, '')
+        const contractAuthorized = (req) => {
+          const token = String(contractCfg.token ?? '')
+          if (!token) return false
+          const match = /^Bearer\s+(\S+)$/i.exec(String(req?.headers?.authorization ?? '').trim())
+          if (!match) return false
+          const a = Buffer.from(match[1], 'utf8')
+          const b = Buffer.from(token, 'utf8')
+          return a.length === b.length && crypto.timingSafeEqual(a, b)
+        }
+        route('POST', `${contractPath}/hello`, async (req, res) => {
+          if (!contractCfg.token) return json(res, 503, { ok: false, code: 'contract-token-required' })
+          if (!contractAuthorized(req)) return json(res, 401, { ok: false, code: 'contract-unauthorized' })
+          return json(res, 200, contractServer.hello())
+        })
+        route('POST', `${contractPath}/invoke`, async (req, res) => {
+          if (!contractCfg.token) return json(res, 503, { ok: false, code: 'contract-token-required' })
+          if (!contractAuthorized(req)) return json(res, 401, { ok: false, code: 'contract-unauthorized' })
+          const body = await readBody(req)
+          if (!body || typeof body !== 'object') return json(res, 400, { ok: false, code: 'invalid-envelope' })
+          const out = await contractServer.invoke(body)
+          return json(res, 200, out)
+        })
+        route('GET', `${contractPath}/health`, (req, res) => json(res, 200, {
+          ok: true, contractVersion: CONTRACT_VERSION, role: gate.role, methods: contractServer.hello().methods,
+        }))
+      }
       // 重启守卫 / supervisor 契约（只读）。不触发重启；写操作仍只走审批 + 外部 supervisor。
       route('GET', `${prefix}/api/restart`, (req, res) => {
         const view = restartView()
