@@ -365,6 +365,10 @@ export function apply(ctx, config) {
       }
     }
     const workspaceFilter = typeof opts.workspaceId === 'string' && opts.workspaceId.trim() ? opts.workspaceId.trim() : null
+    // v3.1.17：房主 Router 的 Ticket→会话映射键（sessionKey/ticketId）原样带回，
+    // 便于 3_Sessions 把「工单」与「母体会话目录」对齐；不参与过滤，只做标注。
+    const sessionKey = typeof opts.sessionKey === 'string' && opts.sessionKey.trim() ? opts.sessionKey.trim() : null
+    const ticketId = typeof opts.ticketId === 'string' && opts.ticketId.trim() ? opts.ticketId.trim() : null
 
     let items = scanned.sessions
     if (!includeArchivedEffective) items = items.filter((session) => !session.archived)
@@ -385,7 +389,14 @@ export function apply(ctx, config) {
     })
     return {
       ok: true,
-      sessions: page.map((session) => ({ ...sessionView(session), ...titleFields(titleOf(session), session.workspaceTitle) })),
+      sessions: page.map((session) => ({
+        ...sessionView(session),
+        ...titleFields(titleOf(session), session.workspaceTitle),
+        ...(sessionKey ? { sessionKey } : {}),
+        ...(ticketId ? { ticketId } : {}),
+      })),
+      ...(sessionKey ? { sessionKey } : {}),
+      ...(ticketId ? { ticketId } : {}),
       total,
       returned: page.length,
       limit: requestedLimit,

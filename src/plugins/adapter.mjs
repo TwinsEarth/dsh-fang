@@ -695,13 +695,29 @@ export function apply(ctx, config) {
 
   // v3.1.14：Web 端拿不到 adapter Bearer token，身份探测走公开只读路由；
   // 只暴露 role/kind/version，不含 taskId/sessionId/token。
+  let clientReported = false
+  let clientReportedAt = 0
+
   const identity = () => ({
     ok: true,
     role,
     kind: identityKind({ role, taskId, essence: typeof process !== 'undefined' && process.env?.DSH_FANG_ESSENCE === '1' }),
     version: FANG_VERSION,
     protocol: ADAPTER_PROTOCOL_VERSION,
+    // v3.1.17：一眼判断「服务端有身份、客户端没加载」——不含 taskId/token 等敏感字段。
+    surface: 'web-adapter',
+    clientLoaded: clientReported,
+    clientReportedAt: clientReportedAt || null,
   })
+  /**
+   * 客户端自报：Web 端加载了 fang client 后会 POST 到这里；
+   * 只记录时间，不记录任何身份/token（用于运维排查徽标不显示）。
+   */
+  const reportClient = () => {
+    clientReported = true
+    clientReportedAt = Date.now()
+    return { ok: true, clientReported: true, at: clientReportedAt }
+  }
 
   const approvals = () => {
     const items = approvalItemsWithOrphans()
@@ -1108,6 +1124,8 @@ export function apply(ctx, config) {
     routes: [],
 
     hello,
+    identity,
+    reportClient,
     status,
     approvals,
     audit,
@@ -1235,6 +1253,14 @@ export function apply(ctx, config) {
       handler: (req, res) => json(res, 200, identity()),
     })
     try { service.routes.push(`${prefix}${ADAPTER_ROUTE.IDENTITY}`) } catch { /* fake ws */ }
+    // v3.1.17：客户端自报加载状态（只记录时间戳，不含身份/token）。
+    webServer.register({
+      kind: 'exact',
+      path: `${prefix}${ADAPTER_ROUTE.CLIENT_REPORT}`,
+      method: 'POST',
+      handler: (req, res) => json(res, 200, reportClient()),
+    })
+    try { service.routes.push(`${prefix}${ADAPTER_ROUTE.CLIENT_REPORT}`) } catch { /* fake ws */ }
     const route = (method, routePath, handler) => {
       webServer.register({
         kind: 'exact',

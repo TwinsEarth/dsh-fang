@@ -479,6 +479,19 @@ window.__ModuleLoader__.load({
       let timer = 0
       let observer = null
       let observed = null
+      let fallbackEl = null
+      let reported = false
+
+      // v3.1.17：客户端自报「已加载」，仅时间戳（供 /fang/adapter/identity 的 clientLoaded）。
+      const reportLoaded = () => {
+        if (reported) return
+        reported = true
+        try {
+          void fetch('/fang/adapter/client-report', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+            .catch(() => { /* 老宿主没有该路由：忽略 */ })
+        } catch { /* ignore */ }
+      }
+
       const findBrandName = () => {
         const candidates = document.querySelectorAll('[class*="brandName"]')
         for (const node of candidates) {
@@ -502,50 +515,107 @@ window.__ModuleLoader__.load({
         if (el.title !== title) el.title = title
         if (el.getAttribute('aria-label') !== title) el.setAttribute('aria-label', title)
       }
-      const place = () => {
-        if (!document || !document.body) return false
-        let el = document.getElementById(WEB_ROLE_BADGE_ID)
-        if (el && el.isConnected && el.parentElement) { paint(el); return true }
-        const brandName = findBrandName()
-        if (!brandName || !brandName.parentElement) return false
-        el = document.createElement('span')
+
+      const createBadge = () => {
+        const el = document.createElement('span')
         el.id = WEB_ROLE_BADGE_ID
         el.className = 'fang-web-role'
         el.setAttribute('role', 'status')
         el.setAttribute('aria-live', 'polite')
+        return el
+      }
+
+      /** 首选：宿主侧栏品牌词标右侧。 */
+      const placeInBrand = () => {
+        if (!document || !document.body) return false
+        const existing = document.getElementById(WEB_ROLE_BADGE_ID)
+        if (existing && existing.isConnected && existing.parentElement && existing !== fallbackEl) { paint(existing); return true }
+        const brandName = findBrandName()
+        if (!brandName || !brandName.parentElement) return false
+        if (fallbackEl) { try { fallbackEl.remove() } catch { /* ignore */ } fallbackEl = null }
+        const el = createBadge()
         brandName.parentElement.insertBefore(el, brandName.nextSibling)
         paint(el)
-        // 宿主重渲染只可能发生在品牌行内部：盯住它的父节点，摘掉就补回。
-        if (observer) { try { observer.disconnect() } catch { /* ignore */ } }
-        observer = new MutationObserver(() => { try { place() } catch { /* ignore */ } })
-        try { observer.observe(brandName.parentElement, { childList: true, subtree: true }) } catch { /* ignore */ }
-        observed = brandName.parentElement
+        observe(brandName.parentElement)
         return true
       }
+
+      /**
+       * 兜底（v3.1.17）：品牌槽不存在或被宿主整段移除时，挂到 body 右上角固定角标。
+       * 只在 3 次重试仍失败后启用，避免与正常挂载抢位置。
+       */
+      const placeFallback = () => {
+        if (!document || !document.body) return false
+        if (fallbackEl && fallbackEl.isConnected) { paint(fallbackEl); return true }
+        const el = createBadge()
+        el.classList.add('fang-web-role--fallback')
+        el.style.position = 'fixed'
+        el.style.top = '8px'
+        el.style.right = '12px'
+        el.style.zIndex = '2147483000'
+        el.style.padding = '2px 8px'
+        el.style.borderRadius = '10px'
+        el.style.fontSize = '11px'
+        el.style.fontWeight = '600'
+        el.style.pointerEvents = 'none'
+        el.style.background = 'rgba(0,0,0,.55)'
+        document.body.append(el)
+        fallbackEl = el
+        paint(el)
+        observe(document.body)
+        return true
+      }
+
+      const observe = (node) => {
+        if (!node) return
+        if (observed === node && observer) return
+        if (observer) { try { observer.disconnect() } catch { /* ignore */ } }
+        observer = new MutationObserver(() => {
+          try { if (!placeInBrand()) placeFallback() } catch { /* ignore */ }
+        })
+        try { observer.observe(node, { childList: true, subtree: true }) } catch { /* ignore */ }
+        observed = node
+      }
+
       const install = () => {
-        if (place()) { if (timer) { clearInterval(timer); timer = 0 } return true }
+        const ok = placeInBrand()
+        if (ok) { if (timer) { clearInterval(timer); timer = 0 } return true }
         return false
       }
-      install()
-      // 侧栏可能晚于插件激活渲染；最多等 20s，不无限占定时器。
-      if (!document.getElementById(WEB_ROLE_BADGE_ID)) {
+
+      reportLoaded()
+
+      // 3 次重试（250ms 间隔）后才兜底；宿主侧栏渲染通常在第一帧后就绪。
+      if (!install()) {
         let tries = 0
         timer = setInterval(() => {
           tries += 1
-          if (install() || tries >= 80) { clearInterval(timer); timer = 0 }
+          const done = install()
+          if (!done && tries >= 3) {
+            clearInterval(timer)
+            timer = 0
+            placeFallback()
+          } else if (done) {
+            clearInterval(timer)
+            timer = 0
+          }
         }, 250)
       }
+
       void (async () => {
         const detected = await detectWebRole()
         if (!detected) return
         role = detected
-        install()
+        if (!install()) placeFallback()
       })()
+
       return () => {
         if (timer) { clearInterval(timer); timer = 0 }
         if (observer) { try { observer.disconnect() } catch { /* ignore */ } observer = null }
         void observed
         try { document.getElementById(WEB_ROLE_BADGE_ID)?.remove() } catch { /* ignore */ }
+        try { fallbackEl?.remove() } catch { /* ignore */ }
+        fallbackEl = null
       }
     }
 

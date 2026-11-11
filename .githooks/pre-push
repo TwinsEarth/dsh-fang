@@ -19,8 +19,17 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "${remote_ref:-}" ] && continue
   case "$remote_ref" in
     refs/heads/main | refs/heads/release/* | refs/tags/v*)
+      # v3.1.17：annotated tag 的 local_sha 是 tag 对象，必须 peel 到 commit
+      # 再交给 guard，否则「tag 必须指向 main first-parent」的检查会误报。
+      guard_sha="$local_sha"
+      case "$remote_ref" in
+        refs/tags/v*)
+          peeled=$(git rev-parse --verify --quiet "${local_sha}^{commit}" 2>/dev/null || true)
+          if [ -n "$peeled" ]; then guard_sha="$peeled"; fi
+          ;;
+      esac
       node "$(git rev-parse --show-toplevel)/tools/git/guard-main.mjs" check \
-        --ref "$remote_ref" --local "$local_sha" --remote "$remote_sha" || status=$?
+        --ref "$remote_ref" --local "$guard_sha" --remote "$remote_sha" || status=$?
       ;;
     *) : ;;
   esac

@@ -129,7 +129,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '3.1.16'
+export const FANG_VERSION = '3.1.17'
 
 /**
  * @typedef {object} ForkInfo
@@ -193,6 +193,7 @@ export const ADAPTER_OP = {
 export const ADAPTER_ROUTE = {
   HELLO: '/adapter/hello',
   IDENTITY: '/adapter/identity',
+  CLIENT_REPORT: '/adapter/client-report',
   STATUS: '/adapter/status',
   APPROVALS: '/adapter/approvals',
   AUDIT: '/adapter/audit',
