@@ -235,6 +235,18 @@ function readPluginTree(dir) {
   return { ok: true, files, count: Object.keys(files).length, bytes }
 }
 
+/**
+ * 角色 → Web 端身份 kind（纯函数，便于测试）。
+ * 母体 = mother；元宝运行态 = essence（DSH_FANG_ESSENCE 或 rt- forkId）；
+ * 其余 fork 实例 = 任务分身。
+ * @param {{role?:string, taskId?:string, essence?:boolean}} [input]
+ * @returns {'mother'|'essence'|'fork'}
+ */
+export function identityKind({ role = 'fork', taskId = '', essence = false } = {}) {
+  if (role === 'mother') return 'mother'
+  return essence === true || String(taskId ?? '').startsWith('rt-') ? 'essence' : 'fork'
+}
+
 export function apply(ctx, config) {
   const gate = roleGate('adapter', { logger: ctx.logger })
   if (!gate.active) return
@@ -654,12 +666,9 @@ export function apply(ctx, config) {
   const hello = () => ({
     ok: true,
     role,
-    taskId,
-    // Web 端身份徽标用：母体 / 元主（元宝运行态）/ 分身（任务）。
+    taskId,    // Web 端身份徽标用：母体 / 元主（元宝运行态）/ 分身（任务）。
     // 元宝运行态由 orchestrator 注入 DSH_FANG_ESSENCE=1；旧运行态按 rt- 前缀兜底。
-    kind: role === 'mother'
-      ? 'mother'
-      : ((typeof process !== 'undefined' && process.env?.DSH_FANG_ESSENCE === '1') || String(taskId ?? '').startsWith('rt-') ? 'essence' : 'fork'),
+    kind: identityKind({ role, taskId, essence: typeof process !== 'undefined' && process.env?.DSH_FANG_ESSENCE === '1' }),
     version: FANG_VERSION,
     protocol: ADAPTER_PROTOCOL_VERSION,
     sessionId,
@@ -683,6 +692,16 @@ export function apply(ctx, config) {
       archived: archivedAt !== null,
     }
   }
+
+  // v3.1.14：Web 端拿不到 adapter Bearer token，身份探测走公开只读路由；
+  // 只暴露 role/kind/version，不含 taskId/sessionId/token。
+  const identity = () => ({
+    ok: true,
+    role,
+    kind: identityKind({ role, taskId, essence: typeof process !== 'undefined' && process.env?.DSH_FANG_ESSENCE === '1' }),
+    version: FANG_VERSION,
+    protocol: ADAPTER_PROTOCOL_VERSION,
+  })
 
   const approvals = () => {
     const items = approvalItemsWithOrphans()
@@ -1207,6 +1226,14 @@ export function apply(ctx, config) {
   }
 
   const registerRoutes = (webServer) => {
+    // v3.1.14：浏览器无法持有 adapter Bearer token；身份探测必须是公开只读路由。
+    // 服务端仍只监听 loopback，且返回值不含 taskId/token（见 identity()）。
+    webServer.register({
+      kind: 'exact',
+      path: `${prefix}${ADAPTER_ROUTE.IDENTITY}`,
+      method: 'GET',
+      handler: (req, res) => json(res, 200, identity()),
+    })
     const route = (method, routePath, handler) => {
       webServer.register({
         kind: 'exact',
