@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "dsh-Fang (mother/fork plugin development)",
-    "description": "One readonly mother plus a disposable child dsh-Web per task: crash containment without restarting the mother, with scoring, approval, audit and promotion gates."
+    "title": "Fangcheng: DSH's First Virtual Machine!",
+    "description": "Dsh-Fangcheng was born from a group of geeks who love tinkering — and have been burned by it more times than we can count. In the era of self-evolving AI, we believe that \"how to safely try something new\" matters more than \"the new thing itself\".\n\nIf you are one of these three, Fangcheng was built for you:\n1. The plugin-building maniac: writing N new plugins a day and changing code hundreds of times. You used to restart DSH after every edit; now you hot-reload inside Fangcheng, and a broken build rolls back instantly.\n2. The multi-tasker: one window for data analysis, one for a crawler, one for long-running tests. Fangcheng lets you open as many as you like without crashing — each in its own absolute isolation.\n3. The security worrier: unwilling to hand your client to third-party plugins, afraid of deleted files or stolen API keys. Fangcheng's review gates and independent sandboxes keep risky code boxed in."
   }
 }
