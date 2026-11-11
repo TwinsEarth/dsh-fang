@@ -1234,6 +1234,7 @@ export function apply(ctx, config) {
       method: 'GET',
       handler: (req, res) => json(res, 200, identity()),
     })
+    try { service.routes.push(`${prefix}${ADAPTER_ROUTE.IDENTITY}`) } catch { /* fake ws */ }
     const route = (method, routePath, handler) => {
       webServer.register({
         kind: 'exact',
