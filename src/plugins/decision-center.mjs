@@ -232,6 +232,7 @@ function publicTicket(ticket) {
     isBlocking: ticket.isBlocking === true,
     resolvedBy: ticket.resolvedBy ?? null,
     resolutionNote: ticket.resolutionNote ?? null,
+    customInput: ticket.customInput === true,
   }
 }
 
@@ -726,23 +727,32 @@ export function apply(ctx, config) {
       ? optionValue
       : { value: optionValue }
     const rawValue = String(requested.value ?? requested.id ?? '').trim()
-    if (!rawValue) return { ok: false, reason: 'option-required', id: ticket.id }
-    const matched = ticket.options.find((option) => option.value === rawValue || option.id === rawValue)
-    if (ticket.options.length > 0 && !matched) {
+    // v3.1.13：会话内联决策允许“直接输入”代替预置选项。只有显式传 custom 才走这条
+    // 路径，避免把误传的任意字符串当成决定；长度上限防注入超长内容。
+    const customText = options.custom === undefined || options.custom === null
+      ? ''
+      : String(options.custom).trim().slice(0, 2000)
+    if (!rawValue && !customText) return { ok: false, reason: 'option-required', id: ticket.id }
+    const matched = rawValue ? ticket.options.find((option) => option.value === rawValue || option.id === rawValue) : null
+    const useCustom = !matched && customText.length > 0
+    if (!useCustom && ticket.options.length > 0 && !matched) {
       return { ok: false, reason: 'unknown-option', id: ticket.id, allowed: ticket.options.map((option) => option.value) }
     }
-    if (ticket.options.length === 0 && rawValue !== '__ACK__') {
+    if (!useCustom && ticket.options.length === 0 && rawValue !== '__ACK__') {
       return { ok: false, reason: 'unknown-option', id: ticket.id, allowed: ['__ACK__'] }
     }
-    const isAck = ticket.options.length === 0
+    const isAck = !useCustom && ticket.options.length === 0
     ticket.status = 'resolved'
     ticket.outcome = isAck ? 'acked' : 'resolved'
-    ticket.resolvedOption = isAck ? null : matched.value
-    ticket.selectedActionId = isAck ? 'ack' : (matched.id ?? matched.value)
-    ticket.resolvedPayload = isAck ? null : (requested.payload ?? matched.payload ?? null)
+    ticket.resolvedOption = useCustom ? customText : (isAck ? null : matched.value)
+    ticket.customInput = useCustom
+    ticket.selectedActionId = useCustom ? null : (isAck ? 'ack' : (matched.id ?? matched.value))
+    ticket.resolvedPayload = useCustom ? { custom: customText } : (isAck ? null : (requested.payload ?? matched.payload ?? null))
     ticket.resolvedAt = nowMs()
     ticket.resolvedBy = options.by === undefined || options.by === null ? null : String(options.by)
-    ticket.resolutionNote = options.note === undefined || options.note === null ? null : String(options.note)
+    ticket.resolutionNote = options.note === undefined || options.note === null
+      ? (useCustom ? customText : null)
+      : String(options.note)
     const aiOutcome = recordAiAdoption(ticket, ticket.resolvedOption, ticket.outcome)
     ticket.rev = nextRevision()
     settleWaiter(ticket.id, publicTicket(ticket))

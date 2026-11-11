@@ -1047,6 +1047,43 @@ window.__ModuleLoader__.load({
   -webkit-app-region:no-drag;user-select:none}
 .fang-web-role[hidden]{display:none}
 .fang-web-role--unknown{visibility:hidden}
+/* 决策中继：每个会话右侧的待选悬浮按钮 + 从右向左滑出的决策栏（v3.1.13）。 */
+.fang-relay-fab{position:fixed;right:18px;top:52%;transform:translateY(-50%);z-index:2147482900;display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 12px;border-radius:999px;border:1px solid rgba(200,16,46,.35);background:#fff;color:#C8102E;box-shadow:0 8px 24px -8px rgba(200,16,46,.45);cursor:pointer;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;-webkit-app-region:no-drag;user-select:none}
+.fang-relay-fab:hover{background:#FFF5F7}
+.fang-relay-fab[hidden]{display:none}
+.fang-relay-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#C8102E;color:#fff;font-size:11px;font-weight:700}
+.fang-relay-panel{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);z-index:2147483000;background:#fff;border-left:1px solid rgba(16,17,20,.12);box-shadow:-18px 0 48px rgba(16,17,20,.18);transform:translateX(102%);transition:transform .22s cubic-bezier(.22,.61,.36,1);display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.45;color:#1D1D1F}
+.fang-relay-panel.is-open{transform:translateX(0)}
+.fang-relay-backdrop{position:fixed;inset:0;z-index:2147482999;background:rgba(18,19,22,.22);opacity:0;pointer-events:none;transition:opacity .2s ease}
+.fang-relay-backdrop.is-open{opacity:1;pointer-events:auto}
+.fang-relay-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid rgba(16,17,20,.08);flex:0 0 auto}
+.fang-relay-title{font-size:14px;font-weight:700}
+.fang-relay-sub{font-size:11.5px;color:#86868B}
+.fang-relay-close{margin-left:auto;width:28px;height:28px;border-radius:8px;border:1px solid rgba(16,17,20,.12);background:#fff;color:#5F6368;cursor:pointer;font-size:15px;line-height:1}
+.fang-relay-body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px 14px 18px;display:flex;flex-direction:column;gap:10px}
+.fang-relay-empty{font-size:12px;color:#86868B;padding:18px 6px;text-align:center}
+.fang-relay-ticket{border:1px solid rgba(16,17,20,.1);border-radius:12px;padding:10px 11px;background:#FAFAFC;display:flex;flex-direction:column;gap:7px}
+.fang-relay-ticket-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.fang-relay-level{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:6px;font-size:10.5px;font-weight:700;letter-spacing:.02em;background:#F2F2F5;color:#5F6368}
+.fang-relay-level--red{background:rgba(200,16,46,.08);color:#C8102E}
+.fang-relay-level--yellow{background:rgba(180,83,9,.1);color:#B45309}
+.fang-relay-level--blue{background:rgba(10,107,224,.08);color:#0A6BE0}
+.fang-relay-level--green{background:rgba(23,128,61,.08);color:#17803D}
+.fang-relay-ticket-title{font-size:13px;font-weight:600;color:#1D1D1F}
+.fang-relay-context{font-size:12px;color:#5F6368;white-space:pre-wrap;max-height:96px;overflow:auto;overscroll-behavior:contain}
+.fang-relay-options{display:flex;flex-direction:column;gap:6px}
+.fang-relay-option{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:1px solid rgba(16,17,20,.12);background:#fff;border-radius:9px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12.5px;color:#1D1D1F}
+.fang-relay-option:hover{border-color:rgba(200,16,46,.4);background:#FFF7F8}
+.fang-relay-option:disabled{opacity:.55;cursor:default}
+.fang-relay-key{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;background:#F2F2F5;color:#5F6368;font-weight:700;font-size:11px;flex:0 0 auto}
+.fang-relay-custom{display:flex;gap:6px;margin-top:2px}
+.fang-relay-input{flex:1 1 auto;min-width:0;height:32px;border-radius:9px;border:1px solid rgba(16,17,20,.14);padding:0 9px;font:inherit;font-size:12.5px;background:#fff;color:#1D1D1F}
+.fang-relay-input:focus{outline:2px solid rgba(200,16,46,.25);outline-offset:-1px}
+.fang-relay-submit{flex:0 0 auto;height:32px;padding:0 11px;border-radius:9px;border:1px solid #C8102E;background:#C8102E;color:#fff;font:600 12.5px/1 inherit;cursor:pointer}
+.fang-relay-submit:disabled{opacity:.5;cursor:default}
+.fang-relay-msg{font-size:11.5px;color:#B45309}
+.fang-relay-error{font-size:11.5px;color:#C8102E}
+@media (prefers-reduced-motion:reduce){.fang-relay-panel{transition:none}.fang-relay-backdrop{transition:none}}
 
 @media (max-width:760px){
   .fang-console{padding:12px 12px 18px}
@@ -5225,6 +5262,14 @@ window.__ModuleLoader__.load({
             method: 'POST', body: JSON.stringify({ id, option, by: 'fang-inbox' }),
           }))
         },
+        /** v3.1.13：会话内直接输入决定（不要求命中预置选项）。 */
+        resolveCustom(id, text) {
+          const custom = String(text ?? '').trim()
+          if (!custom) return Promise.resolve({ ok: false, error: 'custom-required' })
+          return act('resolve-custom', () => api('/fang/api/decisions/resolve', {
+            method: 'POST', body: JSON.stringify({ id, custom: custom.slice(0, 2000), by: 'fang-relay' }),
+          }))
+        },
         abandon(id) {
           return act('abandon', () => api('/fang/api/decisions/abandon', {
             method: 'POST', body: JSON.stringify({ id, by: 'fang-inbox' }),
@@ -5266,6 +5311,159 @@ window.__ModuleLoader__.load({
             method: 'POST', body: JSON.stringify({ id }),
           }))
         },
+      }
+    }
+
+    // ── 会话内决策中继（v3.1.13）────────────────────────────────────────
+    // 每个会话右侧悬浮一个「待选」按钮（仅母体角色、仅当该会话有待决策时出现）；
+    // 点击从右向左滑出决策栏：预置选项按 A/B/C/D 展示，也可直接输入决定。
+    const RELAY_LEVEL_LABEL = Object.freeze({ red: '红', yellow: '黄', blue: '蓝', green: '绿', gray: '灰' })
+    function relayPendingFor(store, sessionId) {
+      const items = typeof store?.pending === 'function' ? store.pending() : []
+      return (Array.isArray(items) ? items : []).filter((ticket) => {
+        const source = ticket?.source && typeof ticket.source === 'object' ? ticket.source : {}
+        return String(source.sessionId ?? '') === String(sessionId)
+      })
+    }
+    function mountDecisionRelay(host, store, sessionId) {
+      if (typeof document === 'undefined' || !store || !sessionId) return () => {}
+      const doc = host?.ownerDocument ?? document
+      try { injectStyle(doc) } catch { /* style optional */ }
+      const sid = String(sessionId)
+      const state = { open: false, busy: false, error: '', customs: new Map() }
+      let fab = null
+      let countEl = null
+      let panel = null
+      let backdrop = null
+      let unsubscribe = null
+      let keyHandler = null
+      let disposed = false
+      const current = () => relayPendingFor(store, sid)
+      const setOpen = (next) => {
+        state.open = next === true
+        if (panel) panel.classList.toggle('is-open', state.open)
+        if (backdrop) backdrop.classList.toggle('is-open', state.open)
+        if (state.open) render()
+      }
+      const onKey = (event) => {
+        if (state.open && (event.key === 'Escape' || event.key === 'Esc')) { event.stopPropagation(); setOpen(false) }
+      }
+      const submitOption = async (ticket, option) => {
+        if (state.busy) return
+        state.busy = true; state.error = ''
+        render()
+        try {
+          const result = await store.resolve(ticket.id, option?.value)
+          if (result && result.ok === false) state.error = '提交失败：' + String(result.reason ?? result.error ?? 'resolve-failed')
+          else { state.customs.delete(String(ticket.id)); if (typeof store.refresh === 'function') await Promise.resolve(store.refresh()).catch(() => {}) }
+        } catch (error) { state.error = '提交失败：' + String(error?.message ?? error) } finally {
+          state.busy = false
+          render()
+        }
+      }
+      const submitCustom = async (ticket) => {
+        if (state.busy) return
+        const text = String(state.customs.get(String(ticket.id)) ?? '').trim()
+        if (!text) { state.error = '请先输入你的决定'; render(); return }
+        state.busy = true; state.error = ''
+        render()
+        try {
+          if (typeof store.resolveCustom !== 'function') throw new Error('resolve-custom-unavailable')
+          const result = await store.resolveCustom(ticket.id, text)
+          if (result && result.ok === false) state.error = '提交失败：' + String(result.reason ?? result.error ?? 'resolve-failed')
+          else { state.customs.delete(String(ticket.id)); if (typeof store.refresh === 'function') await Promise.resolve(store.refresh()).catch(() => {}) }
+        } catch (error) { state.error = '提交失败：' + String(error?.message ?? error) } finally {
+          state.busy = false
+          render()
+        }
+      }
+      const optionButton = (ticket, option, index) => {
+        const key = index < 26 ? String.fromCharCode(65 + index) : String(index + 1)
+        const label = String(option?.label ?? option?.value ?? '选项')
+        return h('button', {
+          type: 'button', class: 'fang-relay-option', disabled: state.busy || undefined,
+          'data-option-key': key, title: option?.isRecommended ? ('推荐：' + label) : label,
+          onClick: () => void submitOption(ticket, option),
+        }, h('span', { class: 'fang-relay-key' }, key), h('span', { class: 'fang-relay-option-label' }, label))
+      }
+      const ticketNode = (ticket) => {
+        const level = String(ticket?.level ?? 'gray')
+        const options = Array.isArray(ticket?.options) ? ticket.options : []
+        const id = String(ticket?.id ?? '')
+        const inputValue = state.customs.get(id) ?? ''
+        return h('div', { class: 'fang-relay-ticket', 'data-decision-id': id },
+          h('div', { class: 'fang-relay-ticket-head' },
+            h('span', { class: 'fang-relay-level fang-relay-level--' + level }, RELAY_LEVEL_LABEL[level] ?? level),
+            h('span', { class: 'fang-relay-ticket-title' }, String(ticket?.title ?? '待决策'))),
+          ticket?.context ? h('div', { class: 'fang-relay-context' }, String(ticket.context)) : null,
+          h('div', { class: 'fang-relay-options' },
+            options.length > 0
+              ? options.map((option, index) => optionButton(ticket, option, index))
+              : [h('button', {
+                  type: 'button', class: 'fang-relay-option', disabled: state.busy || undefined,
+                  onClick: () => void submitOption(ticket, { value: '__ACK__' }),
+                }, h('span', { class: 'fang-relay-key' }, '✓'), h('span', null, '确认收到（ACK）'))]),
+          h('div', { class: 'fang-relay-custom' },
+            h('input', {
+              class: 'fang-relay-input', placeholder: '或输入你的决定…', 'aria-label': '输入决定',
+              value: inputValue,
+              onInput: (event) => state.customs.set(id, String(event.target?.value ?? '')),
+              onKeydown: (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submitCustom(ticket) } },
+            }),
+            h('button', { type: 'button', class: 'fang-relay-submit', disabled: state.busy || undefined, onClick: () => void submitCustom(ticket) }, '提交')))
+      }
+      function render() {
+        if (disposed) return
+        const tickets = current()
+        if (countEl && fab) {
+          countEl.textContent = tickets.length > 99 ? '99+' : String(tickets.length)
+          fab.hidden = tickets.length === 0
+          fab.setAttribute('aria-label', tickets.length > 0 ? `当前会话有 ${tickets.length} 个待决策` : '当前会话没有待决策')
+        }
+        if (!panel) return
+        const head = h('div', { class: 'fang-relay-head' },
+          h('span', { class: 'fang-relay-title' }, '决策中继'),
+          h('span', { class: 'fang-relay-sub' }, `会话 ${short(sid, 10)} · ${tickets.length} 个待选`),
+          h('button', { type: 'button', class: 'fang-relay-close', title: '关闭', 'aria-label': '关闭决策中继', onClick: () => setOpen(false) }, '×'))
+        const body = h('div', { class: 'fang-relay-body' })
+        if (tickets.length === 0) {
+          body.append(h('div', { class: 'fang-relay-empty' }, '当前会话没有待决策；有新的阻塞问题时这里会自动出现。'))
+        } else {
+          for (const ticket of tickets) body.append(ticketNode(ticket))
+        }
+        if (state.error) body.append(h('div', { class: 'fang-relay-error', role: 'alert' }, state.error))
+        panel.replaceChildren(head, body)
+      }
+      const ensureChrome = () => {
+        if (fab || disposed) return
+        countEl = h('span', { class: 'fang-relay-count' }, '0')
+        fab = h('button', {
+          type: 'button', class: 'fang-relay-fab', title: '决策中继：当前会话的待决策',
+          'aria-label': '打开当前会话决策中继', 'aria-haspopup': 'dialog',
+        }, h('span', { 'aria-hidden': 'true', style: { fontSize: '15px', lineHeight: 1 } }, '◈'), h('span', null, '待选'), countEl)
+        backdrop = h('div', { class: 'fang-relay-backdrop' })
+        panel = h('aside', { class: 'fang-relay-panel', role: 'dialog', 'aria-modal': 'false', 'aria-label': '当前会话决策中继' })
+        doc.body.append(fab, backdrop, panel)
+        fab.addEventListener('click', () => setOpen(!state.open))
+        backdrop.addEventListener('click', () => setOpen(false))
+        keyHandler = onKey
+        doc.addEventListener('keydown', keyHandler, true)
+        unsubscribe = typeof store.subscribe === 'function' ? store.subscribe(render) : null
+        render()
+      }
+      void (async () => {
+        try {
+          const role = await detectWebRole()
+          if (disposed || role !== 'mother') return
+          ensureChrome()
+        } catch { /* 非母体或识别失败：不显示中继 */ }
+      })()
+      return () => {
+        disposed = true
+        if (unsubscribe) { try { unsubscribe() } catch { /* ignore */ } unsubscribe = null }
+        if (keyHandler) { try { doc.removeEventListener('keydown', keyHandler, true) } catch { /* ignore */ } keyHandler = null }
+        for (const node of [fab, backdrop, panel]) { try { node?.remove() } catch { /* ignore */ } }
+        fab = null; backdrop = null; panel = null; countEl = null
       }
     }
 
@@ -6120,7 +6318,7 @@ window.__ModuleLoader__.load({
     // ── 插件入口 ──────────────────────────────────────────────────────────
     return {
       mountPanel,
-      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole } : {}),
+      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole, __mountDecisionRelay: mountDecisionRelay } : {}),
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
@@ -6178,6 +6376,16 @@ window.__ModuleLoader__.load({
         const inbox = createDecisionInboxStore()
         inbox.start()
         disposers.push(() => { try { inbox.stop() } catch { /* ignore */ } })
+        // v3.1.13：每个会话右侧的决策中继（母体角色且该会话有待决策时显示）。
+        disposers.push(ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+          name: 'conversation.session.header.utilities',
+          id: 'fang-decision-relay',
+          order: 60,
+          label: '决策中继',
+        }, (props) => React.createElement(DomMount, {
+          mount: (mountHost) => mountDecisionRelay(mountHost, inbox, String(props?.sessionId ?? '')),
+          style: { display: 'none' },
+        }))))
         openInboxExternally = () => openInbox()
         const tryService = (name) => {
           try { if (ctx && typeof ctx === 'object' && ctx[name]) return ctx[name] } catch { /* ignore */ }

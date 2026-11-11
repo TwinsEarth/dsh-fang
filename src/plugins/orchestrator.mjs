@@ -2815,9 +2815,13 @@ export function apply(ctx, config) {
           const out = center.resolveMany(body.ids, { option: body?.option, by: body?.by ?? 'fang-api', note: body?.note })
           return json(res, 200, out)
         }
+        const resolveOptions = { by: body?.by ?? 'fang-api', note: body?.note }
+        // v3.1.13：只有显式传 custom 时才把字段交给服务层；undefined 字段不进
+        // options（旧调用方/测试对 {by,note} 的形状有断言）。
+        if (body?.custom !== undefined) resolveOptions.custom = body.custom
         const out = (body?.actionId !== undefined && typeof center.resolveAction === 'function')
-          ? center.resolveAction(body?.id, body.actionId, body?.payload, { by: body?.by ?? 'fang-api', note: body?.note })
-          : center.resolve(body?.id, body?.option, { by: body?.by ?? 'fang-api', note: body?.note })
+          ? center.resolveAction(body?.id, body.actionId, body?.payload, resolveOptions)
+          : center.resolve(body?.id, body?.option, resolveOptions)
         const status = out.ok ? 200
           : out.reason === 'not-found' ? 404
             : out.reason === 'option-required' || out.reason === 'unknown-option' ? 400
