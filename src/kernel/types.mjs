@@ -128,7 +128,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '3.1.13'
+export const FANG_VERSION = '3.1.14'
 
 /**
  * @typedef {object} ForkInfo
@@ -191,6 +191,7 @@ export const ADAPTER_OP = {
 /** Adapter HTTP route suffixes (fork side). */
 export const ADAPTER_ROUTE = {
   HELLO: '/adapter/hello',
+  IDENTITY: '/adapter/identity',
   STATUS: '/adapter/status',
   APPROVALS: '/adapter/approvals',
   AUDIT: '/adapter/audit',
