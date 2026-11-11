@@ -25,6 +25,7 @@ export const SERVICE = {
   link: 'fangLink',
   mirror: 'fangMirror',
   decisionCenter: 'fangDecisionCenter',
+  contract: 'fangContract',
 }
 
 /** Loader row ids used by cordis.patch.yml. */
@@ -128,7 +129,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '3.1.14'
+export const FANG_VERSION = '3.1.15'
 
 /**
  * @typedef {object} ForkInfo

@@ -142,6 +142,11 @@
         routes:
           enabled: true
           prefix: /fang
+        contract:
+          enabled: true
+          token: ''
+          fileDir: ''
+          pathPrefix: /fang/api/contract
 
     # Child plugin of the fang bundle: composer draft/queue journal (client half).
     # The main Web panel is the fang client half itself (package.json dsh.client),
