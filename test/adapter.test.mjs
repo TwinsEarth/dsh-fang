@@ -240,6 +240,7 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
   assert.match(service.sessionId, /^s-[0-9a-f]{16}$/, '每次进程启动一个 sessionId')
 
   assert.deepEqual(ws.paths(), [
+    routePath(ADAPTER_ROUTE.IDENTITY),
     routePath(ADAPTER_ROUTE.HELLO),
     routePath(ADAPTER_ROUTE.STATUS),
     routePath(ADAPTER_ROUTE.APPROVALS),
@@ -250,7 +251,7 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
     routePath(ADAPTER_ROUTE.STATE),
     routePath(ADAPTER_ROUTE.COMMANDS),
     routePath(ADAPTER_ROUTE.EVENTS),
-  ], '10 条路由 = v2 五条 + v3 五条，顺序与 ADAPTER_ROUTE 常量一致')
+  ], '11 条路由 = identity + v2 五条 + v3 五条，顺序与 ADAPTER_ROUTE 常量一致')
   assert.deepEqual(service.routes, ws.paths(), 'service.routes 暴露已注册路径（测试用）')
   for (const route of ws.routes) assert.equal(route.kind, 'exact')
 
@@ -296,7 +297,7 @@ test('hello(): role/taskId/version/capabilities；taskId 取 environ / 配置优
 test('Config.prefix 生效（与母体 Remote.prefix 对齐）', () => {
   const { ctx, ws } = applyAsFork({ prefix: '/x/' })
   assert.deepEqual(ws.paths(), [
-    '/x/adapter/hello', '/x/adapter/status', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
+    '/x/adapter/identity', '/x/adapter/hello', '/x/adapter/status', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
     '/x/adapter/version', '/x/adapter/health', '/x/adapter/state', '/x/adapter/commands', '/x/adapter/events',
   ])
   ctx.dispose()

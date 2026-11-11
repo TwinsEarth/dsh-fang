@@ -1,3 +1,31 @@
+## v3.1.14（2026-11-11）
+
+**主题：修复元主/分身 Web 不显示身份徽标；徽标改为红/蓝/绿三色。**
+
+### 修复
+- **元主/分身 Web 没有徽标**：v3.1.13 的徽标识别调用 `/fang/adapter/hello`，但该路由要
+  `Authorization: Bearer <adapterToken>`——浏览器拿不到 adapter token，分流后返回 401，
+  客户端判定失败直接隐藏徽标。母体走 `/fang/api/status` 所以正常（红标可见）。
+- 新增**公开只读**路由 `GET /fang/adapter/identity`：只返回 `{ role, kind, version, protocol }`
+  （不含 taskId/sessionId/token），服务端仍只监听 loopback；`kind` 由
+  `identityKind({role, taskId, essence})` 纯函数计算：`mother` / `essence` / `fork`
+  （元宝运行态由 `DSH_FANG_ESSENCE=1` 或 `rt-` forkId 识别）。
+- 客户端 `detectWebRole()` 顺序：`/fang/api/status`（母体）→ `/fang/adapter/identity`
+  （元主/分身）→ 旧宿主 `hello` 兜底；失败仍隐藏，不显示错误身份。
+- **颜色区分**：母体 **红**（`#C8102E`）、元主 **蓝**（`#0A6BE0`）、分身 **绿**（`#17803D`），
+  通过 `.fang-web-role--mother|essence|fork` 变体实现。
+
+### 测试
+- `test/client-role-badge-dom.test.mjs`：母体红 / 元主蓝（identity）/ 旧宿主 rt- 前缀兜底 /
+  分身绿（identity）/ 颜色 CSS 契约 / 接线断言，6/6；
+- `test/adapter-identity.test.mjs`：`identityKind` 四类映射，1/1；
+- 发布前 `preflight --e2e`（含 crash-safety + 打包后门禁）。
+
+### 已知边界
+- 需要升级到 3.1.14 并**重启元主/分身 Web 宿主**才会加载新的 identity 路由与客户端；
+  已运行的旧实例仍为旧代码（不会热更新）。
+- 公开 identity 路由只暴露角色/版本，不含任何 token 或任务标识。
+
 ## v3.1.13（2026-11-11）
 
 **主题：决策中心深入每个会话 —— 右侧「待选」悬浮入口 + 从右向左的决策栏（选项/自定义输入）。**

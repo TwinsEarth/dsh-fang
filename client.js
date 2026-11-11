@@ -450,14 +450,22 @@ window.__ModuleLoader__.load({
           const role = String(status.body.role ?? 'mother')
           if (role === 'mother') return 'mother'
         }
-      } catch { /* fall through to adapter handshake */ }
-      // 元主 / 分身：两者都是 fork 角色的 DSH 实例；adapter hello 给出 kind。
+      } catch { /* fall through to identity route */ }
+      // 元主 / 分身：fork 角色的 adapter 带 Bearer 鉴权，浏览器拿不到 token，
+      // 因此用公开只读的 /fang/adapter/identity（v3.1.14 起）。
+      try {
+        const identity = await api('/fang/adapter/identity')
+        if (identity.status === 200 && identity.body) {
+          const kind = String(identity.body.kind ?? '')
+          if (kind === 'mother' || kind === 'essence' || kind === 'fork') return kind
+        }
+      } catch { /* fall through to legacy hello */ }
+      // 兼容旧宿主（adapter 无 identity 路由）：尝试 hello（可能 401），旧运行态按 rt- 前缀兜底。
       try {
         const hello = await api('/fang/adapter/hello')
         if (hello.status === 200 && hello.body) {
           const kind = String(hello.body.kind ?? '')
           if (kind === 'mother' || kind === 'essence' || kind === 'fork') return kind
-          // 旧宿主没有 kind：元宝运行态的 forkId 是 rt-<essenceId>，任务是 task_/标题 id。
           const taskId = String(hello.body.taskId ?? '')
           return /^rt-/.test(taskId) ? 'essence' : 'fork'
         }
@@ -488,6 +496,9 @@ window.__ModuleLoader__.load({
         if (el.textContent !== label) el.textContent = label
         if (el.hidden !== hidden) el.hidden = hidden
         if (el.dataset.fangWebRole !== role) el.dataset.fangWebRole = role
+        for (const kind of ['mother', 'essence', 'fork']) {
+          el.classList.toggle('fang-web-role--' + kind, role === kind)
+        }
         if (el.title !== title) el.title = title
         if (el.getAttribute('aria-label') !== title) el.setAttribute('aria-label', title)
       }
@@ -1041,10 +1052,13 @@ window.__ModuleLoader__.load({
 .live{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 /* Web 端角色徽标：母体 / 元主 / 分身 —— 挂在侧栏品牌词右侧，仅用于识别当前实例身份。 */
 .fang-web-role{display:inline-flex;align-items:center;height:18px;margin-left:7px;padding:0 6px;border-radius:6px;
-  border:1px solid rgba(200,16,46,.32);background:rgba(200,16,46,.07);color:#C8102E;
+  border:1px solid transparent;background:transparent;color:#C8102E;
   font-size:11.5px;font-weight:700;letter-spacing:.02em;line-height:1;white-space:nowrap;
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;vertical-align:middle;
   -webkit-app-region:no-drag;user-select:none}
+.fang-web-role--mother{border-color:rgba(200,16,46,.32);background:rgba(200,16,46,.07);color:#C8102E}
+.fang-web-role--essence{border-color:rgba(10,107,224,.32);background:rgba(10,107,224,.08);color:#0A6BE0}
+.fang-web-role--fork{border-color:rgba(23,128,61,.32);background:rgba(23,128,61,.08);color:#17803D}
 .fang-web-role[hidden]{display:none}
 .fang-web-role--unknown{visibility:hidden}
 /* 决策中继：每个会话右侧的待选悬浮按钮 + 从右向左滑出的决策栏（v3.1.13）。 */
