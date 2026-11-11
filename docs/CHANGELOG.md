@@ -1,3 +1,21 @@
+## v3.1.15（2026-11-11）
+
+**主题：与房主 dsh-Master 的独立互联契约（fang-master contract 1.0）+ 多级保底通讯。**
+
+### 新增
+- 内嵌 @twinsearth/dsh-fang-contract 1.0.x 同源 SDK（src/contract/）；
+- mother 提供 angContract 服务：hello/health、ang.fork.spawn/stop/list、ang.decision.create/resolve、ang.session.list、ang.orchestrator.status；
+- 可选 HTTP 契约端点 /fang/api/contract/{hello,invoke,health}（Bearer token，常量时间比较；token 留空禁用）；
+- 可选 file outbox 兜底（contract.fileDir）；DSH_MASTER_* env 白名单；fork 角色不暴露契约服务；
+- 文档 docs/CONTRACT-INTEROP.md、docs/RELEASE-3.1.15.md。
+
+### 兼容性
+- 原有服务键与旧版房主直连方式全部保留；新版房主按 local→http→file→legacy 自动降级；
+- contract 1.x 只增不改；删除/改义需 2.0 + 双写一个 MINOR 周期。
+
+### 测试
+- 	est/contract.test.mjs 2/2；全量 preflight/e2e 见 release run。
+
 ## v3.1.14（2026-11-11）
 
 **主题：修复元主/分身 Web 不显示身份徽标；徽标改为红/蓝/绿三色。**
