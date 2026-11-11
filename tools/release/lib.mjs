@@ -117,6 +117,36 @@ export async function httpJson(url, opts = {}) {
   return { status: res.status, data, text, headers: res.headers }
 }
 
+/**
+ * 带指数退避的 httpJson：用于「发布后远端传播」这类**最终一致**检查。
+ * npm 的 dist-tags 在 publish 成功后常需数十秒到数分钟才全球可见，
+ * 单次请求会误判为失败（v3.1.16 / v3.1.17 两次 release 的 verify 红即此原因）。
+ *
+ * @param {string} url
+ * @param {{attempts?:number, baseMs?:number, capMs?:number, predicate?:(r:{status:number,data:any})=>boolean,
+ *          httpJsonImpl?:(url:string)=>Promise<any>, sleep?:(ms:number)=>Promise<void>, log?:(m:string)=>void}} [opts]
+ * @returns {Promise<{status:number, data:any, attempts:number}>}
+ */
+export async function retryHttpJson(url, opts = {}) {
+  const attempts = Math.max(1, Number(opts.attempts ?? 8) || 8)
+  const baseMs = Math.max(1, Number(opts.baseMs ?? 5_000) || 5_000)
+  const capMs = Math.max(baseMs, Number(opts.capMs ?? 60_000) || 60_000)
+  const request = opts.httpJsonImpl ?? httpJson
+  const wait = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+  const log = opts.log ?? (() => {})
+  const predicate = opts.predicate ?? ((r) => r && r.status === 200)
+  let last = { status: 0, data: null }
+  for (let i = 0; i < attempts; i += 1) {
+    last = await request(url)
+    if (predicate(last)) return { ...last, attempts: i + 1 }
+    if (i === attempts - 1) break
+    const delay = Math.min(capMs, baseMs * 2 ** i)
+    log(`第 ${i + 1}/${attempts} 次未就绪（status=${last?.status ?? 0}），${Math.round(delay / 1000)}s 后重试：${url}`)
+    await wait(delay)
+  }
+  return { ...last, attempts }
+}
+
 export function serveHealthz(handler, port = Number(process.env.PORT ?? 8080)) {
   const server = http.createServer((req, res) => {
     if (req.url === '/healthz' || req.url === '/healthz/') {

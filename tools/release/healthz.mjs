@@ -50,12 +50,27 @@ try {
 }
 
 if (remote) {
-  const { httpJson } = await import('./lib.mjs')
+  const { retryHttpJson } = await import('./lib.mjs')
+  // v3.1.19：npm / GitHub 的发布传播是最终一致的，单次请求会把「刚发完」误判为失败。
+  // 默认 8 次、5s 起指数退避（5,10,20,40,60,60,60 ≈ 4 分钟），可用环境变量调参。
+  const attempts = Number(process.env.FANG_HEALTHZ_ATTEMPTS ?? 8)
+  const baseMs = Number(process.env.FANG_HEALTHZ_BACKOFF_MS ?? 5_000)
+  const capMs = Number(process.env.FANG_HEALTHZ_MAX_DELAY_MS ?? 60_000)
+  const backoff = { attempts, baseMs, capMs, log: (m) => console.log('WAIT  remote: ' + m) }
+
   const npmNamePath = manifest.name.replace('/', '%2F')
-  const npm = await httpJson(`https://registry.npmjs.org/${npmNamePath}/latest`)
-  add('remote: npm package published', npm.status === 200 && npm.data?.version === manifest.version, `status=${npm.status} version=${npm.data?.version ?? '(none)'}`)
-  const gh = await httpJson('https://api.github.com/repos/TwinsEarth/dsh-fang/releases/tags/v' + manifest.version)
-  add('remote: GitHub release exists', gh.status === 200, `status=${gh.status}`)
+  const npm = await retryHttpJson(`https://registry.npmjs.org/${npmNamePath}/latest`, {
+    ...backoff,
+    predicate: (r) => r.status === 200 && r.data?.version === manifest.version,
+  })
+  add('remote: npm package published', npm.status === 200 && npm.data?.version === manifest.version,
+    `status=${npm.status} version=${npm.data?.version ?? '(none)'} attempts=${npm.attempts}`)
+
+  const gh = await retryHttpJson('https://api.github.com/repos/TwinsEarth/dsh-fang/releases/tags/v' + manifest.version, {
+    ...backoff,
+    predicate: (r) => r.status === 200,
+  })
+  add('remote: GitHub release exists', gh.status === 200, `status=${gh.status} attempts=${gh.attempts}`)
 }
 
 for (const c of checks) console.log(`${c.ok ? 'PASS' : 'FAIL'}  ${c.id.padEnd(44)} ${c.detail}`)

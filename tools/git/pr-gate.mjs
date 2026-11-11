@@ -54,7 +54,7 @@ export function parseSubject (subject = '') {
 }
 
 // 纯基础设施改动（不改变发布物）的路径：版本号检查按“同一版本”放行。
-export const INFRA_PREFIXES = ['.github/', 'docs/', 'tools/git/', '.githooks/', 'test/']
+export const INFRA_PREFIXES = ['.github/', 'docs/', 'tools/git/', 'tools/release/', '.githooks/', 'test/']
 
 export function isInfraOnly (changed = []) {
   return changed.length > 0 && changed.every((c) => INFRA_PREFIXES.some((p) => c.file.startsWith(p)))
