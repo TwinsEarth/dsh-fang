@@ -125,4 +125,21 @@ if (!JSDOM) {
       assert.equal(calls, 1, 'mother click handler must still run')
     } finally { dispose() }
   })
+
+  test('client-fork-locks: hides the entry even when the host drops the panelRow class', async () => {
+    const { window, plugin } = makeHarness({ role: 'fork' })
+    const doc = window.document
+    const sidebar = doc.createElement('nav')
+    doc.body.append(sidebar)
+    const btn = doc.createElement("button")
+    btn.textContent = '插件'
+    sidebar.append(btn)
+
+    const dispose = plugin.__mountForkUiLocks()
+    try {
+      await waitFor(() => btn.hidden === true || window.getComputedStyle(btn).display === 'none')
+      assert.ok(btn.hidden === true || window.getComputedStyle(btn).display === 'none', 'entry inside <nav> must be hidden')
+      assert.equal(doc.documentElement.getAttribute('data-fang-fork-locks'), 'applied', 'diagnostic attribute must be set')
+    } finally { dispose() }
+  })
 }
