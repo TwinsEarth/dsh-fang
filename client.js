@@ -6399,15 +6399,189 @@ window.__ModuleLoader__.load({
       })
     }
 
+
+    /**
+     * v3.1.19：分身 Web 的界面收敛。
+     *
+     * 1) 隐藏左侧栏「插件」入口 —— 分身里不允许进入插件设置页（避免用户在一次性沙箱里
+     *    改动宿主插件配置，导致下一次派生继承脏配置）。
+     * 2) 「启动」类按钮在分身里变成真正无操作：capture 阶段拦下点击，
+     *    宿主处理器不执行 → 不切换面板、不弹提醒、不打印错误。
+     *    （此前用户点「启动」会收到一条无法处理的报错，属噪音。）
+     *
+     * 只在 role === 'fork' 时生效；母体/元主不受影响。
+     */
+    function mountForkUiLocks() {
+      if (typeof document === 'undefined' || !document.body) return () => {}
+      const doc = document
+      let disposed = false
+      let active = false
+      let timer = 0
+      let observer = null
+      const NAV_TEXTS = ['插件']
+      const ACTION_TEXTS = ['启动', '启动插件', '开始使用', '启用']
+
+      const isPanelRow = (node) => {
+        try {
+          if (!node || node.tagName !== 'BUTTON') return false
+          const cls = String(node.className || '')
+          return /panelRow/i.test(cls)
+        } catch { return false }
+      }
+
+      const hidePluginNav = () => {
+        if (disposed || !active) return
+        for (const node of doc.querySelectorAll('button')) {
+          if (!isPanelRow(node)) continue
+          const text = String(node.textContent || '').trim()
+          if (!NAV_TEXTS.includes(text)) continue
+          if (node.dataset.fangForkHidden === '1' && node.hidden) continue
+          node.dataset.fangForkHidden = '1'
+          node.hidden = true
+          node.setAttribute('aria-hidden', 'true')
+          node.style.setProperty('display', 'none', 'important')
+        }
+      }
+
+      const onClickCapture = (event) => {
+        if (!active || disposed) return
+        const target = event.target
+        const button = target && typeof target.closest === 'function' ? target.closest('button') : null
+        if (!button) return
+        const text = String(button.textContent || '').trim()
+        // ① 侧栏「插件」入口：双重保险（DOM 已隐藏，这里再拦一次点击/键盘激活）
+        if (isPanelRow(button) && NAV_TEXTS.includes(text)) {
+          event.preventDefault()
+          event.stopPropagation()
+          event.stopImmediatePropagation()
+          return
+        }
+        // ② 插件页「启动」：无操作（不切换、不提醒、不报错）
+        const isAction = ACTION_TEXTS.some((label) => text === label || text.startsWith(label))
+        if (!isAction) return
+        event.preventDefault()
+        event.stopPropagation()
+        event.stopImmediatePropagation()
+        // ③ 万一宿主已被别处触发过提示，把残留的错误气泡收掉（仅限含错误语义的气泡）
+        setTimeout(() => {
+          if (disposed) return
+          for (const node of doc.querySelectorAll('[role="alert"],[class*="toast"],[class*="Toast"]')) {
+            const body = String(node.textContent || '')
+            if (!/失败|错误|异常|无法|不能|不可|不允许|拒绝|failed|error/i.test(body)) continue
+            if (node.dataset.fangForkAlertHidden === '1') continue
+            node.dataset.fangForkAlertPrevDisplay = node.style.display || ''
+            node.dataset.fangForkAlertHidden = '1'
+            node.style.setProperty('display', 'none', 'important')
+          }
+        }, 60)
+      }
+
+      const activate = () => {
+        if (active || disposed) return
+        active = true
+        hidePluginNav()
+        doc.addEventListener('click', onClickCapture, true)
+        try {
+          observer = new MutationObserver(() => { hidePluginNav() })
+          observer.observe(doc.body, { childList: true, subtree: true })
+        } catch { observer = null }
+        timer = setInterval(hidePluginNav, 1500)
+        try { timer && timer.unref && timer.unref() } catch { /* ignore */ }
+        hidePluginNav()
+      }
+
+      void (async () => {
+        try {
+          const role = await detectWebRole()
+          if (disposed || role !== 'fork') return
+          activate()
+        } catch { /* 识别失败：保持原样，不误伤母体 */ }
+      })()
+
+      return () => {
+        disposed = true
+        active = false
+        if (timer) { clearInterval(timer); timer = 0 }
+        try { observer?.disconnect() } catch { /* ignore */ }
+        observer = null
+        try { doc.removeEventListener('click', onClickCapture, true) } catch { /* ignore */ }
+        // 恢复被隐藏的入口与提示，避免热卸载后宿主界面残缺
+        for (const node of doc.querySelectorAll('button[data-fang-fork-hidden="1"]')) {
+          try {
+            node.hidden = false
+            node.removeAttribute('aria-hidden')
+            node.style.removeProperty('display')
+            delete node.dataset.fangForkHidden
+          } catch { /* ignore */ }
+        }
+        for (const node of doc.querySelectorAll('[data-fang-fork-alert-hidden="1"]')) {
+          try {
+            const prev = node.dataset.fangForkAlertPrevDisplay || ''
+            if (prev) node.style.display = prev
+            else node.style.removeProperty('display')
+            delete node.dataset.fangForkAlertPrevDisplay
+            delete node.dataset.fangForkAlertHidden
+          } catch { /* ignore */ }
+        }
+      }
+    }
+
+
+    /**
+     * v3.1.19：元主 / 分身 Web 的「关闭二次确认」。
+     *
+     * 右上角直接关闭很容易误触（尤其是把分身窗口当临时浏览器用时）。
+     * 这里注册 beforeunload：浏览器会弹出原生「离开此网站？」确认框，
+     * 用户确认后才真正关闭；母体（主会话）不注册，避免打断正常主机操作。
+     */
+    function mountCloseConfirm() {
+      if (typeof window === 'undefined') return () => {}
+      let installed = false
+      let disposed = false
+      const onBeforeUnload = (event) => {
+        try {
+          event.preventDefault()
+          // 现代浏览器忽略自定义文案，但仍要求设置 returnValue 才会弹确认框
+          event.returnValue = '确认关闭瓮城窗口？未保存的分身状态会丢失。'
+        } catch { /* ignore */ }
+        return event.returnValue
+      }
+      const activate = () => {
+        if (installed || disposed) return
+        installed = true
+        window.addEventListener('beforeunload', onBeforeUnload)
+        // 兜底：宿主若用 history/路由隐藏关闭入口，键盘快捷键也走同一确认
+        window.addEventListener('unload', () => {}, { once: true })
+      }
+      void (async () => {
+        try {
+          const role = await detectWebRole()
+          if (disposed) return
+          // 母体是主机式长驻窗口，不打断；元主/分身需要确认
+          if (role === 'essence' || role === 'fork') activate()
+        } catch { /* ignore */ }
+      })()
+      return () => {
+        disposed = true
+        if (!installed) return
+        installed = false
+        try { window.removeEventListener('beforeunload', onBeforeUnload) } catch { /* ignore */ }
+      }
+    }
+
     // ── 插件入口 ──────────────────────────────────────────────────────────
     return {
       mountPanel,
-      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole, __mountDecisionRelay: mountDecisionRelay } : {}),
+      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole, __mountForkUiLocks: mountForkUiLocks, __mountCloseConfirm: mountCloseConfirm, __mountDecisionRelay: mountDecisionRelay } : {}),
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
         // v3.1.12：侧栏 HARNESS 右侧的 Web 端身份徽标（母体 / 元主 / 分身）。
         disposers.push(mountWebRoleBadge())
+        // v3.1.19：分身 Web 界面收敛（隐藏「插件」入口 + 「启动」无操作）。
+        disposers.push(mountForkUiLocks())
+        // v3.1.19：元主 / 分身 Web 关闭前二次确认（防误触）。
+        disposers.push(mountCloseConfirm())
         // 母体 Web = DSH 主会话视图；Web 端直接切回 conversation 面板。
         const goMother = () => {
           try {
