@@ -29,6 +29,23 @@ legacy 直接调用 3.1.x 旧服务键（fangForker / fangDecisionCenter 等）
 业务错误（如 `ticket-invalid`）**不降级**，避免重复副作用；传输/协议/未知方法才降级。
 每次尝试记录在 `client.attempts()`，状态可观测。
 
+## 2.5 零配置（v3.1.16 / 房主 3.2.5）
+
+瓮城原身运行态的 spawn 环境新增 `DSH_FANG_MOTHER=<母体 dataDir>`；房主 Router 检测到该变量后
+自动使用 `<母体 dataDir>/contract-outbox` 作为 `dispatch.contractFileDir`，无需手工配置：
+
+```text
+原身 Host（essence Router）
+  env: DSH_FANG_ROLE=fork / DSH_FANG_ESSENCE=1 / DSH_FANG_MOTHER=<母体 dataDir>
+    ↓ dispatch.contract=true（自动 file 桥）
+<母体 dataDir>/contract-outbox/requests → responses
+    ↓
+母体 Host（Fang contract service）→ 真实 fork
+```
+
+HTTP 桥需要两个凭据：契约 Bearer token + 安装级 `x-fang-auth`；房主通过
+`dispatch.motherToken` 与 `dispatch.motherAuthToken` 提供（SDK 侧为可选 `headers`）。
+
 ## 3. 两侧实现位置
 
 | 侧 | 文件 | 内容 |
