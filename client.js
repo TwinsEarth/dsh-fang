@@ -6421,20 +6421,31 @@ window.__ModuleLoader__.load({
       const NAV_TEXTS = ['插件']
       const ACTION_TEXTS = ['启动', '启动插件', '开始使用', '启用']
 
+      /** v3.1.20：宿主侧栏行类名会随版本变化，不再只认 panelRow。 */
       const isPanelRow = (node) => {
         try {
           if (!node || node.tagName !== 'BUTTON') return false
           const cls = String(node.className || '')
-          return /panelRow/i.test(cls)
+          if (/panelRow/i.test(cls)) return true
+          // 兜底：侧栏/导航容器内的按钮
+          return Boolean(node.closest('nav, aside, [class*="sidebar"], [class*="sideBar"], [class*="sider"]'))
         } catch { return false }
+      }
+
+      /** 插件入口的文本判定（中英 + 少量变体），容忍零宽字符与多余空白。 */
+      const isPluginNavText = (text) => {
+        const clean = String(text || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim()
+        if (!clean) return false
+        if (clean === '插件' || clean === 'Plugins' || clean === 'Plugin') return true
+        // 「插件」后面可能跟计数徽标，例如「插件 3」
+        return /^插件(\s|$)/.test(clean) || /^Plugins?(\s|$)/.test(clean)
       }
 
       const hidePluginNav = () => {
         if (disposed || !active) return
         for (const node of doc.querySelectorAll('button')) {
           if (!isPanelRow(node)) continue
-          const text = String(node.textContent || '').trim()
-          if (!NAV_TEXTS.includes(text)) continue
+          if (!isPluginNavText(node.textContent)) continue
           if (node.dataset.fangForkHidden === '1' && node.hidden) continue
           node.dataset.fangForkHidden = '1'
           node.hidden = true
@@ -6450,7 +6461,7 @@ window.__ModuleLoader__.load({
         if (!button) return
         const text = String(button.textContent || '').trim()
         // ① 侧栏「插件」入口：双重保险（DOM 已隐藏，这里再拦一次点击/键盘激活）
-        if (isPanelRow(button) && NAV_TEXTS.includes(text)) {
+        if (isPanelRow(button) && isPluginNavText(text)) {
           event.preventDefault()
           event.stopPropagation()
           event.stopImmediatePropagation()
@@ -6480,6 +6491,10 @@ window.__ModuleLoader__.load({
         if (active || disposed) return
         active = true
         hidePluginNav()
+        try {
+          doc.documentElement?.setAttribute('data-fang-fork-locks', 'applied')
+          window.__fangForkLocks = { applied: true, at: Date.now() }
+        } catch { /* ignore */ }
         doc.addEventListener('click', onClickCapture, true)
         try {
           observer = new MutationObserver(() => { hidePluginNav() })
