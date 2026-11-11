@@ -53,7 +53,7 @@ export function createLocalTransport({ ctx, serviceName = 'fangContract' } = {})
   }
 }
 
-export function createHttpTransport({ baseUrl = '', token = '', fetchImpl = fetch, timeoutMs = 15_000, pathPrefix = '/fang/api/contract' } = {}) {
+export function createHttpTransport({ baseUrl = '', token = '', headers: extraHeaders = {}, fetchImpl = fetch, timeoutMs = 15_000, pathPrefix = '/fang/api/contract' } = {}) {
   const base = baseOf(baseUrl)
   const prefix = `/${String(pathPrefix).replace(/^\/+|\/+$/g, '')}`
   const available = () => Boolean(base)
@@ -64,7 +64,7 @@ export function createHttpTransport({ baseUrl = '', token = '', fetchImpl = fetc
     try {
       const response = await fetchImpl(`${base}${prefix}${endpoint}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json', ...authHeaders(token) },
+        headers: { 'content-type': 'application/json', accept: 'application/json', ...authHeaders(token), ...(extraHeaders && typeof extraHeaders === 'object' ? extraHeaders : {}) },
         body: JSON.stringify(role),
         signal: controller.signal,
       })

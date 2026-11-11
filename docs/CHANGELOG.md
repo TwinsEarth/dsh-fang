@@ -1,3 +1,26 @@
+## v3.1.16（2026-11-11）
+**主题：跨进程契约桥“零配置”——原身运行态注入 `DSH_FANG_MOTHER` + 契约 HTTP headers 同步。**
+
+### 修复 / 新增
+- **原身（essence-runtime）spawn 注入 `DSH_FANG_MOTHER: layout.dataDir`**：
+  房主 dsh-Master 的 Router 在原身内可据此自动推导共享契约 outbox
+  （`<motherDataDir>/contract-outbox`），无需再手工配置 `dispatch.contractFileDir`；
+  普通分身（`DSH_FANG_ROLE=fork`）此前已有该注入（任务 spawn / 恢复 / 队列三处），本版只补齐原身运行态这一处；
+- **契约 SDK HTTP 传输支持自定义 headers**：`createHttpTransport({ headers })` /
+  `createContractClient({ config: { httpHeaders } })`；瓮城的契约 HTTP 端点同时需要
+  Bearer contract token 与安装级 `x-fang-auth`，房主可一次带齐；
+  该改动为**加性**扩展：不传 `headers` 时行为与 1.0.0 完全一致；
+- 内嵌契约 SDK 与 npm 已发布 `@twinsearth/dsh-fang-contract@1.0.0` 的导出面/常量/方法表/
+  错误码保持一致（房主侧有对应一致性测试保护）。
+
+### 兼容性
+- 不改变任何既有服务键、环境变量语义或 HTTP 路由；旧版房主（3.2.4 及以前）仍可用 `legacy` 传输；
+- `DSH_FANG_MOTHER` 只是在原身 spawn 时多注入一个既有变量，未注入时房主行为不变（仍需显式配置）。
+
+### 测试
+- `test/contract.test.mjs` 2/2；全量 `npm test` **1034 pass / 0 fail**；
+- release preflight（含 e2e）见发布记录。
+
 ## v3.1.15（2026-11-11）
 
 **主题：与房主 dsh-Master 的独立互联契约（fang-master contract 1.0）+ 多级保底通讯。**

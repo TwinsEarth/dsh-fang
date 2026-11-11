@@ -28,6 +28,7 @@ export function createContractClient(options = {}) {
   if (config.httpBaseUrl) transports.push(createHttpTransport({
     baseUrl: config.httpBaseUrl,
     token: config.httpToken,
+    headers: config.httpHeaders,
     fetchImpl,
     timeoutMs: config.timeoutMs,
     pathPrefix: config.pathPrefix,

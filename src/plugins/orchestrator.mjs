@@ -2319,7 +2319,9 @@ export function apply(ctx, config) {
         homeDir,
         profile: 'essence-runtime',
         cliPath: cliPath(),
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1' },
+        // v3.1.16：原身运行态同样需要母体 dataDir，房主 Router 才能零配置推导
+        // 契约 file 桥（contract-outbox）；普通分身在 846/1461/1534 行已有同名注入。
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir },
       })
       if (!started.ok) throw new Error(`runtime-spawn-failed: ${started.error ?? 'unknown'} (forkId=${forkId}, homeDir=${homeDir}, profile=essence-runtime)`)
       return {
