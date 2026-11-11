@@ -151,8 +151,11 @@ function cmdCheck (argv) {
   }
   const allowed = parseAllow(process.env.FANG_ALLOW_PROTECTED_PUSH || '')
   const tagMoveAllowed = process.env.FANG_ALLOW_TAG_MOVE === '1'
-  const isAncestor = ZERO_SHA.test(remote) ? true : isAncestorOf(remote, local)
-  const onMain = ZERO_SHA.test(local) ? false : (isAncestorOf(local, 'main') ? onFirstParentOfMain(local) : false)
+  // v3.1.17：版本 tag 可能是 annotated（local 是 tag 对象），先 peel 到 commit 再判断。
+  const isVersionTag = /^refs\/tags\/v\d+\.\d+\.\d+$/.test(ref)
+  const commitSha = isVersionTag ? (revParse(local) || local) : local
+  const isAncestor = ZERO_SHA.test(remote) ? true : isAncestorOf(remote, commitSha)
+  const onMain = ZERO_SHA.test(local) ? false : (isAncestorOf(commitSha, 'main') ? onFirstParentOfMain(commitSha) : false)
 
   const verdict = evaluatePush({ ref, localSha: local, remoteSha: remote, allowed, isAncestor, onMain, tagMoveAllowed })
   if (!verdict.ok) {

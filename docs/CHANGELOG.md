@@ -1,3 +1,26 @@
+## v3.1.17（2026-11-11）
+**主题：身份徽标兜底 + 身份诊断字段 + 会话映射透传 + 发版钩子兼容 annotated tag。**
+
+### 修复
+- **元主 Web 看不到蓝标（v3.1.16 报告）**：`mountWebRoleBadge` 原来只挂宿主侧栏品牌词标右侧，
+  brand 槽不存在或被宿主整段重渲染摘掉时就静默不显示。v3.1.17 增加**兜底挂载**：
+  3 次重试（250ms）仍找不到品牌槽 → 挂到 `document.body` 右上角固定角标；
+  MutationObserver 同时监听品牌行与兜底容器，被摘掉即补回；
+- **发版钩子与 annotated tag 冲突**：`.githooks/pre-push` 与 `tools/git/guard-main.mjs`
+  现在先把版本 tag **peel 到 commit** 再判断「tag 是否在 main 的 first-parent 上」，
+  annotated tag 不再被误判为“非 main 提交”（这正是 v3.1.16 release 的 `final verify` 失败原因）。
+
+### 新增
+- `GET /fang/adapter/identity` 增加 **`surface`** 与 **`clientLoaded`/`clientReportedAt`**：
+  便于一眼判断“服务端有身份、客户端没加载”（不含 taskId/sessionId/token）；
+- `POST /fang/adapter/client-report`：client half 加载后自报（只记时间戳）；
+- 会话目录 `listSessions` 支持 `sessionKey` / `ticketId` 参数并**原样透传**到结果，
+  便于 3_Sessions 把房主 Router 的 Ticket→会话映射与母体会话目录对齐。
+
+### 测试
+- 新增 `test/v3117.test.mjs`（5 例）：identity 字段与脱敏、client-report 路由、
+  sessionKey 透传、徽标兜底与 3 次重试、钩子 peel。
+
 ## v3.1.16（2026-11-11）
 **主题：跨进程契约桥“零配置”——原身运行态注入 `DSH_FANG_MOTHER` + 契约 HTTP headers 同步。**
 
