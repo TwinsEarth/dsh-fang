@@ -152,3 +152,7 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 - 商业授权/OEM：`licensing@example.com`（占位，发布前替换）。
 - 本仓库不含第三方运行时依赖；vendored schemastery/cosmokit 保留上游 MIT（见 [LICENSES/cordis-MIT.txt](LICENSES/cordis-MIT.txt)）。
 - 所有源码文件头带 `SPDX-License-Identifier`；`test/licensing.test.mjs` 防止分层漂移。
+
+---
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

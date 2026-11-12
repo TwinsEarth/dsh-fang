@@ -35,3 +35,7 @@
 > `I have read the CLA and I sign it.`
 > GitHub 用户名：
 > 真实姓名 / 主体：
+
+---
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
