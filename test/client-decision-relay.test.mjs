@@ -56,14 +56,20 @@ function makeStore(tickets) {
 if (!JSDOM) {
   test('decision relay: skipped (jsdom not installed)', (t) => t.skip('jsdom not installed'))
 } else {
-  test('decision relay: panel is centered, 1/3 height, width unchanged, no blocking backdrop', () => {
-    // v3.1.27：用户要求「浮窗居中、高度 1/3、宽度保持不变」
+  test('decision relay: panel docks to the right edge (vertically centered), slides in from the right', () => {
+    // v3.1.28：用户要求「不居中弹窗，靠右贴边吸附、垂直居中；点待选从右往左飞出」
     assert.match(styleText, /\.fang-relay-panel\{[^}]*top:50%/)
-    assert.match(styleText, /\.fang-relay-panel\{[^}]*left:50%/)
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*right:0/)
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*left:auto/)
     assert.match(styleText, /\.fang-relay-panel\{[^}]*height:33vh/)
     assert.match(styleText, /\.fang-relay-panel\{[^}]*max-height:33vh/)
     // 宽度保持不变（仍是原来的 min(420px,94vw)）
     assert.match(styleText, /\.fang-relay-panel\{[^}]*width:min\(420px,94vw\)/)
+    // 关闭态停在屏幕右侧外 → 打开时从右往左飞入
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*transform:translateX\(102%\)/)
+    assert.match(styleText, /\.fang-relay-panel\.is-open\{[^}]*transform:translateX\(0\)/)
+    // 贴边吸附：右侧无边框、左侧圆角
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*border-radius:16px 0 0 16px/)
     // 不再使用遮挡式遮罩（否则会挡住会话与工作区）
     assert.match(styleText, /\.fang-relay-backdrop\{display:none\}/)
   })

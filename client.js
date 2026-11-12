@@ -1138,8 +1138,9 @@ window.__ModuleLoader__.load({
 .fang-relay-fab.is-empty{opacity:.55;border-color:rgba(16,17,20,.18);color:#6E6E73;box-shadow:0 6px 18px -10px rgba(16,17,20,.35)}
 .fang-relay-fab.is-empty:hover{opacity:.85;background:#F5F5F7}
 .fang-relay-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#C8102E;color:#fff;font-size:11px;font-weight:700}
-.fang-relay-panel{position:fixed;top:50%;left:50%;right:auto;bottom:auto;height:33vh;min-height:220px;max-height:33vh;width:min(420px,94vw);z-index:2147483000;background:#fff;border:1px solid rgba(16,17,20,.12);border-radius:16px;box-shadow:0 18px 48px -12px rgba(16,17,20,.28);transform:translate(-50%,calc(-50% + 18px)) scale(.98);opacity:0;transition:transform .2s cubic-bezier(.22,.61,.36,1),opacity .18s ease;display:flex;flex-direction:column;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.45;color:#1D1D1F}
-.fang-relay-panel.is-open{transform:translate(-50%,-50%) scale(1);opacity:1;pointer-events:auto}
+/* v3.1.28：靠右贴边吸附 + 垂直居中；关闭态整体停在屏幕右侧外，打开时从右往左飞入 */
+.fang-relay-panel{position:fixed;top:50%;right:0;left:auto;bottom:auto;height:33vh;min-height:220px;max-height:33vh;width:min(420px,94vw);z-index:2147483000;background:#fff;border:1px solid rgba(16,17,20,.12);border-right:none;border-radius:16px 0 0 16px;box-shadow:-18px 0 48px -16px rgba(16,17,20,.28);transform:translateX(102%) translateY(-50%);opacity:0;transition:transform .26s cubic-bezier(.22,.61,.36,1),opacity .2s ease;display:flex;flex-direction:column;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.45;color:#1D1D1F}
+.fang-relay-panel.is-open{transform:translateX(0) translateY(-50%);opacity:1;pointer-events:auto}
 .fang-relay-backdrop{display:none}
 .fang-relay-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid rgba(16,17,20,.08);flex:0 0 auto}
 .fang-relay-title{font-size:14px;font-weight:700}
