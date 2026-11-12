@@ -1,6 +1,6 @@
 {
   "name": "@twinsearth/dsh-fang-queue-journal",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": false,
   "type": "module",
   "description": "Composer draft/queue journal for dsh-Fang: per-session keys, immediate queue persistence, append-only history and user-confirmed recovery.",
