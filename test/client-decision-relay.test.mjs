@@ -56,9 +56,15 @@ function makeStore(tickets) {
 if (!JSDOM) {
   test('decision relay: skipped (jsdom not installed)', (t) => t.skip('jsdom not installed'))
 } else {
-  test('decision relay: panel is bottom-anchored at 1/3 height and has no blocking backdrop', () => {
+  test('decision relay: panel is centered, 1/3 height, width unchanged, no blocking backdrop', () => {
+    // v3.1.27：用户要求「浮窗居中、高度 1/3、宽度保持不变」
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*top:50%/)
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*left:50%/)
     assert.match(styleText, /\.fang-relay-panel\{[^}]*height:33vh/)
-    assert.match(styleText, /\.fang-relay-panel\{[^}]*bottom:12px/)
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*max-height:33vh/)
+    // 宽度保持不变（仍是原来的 min(420px,94vw)）
+    assert.match(styleText, /\.fang-relay-panel\{[^}]*width:min\(420px,94vw\)/)
+    // 不再使用遮挡式遮罩（否则会挡住会话与工作区）
     assert.match(styleText, /\.fang-relay-backdrop\{display:none\}/)
   })
 

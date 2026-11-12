@@ -100,6 +100,11 @@ jobs:
     needs: test
     runs-on: [self-hosted, windows, fang-e2e]
     timeout-minutes: 45
+    # v3.1.27：build job 现在亲自创建 GitHub Release 并上传资产，
+    # 需要 contents: write（workflow 级是 contents: read，缺它就会 403
+    # "Resource not accessible by integration"）。
+    permissions:
+      contents: write
     outputs:
       artifact_ok: ${{ steps.artifact.outcome == 'success' && '1' || '0' }}
     steps:
