@@ -390,10 +390,25 @@ async function main() {
     const reArchived = await api('/fang/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId }) })
     check('re-archive after restore accepted', reArchived.body?.ok === true)
 
-    // ── v2.1 derive endpoint (lineage-only quick derive, same path the double-click uses) ──
-    let derivedTaskId = ''
-    const derived = await api('/fang/api/derive', { method: 'POST', body: JSON.stringify({ title: 'e2e derive' }) })
-    check('POST /fang/api/derive accepted', derived.body?.ok === true, JSON.stringify(derived.body?.error ?? ''))
+// ── v3.1.30 derive contract: 派生必须导入「一个」进行中会话 ──────────────────
+// 旧的 lineage-only 空白派生已按需求移除，这里同时验证拒绝侧与接受侧。
+let derivedTaskId = ''
+const derivedNoSession = await api('/fang/api/derive', { method: 'POST', body: JSON.stringify({ title: 'e2e derive' }) })
+check('POST /fang/api/derive without session is rejected',
+  derivedNoSession.body?.ok === false && derivedNoSession.body?.error === 'session-required',
+  JSON.stringify(derivedNoSession.body?.error ?? ''))
+const derivedMulti = await api('/fang/api/derive', { method: 'POST', body: JSON.stringify({ sessionIds: ['session-a', 'session-b'] }) })
+check('POST /fang/api/derive with multiple sessions is rejected',
+  derivedMulti.body?.ok === false && derivedMulti.body?.error === 'session-multi-not-allowed',
+  JSON.stringify(derivedMulti.body?.error ?? ''))
+// 用母体里真实存在的一个会话派生（e2e 母体是新起的，先查一次会话表）。
+const sessionList = await api('/fang/api/sessions?limit=5')
+const firstSession = Array.isArray(sessionList.body?.sessions) ? sessionList.body.sessions[0] : null
+const derived = firstSession
+  ? await api('/fang/api/derive', { method: 'POST', body: JSON.stringify({ title: 'e2e derive', sessionId: firstSession.sessionId }) })
+  : { status: 0, body: { ok: false, error: 'no-session-available' } }
+check('POST /fang/api/derive accepted with exactly one session',
+  derived.body?.ok === true, JSON.stringify(derived.body?.error ?? 'no-session-available'))
     if (derived.body?.ok) {
       derivedTaskId = String(derived.body.taskId ?? '')
       const dStatus = await api('/fang/api/tasks/status?taskId=' + encodeURIComponent(derived.body.taskId))

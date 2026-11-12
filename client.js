@@ -2034,6 +2034,8 @@ window.__ModuleLoader__.load({
         await refresh()
       }
 
+      // v3.1.30：DEPRECATED —— 打开元主已改为无对话直接启动（见 openEssence）。
+      // 保留此函数只为兼容未来可能的多会话入口；元主与派生都不再调用它。
       // 打开前选会话：多选 1–5 个进行中会话（归档会话不出现）。
       function showSessionPicker(sessions, onPick) {
         const doc = document
@@ -2174,7 +2176,9 @@ window.__ModuleLoader__.load({
         await refresh()
       }
 
-      // 打开&设置：已在跑 → 直接开带 token 的 URL；没跑 → 选会话后启动再打开。
+      // 打开&设置：已在跑 → 直接开带 token 的 URL；没跑 → **无对话直接启动**再打开。
+      // v3.1.30：元主 Web 本身不允许会话（会话按钮与工作区已隐藏），
+      // 因此打开元主时不再要求/提示导入进行中会话——「导入一个会话」只属于派生分身。
       async function openEssence(essenceId) {
         if (isBusy()) return
         S.busy = 'essence:open:' + essenceId
@@ -2188,9 +2192,8 @@ window.__ModuleLoader__.load({
           else setNotice({ tone: 'bad', title: '无法打开元主 Web', message: '实例在跑但拿不到带 token 的地址' })
           return
         }
-        const candidates = await api('/fang/api/essence/open/candidates')
-        const sessions = Array.isArray(candidates.body?.sessions) ? candidates.body.sessions : []
-        showSessionPicker(sessions, (sessionIds) => void startEssenceRuntime(essenceId, sessionIds))
+        // 直接启动：不导入任何会话（元主是「插件控制台」，不是对话工作区）。
+        void startEssenceRuntime(essenceId, [])
       }
 
       async function copyEssence(essence) {

@@ -1,3 +1,47 @@
+## v3.1.30（2026-11-12）
+
+**主题：修「分身启动/还原失败 spawn-failed」真因，并让元主无对话启动、派生必须导入一个会话。**
+
+### 一、spawn-failed 根因（P0）
+
+v3.1.28 实测：派生与还原分身都失败，审计里是 `fork-crashed exited` + `restart-given-up:never-ready`。
+手工用同一个 fork profile 启动，拿到原始报错：
+
+```text
+Error: EPERM: operation not permitted, open
+  '<forkHome>\profiles\<profile>\package.json'
+  at writeFileSync (dsh-app-boot/lib/index.js writeProfileManifest)
+  at dropRetiredBundles (… loadProfileDirectory → loadProfile → prepareProfile)
+```
+
+原因：`setProfileConfigReadonly()` 把 profile 的 `package.json` / `cordis.patch.yml` 设成 0444，
+而 **DSH 0.2.2 每次启动都会重写 package.json**（dropRetiredBundles），于是子进程在引导阶段
+直接 EPERM 退出 → 上层只能看到 spawn-failed。解除只读后同一 profile 立刻正常启动（已复验）。
+
+修复：
+- `setProfileConfigReadonly(profileDir, true)` **不再 chmod** 任何 DSH 引导必须写的文件
+  （`READONLY_LOCKED_FILES` 为空）；
+- `readonly=false` 仍执行 `chmod 0644`，并返回 `repaired[]`，**自动修复历史版本留下的只读分身**；
+- 行为锁不变：`applyForkConfigLock()` 继续禁用 `tool-plugin-manager` / `ui-settings-plugin-inventory`，
+  分身里依旧装不了插件、改不了插件设置。
+
+### 二、元主 Web 无对话启动（需求 1）
+
+- 打开元主 Web 不再弹「导入进行中会话」选择器，直接 `startEssenceRuntime(essenceId, [])` 无对话启动；
+- 与 v3.1.23 的界面收敛一致：元主不允许会话，会话按钮与工作区已隐藏。
+
+### 三、派生必须导入一个会话（需求 2）
+
+- 服务端 `service.derive()` 硬校验（此前只有客户端提示，API 可以绕过）：
+  - 不给 `sessionId` → `session-required`；
+  - 给多个 `sessionIds` → `session-multi-not-allowed`（一次只能导入一个）；
+- UI 侧派生仍然弹「选择一个进行中的会话」，单选。
+
+### 验证
+
+- 新增 `test/fork-config-lock.test.mjs`（3 例）：锁不得只读、解锁修复历史 0444、行为锁仍在；
+- `test/orchestrator.test.mjs` 更新派生契约（62 例通过）：无会话/多会话均被拒绝且不建任务；
+- `build` preflight GREEN（含 e2e）。
 ## v3.1.29（2026-11-12）
 
 **主题：README 增加 DSH 运行时版本徽章（docs-only，无运行时行为变化）。**

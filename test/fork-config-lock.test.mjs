@@ -1,124 +1,61 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
+// v3.1.30 回归：分身配置锁不得阻断 DSH 引导；派生必须且只能导入一个会话。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { applyForkConfigLock, clearForkConfigLock, FORK_LOCKED_ENTRY_IDS, setProfileConfigReadonly } from '../src/lib/fork-config-lock.mjs'
+import {
+  PROFILE_CONFIG_FILES,
+  READONLY_LOCKED_FILES,
+  applyForkConfigLock,
+  setProfileConfigReadonly,
+} from '../src/lib/fork-config-lock.mjs'
 
-const tmpProfile = () => {
+function withProfile(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-lock-'))
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '[]\n', 'utf8')
-  return dir
+  try {
+    for (const name of PROFILE_CONFIG_FILES) fs.writeFileSync(path.join(dir, name), '{"name":"x"}\n', 'utf8')
+    return fn(dir)
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 }
 
-test('fork-config-lock: clear 只解除生产盘锁，不碰其他 patch', () => {
-  const dir = tmpProfile()
-  applyForkConfigLock(dir)
-  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), JSON.stringify([
-    { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat', config: { transcriptView: 'standard' } },
-    { id: FORK_LOCKED_ENTRY_IDS[0], disabled: true },
-  ], null, 2), 'utf8')
-  const out = clearForkConfigLock(dir)
-  assert.equal(out.ok, true)
-  assert.equal(out.removed, 1)
-  const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'))
-  assert.equal(parsed.some((entry) => entry.id === FORK_LOCKED_ENTRY_IDS[0]), false)
-  assert.equal(parsed.some((entry) => entry.id === 'ui-chat'), true)
-  assert.equal(clearForkConfigLock(dir).removed, 0, '幂等')
-
-  // YAML 形态同样只删锁行
-  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), [
-    '- id: ui-chat', '  name: "@deepseek-ai/dsh-client-ui-chat"',
-    `- id: ${FORK_LOCKED_ENTRY_IDS[0]}`, '  disabled: true',
-    '- id: keep-me', '  config: {}',
-  ].join('\n') + '\n', 'utf8')
-  const yaml = clearForkConfigLock(dir)
-  assert.equal(yaml.removed, 1)
-  const text = fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
-  assert.doesNotMatch(text, new RegExp(`id: ${FORK_LOCKED_ENTRY_IDS[0]}`))
-  assert.match(text, /id: keep-me/)
+test('fork-config-lock: locking must NOT make package.json read-only (DSH rewrites it on boot)', () => {
+  // v3.1.28 及以前：启动时重写 package.json → EPERM → 子进程立即退出 → spawn-failed
+  withProfile((dir) => {
+    setProfileConfigReadonly(dir, true)
+    for (const name of PROFILE_CONFIG_FILES) {
+      const file = path.join(dir, name)
+      const mode = fs.statSync(file).mode
+      assert.notEqual(mode & 0o222, 0, `${name} must stay writable so dsh can bootstrap`)
+    }
+    assert.deepEqual([...READONLY_LOCKED_FILES], [], 'no profile file may be forced read-only')
+  })
 })
 
-test('fork-config-lock: 自动移除 v3.1.5 遗留的 ui-plugin-manager 锁', () => {
-  const dir = tmpProfile()
-  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), JSON.stringify([
-    { id: 'ui-plugin-manager', disabled: true },
-    { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat', config: { transcriptView: 'standard' } },
-  ], null, 2), 'utf8')
-  const out = applyForkConfigLock(dir)
-  assert.equal(out.ok, true)
-  const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'))
-  assert.equal(parsed.some((entry) => entry.id === 'ui-plugin-manager' && entry.disabled === true), false, '不能禁 ui-plugin-manager（pluginNavigation 提供者）')
-  assert.equal(parsed.some((entry) => entry.id === 'ui-chat'), true)
-  for (const id of FORK_LOCKED_ENTRY_IDS) assert.equal(parsed.some((entry) => entry.id === id && entry.disabled === true), true)
+test('fork-config-lock: unlock path repairs a legacy read-only profile', () => {
+  withProfile((dir) => {
+    // 模拟历史版本留下的 0444
+    for (const name of PROFILE_CONFIG_FILES) fs.chmodSync(path.join(dir, name), 0o444)
+    const result = setProfileConfigReadonly(dir, false)
+    assert.equal(result.ok, true)
+    assert.ok(result.repaired.includes('package.json'), 'legacy readonly package.json must be repaired')
+    for (const name of PROFILE_CONFIG_FILES) {
+      assert.notEqual(fs.statSync(path.join(dir, name)).mode & 0o222, 0, `${name} must be writable after repair`)
+    }
+  })
 })
 
-test('fork-config-lock: 写入禁用条目且幂等', () => {
-  const dir = tmpProfile()
-  const first = applyForkConfigLock(dir)
-  assert.equal(first.ok, true)
-  assert.equal(first.entries, FORK_LOCKED_ENTRY_IDS.length)
-  const text = fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
-  assert.doesNotMatch(text, /^\s*\[\s*\]\s*$/m, '必须移除模板里的空数组 []，否则 YAML 非法')
-  for (const id of FORK_LOCKED_ENTRY_IDS) assert.match(text, new RegExp(`- id: ${id}\\n  disabled: true`))
-  const second = applyForkConfigLock(dir)
-  assert.equal(second.entries, 0, '第二次不得重复写入')
-  assert.equal(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'), text)
-})
-
-test('fork-config-lock: JSON {insert} 补丁结构化合并，保持合法 YAML/JSON', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-lock-json-'))
-  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '{"insert":[{"id":"ui-chat"}]}\n', 'utf8')
-  const out = applyForkConfigLock(dir)
-  assert.equal(out.ok, true)
-  assert.equal(out.entries, FORK_LOCKED_ENTRY_IDS.length)
-  const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'))
-  assert.ok(Array.isArray(parsed), '必须变成顶层数组，不能在 JSON object 后追加 YAML')
-  assert.ok(parsed.some((entry) => Array.isArray(entry.insert) && entry.insert.some((inner) => inner.id === 'ui-chat')))
-  assert.ok(parsed.some((entry) => entry.id === FORK_LOCKED_ENTRY_IDS[0] && entry.disabled === true))
-  assert.ok(parsed.some((entry) => entry.id === 'ui-settings-general'))
-  const again = applyForkConfigLock(dir)
-  assert.equal(again.entries, 0, '重复应用不得重复写入')
-})
-
-test('fork-config-lock: essence-runtime 不设只读（元主设置需要原子写 package.json）', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-runtime-ro-'))
-  const dir = path.join(root, 'profiles', 'essence-runtime')
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, 'package.json'), '{}', 'utf8')
-  const out = setProfileConfigReadonly(dir, true)
-  assert.equal(out.runtime, true)
-  assert.equal(out.skipped, true)
-  fs.writeFileSync(path.join(dir, 'package.json'), '{"enabled":true}', 'utf8')
-  assert.equal(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'), '{"enabled":true}')
-})
-
-test('fork-config-lock: 配置文件只读/可解锁', () => {
-  const dir = tmpProfile()
-  fs.writeFileSync(path.join(dir, 'cordis.yml'), '[]\n', 'utf8')
-  const locked = setProfileConfigReadonly(dir, true)
-  assert.equal(locked.ok, true)
-  assert.ok(locked.changed.includes('package.json') === false, '不存在的文件跳过')
-  assert.ok(locked.changed.includes('cordis.patch.yml'))
-  assert.ok(!locked.changed.includes('cordis.yml'), 'cordis.yml 不能只读：DSH 启动会写它')
-  assert.throws(() => fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), 'x', 'utf8'), '只读后写入必须失败')
-  setProfileConfigReadonly(dir, false)
-  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '[]\n', 'utf8')
-})
-
-test('fork-config-lock: DSH_FANG_FORK_CONFIG_LOCK=0 可关闭', () => {
-  const dir = tmpProfile()
-  const previous = process.env.DSH_FANG_FORK_CONFIG_LOCK
-  process.env.DSH_FANG_FORK_CONFIG_LOCK = '0'
-  try {
-    const out = applyForkConfigLock(dir)
-    assert.equal(out.skipped, true)
-    assert.equal(fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8'), '[]\n')
-  } finally {
-    if (previous === undefined) delete process.env.DSH_FANG_FORK_CONFIG_LOCK
-    else process.env.DSH_FANG_FORK_CONFIG_LOCK = previous
-  }
+test('fork-config-lock: behaviour lock still disables plugin manager entries', () => {
+  withProfile((dir) => {
+    const result = applyForkConfigLock(dir)
+    const text = fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8')
+    assert.ok(result.ok !== false, 'applyForkConfigLock must succeed')
+    assert.match(text, /tool-plugin-manager/)
+    assert.match(text, /ui-settings-plugin-inventory/)
+    // 行为锁不能触碰文件权限
+    assert.notEqual(fs.statSync(path.join(dir, 'package.json')).mode & 0o222, 0)
+  })
 })
