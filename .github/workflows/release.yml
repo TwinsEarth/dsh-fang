@@ -101,9 +101,22 @@ jobs:
     runs-on: [self-hosted, windows, fang-e2e]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+      # v3.1.22：自托管机到 github.com:443 不稳定（actions/checkout 反复失败），
+      # 改用 codeload 的 tarball 取源码（同一 ref、同一字节），不降级任何门禁。
+      - name: 取源码（codeload，避开 github.com 直连）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.ref_name }}"
+          Write-Host "fetch $url"
+          $tmp = Join-Path $env:RUNNER_TEMP 'src.tar.gz'
+          Invoke-WebRequest -Uri $url -OutFile $tmp -TimeoutSec 600
+          Write-Host ("tarball bytes: {0}" -f (Get-Item $tmp).Length)
+          tar -xzf $tmp -C $env:GITHUB_WORKSPACE --strip-components=1
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'package.json'))) {
+            Write-Host "::error::源码解包失败（缺少 package.json）"; exit 1
+          }
+          Write-Host "source ready"
       - name: runner 自检
         shell: pwsh
         run: |
