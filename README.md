@@ -1,4 +1,5 @@
 [![CI](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml/badge.svg)](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml)
+[![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-4D6BFE?logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE-CORE)
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
 [![npm latest](https://img.shields.io/npm/v/@twinsearth/dsh-fang.svg?label=npm&color=red)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
