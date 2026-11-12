@@ -109,10 +109,20 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $url = "https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.ref_name }}"
           Write-Host "fetch $url"
-          $tmp = Join-Path $env:RUNNER_TEMP 'src.tar.gz'
-          Invoke-WebRequest -Uri $url -OutFile $tmp -TimeoutSec 600
-          Write-Host ("tarball bytes: {0}" -f (Get-Item $tmp).Length)
-          tar -xzf $tmp -C $env:GITHUB_WORKSPACE --strip-components=1
+          # 用 zip + Expand-Archive：tar.gz 在 Windows 上对中文文件名会报
+          # "Invalid empty pathname"（codepage 解码问题），zip 由 .NET 以 UTF-8 处理，稳定。
+          $zipUrl = "https://codeload.github.com/${{ github.repository }}/zip/${{ github.ref_name }}"
+          $zip = Join-Path $env:RUNNER_TEMP 'src.zip'
+          $stage = Join-Path $env:RUNNER_TEMP 'src-stage'
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Write-Host "fetch $zipUrl"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zip -TimeoutSec 600
+          Write-Host ("zip bytes: {0}" -f (Get-Item $zip).Length)
+          Expand-Archive -Path $zip -DestinationPath $stage -Force
+          $top = Get-ChildItem $stage -Directory | Select-Object -First 1
+          if (-not $top) { Write-Host "::error::压缩包结构异常"; exit 1 }
+          Get-ChildItem $top.FullName -Force | ForEach-Object { Move-Item $_.FullName (Join-Path $env:GITHUB_WORKSPACE $_.Name) -Force }
           if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'package.json'))) {
             Write-Host "::error::源码解包失败（缺少 package.json）"; exit 1
           }

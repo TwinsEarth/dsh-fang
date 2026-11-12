@@ -1756,6 +1756,15 @@ window.__ModuleLoader__.load({
       }
 
       async function deriveTask(payload) {
+      // v3.1.23：元主派生必须绑定一个会话（不允许空白快速派生出来源不明的一次性分身）。
+      if (!String(payload?.sessionId ?? '').trim()) {
+        try {
+          if ((await detectWebRole()) === 'essence') {
+            setNotice({ tone: 'warn', title: '元主派生需要先选择一个会话', message: '请在左侧会话列表中选中一个进行中的会话，再点「从此会话派生」。' })
+            return
+          }
+        } catch { /* 识别失败则按原行为 */ }
+      }
         if (deriveStore.inflight) return
         deriveStore.lastGesture = Date.now()
         S.notice = null
@@ -6411,6 +6420,177 @@ window.__ModuleLoader__.load({
      *
      * 只在 role === 'fork' 时生效；母体/元主不受影响。
      */
+
+    /**
+     * v3.1.23：元主（essence）Web 的界面收敛。
+     *
+     * 用户要求：
+     * 1) 元主端不允许执行会话 / 任务 / 指令（派生与调度由房主 Router 负责）；
+     * 2) 元主派生新分身必须选一个会话，分身内不允许新建会话（只能分叉会话）；
+     * 3) 元主 Web 隐藏「工作区」「新会话」，只保留 插件安装/设置 与 系统设置，
+     *    默认进入即打开插件设置页。
+     *
+     * 实现方式：DOM 收敛 + 事件拦截 + 一次性落地页跳转；不依赖宿主内部 API。
+     */
+    function mountEssenceUiLocks() {
+      if (typeof document === 'undefined' || !document.body) return () => {}
+      const doc = document
+      let disposed = false
+      let active = false
+      let observer = null
+      const NAV_HIDDEN = ['工作区', '新会话', '新建会话', 'Workspace', 'New session', 'New Session']
+      const NOTICE_ID = 'fang-essence-notice'
+
+      const clean = (text) => String(text || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim()
+      const isPanelRow = (node) => {
+        try {
+          if (!node || node.tagName !== 'BUTTON') return false
+          if (/panelRow/i.test(String(node.className || ''))) return true
+          return Boolean(node.closest('nav, aside, [class*="sidebar"], [class*="sideBar"], [class*="sider"]'))
+        } catch { return false }
+      }
+      const matchNav = (text) => {
+        const value = clean(text)
+        if (!value) return false
+        return NAV_HIDDEN.some((label) => value === label || value.startsWith(label + ' '))
+      }
+      const isPluginNav = (text) => {
+        const value = clean(text)
+        return value === '插件' || value === 'Plugins' || /^插件(\s|$)/.test(value) || /^Plugins?(\s|$)/.test(value)
+      }
+
+      const hideNavRows = () => {
+        if (disposed || !active) return
+        for (const node of doc.querySelectorAll('button')) {
+          if (!isPanelRow(node)) continue
+          const text = clean(node.textContent)
+          if (!matchNav(text)) continue
+          if (node.dataset.fangEssenceHidden === '1' && node.hidden) continue
+          node.dataset.fangEssenceHidden = '1'
+          node.hidden = true
+          node.setAttribute('aria-hidden', 'true')
+          node.style.setProperty('display', 'none', 'important')
+          // 有些宿主用父级容器承载整行（工作区整块），一并收掉
+          const row = node.closest('[class*="panelRow"],[class*="workspaceRow"],[data-workspace-row]')
+          if (row && row !== node) {
+            row.hidden = true
+            row.dataset.fangEssenceHidden = '1'
+            row.style.setProperty('display', 'none', 'important')
+          }
+        }
+      }
+
+      /** 隐藏输入区：元主不执行会话/指令（避免误以为能在这里跑任务）。 */
+      const hideComposer = () => {
+        if (disposed || !active) return
+        for (const textarea of doc.querySelectorAll('textarea')) {
+          const box = textarea.closest('[class*="composer"],[class*="Composer"]') || textarea.parentElement?.parentElement
+          if (!box) continue
+          if (box.dataset.fangEssenceHidden === '1') continue
+          box.dataset.fangEssenceHidden = '1'
+          box.hidden = true
+          box.setAttribute('aria-hidden', 'true')
+          box.style.setProperty('display', 'none', 'important')
+        }
+        for (const node of doc.querySelectorAll('button')) {
+          const label = clean(node.getAttribute?.('aria-label') || node.textContent)
+          if (!/^(发送|Send|发送消息)$/.test(label)) continue
+          if (node.dataset.fangEssenceHidden === '1') continue
+          node.dataset.fangEssenceHidden = '1'
+          node.hidden = true
+          node.style.setProperty('display', 'none', 'important')
+        }
+      }
+
+      const insertNotice = () => {
+        if (disposed || !active) return
+        if (doc.getElementById(NOTICE_ID)) return
+        const notice = doc.createElement('div')
+        notice.id = NOTICE_ID
+        notice.setAttribute('data-fang-essence-notice', '1')
+        notice.setAttribute('role', 'status')
+        notice.textContent = '元主 Web：仅插件安装/设置与系统设置可用；会话、任务与指令请在母体或分身中执行。'
+        notice.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:2147483000;max-width:min(520px,60vw);' +
+          'padding:8px 12px;border-radius:10px;border:1px solid rgba(10,107,224,.25);background:rgba(232,241,253,.96);' +
+          'color:#0B3E8E;font:12px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;box-shadow:0 2px 8px rgba(16,17,20,.08)'
+        doc.body.appendChild(notice)
+      }
+
+      /** 默认落地页 = 插件设置页（点一次侧栏「插件」，只做一次）。 */
+      let landed = false
+      const landOnPlugins = () => {
+        if (disposed || !active || landed) return
+        const button = [...doc.querySelectorAll('button')].find((node) => isPanelRow(node) && isPluginNav(clean(node.textContent)))
+        if (!button) return
+        landed = true
+        try { button.click() } catch { /* ignore */ }
+        doc.documentElement?.setAttribute?.('data-fang-essence-landing', 'plugins')
+      }
+
+      const onClickCapture = (event) => {
+        if (!active || disposed) return
+        const button = event.target && typeof event.target.closest === 'function' ? event.target.closest('button') : null
+        if (!button) return
+        const text = clean(button.textContent)
+        if (isPanelRow(button) && matchNav(text)) {
+          event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); return
+        }
+        const label = clean(button.getAttribute?.('aria-label') || '')
+        if (/^(发送|Send)$/.test(label) || /^(发送|Send)$/.test(text)) {
+          event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
+        }
+      }
+
+      const onKeyDown = (event) => {
+        if (!active || disposed) return
+        if (event.key !== 'Enter' || event.shiftKey) return
+        const target = event.target
+        const inComposer = Boolean(target && typeof target.closest === 'function' && target.closest('[class*="composer"],[class*="Composer"],textarea'))
+        if (!inComposer) return
+        event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
+      }
+
+      const apply = () => {
+        if (disposed) return
+        hideNavRows()
+        hideComposer()
+        insertNotice()
+        landOnPlugins()
+      }
+      const start = () => {
+        if (disposed || active) return
+        active = true
+        apply()
+        try {
+          observer = new MutationObserver(() => apply())
+          observer.observe(doc.body, { childList: true, subtree: true })
+        } catch { /* ignore */ }
+        doc.addEventListener('click', onClickCapture, true)
+        doc.addEventListener('keydown', onKeyDown, true)
+        // 宿主首屏渲染有先后：分几次重试落地页与隐藏
+        for (const delay of [300, 800, 1500, 3000]) setTimeout(apply, delay)
+        doc.documentElement?.setAttribute?.('data-fang-essence-locks', 'applied')
+      }
+
+      void detectWebRole().then((role) => {
+        if (disposed) return
+        if (role === 'essence') start()
+      }).catch(() => { /* 识别失败则不启用 */ })
+
+      return () => {
+        disposed = true
+        active = false
+        try { observer?.disconnect() } catch { /* ignore */ }
+        try { doc.removeEventListener('click', onClickCapture, true) } catch { /* ignore */ }
+        try { doc.removeEventListener('keydown', onKeyDown, true) } catch { /* ignore */ }
+        try { doc.getElementById(NOTICE_ID)?.remove() } catch { /* ignore */ }
+        for (const node of doc.querySelectorAll('[data-fang-essence-hidden="1"]')) {
+          try { node.hidden = false; node.style.removeProperty('display'); node.removeAttribute('aria-hidden'); delete node.dataset.fangEssenceHidden } catch { /* ignore */ }
+        }
+        doc.documentElement?.removeAttribute?.('data-fang-essence-locks')
+      }
+    }
+
     function mountForkUiLocks() {
       if (typeof document === 'undefined' || !document.body) return () => {}
       const doc = document
@@ -6418,7 +6598,7 @@ window.__ModuleLoader__.load({
       let active = false
       let timer = 0
       let observer = null
-      const NAV_TEXTS = ['插件']
+      const NAV_TEXTS = ['插件', '新会话', '新建会话']
       const ACTION_TEXTS = ['启动', '启动插件', '开始使用', '启用']
 
       /** v3.1.20：宿主侧栏行类名会随版本变化，不再只认 panelRow。 */
@@ -6445,7 +6625,8 @@ window.__ModuleLoader__.load({
         if (disposed || !active) return
         for (const node of doc.querySelectorAll('button')) {
           if (!isPanelRow(node)) continue
-          if (!isPluginNavText(node.textContent)) continue
+          const navText = String(node.textContent || '').trim()
+          if (!isPluginNavText(navText) && !/^新会话$|^新建会话$/.test(navText)) continue
           if (node.dataset.fangForkHidden === '1' && node.hidden) continue
           node.dataset.fangForkHidden = '1'
           node.hidden = true
@@ -6585,9 +6766,20 @@ window.__ModuleLoader__.load({
     }
 
     // ── 插件入口 ──────────────────────────────────────────────────────────
+    // v3.1.23：jsdom 回归用钩子桥（只在测试模式挂到 window，正常运行时不存在）
+    if (typeof window !== 'undefined' && window.__FANG_TEST_HOOK__) {
+      window.__fangTestHooks = window.__fangTestHooks || {}
+      Object.assign(window.__fangTestHooks, {
+        __mountEssenceUiLocks: mountEssenceUiLocks,
+        __mountForkUiLocks: mountForkUiLocks,
+        __mountCloseConfirm: mountCloseConfirm,
+        __detectWebRole: detectWebRole,
+      })
+    }
+
     return {
       mountPanel,
-      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole, __mountForkUiLocks: mountForkUiLocks, __mountCloseConfirm: mountCloseConfirm, __mountDecisionRelay: mountDecisionRelay } : {}),
+      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole, __mountForkUiLocks: mountForkUiLocks, __mountEssenceUiLocks: mountEssenceUiLocks, __mountCloseConfirm: mountCloseConfirm, __mountDecisionRelay: mountDecisionRelay } : {}),
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
@@ -6595,6 +6787,8 @@ window.__ModuleLoader__.load({
         disposers.push(mountWebRoleBadge())
         // v3.1.19：分身 Web 界面收敛（隐藏「插件」入口 + 「启动」无操作）。
         disposers.push(mountForkUiLocks())
+        // v3.1.23：元主 Web 界面收敛（隐藏工作区/新会话、只留插件与系统设置、默认落地插件页）。
+        disposers.push(mountEssenceUiLocks())
         // v3.1.19：元主 / 分身 Web 关闭前二次确认（防误触）。
         disposers.push(mountCloseConfirm())
         // 母体 Web = DSH 主会话视图；Web 端直接切回 conversation 面板。
