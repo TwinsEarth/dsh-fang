@@ -171,7 +171,7 @@ window.__ModuleLoader__.load({
     }
 
     const QUEUE_COUNT_RE = /(\d+)\s*(条排队消息|queued messages|件のキュー済みメッセージ|mensagens na fila|messages en file d'attente|nachrichten in der warteschlange|сообщения в очереди|mensajes en cola|mensagens na fila)/i
-    const QUEUE_ACTION_LABELS = /^(插话发送|编辑排队消息|删除排队消息|保存排队消息|取消编辑|发送中…|排队消息图片|queued message image|edit queued message|remove queued message|save queued message|cancel edit|sending…|steer)$/i
+    const QUEUE_ACTION_LABELS = /^(插话发送|编辑排队消息|删除排队消息|保存排队消息|取消编辑|发送中…|排队消息图片|queued message image|edit queued message|remove queued message|save queued message|cancel edit|sending…|steer|恢复全部|恢复草稿|队列 \d+|历史 \d+|清除)$/i
 
     /** 从 QueueDock 行里去掉操作按钮，只留消息正文。 */
     function queueRowText(row) {
@@ -216,13 +216,21 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    /** v3.1.22：排除瓮城自己的 UI（恢复条/历史条），否则按钮文案会被误当成排队消息。 */
+    function insideFangOwnUi(el) {
+      try { return Boolean(el?.closest?.('[data-fang-entry]')) } catch { return false }
+    }
+
     function scanQueue() {
       const found = scanQueueDock()
+      const cleaned = found.filter((item) => String(item?.text || '').trim())
+      if (cleaned.length > 0) return cleaned.slice(-100)
       if (found.length > 0) return found.slice(-100)
       const seen = new Set()
       const out = []
       const nodes = document.querySelectorAll('[class*="queue" i], [data-testid*="queue" i], [aria-label*="queue" i], [class*="pending" i], [data-testid*="pending" i], [aria-label*="排队"], [title*="排队"]')
       for (const el of nodes) {
+        if (insideFangOwnUi(el)) continue
         const text = String(el.innerText || '').trim()
         if (!text || text.length > 4000 || seen.has(text)) continue
         seen.add(text)

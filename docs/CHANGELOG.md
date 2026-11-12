@@ -1,3 +1,22 @@
+## v3.1.22（2026-11-12）
+
+**主题：3.1.21 上站后的两处收口（产物缺文件 + 自家 UI 误采集）。**
+
+### 修复
+- **`tools/recover-queue.mjs` 未进 npm 产物**：`package.json#files` 原清单没有它，
+  导致 3.1.21 安装后工具不存在。已补入 `files`，并随本版重新上架。
+- **queue-journal 误采集自家 UI**：历史快照里出现过 `恢复全部 / 队列 1 / 清除` 这类按钮文案
+  （JournalDock 自己渲染的条目被 `[class*="queue"]` 宽松扫描抓到）。
+  0.1.6：扫描时跳过 `[data-fang-entry]` 子树，并把「恢复全部/恢复草稿/队列 N/历史 N/清除」
+  加入动作标签过滤。
+
+### 验证
+- 真实运行态（3.1.21 已生效）核对：
+  - `@twinsearth/dsh-fang@3.1.21` + `dsh-fang-queue-journal@0.1.5` 均已激活；
+  - `GET /fang/api/composer/journal/history` 路由存在；
+  - **真实 dataDir（D:\ToFuture\mirror\desktop）已出现 `composer-journal-history.jsonl`，
+    且捕获到真实排队消息内容**（证明「变化即写 + append-only 历史」已在线上工作）。
+- `npm test`：1091 tests / 1080 pass / 0 fail
 ## v3.1.21（2026-11-12）
 
 **主题：队列永不丢 —— 客户端采集 + 恢复 UI + 恢复工具（升级 `dsh-fang-queue-journal` 到 0.1.5）。**
