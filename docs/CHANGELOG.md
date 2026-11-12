@@ -1,3 +1,30 @@
+## v3.1.25（2026-11-12）
+
+**主题：让「大模型主动开票」真正生效 + 修掉发布流水线的单点（artifact 上传）并三方发布。**
+
+### 一、PM 主动开票策略（新增）
+- 新增 `PM_DECISION_POLICY` / `PM_PROACTIVE_HINT`（`src/plugins/decision-center.mjs` 导出）：
+  把「什么情况必须开票、什么情况不要开票、怎么问」写进 **模型可见的工具 description**
+  （`ask_user_choice` / `request_human_decision` 主母体与 fork 两侧都注入）；
+- 新增 `docs/PM-DECISION-POLICY.md`：mustAsk 7 条 / mustNotAsk 3 条 / 提问规则 5 条 /
+  `autoDecide` 边界（red 与 blocking 永不自动）；
+- 判据写死：只有「决策代价 > 打断一代价」才开票，避免注意力噪音。
+
+### 二、发布流水线修单点（v3.1.24 发布卡住的真因）
+- 现象：build job 本身绿（`tests pass=1044 fail=0`、`e2e 81/81`、`green true`），
+  但 `upload-artifact` 对 `results-receiver.actions.githubusercontent.com` 解析间歇 `ENOTFOUND`，
+  导致 `npm publish` / `GitHub Release` 全部被 **skip**（重跑 3 次同一处）；
+- 修复：
+  1. `upload-artifact` 改为 **非阻塞**（`continue-on-error: true` + `if-no-files-found: warn`），
+     artifact 只作存档，不再作为发布路径的单点；
+  2. build job 内 **直接发布**：npm（主包 + queue-journal，幂等跳过已存在版本）与
+     GitHub Release 资产上传（`gh release upload --clobber`，幂等）；
+  3. 下游 `healthz` / `mirror` / `verify` 改为依赖 `build`（而非 npm/Release job），
+     避免上游被 skip 时连锁 skip，远端复核仍然执行。
+
+### 验证
+- `build` preflight GREEN（含 e2e 81/81）；
+- `test/decision-center.test.mjs` 84 例通过（含策略注入后的工具描述契约）。
 ## v3.1.24（2026-11-12）
 
 **主题：决策中心浮窗改造——底部 1/3 高度、不遮挡会话与工作区、选完/点外部自动收起为小浮标。**
