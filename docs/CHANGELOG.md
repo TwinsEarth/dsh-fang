@@ -1,3 +1,23 @@
+## v3.1.27（2026-11-12）
+
+**主题：发布流水线最后一个单点——build job 缺 contents: write。**
+
+### 决策中心浮窗（用户当面要求）
+- 浮窗**居中**（	op:50%;left:50%;translate(-50%,-50%)），高度 **1/3**（height:33vh），宽度保持不变；
+- 无遮罩、不挡会话与工作区；选完 / 点外部自动收起为小浮标（沿用 v3.1.24 行为）。
+
+### 修复
+- build job 现在亲自创建 GitHub Release 并上传资产，但 workflow 级权限是 contents: read，
+  导致 POST /releases → HTTP 403 Resource not accessible by integration（v3.1.26 就是卡在这里，
+  npm 已发成功、Release 没发出去）。本版给 build job 显式加 permissions: contents: write。
+
+### 流水线现状（v3.1.26 → v3.1.27 的修复链）
+| 单点 | 症状 | 修复版本 |
+|---|---|---|
+| artifact 上传 ENOTFOUND | npm/Release 被 skip | v3.1.25（非阻塞） |
+| 工作区复用 .githooks 撞名 | Move-Item 失败 | v3.1.26（解包前清空） |
+| runner 无 gh CLI | gh: not recognized | v3.1.26（改 REST 脚本） |
+| build job 无 contents: write | 403 Resource not accessible | **v3.1.27（本版）** |
 ## v3.1.26（2026-11-12）
 
 **主题：把发布流水线剩下的两个单点修掉（自托管 runner 无 gh、工作区复用撞名）。**
