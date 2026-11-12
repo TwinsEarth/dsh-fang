@@ -1,3 +1,37 @@
+## v3.1.21（2026-11-12）
+
+**主题：队列永不丢 —— 客户端采集 + 恢复 UI + 恢复工具（升级 `dsh-fang-queue-journal` 到 0.1.5）。**
+
+### 根因（v3.1.20 及以前）
+
+| # | 缺陷 | 后果 |
+|---|---|---|
+| 1 | journal key 塌缩到 `/`（插件源码注释自述） | 多会话共用一条记录，后写覆盖前写 |
+| 2 | 只在 dock 被扫描时保存 | 窗口不在前台/面板未开 → 队列变化不落盘 |
+| 3 | 无关闭前 flush | 刷新/关窗瞬间的队列永远丢失 |
+| 4 | 无历史留档 | 主记录被覆盖即不可恢复 |
+| 5 | 写入乱码（`"???????"`） | 即便有记录也读不回原文 |
+
+### 修复
+
+- **queue-journal 0.1.5**（`queue-journal/`，独立包，随本次发版一并上架 npm）：
+  1. **按会话键**：优先 slot 的 SessionId → DOM 探测 → URL → 本页实例键（写 sessionStorage，跨刷新稳定），
+     **绝不再用 `/`**；
+  2. **变化即写**：`MutationObserver`（`[data-queue-dock]` + body childList）+ **15s 兜底** +
+     `pagehide` / `visibilitychange` / `beforeunload` 前 `fetch(keepalive)` flush；
+  3. **恢复 UI**：`JournalDock` 增加「历史 N」入口，逐条显示快照并「恢复」→ `POST /fang/api/composer/queue`；
+  4. **回读校验**：保存后 GET 比对；不一致或出现 `??` 乱码即重试一次并打诊断；
+  5. **UTF-8 往返**：新增单测覆盖中文/emoji/CRLF 原样落盘。
+- **服务端（dsh-fang）**：`composer-journal` 增加 append-only **历史快照**（`composer-journal-history.jsonl`，500 条上限），
+  新路由 `GET /fang/api/composer/journal/history?limit=&sessionKey=`；`POST /journal` 把 `sessionId` 记为 `sessionKey`。
+- **恢复工具 `tools/recover-queue.mjs`**：扫描所有 fang dataDir（journal + history），列出可恢复草稿/队列（自动标记疑似乱码），
+  支持 `--json`、`--dry-run`、`--restore <url> --token <t> --session <id> [--index n]` 显式写回官方队列。
+
+### 验证
+
+- `npm test`：1089 tests / 1078 pass / 0 fail
+- 新增 `test/composer-journal-history.test.mjs`（5 例）：分会话键、历史追加/排序、草稿不刷历史、上限裁剪、UTF-8 往返
+- 恢复工具实测（你本机 dataDir）：正确列出 2 条旧记录，并对 `??????` 标注「疑似乱码（原文已丢失）」
 ## v3.1.20（2026-11-12）
 
 **主题：分身「插件」入口隐藏的兼容性与可诊断性（3.1.19 在个别宿主上未生效的收口）。**

@@ -3581,10 +3581,20 @@ export function apply(ctx, config) {
           const key = String(body?.key ?? '')
           if (!key) return json(res, 400, { ok: false, error: 'journal-key-required' })
           try {
-            return json(res, 200, { ok: true, entry: composerJournal.save(key, body) })
+            return json(res, 200, { ok: true, entry: composerJournal.save(key, { ...body, sessionKey: body?.sessionKey || body?.sessionId || '' }) })
           } catch (error) {
             return json(res, 400, { ok: false, error: String(error?.message ?? error) })
           }
+        },
+      })
+
+      // v3.1.21：append-only 历史快照（主 journal 被覆盖时的兜底恢复源）。
+      routeMethods(`${prefix}/api/composer/journal/history`, {
+        GET: (req, res) => {
+          const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
+          const limit = Math.max(1, Math.min(200, Number(query.get('limit') || 20)))
+          const sessionKey = String(query.get('sessionKey') || '')
+          return json(res, 200, { ok: true, items: composerJournal.history({ limit, sessionKey }) })
         },
       })
 

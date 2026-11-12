@@ -182,6 +182,27 @@ jobs:
           node tools/release/publish-npm.mjs
           echo "published=true" >> "$GITHUB_OUTPUT"
 
+      # v3.1.21：queue-journal 是独立包（^0.1.5），主包 optionalDependency 依赖它先上架。
+      - name: publish queue-journal when NPM_TOKEN is configured
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::warning::未配置 NPM_TOKEN —— queue-journal 跳过"
+            exit 0
+          fi
+          set -euo pipefail
+          cd queue-journal
+          version=$(node -p "require('./package.json').version")
+          pkg=$(node -p "require('./package.json').name")
+          if node -e "const p=require('./package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+            echo "::notice::$pkg@${version} 已存在，跳过"
+            exit 0
+          fi
+          printf '//registry.npmjs.org/:_authToken=%s\n' "${NPM_TOKEN}" > .npmrc
+          npm publish --ignore-scripts --access public
+          rm -f .npmrc
+
   # ── 4. GitHub Release（附 tarball + sha256 + manifest + preflight 证据）──────
   github-release:
     name: GitHub Release

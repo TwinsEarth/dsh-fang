@@ -1,9 +1,9 @@
 {
   "name": "@twinsearth/dsh-fang-queue-journal",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": false,
   "type": "module",
-  "description": "Composer draft/queue journal for dsh-Fang: persist unsent input and a read-only queue mirror; recovery is always user-confirmed.",
+  "description": "Composer draft/queue journal for dsh-Fang: per-session keys, immediate queue persistence, append-only history and user-confirmed recovery.",
   "license": "AGPL-3.0-or-later",
   "author": {
     "name": "dsh-Fang contributors"
