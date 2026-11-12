@@ -1711,17 +1711,22 @@ test('orchestrator: derive() asks the session catalog for a bounded seed and wri
   } finally { await adapter.close() }
 })
 
-test('orchestrator: derive() is fail-closed without a session catalog, and lineage-only needs no seed', skipNoRemote, async () => {
+test('orchestrator: derive() is fail-closed without a session catalog, and requires exactly one session', skipNoRemote, async () => {
   const adapter = await makeAdapterServer()
   try {
     const { ctx, svc, dataRoot } = await boot({ forker: makeFakeForker({ url: adapter.url, port: adapter.port }) })
     const denied = await svc.derive({ sessionId: 'session-01234567-89ab-cdef-0123-456789abcdef' })
     assert.equal(denied.ok, false)
     assert.equal(denied.error, 'session-catalog-unavailable')
+    // v3.1.30：派生分身必须导入一个进行中会话——不再允许无 sessionId 的空白派生。
     const plain = await svc.derive({ title: '纯 lineage' })
-    assert.equal(plain.ok, true)
-    assert.equal(plain.derivedFrom, null)
-    assert.equal(svc.listTasks()[0].seed, null)
+    assert.equal(plain.ok, false)
+    assert.equal(plain.error, 'session-required')
+    // 一次只能导入一个：多选直接拒绝，且不会创建任何任务。
+    const multi = await svc.derive({ sessionIds: ['session-a', 'session-b'] })
+    assert.equal(multi.ok, false)
+    assert.equal(multi.error, 'session-multi-not-allowed')
+    assert.equal(svc.listTasks().length, 0, 'rejected derives must not create tasks')
     cleanup(ctx, dataRoot)
   } finally { await adapter.close() }
 })

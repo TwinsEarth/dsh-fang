@@ -21,8 +21,18 @@ const WELCOME_NOTICE_ENTRY = Object.freeze({
   config: Object.freeze({ welcomeNoticeVersion: '2026-09-28.1' }),
 })
 
-// cordis.yml 不加只读：DSH 启动时会打开它做规范化写入，只读会导致 EPERM 启动失败。
+// v3.1.30：DSH 0.2.2 每次启动都会重写 profile 的 package.json
+// （dsh-app-boot dropRetiredBundles → writeProfileManifest），cordis.patch.yml 也会被
+// 规范化写回。把这两个文件设成只读会让子进程在引导阶段直接
+//   EPERM: operation not permitted, open '...\profiles\<profile>\package.json'
+// 然后立即退出——上层看到的就是 spawn-failed（派生与还原都失败，v3.1.28 实测）。
+//
+// 因此 readonly=true 不再 chmod 任何 DSH 启动必须写的文件；readonly=false 仍会 chmod 0644，
+// 用于自动修复历史上被设成只读的分身 profile。行为锁由 applyForkConfigLock 承担。
 export const PROFILE_CONFIG_FILES = Object.freeze(['package.json', 'cordis.patch.yml'])
+
+/** 真正会被 chmod 成只读的文件：v3.1.30 起为空（见上面的根因说明）。 */
+export const READONLY_LOCKED_FILES = Object.freeze([])
 
 /** v3.1.5 曾错误禁用 ui-plugin-manager（它提供 pluginNavigation）；升级时自动移除该历史锁。 */
 export const LEGACY_LOCKED_ENTRY_IDS = Object.freeze(['ui-plugin-manager'])
@@ -31,20 +41,23 @@ export const LEGACY_LOCKED_ENTRY_IDS = Object.freeze(['ui-plugin-manager'])
  * 把分身 profile 的配置文件设为只读（防止误写；不防有意绕过）。 */
 export function setProfileConfigReadonly(profileDir, readonly = true) {
   if (String(process.env.DSH_FANG_FORK_PROFILE_RO ?? '1') === '0') return { ok: true, skipped: true, changed: [] }
-  // essence-runtime 是元主的配置态实例：DSH 设置/内置插件开关需要原子写 package.json。
-  // 只对真正的分身（生产盘）保持只读；否则点「启用」会 EPERM rename package.json.tmp。
-  if (readonly && path.basename(String(profileDir)) === 'essence-runtime') {
-    return { ok: true, skipped: true, runtime: true, changed: [] }
-  }
   const changed = []
+  const repaired = []
   for (const name of PROFILE_CONFIG_FILES) {
     const file = path.join(String(profileDir), name)
+    // readonly=true：只记录、不 chmod（DSH 启动必须能写这两个文件，v3.1.30 根因修复）。
+    // readonly=false：解锁——顺带修掉历史版本留下的 0444，让旧分身恢复可用。
+    if (readonly) continue
     try {
-      fs.chmodSync(file, readonly ? 0o444 : 0o644)
+      if (!fs.existsSync(file)) continue
+      const stat = fs.statSync(file)
+      const wasReadonly = (stat.mode & 0o222) === 0
+      fs.chmodSync(file, 0o644)
       changed.push(name)
-    } catch { /* 文件不存在/平台不支持则跳过 */ }
+      if (wasReadonly) repaired.push(name)
+    } catch { /* 平台不支持/文件被占用则跳过 */ }
   }
-  return { ok: true, changed }
+  return { ok: true, changed, repaired, enforced: false, files: PROFILE_CONFIG_FILES }
 }
 
 /**

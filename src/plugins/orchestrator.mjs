@@ -1221,10 +1221,23 @@ export function apply(ctx, config) {
      * 只读会话目录（session catalog）缺失时退化为 lineage-only，不阻塞派生。
      */
     async derive(input = {}) {
-      const sessionId = String(input.sessionId ?? '').trim()
+      // v3.1.30：派生分身必须导入「一个」进行中会话。
+      //   · 不传 sessionId      → 明确拒绝（不再静默退化成空白分身）
+      //   · 传了多个 sessionIds → 拒绝（一次只能导入一个，避免来源混淆）
+      // 元主 Web 自身启动不经过这里，因此「元主无对话启动」不受影响。
+      const rawMulti = Array.isArray(input.sessionIds)
+        ? input.sessionIds.map((id) => String(id ?? '').trim()).filter(Boolean)
+        : []
+      if (rawMulti.length > 1) {
+        return { ok: false, error: 'session-multi-not-allowed', detail: '一次只能导入一个会话（收到 ' + rawMulti.length + ' 个）' }
+      }
+      const sessionId = (rawMulti[0] ?? String(input.sessionId ?? '')).trim()
+      if (!sessionId) {
+        return { ok: false, error: 'session-required', detail: '派生分身需要先选择一个进行中的会话（一次只能导入一个）' }
+      }
       let seed = null
       let importSession = null
-      if (sessionId) {
+      {
         const catalog = safeGet(SERVICE.sessionCatalog)
         if (!catalog || typeof catalog.seed !== 'function') {
           return { ok: false, error: 'session-catalog-unavailable' }
@@ -3204,7 +3217,13 @@ export function apply(ctx, config) {
 
       route('POST', `${prefix}/api/derive`, async (req, res) => {
         const body = await readBody(req)
-        const out = await service.derive({ title: body?.title, sessionId: body?.sessionId, collaborators: body?.collaborators })
+        // v3.1.30：透传 sessionIds，让「一次只能导入一个会话」的校验在 API 层生效。
+        const out = await service.derive({
+          title: body?.title,
+          sessionId: body?.sessionId,
+          sessionIds: body?.sessionIds,
+          collaborators: body?.collaborators,
+        })
         return json(res, out.ok ? 200 : 409, out)
       })
       route('GET', `${prefix}/api/tasks/sessions`, async (req, res) => {
