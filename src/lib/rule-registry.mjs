@@ -208,8 +208,11 @@ export function parseYamlSubset(text) {
         const key = inlineKey[1]
         const restValue = rest.slice(inlineKey[0].length).trim()
         const mapped = {}
-        if (restValue.length > 0) mapped[key] = parseScalar(restValue)
-        else {
+        if (restValue.length > 0) {
+          const [folded, nextIndex] = foldContinuations({ content: restValue }, index + 1, virtualIndent)
+          mapped[key] = parseScalar(folded)
+          index = nextIndex - 1
+        } else {
           const next = tokens[index + 1]
           if (next !== undefined && next.indent > virtualIndent) {
             const [child, nextIndex] = parseBlock(index + 1, next.indent)
@@ -232,8 +235,9 @@ export function parseYamlSubset(text) {
           const childKey = match[1]
           const childRest = String(match[2] ?? '').trim()
           if (childRest.length > 0) {
-            mapped[childKey] = parseScalar(childRest)
-            index += 1
+            const [folded, nextIndex] = foldContinuations({ content: childRest }, index + 1, virtualIndent)
+            mapped[childKey] = parseScalar(folded)
+            index = nextIndex
             continue
           }
           const nextToken = tokens[index + 1]
@@ -255,6 +259,26 @@ export function parseYamlSubset(text) {
     return [items, index]
   }
 
+  // v3.1.31：折行纯量（plain scalar continuation）。
+  // DSH 会把超长 description 折成多行，续行缩进更深、且既不是 "key:" 也不是 "- item"。
+  // 结构行（映射键/序列项）一律不吸收，避免吞掉兄弟节点。
+  const KEY_LINE = /^[A-Za-z0-9_$.-]+:(?:\s|$)/
+  const isStructural = (token) => isSequenceLine(token) || KEY_LINE.test(token.content)
+  const foldContinuations = (valueToken, startIndex, parentIndent) => {
+    const parts = []
+    let index = startIndex
+    while (index < tokens.length) {
+      const token = tokens[index]
+      if (token.indent <= parentIndent) break
+      if (isStructural(token)) break
+      parts.push(token.content)
+      index += 1
+    }
+    if (parts.length === 0) return [valueToken.content, startIndex]
+    const first = valueToken.content
+    const joined = [first, ...parts].join(" ")
+    return [joined, index]
+  }
   const parseMapping = (startIndex, indent) => {
     const mapping = {}
     let index = startIndex
@@ -270,8 +294,10 @@ export function parseYamlSubset(text) {
       const key = match[1]
       const rest = String(match[2] ?? '').trim()
       if (rest.length > 0) {
-        mapping[key] = parseScalar(rest)
-        index += 1
+        // v3.1.31：先吸收折行续行，再按纯量解析。
+        const [folded, nextIndex] = foldContinuations({ content: rest }, index + 1, indent)
+        mapping[key] = parseScalar(folded)
+        index = nextIndex
         continue
       }
       const next = tokens[index + 1]

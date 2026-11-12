@@ -268,7 +268,8 @@ jobs:
   healthz:
     name: healthz (remote)
     needs: [build]   # v3.1.25：build 内已直发 npm + Release
-    if: needs.npm.outputs.published == 'true'
+    # v3.1.31：原 if 引用已删除的 npm job，导致 healthz 永远 skipped；改为跟随 build 成功。
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -315,7 +316,8 @@ jobs:
   verify:
     name: final verify
     needs: [guard, build, mirror, healthz]
-    if: always() && needs.github-release.result == 'success' && needs.mirror.result == 'success'
+    # v3.1.31：原 if 引用已删除的 github-release job；Release 由 build 直传，改为跟随 build。
+    if: always() && needs.build.result == 'success' && needs.mirror.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
