@@ -105,6 +105,23 @@ jobs:
     steps:
       # v3.1.22：自托管机到 github.com:443 不稳定（actions/checkout 反复失败），
       # 改用 codeload 的 tarball 取源码（同一 ref、同一字节），不降级任何门禁。
+      # v3.1.26：自托管 runner 的工作区是复用的。上一轮残留的 .githooks / .github 等目录
+      # 会让解包时的 Move-Item 变成「把目录搬进同名目录」→
+      #   Cannot create ...\.githooks\\.githooks because a file or directory with the same name already exists.
+      # 之前每次都要人工清理 runner。这里在解包前无条件清空工作区。
+      - name: 工作区清空（避免 .githooks 嵌套撞名）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ws = $env:GITHUB_WORKSPACE
+          if (-not $ws -or -not (Test-Path $ws)) { Write-Host "workspace missing: $ws"; exit 0 }
+          Get-ChildItem $ws -Force | ForEach-Object {
+            try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop }
+            catch { Write-Host ("::warning::无法删除 {0}", $_.Name) }
+          }
+          $left = (Get-ChildItem $ws -Force | Measure-Object).Count
+          Write-Host "workspace cleared, entries left: $left"
+          if ($left -gt 0) { Write-Host "::error::工作区未能完全清空，解包会撞名"; exit 1 }
       - name: 取源码（codeload，避开 github.com 直连）
         shell: pwsh
         run: |
@@ -194,42 +211,18 @@ jobs:
             node tools/release/publish-npm.mjs
           }
 
+      # v3.1.26：自托管 Windows runner 上没有 gh CLI（v3.1.25 就是卡在这里），
+      # 改用仓库内的 node 脚本走 REST API（幂等：release 复用、同名资产替换）。
       - name: 直传 GitHub Release（不依赖 artifact）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = "${{ env.RELEASE_TAG }}"
-          $files = @()
-          $files += (Get-ChildItem dist -Filter 'dsh-fang-*.tgz' | ForEach-Object { $_.FullName })
-          $files += (Get-ChildItem dist -Filter 'dsh-fang-*.tgz.sha256' | ForEach-Object { $_.FullName })
-          foreach ($name in @('manifest.json','preflight.json')) {
-            $f = Join-Path 'dist' $name
-            if (Test-Path $f) { $files += (Resolve-Path $f).Path }
-          }
-          if ($files.Count -eq 0) { Write-Host "::error::dist 里没有可发布资产"; exit 1 }
-          Write-Host "assets: $($files -join ', ')"
-          $repo = "${{ github.repository }}"
-          $exists = $false
-          try {
-            $rel = gh api "repos/$repo/releases/tags/$tag" 2>$null | ConvertFrom-Json
-            if ($rel) { $exists = $true; Write-Host "release $tag 已存在（id=$($rel.id)）" }
-          } catch { $exists = $false }
-          if (-not $exists) {
-            gh api -X POST "repos/$repo/releases" -f tag_name="$tag" -f name="$tag" -F generate_release_notes=true | Out-Null
-            Write-Host "release $tag created"
-            Start-Sleep -Seconds 2
-          }
-          foreach ($f in $files) {
-            $assetName = Split-Path $f -Leaf
-            try {
-              gh api "repos/$repo/releases/tags/$tag/assets" 2>$null | Out-Null
-            } catch { }
-            gh release upload "$tag" "$f" --clobber --repo "$repo"
-            Write-Host "uploaded $assetName"
-          }
-          Write-Host "github release ready: $tag"
+          if (-not $env:GH_TOKEN) { Write-Host "::error::缺少 GH_TOKEN，无法创建 Release"; exit 1 }
+          node tools/release/upload-release-assets.mjs --tag $env:RELEASE_TAG --repo $env:GH_REPOSITORY --dist dist
 
   # ── 3. npm：build 已直发；这里只做「artifact 可用时的二次核验 + 补发」──────
   #      artifact 缺失（自托管机 DNS 抖动）时本 job 直接跳过，不算失败。

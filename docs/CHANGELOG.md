@@ -1,3 +1,19 @@
+## v3.1.26（2026-11-12）
+
+**主题：把发布流水线剩下的两个单点修掉（自托管 runner 无 gh、工作区复用撞名）。**
+
+### 修复
+- **runner 没有 gh CLI**：v3.1.25 的 build job 在直传 Release 时 gh: not recognized。
+  新增 	ools/release/upload-release-assets.mjs（纯 REST，幂等：release 复用、同名资产替换），
+  workflow 改为调用它；
+- **工作区复用导致 .githooks 嵌套撞名**：v3.1.24/v3.1.25 的 Move-Item 报
+  Cannot create ...\.githooks\.githooks。build job 解包前新增「工作区清空」步骤，
+  残留在拦截时直接失败（不静默继续）；
+- upload-artifact 保持 continue-on-error（仅存档），npm / Release 都不再依赖它；
+- healthz / mirror / erify 依赖 uild，避免上游 skip 连锁 skip。
+
+### 验证
+- 本版发布即验证：完整走 build → npm → Release → healthz → mirror → verify，无需人工兜底。
 ## v3.1.25（2026-11-12）
 
 **主题：让「大模型主动开票」真正生效 + 修掉发布流水线的单点（artifact 上传）并三方发布。**
