@@ -114,7 +114,7 @@ test('decision center: expiry turns pending tickets gray and wakes waiters', asy
   }
 })
 
-test('decision center: persisted pending tickets restore as gray, never blocking', () => {
+test('decision center: persisted pending tickets restore as pending (still answerable), never blocking', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-decision-restore-'))
   let ctx = makeCtx()
   try {
@@ -129,9 +129,9 @@ test('decision center: persisted pending tickets restore as gray, never blocking
     ctx = makeCtx()
     const restored = apply(ctx, { dataRoot: root })
     const item = restored.list({ includeArchived: true }).items[0]
-    assert.equal(item.status, 'expired')
-    assert.equal(item.level, 'gray')
-    assert.equal(item.outcome, 'expired')
+    // v3.1.24：重启后 pending 仍保留给人回答（浮窗/收件箱可见），但不再阻塞 Agent
+    assert.equal(item.status, 'pending')
+    assert.equal(item.isBlocking, false)
     assert.equal(item.resolvedOption, null)
   } finally {
     try { ctx.dispose() } catch { /* ignore */ }
@@ -1845,7 +1845,7 @@ test('decision center: expired/abandoned overwrite level to gray but keep origin
   }
 })
 
-test('decision center: restart recovery persists pending tickets as expired/gray', () => {
+test('decision center: restart recovery keeps unexpired pending tickets as pending', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-decision-recovery-'))
   const ctx1 = makeCtx()
   try {
@@ -1857,13 +1857,15 @@ test('decision center: restart recovery persists pending tickets as expired/gray
     try {
       const second = apply(ctx2, { dataRoot: root, tickMs: 1000, autoAdvise: false })
       const restored = second.get(created.ticket.id)
-      assert.equal(restored.status, 'expired')
-      assert.equal(restored.level, 'gray')
-      assert.equal(restored.originalLevel, 'red')
+      // v3.1.24：未过期的 pending 保留原 level/status（仍可人工回答）
+      assert.equal(restored.status, 'pending')
+      assert.equal(restored.level, 'red')
+      assert.equal(restored.isBlocking, false)
       const persisted = JSON.parse(fs.readFileSync(path.join(root, 'decision-center.json'), 'utf8'))
       const row = persisted.tickets.find((item) => item.id === created.ticket.id)
-      assert.equal(row.status, 'expired', 'recovery must be written back to disk')
-      assert.equal(row.level, 'gray')
+      assert.equal(row.status, 'pending', 'unexpired pending must stay pending on disk')
+      assert.equal(row.level, 'red')
+      assert.equal(row.isBlocking, false, 'restored ticket must never block the Agent')
     } finally {
       ctx2.dispose()
     }

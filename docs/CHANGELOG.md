@@ -1,3 +1,27 @@
+## v3.1.24（2026-11-12）
+
+**主题：决策中心浮窗改造——底部 1/3 高度、不遮挡会话与工作区、选完/点外部自动收起为小浮标。**
+
+### 变更
+- `客户端 · 决策中继面板`：由「右侧全高抽屉 + 半透明遮罩」改为 **底部悬浮卡片**
+  （`height:33vh`、`min-height:220px`、`bottom:12px`、圆角、无遮罩），不再挡住会话与工作区；
+- **点击面板外部任意位置**（`pointerdown` 捕获）即收起为右侧小浮标；
+- **完成选择后自动收起**（`submitOption` / `submitCustom` 成功后 `setOpen(false)`）；
+- 遮罩层保留 DOM 但 `display:none`，确保旧引用不炸、也不再拦截点击。
+
+### 决策中心可见性 / 自动化修复（用户反馈"开发了一整天都没见它出来"）
+
+1. **入口常驻**：会话右侧的「待选」小浮标 **0 待选也显示**（半透明 + 计数 0 + 提示语），
+   不再"没有 pending 就完全看不到决策中心"；
+2. **重启不丢 pending**：此前重启会把所有 pending 强制改为 `expired/gray`（刷新后收件箱空白）；
+   现在**未过期 pending 保留**（人仍可回答），只把真过期的置灰；恢复时 `isBlocking=false`，绝不挂起 Agent；
+3. **AI 自动决策（新增）**：`autoDecide` 配置（默认开，`levels:["green"]`、`minConfidence:0.8`、要求推荐项低风险），
+   满足条件时 AI 建议直接落为决策（`resolvedBy=ai-auto`，审计 `decision-ai-auto-resolved`）；
+   **red / blocking 永不自动**，仍需人工明确选择。
+
+### 验证
+- 新增 `test/client-decision-relay.test.mjs`（3 例）：1/3 高度 CSS、无阻塞遮罩、点外部收起、选完自动收起；
+- `npm test` 全绿；`build` preflight GREEN。
 ## v3.1.23（2026-11-12）
 
 **主题：元主 Web 只做「插件控制台」+ 3.1.21 上站后的两处收口。**
