@@ -1,3 +1,15 @@
+## v3.1.29（2026-11-12）
+
+**主题：README 增加 DSH 运行时版本徽章（docs-only，无运行时行为变化）。**
+
+### 变更
+- `README.md` 顶部徽章区新增 `DSH 0.2.2-rc.1`（Shields.io，deepseek logo，链接到 deepseek-harness），
+  与 CI / license / SDK / npm 徽章并列；
+- `package.json` / `FANG_VERSION` / 版本断言测试 → 3.1.29（仅版本元数据）。
+
+### 验证
+- `node tools/git/pr-gate.mjs` GREEN（docs-only + 版本元数据）；
+- `node tools/release/build.mjs` preflight GREEN。
 ## v3.1.28（2026-11-12）
 
 **主题：发布流水线定稿——删掉与 build 重复的 npm / GitHub Release 独立 job。**
