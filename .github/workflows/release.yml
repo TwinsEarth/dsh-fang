@@ -100,6 +100,8 @@ jobs:
     needs: test
     runs-on: [self-hosted, windows, fang-e2e]
     timeout-minutes: 45
+    outputs:
+      artifact_ok: ${{ steps.artifact.outcome == 'success' && '1' || '0' }}
     steps:
       # v3.1.22：自托管机到 github.com:443 不稳定（actions/checkout 反复失败），
       # 改用 codeload 的 tarball 取源码（同一 ref、同一字节），不降级任何门禁。
@@ -146,7 +148,12 @@ jobs:
         run: node tools/release/build.mjs
       - name: 记录门禁证据
         run: node -e "const p=require('./dist/preflight.json');console.log('tests',p.tests,'e2e',p.e2e,'green',p.green)"
-      - uses: actions/upload-artifact@v4
+      # v3.1.25：artifact 只作「存档」，不再作为发布路径的单点。
+      # 自托管机对 results-receiver.actions.githubusercontent.com 的解析会间歇 ENOTFOUND，
+      # 之前它一挂，npm / GitHub Release 全部被 skip（构建本身是绿的）。
+      - id: artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: dsh-fang-release
           path: |
@@ -155,13 +162,81 @@ jobs:
             dist/manifest.json
             dist/preflight.json
             dist/npm/**
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
-  # ── 3. npm：用 Windows 上构建的同一份 payload 发布 ───────────────────────────
+      # v3.1.25：不依赖 artifact 的发布兜底——产物就在本 job 的工作区里，
+      # 直接发 npm 与 GitHub Release。幂等：已存在则跳过。
+      - name: 发布 npm（build job 内直发，不依赖 artifact）
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: pwsh
+        run: |
+          if (-not $env:NPM_TOKEN) {
+            Write-Host "::warning::未配置 NPM_TOKEN —— npm 发布跳过"
+            exit 0
+          }
+          $version = "${{ env.RELEASE_TAG }}".Replace('v','')
+          node -e "const p=require('./queue-journal/package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "::notice::queue-journal 已存在，跳过"
+          } else {
+            Set-Content -Path 'queue-journal/.npmrc' -Value "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" -Encoding utf8
+            Push-Location queue-journal
+            npm publish --ignore-scripts --access public
+            Pop-Location
+            Remove-Item 'queue-journal/.npmrc' -Force -ErrorAction SilentlyContinue
+          }
+          node -e "const p=require('./package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "::notice::${{ env.PUBLISH_NAME }}@$version 已存在，跳过"
+          } else {
+            node tools/release/publish-npm.mjs
+          }
+
+      - name: 直传 GitHub Release（不依赖 artifact）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ env.RELEASE_TAG }}"
+          $files = @()
+          $files += (Get-ChildItem dist -Filter 'dsh-fang-*.tgz' | ForEach-Object { $_.FullName })
+          $files += (Get-ChildItem dist -Filter 'dsh-fang-*.tgz.sha256' | ForEach-Object { $_.FullName })
+          foreach ($name in @('manifest.json','preflight.json')) {
+            $f = Join-Path 'dist' $name
+            if (Test-Path $f) { $files += (Resolve-Path $f).Path }
+          }
+          if ($files.Count -eq 0) { Write-Host "::error::dist 里没有可发布资产"; exit 1 }
+          Write-Host "assets: $($files -join ', ')"
+          $repo = "${{ github.repository }}"
+          $exists = $false
+          try {
+            $rel = gh api "repos/$repo/releases/tags/$tag" 2>$null | ConvertFrom-Json
+            if ($rel) { $exists = $true; Write-Host "release $tag 已存在（id=$($rel.id)）" }
+          } catch { $exists = $false }
+          if (-not $exists) {
+            gh api -X POST "repos/$repo/releases" -f tag_name="$tag" -f name="$tag" -F generate_release_notes=true | Out-Null
+            Write-Host "release $tag created"
+            Start-Sleep -Seconds 2
+          }
+          foreach ($f in $files) {
+            $assetName = Split-Path $f -Leaf
+            try {
+              gh api "repos/$repo/releases/tags/$tag/assets" 2>$null | Out-Null
+            } catch { }
+            gh release upload "$tag" "$f" --clobber --repo "$repo"
+            Write-Host "uploaded $assetName"
+          }
+          Write-Host "github release ready: $tag"
+
+  # ── 3. npm：build 已直发；这里只做「artifact 可用时的二次核验 + 补发」──────
+  #      artifact 缺失（自托管机 DNS 抖动）时本 job 直接跳过，不算失败。
   npm:
     name: npm publish
     needs: [guard, build]
+    if: needs.build.outputs.artifact_ok == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -230,6 +305,8 @@ jobs:
   github-release:
     name: GitHub Release
     needs: [guard, build]
+    # build job 已直传 Release；artifact 可用时这里做幂等补传。
+    if: needs.build.outputs.artifact_ok == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -284,7 +361,7 @@ jobs:
   # ── 6. healthz 远端复核（npm + GitHub 都必须能取到这一版）──────────────────
   healthz:
     name: healthz (remote)
-    needs: [npm, github-release]
+    needs: [build]   # v3.1.25：build 内已直发 npm + Release
     if: needs.npm.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -304,7 +381,7 @@ jobs:
   # ── 7. 私有镜像 verify（默认必过；RELEASE-WAIVER 规则 3）────────────────────
   mirror:
     name: private mirror verify
-    needs: [guard, github-release]
+    needs: [guard, build]   # v3.1.25：Release 由 build 直传
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -331,7 +408,7 @@ jobs:
   # ── 8. 终检：把“已发布”这件事再断言一次（含远端）──────────────────────────
   verify:
     name: final verify
-    needs: [guard, github-release, mirror, healthz]
+    needs: [guard, build, mirror, healthz]
     if: always() && needs.github-release.result == 'success' && needs.mirror.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10

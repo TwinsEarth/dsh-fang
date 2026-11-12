@@ -44,6 +44,52 @@ const STATUSES = Object.freeze(['pending', 'resolved', 'expired', 'abandoned'])
 const SOURCE_ROLES = Object.freeze(['pm', 'pjm', 'worker', 'system'])
 
 /**
+ * PM 主动性策略（v3.1.25）：把「遇到需要人判断的事情必须开票」写进模型可见的工具描述。
+ *
+ * 背景：决策中心的链路一直是通的，但 PM 从不主动调用 ask_user_choice，
+ * 于是"开发了一整天也看不到一张票"。工具 description 是模型唯一能读到的权威说明，
+ * 所以策略必须落在这里，而不是只写在文档里。
+ *
+ * 约束：
+ *  - 只影响「要不要开票」的判定，不改变任何权限/安全边界；
+ *  - red（阻塞）必须由人显式选择，任何情况下都不允许 AI 自选；
+ *  - 低风险且可回滚的推进不必开票（否则会变成注意力噪音）。
+ */
+export const PM_DECISION_POLICY = Object.freeze({
+  version: 1,
+  mustAsk: [
+    '要在两个及以上合理方案里做取舍（架构/技术选型/交互形态），且代价不可忽略',
+    '要执行不可逆或难以回滚的动作：删除数据、重置分支、强制推送、覆盖生产配置、发版',
+    '要触碰凭据、权限、外部账号、付费资源或对外承诺',
+    '需求存在歧义或缺失关键信息，不同理解会导致返工',
+    '要越过既定范围（改用户没要求的模块、扩大 mandate、跨仓库操作）',
+    '发现阻塞缺陷但修复方案会改变对外行为/契约',
+    '长时间任务（>10 分钟）需要中途改变方向',
+  ],
+  mustNotAsk: [
+    '低风险、可回滚、在既定范围内的实现细节（命名、注释、内部结构、测试补全）',
+    '等价于「继续」的常规推进，以及取文件/跑测试/格式化这类机械操作',
+    '已经有明确约定的既定方案（此前已确认过）',
+  ],
+  rules: [
+    '一次只问一个决定点，问题要具体到「选哪个」或「能不能做」',
+    '必须给出 2-4 个可执行选项，推荐项放第一个并把标签后缀 "(推荐)"',
+    'context 里写清：为什么需要人决定、每个选项的代价与风险、不决定的后果',
+    'red 用于阻塞（人不在就没法继续）；yellow/blue 用于「记录并继续」，不要滥用 red',
+    '绝对不要因为「不确定」而把问题原样抛回给开发者——先把能自己查的查清',
+  ],
+})
+
+/** 模型可见的 PM 主动性说明（拼进工具 description）。 */
+const PM_PROACTIVE_HINT = [
+  '【PM 主动性要求】',
+  '遇到下列情形必须调用本工具开票，不要自行假设、也不要把问题原样丢回给开发者：',
+  ...PM_DECISION_POLICY.mustAsk.map((item) => '· ' + item),
+  '下列情形不要开票（避免注意力噪音）：' + PM_DECISION_POLICY.mustNotAsk.join('；'),
+  '规则：' + PM_DECISION_POLICY.rules.join('；'),
+].join('\n')
+
+/**
  * 宿主角色绑定：只从宿主执行上下文里取角色，取不到返回 null。
  * 探测多个形状（不同 Host/版本字段名不同），但只接受 SOURCE_ROLES 白名单值；
  * 绝不读模型参数。返回 { role, roleSource, roleTrusted:true }。
@@ -333,7 +379,7 @@ function applyForkDecisionCenter(ctx, config, gate) {
       if (!tools || typeof tools.register !== 'function') return
       const unregister = tools.register({
         name: 'request_human_decision',
-        description: 'Fork 内请求人类决策（代理到母体决策中心）：黄/蓝/绿立即返回 ticketId；红色等待母体结果或超时回落。',
+        description: 'Fork 内请求人类决策（代理到母体决策中心）：黄/蓝/绿立即返回 ticketId；红色等待母体结果或超时回落。\n' + PM_PROACTIVE_HINT,
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -2093,7 +2139,7 @@ export function apply(ctx, config) {
         if (!tools || typeof tools.register !== 'function') return
         const unregister = tools.register({
           name: 'request_human_decision',
-          description: '当需要人类授权、选择方案、或汇报重要结果时，创建一张决策中心 ticket。红色会挂起等待；黄/蓝/绿只记录并立即返回。',
+          description: '当需要人类授权、选择方案、或汇报重要结果时，创建一张决策中心 ticket。红色会挂起等待；黄/蓝/绿只记录并立即返回。\n' + PM_PROACTIVE_HINT,
           parameters: {
             type: 'object',
             additionalProperties: false,
@@ -2187,7 +2233,10 @@ export function apply(ctx, config) {
         // PM 交互式选择：独立工具名，语义 = 红色决策 ticket（默认红、阻塞等待选择）。
         const unregisterChoice = tools.register({
           name: 'ask_user_choice',
-          description: 'PM 交互式选择：向人类提出一个带选项的问题，创建红色决策 ticket 并等待选择。',
+          description: 'PM 交互式选择：向人类提出一个带选项的问题，创建红色决策 ticket 并等待选择。'
+            + '\n凡属下列情形，PM 必须用本工具开票而不是自行决定或把问题丢回给开发者：'
+            + PM_DECISION_POLICY.mustAsk.join('；')
+            + '。每次只问一个决定点，给 2-4 个选项并标出推荐项。',
           parameters: {
             type: 'object',
             additionalProperties: false,
