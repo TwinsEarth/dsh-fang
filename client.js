@@ -6452,7 +6452,9 @@ window.__ModuleLoader__.load({
       const matchNav = (text) => {
         const value = clean(text)
         if (!value) return false
-        return NAV_HIDDEN.some((label) => value === label || value.startsWith(label + ' '))
+        // 实机发现：宿主会把快捷键拼在文案后面（「新会话Ctrl+Alt+N」），
+        // 因此按「标签前缀」匹配，而不是要求空格分隔。
+        return NAV_HIDDEN.some((label) => value === label || value.startsWith(label))
       }
       const isPluginNav = (text) => {
         const value = clean(text)
@@ -6477,6 +6479,37 @@ window.__ModuleLoader__.load({
             row.dataset.fangEssenceHidden = '1'
             row.style.setProperty('display', 'none', 'important')
           }
+        }
+      }
+
+      /**
+       * v3.1.23 实机补充：等工作区不是单个按钮，而是「工作区」分组标题 + 若干工作区行。
+       * 元主只做插件控制台，因此整段收起：标题所在分组 + 所有工作区行。
+       */
+      const hideWorkspaceBlock = () => {
+        if (disposed || !active) return
+        // ① 分组标题：文本恰好是「工作区」的任意元素（标题/按钮/标签）
+        for (const node of doc.querySelectorAll('div,span,h2,h3,button,a')) {
+          const text = clean(node.textContent)
+          if (text !== '工作区' && text !== 'Workspace') continue
+          const blockNode = node.closest('[class*="panelRow"],[class*="workspaceRow"],[class*="section"],[class*="group"]') || node.parentElement
+          if (!blockNode || blockNode === doc.body) continue
+          if (blockNode.dataset.fangEssenceHidden === '1') continue
+          blockNode.dataset.fangEssenceHidden = '1'
+          blockNode.hidden = true
+          blockNode.setAttribute('aria-hidden', 'true')
+          blockNode.style.setProperty('display', 'none', 'important')
+        }
+        // ② 工作区行（默认工作区 / 某个工作区名）
+        for (const node of doc.querySelectorAll('button,div,li')) {
+          if (!node || node.dataset.fangEssenceHidden === '1') continue
+          const text = clean(node.textContent)
+          if (!/^(默认工作区|工作区|Workspace)/.test(text)) continue
+          if (!node.closest('[class*="sidebar"],[class*="sideBar"],[class*="sider"],nav,aside')) continue
+          node.dataset.fangEssenceHidden = '1'
+          node.hidden = true
+          node.setAttribute('aria-hidden', 'true')
+          node.style.setProperty('display', 'none', 'important')
         }
       }
 
@@ -6553,6 +6586,7 @@ window.__ModuleLoader__.load({
       const apply = () => {
         if (disposed) return
         hideNavRows()
+        hideWorkspaceBlock()
         hideComposer()
         insertNotice()
         landOnPlugins()
@@ -6626,7 +6660,7 @@ window.__ModuleLoader__.load({
         for (const node of doc.querySelectorAll('button')) {
           if (!isPanelRow(node)) continue
           const navText = String(node.textContent || '').trim()
-          if (!isPluginNavText(navText) && !/^新会话$|^新建会话$/.test(navText)) continue
+          if (!isPluginNavText(navText) && !/^新会话|^新建会话/.test(navText)) continue
           if (node.dataset.fangForkHidden === '1' && node.hidden) continue
           node.dataset.fangForkHidden = '1'
           node.hidden = true
