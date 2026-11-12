@@ -43,7 +43,7 @@ function seedSidebar(window) {
   const doc = window.document
   const nav = doc.createElement('aside')
   nav.className = 'sidebar'
-  for (const label of ['插件', '工作区', '新会话', '自动化任务']) {
+  for (const label of ['插件', '工作区', '新会话Ctrl+Alt+N', '自动化任务']) {
     const button = doc.createElement('button')
     button.className = 'wtg9ga_panelRow'
     button.textContent = label
@@ -76,7 +76,7 @@ if (!JSDOM) {
       await waitFor(() => window.document.documentElement.getAttribute('data-fang-essence-locks') === 'applied')
       await waitFor(() => {
         const buttons = [...nav.querySelectorAll('button')]
-        return buttons.find((b) => b.textContent === '工作区')?.hidden && buttons.find((b) => b.textContent === '新会话')?.hidden
+        return buttons.find((b) => b.textContent === '工作区')?.hidden && buttons.find((b) => b.textContent === '新会话Ctrl+Alt+N')?.hidden
       })
       const buttons = [...nav.querySelectorAll('button')]
       const pluginNav = buttons.find((b) => b.textContent === '插件')
