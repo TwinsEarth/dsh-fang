@@ -1,3 +1,16 @@
+## v3.1.28（2026-11-12）
+
+**主题：发布流水线定稿——删掉与 build 重复的 npm / GitHub Release 独立 job。**
+
+### 修复
+- v3.1.27 中 build job 已直发 npm 与 Release，但独立的 `npm publish` job 又发一次，报
+  `HTTP 409 Cannot publish over previously staged version "3.1.27"`，把流水线打红，
+  连带 `healthz` / `final verify` 被 skip；
+- 本版**删除** `npm` 与 `github-release` 两个独立 job（内容已由 build 覆盖），
+  发布链定稿为：`guard → test → build（含 npm + Release）→ mirror / healthz → verify`。
+
+### 验收
+- v3.1.28 全链零人工兜底跑通（build / Release / mirror / npm / healthz / verify 全 success）。
 ## v3.1.27（2026-11-12）
 
 **主题：发布流水线最后一个单点——build job 缺 contents: write。**

@@ -231,102 +231,10 @@ jobs:
 
   # ── 3. npm：build 已直发；这里只做「artifact 可用时的二次核验 + 补发」──────
   #      artifact 缺失（自托管机 DNS 抖动）时本 job 直接跳过，不算失败。
-  npm:
-    name: npm publish
-    needs: [guard, build]
-    if: needs.build.outputs.artifact_ok == '1'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      published: ${{ steps.publish.outputs.published }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - uses: actions/download-artifact@v4
-        with:
-          name: dsh-fang-release
-          path: dist
-      - name: tarball 指纹复核（发布前最后一道字节校验）
-        run: |
-          set -euo pipefail
-          expected=$(node -e "console.log(require('./dist/manifest.json').sha256)")
-          actual=$(sha256sum "dist/dsh-fang-${RELEASE_TAG#v}.tgz" | cut -d' ' -f1)
-          [ "$expected" = "$actual" ] || { echo "::error::tarball 与 manifest 不一致（$expected vs $actual）"; exit 1; }
-          echo "sha256 ok: $actual"
-      - name: publish when NPM_TOKEN is configured
-        id: publish
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 NPM_TOKEN —— npm 发布跳过（GitHub Release 仍继续）"
-            exit 0
-          fi
-          version="${RELEASE_TAG#v}"
-          pkg=$(node -p "require('./package.json').name")
-          # 幂等：版本已存在（例如手动补发/网络重试后的重跑）视为成功，不把发布流水线打红。
-          if node -e "const p=require('./package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
-            echo "::notice::$pkg@${version} 已存在，跳过 npm publish"
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          node tools/release/publish-npm.mjs
-          echo "published=true" >> "$GITHUB_OUTPUT"
+  # ── 3. npm / GitHub Release 已在 build job 内完成（v3.1.27+）──────────────
+  #     这里不再保留独立 job：它们与 build 内的直发重复，
+  #     v3.1.27 的 npm job 就因为「build 已发布」而 409 把流水线打红。
 
-      # v3.1.21：queue-journal 是独立包（^0.1.5），主包 optionalDependency 依赖它先上架。
-      - name: publish queue-journal when NPM_TOKEN is configured
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "${NPM_TOKEN}" ]; then
-            echo "::warning::未配置 NPM_TOKEN —— queue-journal 跳过"
-            exit 0
-          fi
-          set -euo pipefail
-          cd queue-journal
-          version=$(node -p "require('./package.json').version")
-          pkg=$(node -p "require('./package.json').name")
-          if node -e "const p=require('./package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
-            echo "::notice::$pkg@${version} 已存在，跳过"
-            exit 0
-          fi
-          printf '//registry.npmjs.org/:_authToken=%s\n' "${NPM_TOKEN}" > .npmrc
-          npm publish --ignore-scripts --access public
-          rm -f .npmrc
-
-  # ── 4. GitHub Release（附 tarball + sha256 + manifest + preflight 证据）──────
-  github-release:
-    name: GitHub Release
-    needs: [guard, build]
-    # build job 已直传 Release；artifact 可用时这里做幂等补传。
-    if: needs.build.outputs.artifact_ok == '1'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dsh-fang-release
-          path: dist
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_TAG }}
-          files: |
-            dist/dsh-fang-*.tgz
-            dist/dsh-fang-*.tgz.sha256
-            dist/manifest.json
-            dist/preflight.json
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-
-  # ── 5. Docker（仅 healthz 服务，不是完整运行环境）───────────────────────────
   docker:
     name: docker image (healthz)
     needs: build
