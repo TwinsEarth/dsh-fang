@@ -1135,11 +1135,12 @@ window.__ModuleLoader__.load({
 .fang-relay-fab{position:fixed;right:18px;top:52%;transform:translateY(-50%);z-index:2147482900;display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 12px;border-radius:999px;border:1px solid rgba(200,16,46,.35);background:#fff;color:#C8102E;box-shadow:0 8px 24px -8px rgba(200,16,46,.45);cursor:pointer;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;-webkit-app-region:no-drag;user-select:none}
 .fang-relay-fab:hover{background:#FFF5F7}
 .fang-relay-fab[hidden]{display:none}
+.fang-relay-fab.is-empty{opacity:.55;border-color:rgba(16,17,20,.18);color:#6E6E73;box-shadow:0 6px 18px -10px rgba(16,17,20,.35)}
+.fang-relay-fab.is-empty:hover{opacity:.85;background:#F5F5F7}
 .fang-relay-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#C8102E;color:#fff;font-size:11px;font-weight:700}
-.fang-relay-panel{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);z-index:2147483000;background:#fff;border-left:1px solid rgba(16,17,20,.12);box-shadow:-18px 0 48px rgba(16,17,20,.18);transform:translateX(102%);transition:transform .22s cubic-bezier(.22,.61,.36,1);display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.45;color:#1D1D1F}
-.fang-relay-panel.is-open{transform:translateX(0)}
-.fang-relay-backdrop{position:fixed;inset:0;z-index:2147482999;background:rgba(18,19,22,.22);opacity:0;pointer-events:none;transition:opacity .2s ease}
-.fang-relay-backdrop.is-open{opacity:1;pointer-events:auto}
+.fang-relay-panel{position:fixed;top:auto;right:12px;bottom:12px;height:33vh;min-height:220px;max-height:33vh;width:min(420px,94vw);z-index:2147483000;background:#fff;border:1px solid rgba(16,17,20,.12);border-radius:16px 16px 12px 12px;box-shadow:0 18px 48px -12px rgba(16,17,20,.28);transform:translateY(calc(100% + 16px));transition:transform .22s cubic-bezier(.22,.61,.36,1);display:flex;flex-direction:column;pointer-events:auto;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.45;color:#1D1D1F}
+.fang-relay-panel.is-open{transform:translateY(0)}
+.fang-relay-backdrop{display:none}
 .fang-relay-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid rgba(16,17,20,.08);flex:0 0 auto}
 .fang-relay-title{font-size:14px;font-weight:700}
 .fang-relay-sub{font-size:11.5px;color:#86868B}
@@ -5430,6 +5431,7 @@ window.__ModuleLoader__.load({
       let backdrop = null
       let unsubscribe = null
       let keyHandler = null
+      let onDocPointerDown = null
       let disposed = false
       const current = () => relayPendingFor(store, sid)
       const setOpen = (next) => {
@@ -5448,7 +5450,12 @@ window.__ModuleLoader__.load({
         try {
           const result = await store.resolve(ticket.id, option?.value)
           if (result && result.ok === false) state.error = '提交失败：' + String(result.reason ?? result.error ?? 'resolve-failed')
-          else { state.customs.delete(String(ticket.id)); if (typeof store.refresh === 'function') await Promise.resolve(store.refresh()).catch(() => {}) }
+          else {
+            state.customs.delete(String(ticket.id))
+            if (typeof store.refresh === 'function') await Promise.resolve(store.refresh()).catch(() => {})
+            // 选完立刻收起为小浮标（用户要求：不占工作区）
+            setOpen(false)
+          }
         } catch (error) { state.error = '提交失败：' + String(error?.message ?? error) } finally {
           state.busy = false
           render()
@@ -5464,7 +5471,12 @@ window.__ModuleLoader__.load({
           if (typeof store.resolveCustom !== 'function') throw new Error('resolve-custom-unavailable')
           const result = await store.resolveCustom(ticket.id, text)
           if (result && result.ok === false) state.error = '提交失败：' + String(result.reason ?? result.error ?? 'resolve-failed')
-          else { state.customs.delete(String(ticket.id)); if (typeof store.refresh === 'function') await Promise.resolve(store.refresh()).catch(() => {}) }
+          else {
+            state.customs.delete(String(ticket.id))
+            if (typeof store.refresh === 'function') await Promise.resolve(store.refresh()).catch(() => {})
+            // 选完立刻收起为小浮标（用户要求：不占工作区）
+            setOpen(false)
+          }
         } catch (error) { state.error = '提交失败：' + String(error?.message ?? error) } finally {
           state.busy = false
           render()
@@ -5510,8 +5522,10 @@ window.__ModuleLoader__.load({
         const tickets = current()
         if (countEl && fab) {
           countEl.textContent = tickets.length > 99 ? '99+' : String(tickets.length)
-          fab.hidden = tickets.length === 0
-          fab.setAttribute('aria-label', tickets.length > 0 ? `当前会话有 ${tickets.length} 个待决策` : '当前会话没有待决策')
+          // v3.1.24：入口常驻（0 时半透明），否则用户"一整天都看不到决策中心"
+          fab.hidden = false
+          fab.classList.toggle('is-empty', tickets.length === 0)
+          fab.setAttribute('aria-label', tickets.length > 0 ? `当前会话有 ${tickets.length} 个待决策` : '当前会话没有待决策（点击查看决策中心）')
         }
         if (!panel) return
         const head = h('div', { class: 'fang-relay-head' },
@@ -5534,11 +5548,20 @@ window.__ModuleLoader__.load({
           type: 'button', class: 'fang-relay-fab', title: '决策中继：当前会话的待决策',
           'aria-label': '打开当前会话决策中继', 'aria-haspopup': 'dialog',
         }, h('span', { 'aria-hidden': 'true', style: { fontSize: '15px', lineHeight: 1 } }, '◈'), h('span', null, '待选'), countEl)
-        backdrop = h('div', { class: 'fang-relay-backdrop' })
         panel = h('aside', { class: 'fang-relay-panel', role: 'dialog', 'aria-modal': 'false', 'aria-label': '当前会话决策中继' })
-        doc.body.append(fab, backdrop, panel)
+        doc.body.append(fab, panel)
         fab.addEventListener('click', () => setOpen(!state.open))
-        backdrop.addEventListener('click', () => setOpen(false))
+        // 用户要求：不遮挡会话/工作区，点浮窗以外任何地方即收起为小浮标
+        onDocPointerDown = (event) => {
+          if (disposed || !state.open) return
+          const target = event.target
+          try {
+            if (panel && panel.contains(target)) return
+            if (fab && fab.contains(target)) return
+            setOpen(false)
+          } catch { /* ignore */ }
+        }
+        doc.addEventListener('pointerdown', onDocPointerDown, true)
         keyHandler = onKey
         doc.addEventListener('keydown', keyHandler, true)
         unsubscribe = typeof store.subscribe === 'function' ? store.subscribe(render) : null
@@ -5555,6 +5578,7 @@ window.__ModuleLoader__.load({
         disposed = true
         if (unsubscribe) { try { unsubscribe() } catch { /* ignore */ } unsubscribe = null }
         if (keyHandler) { try { doc.removeEventListener('keydown', keyHandler, true) } catch { /* ignore */ } keyHandler = null }
+        if (onDocPointerDown) { try { doc.removeEventListener('pointerdown', onDocPointerDown, true) } catch { /* ignore */ } onDocPointerDown = null }
         for (const node of [fab, backdrop, panel]) { try { node?.remove() } catch { /* ignore */ } }
         fab = null; backdrop = null; panel = null; countEl = null
       }

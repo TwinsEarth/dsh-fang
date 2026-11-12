@@ -121,14 +121,20 @@ test('decision relay: pending session shows a right-side 待选 button and A/B o
       return node || null
     })
     assert.ok(panel, 'drawer opens')
-    assert.ok(harness.doc.querySelector('.fang-relay-backdrop.is-open'), 'backdrop opens')
+    // v3.1.24：不再使用遮挡式遮罩（会挡住会话与工作区），改为点外部收起
+    assert.equal(harness.doc.querySelector('.fang-relay-backdrop.is-open'), null, 'no blocking backdrop')
     const keys = [...panel.querySelectorAll('.fang-relay-option .fang-relay-key')].map((node) => node.textContent)
     assert.deepEqual(keys, ['A', 'B'])
     panel.querySelector('[data-option-key="A"]').click()
     await waitFor(() => calls.resolve.length === 1)
     assert.deepEqual(calls.resolve[0], { id: 'dec_1', option: 'a' })
+    // v3.1.24：选完自动收起为小浮标
+    await waitFor(() => harness.doc.querySelector('.fang-relay-panel.is-open') === null)
     await waitFor(() => harness.doc.querySelector('.fang-relay-empty'))
-    assert.equal(harness.doc.querySelector('.fang-relay-fab').hidden, true, 'button hides when nothing is pending')
+    // v3.1.24：入口常驻（0 待选时半透明），避免用户"看不到决策中心"
+    assert.equal(harness.doc.querySelector('.fang-relay-fab').hidden, false)
+    assert.equal(harness.doc.querySelector('.fang-relay-fab').classList.contains('is-empty'), true)
+    assert.equal(harness.doc.querySelector('.fang-relay-fab').textContent.includes('0'), true)
     dispose()
     assert.equal(harness.doc.querySelector('.fang-relay-fab'), null, 'dispose removes the relay chrome')
   } finally {
@@ -159,13 +165,15 @@ test('decision relay: free-text decision resolves the same ticket', async () => 
   }
 })
 
-test('decision relay: tickets from other sessions are ignored; no pending means no button', async () => {
+test('decision relay: tickets from other sessions are ignored; empty entry stays visible with count 0', async () => {
   const harness = makeHarness()
   const { store } = makeStore([ticket({ id: 'dec_other', source: { sessionId: 'session-other' } })])
   const { dispose } = mount(harness, store, 'session-1')
   try {
     const fab = await waitFor(() => harness.doc.querySelector('.fang-relay-fab'))
-    assert.equal(fab.hidden, true)
+    assert.equal(fab.hidden, false, 'v3.1.24: entry is always visible')
+    assert.equal(fab.classList.contains('is-empty'), true)
+    assert.equal(harness.doc.querySelector('.fang-relay-count').textContent, '0')
     assert.equal(harness.doc.querySelectorAll('.fang-relay-ticket').length, 0)
     dispose()
   } finally {

@@ -144,6 +144,12 @@ export const Config = z.object({
     .description('单会话每日最多创建多少 ticket（0=不限）；超限策略见 sessionQuotaPolicy'),
   sessionQuotaPolicy: z.union(['reject', 'demote', 'merge']).default('reject')
     .description('单会话日配额超限策略：reject=拒绝；demote=降一级并打标；merge=并入该会话最新 pending ticket'),
+  autoDecide: z.object({
+    enabled: z.boolean().default(true),
+    levels: z.array(z.union(['green', 'blue', 'yellow', 'red'])).default(['green']),
+    minConfidence: z.number().min(0).max(1).default(0.8),
+    allowUnknownRisk: z.boolean().default(false),
+  }).description('AI 自动决策：仅对白名单 level、高置信度、低风险选项自动选择；red/blocking 永不自动'),
   forkWaitTimeoutMs: z.number().min(0).max(86400000).default(300000)
     .description('fork 代理模式下，红色 ticket 等待母体处理的最长时间（毫秒）'),
 }).description('瓮城决策中心配置')
@@ -173,6 +179,18 @@ function normalizeConfig(input = {}) {
       ? String(input.sessionQuotaPolicy)
       : DEFAULTS.sessionQuotaPolicy,
     forkWaitTimeoutMs: Math.max(0, Math.min(86400000, Math.floor(Number(input.forkWaitTimeoutMs ?? DEFAULTS.forkWaitTimeoutMs) || 0))),
+    autoDecide: (() => {
+      const raw = input.autoDecide && typeof input.autoDecide === 'object' ? input.autoDecide : {}
+      const levels = Array.isArray(raw.levels)
+        ? raw.levels.map((level) => String(level)).filter((level) => ['green', 'blue', 'yellow', 'red'].includes(level))
+        : ['green']
+      return {
+        enabled: raw.enabled !== false,
+        levels: levels.length > 0 ? levels : ['green'],
+        minConfidence: Math.max(0, Math.min(1, Number(raw.minConfidence ?? 0.8) || 0.8)),
+        allowUnknownRisk: raw.allowUnknownRisk === true,
+      }
+    })(),
   }
 }
 
@@ -1091,12 +1109,15 @@ export function apply(ctx, config) {
         resolutionNote: item.resolutionNote === undefined || item.resolutionNote === null ? null : String(item.resolutionNote),
       }
       if (ticket.status === 'pending') {
-        ticket.status = 'expired'
-        ticket.outcome = 'expired'
-        ticket.level = 'gray'
+        // v3.1.24：进程重启后 pending 仍保留给人回答（浮窗/收件箱可见），
+        // 只有已经过期的才降级为 gray；不再一律强制 expired（那会让重启后“什么都没了”）。
+        const expired = ticket.expiresAt !== null && Number(ticket.expiresAt) <= nowMs()
+        if (expired) {
+          ticket.status = 'expired'
+          ticket.outcome = 'expired'
+          ticket.level = 'gray'
+        }
         ticket.isBlocking = false
-        ticket.resolvedAt = nowMs()
-        ticket.resolvedOption = null
         recovered = true
       }
       tickets.set(ticket.id, ticket)
@@ -1772,6 +1793,27 @@ export function apply(ctx, config) {
       ticket.ai = advice
       ticket.rev = nextRevision()
       recordAiSuccess(usage)
+      // v3.1.24：低风险工单允许 AI 自动决策（不再“全部丢给开发者”）。
+      // 约束：只对白名单 level、置信度达标、推荐项是该 level 的低风险选项才自动选；
+      // red / blocking 永远要人明确选择。
+      try {
+        const auto = cfg.autoDecide && cfg.autoDecide.enabled === true ? cfg.autoDecide : null
+        const autoLevels = new Set((auto?.levels ?? ['green']).map((level) => String(level)))
+        const recommended = ticket.options.find((option) => option.value === advice.recommendation)
+        const riskOfRecommended = (advice.optionRisks ?? []).find((item) => item.value === advice.recommendation)?.risk ?? null
+        const confidenceOk = advice.confidence !== null && advice.confidence >= Number(auto?.minConfidence ?? 0.8)
+        const riskOk = Number(auto?.minConfidence ?? 0.8) > 1 ? false
+          : (riskOfRecommended === 'low' || (auto?.allowUnknownRisk === true && riskOfRecommended === null))
+        if (auto && autoLevels.has(ticket.level) && ticket.level !== 'red' && ticket.isBlocking !== true
+          && recommended && confidenceOk && riskOk) {
+          const resolved = resolve(ticket.id, recommended.value, { by: 'ai-auto', note: 'AI 自动决策（低风险，' + (advice.confidence ?? 0) + '）' })
+          audit('decision-ai-auto-resolved', {
+            id: ticket.id, level: ticket.level, option: recommended.value,
+            confidence: advice.confidence, risk: riskOfRecommended,
+          })
+          if (resolved && resolved.ok !== false) return { ok: true, advice, ticket: publicTicket(ticket), autoResolved: true }
+        }
+      } catch { /* 自动决策失败不影响建议本身 */ }
       save()
       emitUpdated(ticket)
       audit('decision-ai-advice', {
