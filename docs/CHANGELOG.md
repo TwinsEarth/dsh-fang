@@ -1,3 +1,50 @@
+## v3.1.31（2026-11-13）
+
+**主题：修「生成元主失败」（折行纯量解析）+ 让 CI 的远端复核/终检真正执行。**
+
+### P1 · 生成元主失败（阻塞功能）
+
+实测报错：`capture: mother patch parse failed: line 93: unexpected indentation / content`。
+
+母体 `cordis.patch.yml` 第 92–93 行是 **DSH 自己写出的折行纯量**：
+
+```yaml
+        description: Stronger agentic coding, ...; suited
+          to complex or quality-critical tasks at higher cost.
+```
+
+合法 YAML，但 `parseYamlSubset()` 的逐行子集解析器不接受续行，
+在 `src/lib/rule-registry.mjs:293` 抛出 `unexpected indentation / content`，
+于是**只要 profile 里有折行描述，生成元主 100% 失败**。
+
+修复：新增 `foldContinuations()`，在三处纯量赋值点之前吸收更深缩进的**非结构**续行
+（既不是 `key:` 也不是 `- item`），按 YAML 折行语义用单个空格拼接；
+结构行一律不吸收，避免吞掉兄弟键。
+
+实测：真实母体 patch 解析 **0 错误**，折行值拼成 `Stronger agentic coding; suited to complex ...`。
+
+### P2 · CI 的 healthz / final verify 一直 skipped
+
+`if` 仍引用已在 v3.1.25 删除的 `npm` / `github-release` job：
+
+```yaml
+healthz: if: needs.npm.outputs.published == 'true'        # job 不存在 → 永远 false
+verify : if: needs.github-release.result == 'success'     # 同上
+```
+
+→ 三方发布的远端复核与终检**从 v3.1.25 到 v3.1.30 从未真正执行**。
+
+修复：
+```yaml
+healthz: if: always() && needs.build.result == 'success'
+verify : if: always() && needs.build.result == 'success' && needs.mirror.result == 'success'
+```
+
+### 验证
+
+- 新增 `test/yaml-folded-scalar.test.mjs`（5 例）：折行 / 多折行 / 不吞兄弟键 / 序列内联键 / 引号共存；
+- `test/rule-config.test.mjs` 37 例全过（无回归）；
+- 真实母体 patch 复现 → 修复后 0 错误。
 ## v3.1.30（2026-11-12）
 
 **主题：修「分身启动/还原失败 spawn-failed」真因，并让元主无对话启动、派生必须导入一个会话。**
