@@ -1,29 +1,66 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Composer journal: capture the unsent draft and a read-only mirror of the
-// composer queue, persist them through the fang HTTP API, and offer recovery
-// only after an explicit user click. This plugin never sends a message.
+// Composer journal (v0.1.5): 持久化未发送草稿 + 官方排队队列的只读镜像，
+// 通过 fang HTTP API 落盘；恢复必须由用户显式点击，插件本身永不发送消息。
+//
+// v0.1.5 修复「队列必丢」：
+//   1) journal key 不再塌缩到 "/"：优先 slot 的 SessionId，其次页面探测，
+//      最后退化为「本页实例键」（写进 sessionStorage，跨刷新稳定），绝不共用 "/"；
+//   2) 队列变化即写：MutationObserver 盯 [data-queue-dock] + 15s 兜底 + 关闭前 flush；
+//   3) 恢复 UI 增加「历史快照」：即使主 journal 被覆盖，也能从 append-only 历史里挑一份恢复；
+//   4) 写入后回读校验：发现乱码（"????" 且原文含非 ASCII）会标记并重试一次；
+//   5) 服务端有 /fang/api/composer/journal/history，按会话过滤。
 window.__ModuleLoader__.load({
   id: '@twinsearth/dsh-fang-queue-journal',
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const DEBOUNCE_MS = 400
+    const DEBOUNCE_MS = 250
+    const FALLBACK_MS = 15_000
 
-    function sessionKey() {
+    /** 从 URL 里尝试取会话 id（兼容多种路由形态）。 */
+    function sessionKeyFromUrl() {
       const hash = String(location.hash || '').replace(/^#/, '')
       const fromHash = /sessions?\/([^/?#]+)/.exec(hash)
       const fromPath = /sessions?\/([^/?#]+)/.exec(location.pathname)
-      const q = new URLSearchParams(location.search).get('session')
-      const value = String(q || fromHash?.[1] || fromPath?.[1] || hash || location.pathname || '/')
-      return value.slice(0, 200)
+      const q = new URLSearchParams(location.search).get('session') || new URLSearchParams(location.search).get('sessionId')
+      return String(q || fromHash?.[1] || fromPath?.[1] || '').slice(0, 200)
     }
 
-    // The official slot prop gives us the real SessionId. The URL may not carry
-    // one (DSH keeps the selected Session in client state), so using the URL as
-    // the journal key collapses every session onto "/" and only the last draft
-    // survives. Prefer the SessionId; keep the URL only as a compatibility key.
+    /** 从 DOM 上找宿主暴露的会话 id（DSH 可能在容器上打 data 属性）。 */
+    function sessionKeyFromDom() {
+      const selectors = ['[data-session-id]', '[data-sessionid]', '[data-current-session]', '[data-active-session]']
+      for (const selector of selectors) {
+        const el = document.querySelector(selector)
+        const value = el?.getAttribute(selector.replace(/[[\]]/g, '').split('=')[0]) || ''
+        const attr = selector.slice(1, -1)
+        const v = el?.getAttribute(attr)
+        if (v) return String(v).slice(0, 200)
+      }
+      return ''
+    }
+
+    /** 本页实例键：sessionStorage 里稳定存在，避免多会话挤在同一个 key。 */
+    function instanceKey() {
+      try {
+        const cached = sessionStorage.getItem('fang-queue-journal-instance')
+        if (cached) return cached
+        const generated = 'page:' + Math.random().toString(36).slice(2, 10) + ':' + Date.now().toString(36)
+        sessionStorage.setItem('fang-queue-journal-instance', generated)
+        return generated
+      } catch { return 'page:unknown' }
+    }
+
     let activeKey = ''
     let activeSessionId = ''
+    function resolveKey() {
+      // 优先级：slot 给的 SessionId > DOM > URL > 本页实例键（绝不使用 "/"）
+      if (activeSessionId) return activeSessionId
+      const fromUrl = sessionKeyFromUrl()
+      const fromDom = sessionKeyFromDom()
+      const key = String(fromDom || fromUrl || instanceKey())
+      activeKey = key === '/' || key === '' ? instanceKey() : key
+      return activeKey
+    }
 
     let tokenCache = { at: 0, token: '' }
     async function fangToken() {
@@ -39,16 +76,29 @@ window.__ModuleLoader__.load({
     async function journalRequest(method, entry, keyOverride) {
       const token = await fangToken()
       if (!token) return null
-      const key = keyOverride || activeKey || activeSessionId || sessionKey()
+      const key = keyOverride || resolveKey()
       const res = await fetch(method === 'POST' ? '/fang/api/composer/journal' : '/fang/api/composer/journal?key=' + encodeURIComponent(key), {
         method,
         headers: { 'content-type': 'application/json', 'x-fang-auth': token },
         body: method === 'POST'
-          ? JSON.stringify({ key, sessionId: activeSessionId || undefined, path: location.hash || location.pathname, ...entry })
+          ? JSON.stringify({ key, sessionId: activeSessionId || undefined, sessionKey: key, path: location.hash || location.pathname, ...entry })
           : undefined,
       })
       if (!res.ok) return null
-      return res.json()
+      try { return await res.json() } catch { return null }
+    }
+
+    async function journalHistory(limit = 10) {
+      const token = await fangToken()
+      if (!token) return []
+      try {
+        const res = await fetch('/fang/api/composer/journal/history?limit=' + Number(limit) + '&sessionKey=' + encodeURIComponent(resolveKey()), {
+          headers: { accept: 'application/json', 'x-fang-auth': token },
+        })
+        if (!res.ok) return []
+        const body = await res.json()
+        return Array.isArray(body?.items) ? body.items : []
+      } catch { return [] }
     }
 
     async function queueRestore(sessionId, items) {
@@ -149,14 +199,12 @@ window.__ModuleLoader__.load({
         seen.add(value)
         out.push({ text: value, at: Date.now() })
       }
-      // DSH 自带 QueueDock 的稳定锚点：data-queue-dock；每行是 li。
       const docks = document.querySelectorAll('[data-queue-dock]')
       for (const dock of docks) {
         for (const row of dock.querySelectorAll('li')) pushText(queueRowText(row))
       }
       if (docks.length > 0) return out
 
-      // 兼容：通过 header 的“N 条排队消息”文案 + aria-controls 定位。
       const headers = [...document.querySelectorAll('button[aria-controls], [role="button"][aria-controls]')]
         .filter((el) => QUEUE_COUNT_RE.test(String(el.textContent || '')))
       for (const header of headers) {
@@ -171,7 +219,6 @@ window.__ModuleLoader__.load({
     function scanQueue() {
       const found = scanQueueDock()
       if (found.length > 0) return found.slice(-100)
-      // 旧 DOM / 自定义队列仍走宽松选择器
       const seen = new Set()
       const out = []
       const nodes = document.querySelectorAll('[class*="queue" i], [data-testid*="queue" i], [aria-label*="queue" i], [class*="pending" i], [data-testid*="pending" i], [aria-label*="排队"], [title*="排队"]')
@@ -184,71 +231,75 @@ window.__ModuleLoader__.load({
       return out.slice(-100)
     }
 
+    /** 回读校验：确认服务端存下来的队列文本与本地一致（并检测 "????" 乱码）。 */
+    async function verifySaved(expectedQueue) {
+      const body = await journalRequest('GET')
+      const saved = Array.isArray(body?.entry?.queue) ? body.entry.queue.map((item) => String(item?.text || '')) : []
+      const expected = expectedQueue.map((item) => String(item?.text || ''))
+      const sameLength = saved.length === expected.length
+      const sameText = sameLength && saved.every((text, index) => text === expected[index])
+      const looksMojibake = saved.some((text) => /\?{3,}/.test(text) && !/\?{3,}/.test(expected[saved.indexOf(text)] || ''))
+      return { ok: sameText && !looksMojibake, sameLength, sameText, looksMojibake, saved }
+    }
+
     function JournalDock(props) {
       const sessionId = String(props?.sessionId || '')
       const [entry, setEntry] = React.useState(null)
+      const [history, setHistory] = React.useState([])
       const [status, setStatus] = React.useState('')
       const [showQueue, setShowQueue] = React.useState(false)
+      const [showHistory, setShowHistory] = React.useState(false)
 
       React.useEffect(() => {
         activeSessionId = sessionId
-        activeKey = sessionId || sessionKey()
         setEntry(null)
         setShowQueue(false)
+        setShowHistory(false)
         let alive = true
         journalRequest('GET').then(async (body) => {
-          let found = body?.entry ?? null
-          // Migration: older builds keyed everything under "/".
-          if (!found && activeKey !== '/') {
-            const legacy = await journalRequest('GET', null, '/').catch(() => null)
-            found = legacy?.entry ?? null
-          }
-          if (alive) setEntry(found)
+          if (alive) setEntry(body?.entry ?? null)
         }).catch(() => {})
+        journalHistory(10).then((items) => { if (alive) setHistory(items) }).catch(() => {})
         return () => { alive = false }
       }, [sessionId])
 
-      if (!entry || (!entry.draft && !(entry.queue || []).length)) return null
+      const queue = Array.isArray(entry?.queue) ? entry.queue : []
+      const hasEntry = Boolean(entry && (entry.draft || queue.length))
 
-      const queue = Array.isArray(entry.queue) ? entry.queue : []
-      const restoreAll = async () => {
-        const draft = String(entry.draft || '')
-        const draftOk = draft ? setDraftViaApi(props, draft) : true
-        if (!draftOk) {
-          setStatus('未找到输入框，请先打开会话')
-          return
-        }
-        if (queue.length > 0) {
-          if (!sessionId) {
-            setStatus('草稿已恢复；队列需要先选中会话')
-            return
-          }
-          const restored = await queueRestore(sessionId, queue)
-          if (!restored.ok) {
-            setStatus(restored.error === 'session-not-live'
-              ? '草稿已恢复；会话未运行，队列保留待重试'
-              : '草稿已恢复；队列恢复失败：' + restored.error)
-            return
-          }
+      if (!hasEntry && history.length === 0) return null
+
+      const restoreItems = async (items, draft) => {
+        const draftText = String(draft || '')
+        const draftOk = draftText ? setDraftViaApi(props, draftText) : true
+        if (!draftOk) { setStatus('未找到输入框，请先打开会话'); return }
+        if (items.length === 0) {
           await journalRequest('POST', { draft: '', queue: [] })
           setEntry(null)
-          setStatus(`已恢复草稿，并把 ${restored.queued} 条排队消息放回官方队列${restored.failed ? `（${restored.failed} 条失败）` : ''}`)
+          setStatus('草稿已放入官方输入框')
+          return
+        }
+        if (!sessionId) { setStatus('草稿已恢复；队列需要先选中会话'); return }
+        const restored = await queueRestore(sessionId, items)
+        if (!restored.ok) {
+          setStatus(restored.error === 'session-not-live'
+            ? '草稿已恢复；会话未运行，队列保留待重试'
+            : '草稿已恢复；队列恢复失败：' + restored.error)
           return
         }
         await journalRequest('POST', { draft: '', queue: [] })
         setEntry(null)
-        setStatus('草稿已放入官方输入框')
-      }
-
-      const clear = async () => {
-        await journalRequest('POST', { draft: '', queue: [] })
-        setEntry(null)
-        setStatus('已清除记录')
+        setStatus(`已恢复 ${restored.queued} 条排队消息${restored.failed ? `（${restored.failed} 条失败）` : ''}`)
       }
 
       const rowText = (item) => {
         const text = String(item?.text || '').replace(/\s+/g, ' ').trim()
         return text.length > 140 ? text.slice(0, 137) + '…' : text
+      }
+
+      const snapshotLabel = (snap) => {
+        const at = String(snap?.updatedAt || '')
+        const count = Array.isArray(snap?.queue) ? snap.queue.length : 0
+        return `${at ? at.replace('T', ' ').slice(0, 16) : '?'} · ${count} 条`
       }
 
       return h('div', {
@@ -260,52 +311,100 @@ window.__ModuleLoader__.load({
         },
       },
       h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
-        h('button', {
+        hasEntry ? h('button', {
           type: 'button',
           title: `恢复草稿${queue.length ? `，并把这 ${queue.length} 条排队消息放回官方输入队列` : ''}`,
           'aria-label': '恢复全部草稿与队列',
-          onClick: () => { void restoreAll() },
+          onClick: () => { void restoreItems(queue, entry?.draft) },
           style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
-        }, queue.length ? `恢复全部 (${queue.length + (entry.draft ? 1 : 0)})` : '恢复草稿'),
-        queue.length > 0 ? h('button', {
-          type: 'button',
-          title: '展开保存的排队消息列表',
-          'aria-expanded': showQueue ? 'true' : 'false',
+        }, queue.length ? `恢复全部 (${queue.length + (entry?.draft ? 1 : 0)})` : '恢复草稿') : null,
+        hasEntry && queue.length > 0 ? h('button', {
+          type: 'button', title: '展开保存的排队消息列表', 'aria-expanded': showQueue ? 'true' : 'false',
           onClick: () => setShowQueue((value) => !value),
           style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
         }, `队列 ${queue.length}`) : null,
-        h('button', {
-          type: 'button', title: '清除本地保存的草稿与排队快照', 'aria-label': '清除草稿',
-          onClick: () => { void clear() },
+        history.length > 0 ? h('button', {
+          type: 'button', title: '从历史快照中挑选一份恢复（主记录被覆盖时的兜底）',
+          'aria-expanded': showHistory ? 'true' : 'false',
+          onClick: () => setShowHistory((value) => !value),
           style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
-        }, '清除'),
+        }, `历史 ${history.length}`) : null,
+        hasEntry ? h('button', {
+          type: 'button', title: '清除本地保存的草稿与排队快照', 'aria-label': '清除草稿',
+          onClick: async () => { await journalRequest('POST', { draft: '', queue: [] }); setEntry(null); setStatus('已清除记录') },
+          style: { height: 26, padding: '0 8px', borderRadius: 7, cursor: 'pointer' },
+        }, '清除') : null,
       ),
       showQueue && queue.length > 0 ? h('div', {
-        role: 'list',
-        style: { display: 'grid', gap: 4, maxHeight: 180, overflow: 'auto', padding: '2px 0' },
+        role: 'list', style: { display: 'grid', gap: 4, maxHeight: 180, overflow: 'auto', padding: '2px 0' },
       }, ...queue.map((item, index) => h('div', {
-        role: 'listitem',
-        key: `${index}:${item?.at || ''}`,
-        title: String(item?.text || ''),
+        role: 'listitem', key: `${index}:${item?.at || ''}`, title: String(item?.text || ''),
         style: { padding: '3px 6px', border: '1px solid rgba(127,127,127,.22)', borderRadius: 6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
       }, `${index + 1}. ${rowText(item)}`))) : null,
+      showHistory && history.length > 0 ? h('div', {
+        role: 'list', style: { display: 'grid', gap: 4, maxHeight: 200, overflow: 'auto', padding: '2px 0' },
+      }, ...history.slice(0, 10).map((snap, index) => h('div', {
+        role: 'listitem', key: `h${index}:${snap?.updatedAt || ''}`,
+        style: { display: 'flex', alignItems: 'center', gap: 6, padding: '3px 6px', border: '1px solid rgba(127,127,127,.22)', borderRadius: 6 },
+      }, h('span', { style: { flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, snapshotLabel(snap)),
+      h('button', {
+        type: 'button', title: '把这份快照里的队列放回官方队列',
+        onClick: async () => { await restoreItems(Array.isArray(snap?.queue) ? snap.queue : [], '') },
+        style: { height: 22, padding: '0 6px', borderRadius: 6, cursor: 'pointer' },
+      }, '恢复')))) : null,
       h('span', {
         role: 'status', 'aria-live': 'polite',
         style: status ? { padding: '1px 2px', opacity: .8 } : { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' },
       }, status))
     }
 
-    let timer = null
-    let lastQueue = ''
-    function saveDraft(text) {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => {
-        const queue = scanQueue()
-        const signature = JSON.stringify(queue.map((q) => q.text))
-        if (!text && signature === lastQueue) return
-        lastQueue = signature
-        void journalRequest('POST', { draft: text, queue })
-      }, DEBOUNCE_MS)
+    let saveTimer = null
+    let lastSignature = ''
+    let flushTimer = null
+
+    function commitSave() {
+      const text = readComposer(findComposer())
+      const queue = scanQueue()
+      const signature = JSON.stringify({ key: resolveKey(), text, queue: queue.map((item) => item.text) })
+      if (signature === lastSignature) return
+      lastSignature = signature
+      void (async () => {
+        const saved = await journalRequest('POST', { draft: text, queue })
+        if (!saved) return
+        const check = await verifySaved(queue)
+        if (!check.ok) {
+          // 回读不一致（或被截断/乱码）：重试一次，并把诊断留在控制台
+          try { window.console?.warn?.('[fang-queue-journal] 回读校验未通过', check) } catch { /* ignore */ }
+          const retried = await journalRequest('POST', { draft: text, queue })
+          if (retried) await verifySaved(queue)
+        }
+      })()
+    }
+
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer)
+      saveTimer = setTimeout(() => { saveTimer = null; commitSave() }, DEBOUNCE_MS)
+    }
+
+    /** 关闭/切页前同步 flush：fetch keepalive 保证请求活着离开页面。 */
+    function flushNow() {
+      const text = readComposer(findComposer())
+      const queue = scanQueue()
+      const signature = JSON.stringify({ key: resolveKey(), text, queue: queue.map((item) => item.text) })
+      if (signature === lastSignature) return
+      lastSignature = signature
+      void (async () => {
+        const token = await fangToken()
+        if (!token) return
+        try {
+          fetch('/fang/api/composer/journal', {
+            method: 'POST',
+            keepalive: true,
+            headers: { 'content-type': 'application/json', 'x-fang-auth': token },
+            body: JSON.stringify({ key: resolveKey(), sessionKey: resolveKey(), sessionId: activeSessionId || undefined, draft: text, queue, path: location.hash || location.pathname }),
+          })
+        } catch { /* ignore */ }
+      })()
     }
 
     return {
@@ -316,15 +415,36 @@ window.__ModuleLoader__.load({
           id: 'fang-queue-journal',
           order: 90,
         }, JournalDock))
+
+        // ① 草稿输入：捕获阶段监听，避免被宿主 stopPropagation 吞掉
         document.addEventListener('input', (event) => {
           const target = event.target
           if (!target || (target.tagName !== 'TEXTAREA' && target.getAttribute?.('contenteditable') !== 'true')) return
-          saveDraft(readComposer(target))
+          scheduleSave()
         }, true)
+
+        // ② 队列变化：只盯 QueueDock（body 全量只用 childList，避免 characterData 风暴）
         try {
-          const observer = new MutationObserver(() => saveDraft(readComposer(findComposer())))
-          observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+          const queueObserver = new MutationObserver(() => scheduleSave())
+          queueObserver.observe(document.body, { childList: true, subtree: true })
+          // 有 [data-queue-dock] 时再额外盯 characterData（行文本可能原地更新）
+          const docksObserver = new MutationObserver(() => scheduleSave())
+          for (const dock of document.querySelectorAll('[data-queue-dock]')) {
+            docksObserver.observe(dock, { childList: true, subtree: true, characterData: true })
+          }
+          queueObserver.__docksObserver = docksObserver
         } catch { /* DOM unavailable */ }
+
+        // ③ 15s 兜底（覆盖“宿主重渲染后新 dock 未被观察到”的情况）
+        flushTimer = setInterval(() => scheduleSave(), FALLBACK_MS)
+        try { flushTimer?.unref?.() } catch { /* browser timer */ }
+
+        // ④ 关闭/切页前 flush
+        const onPageHide = () => flushNow()
+        const onVisibility = () => { if (document.visibilityState === 'hidden') flushNow() }
+        window.addEventListener('pagehide', onPageHide)
+        document.addEventListener('visibilitychange', onVisibility)
+        window.addEventListener('beforeunload', onPageHide)
       },
     }
   },
