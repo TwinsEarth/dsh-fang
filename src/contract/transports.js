@@ -42,10 +42,10 @@ export function createLocalTransport({ ctx, serviceName = 'fangContract' } = {})
       if (!s) throw new ContractTransportError(ERROR_CODES.TRANSPORT_UNAVAILABLE, 'local contract service is absent', { transport: 'local' })
       return await s.hello()
     },
-    async invoke(method, params) {
+    async invoke(method, params, opts = {}) {
       const s = service()
       if (!s || typeof s.invoke !== 'function') throw new ContractTransportError(ERROR_CODES.TRANSPORT_UNAVAILABLE, 'local contract service is absent', { transport: 'local' })
-      const response = await s.invoke(createEnvelope({ method, params, source: 'local' }))
+      const response = await s.invoke(createEnvelope({ method, params, source: 'local', meta: opts.meta, timeoutMs: opts.timeoutMs }))
       const check = validateEnvelope(response, { response: true })
       if (!check.ok) throw new ContractTransportError(ERROR_CODES.INVALID_ENVELOPE, check.errors.join(','), { transport: 'local' })
       return response
@@ -57,10 +57,12 @@ export function createHttpTransport({ baseUrl = '', token = '', headers: extraHe
   const base = baseOf(baseUrl)
   const prefix = `/${String(pathPrefix).replace(/^\/+|\/+$/g, '')}`
   const available = () => Boolean(base)
-  const call = async (endpoint, role, fn) => {
+  const call = async (endpoint, role, fn, callTimeoutMs = timeoutMs) => {
     if (!available()) throw new ContractTransportError(ERROR_CODES.TRANSPORT_UNAVAILABLE, 'http contract baseUrl is missing', { transport: 'http' })
+    const effectiveTimeout = Math.max(1, Number(callTimeoutMs) || timeoutMs)
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs))
+    const timer = setTimeout(() => controller.abort(), effectiveTimeout)
+    timer.unref?.()
     try {
       const response = await fetchImpl(`${base}${prefix}${endpoint}`, {
         method: 'POST',
@@ -91,13 +93,13 @@ export function createHttpTransport({ baseUrl = '', token = '', headers: extraHe
         throw new ContractTransportError(ERROR_CODES.INVALID_ENVELOPE, 'invalid hello payload', { transport: 'http' })
       })
     },
-    async invoke(method, params) {
-      const envelope = createEnvelope({ method, params, source: 'http' })
+    async invoke(method, params, opts = {}) {
+      const envelope = createEnvelope({ method, params, source: 'http', meta: opts.meta, timeoutMs: opts.timeoutMs })
       return await call('/invoke', envelope, (parsed) => {
         const check = validateEnvelope(parsed, { response: true })
         if (!check.ok) throw new ContractTransportError(ERROR_CODES.INVALID_ENVELOPE, check.errors.join(','), { transport: 'http' })
         return parsed
-      })
+      }, opts.timeoutMs)
     },
   }
 }
@@ -105,6 +107,17 @@ export function createHttpTransport({ baseUrl = '', token = '', headers: extraHe
 function atomicWrite(file, text) {
   const tmp = `${file}.${process.pid}.tmp`
   return fs.writeFile(tmp, text, 'utf8').then(() => fs.rename(tmp, file))
+}
+
+/** Windows 对端仍持有句柄时 unlink 可能短暂 EPERM；成功响应后做有界重试清理。 */
+async function removeFileWithRetry(file, attempts = 8) {
+  for (let index = 0; index < attempts; index += 1) {
+    try { await fs.unlink(file); return true } catch (error) {
+      if (error?.code === 'ENOENT') return true
+      if (index + 1 < attempts) await sleep(25 * (index + 1))
+    }
+  }
+  return false
 }
 
 /**
@@ -128,29 +141,34 @@ export function createFileTransport({ dir = '', fetchImpl = null, pollMs = 100, 
       if (!root) throw new ContractTransportError(ERROR_CODES.TRANSPORT_UNAVAILABLE, 'file transport dir is missing', { transport: 'file' })
       return await this.invoke(METHODS.HELLO, null).then((response) => (response.ok ? response.result : Promise.reject(new ContractTransportError(ERROR_CODES.REMOTE_ERROR, response.error?.message ?? 'hello failed', { transport: 'file' }))))
     },
-    async invoke(method, params) {
+    async invoke(method, params, opts = {}) {
       if (!root) throw new ContractTransportError(ERROR_CODES.TRANSPORT_UNAVAILABLE, 'file transport dir is missing', { transport: 'file' })
       await ensure()
-      const envelope = createEnvelope({ method, params, source: 'file' })
+      const envelope = createEnvelope({ method, params, source: 'file', meta: opts.meta, timeoutMs: opts.timeoutMs })
       const requestFile = path.join(directories.request, `${envelope.id}.json`)
       const responseFile = path.join(directories.response, `${envelope.id}.json`)
       await atomicWrite(requestFile, JSON.stringify(envelope))
-      const deadline = Date.now() + Math.max(1, timeoutMs)
+      const effectiveTimeout = Math.max(1, Number(opts.timeoutMs) || timeoutMs)
+      const deadline = Date.now() + effectiveTimeout
       while (Date.now() < deadline) {
         try {
           const text = await fs.readFile(responseFile, 'utf8')
-          await fs.unlink(responseFile).catch(() => {})
+          await removeFileWithRetry(responseFile)
           const parsed = JSON.parse(text)
           const check = validateEnvelope(parsed, { response: true })
           if (!check.ok) throw new ContractTransportError(ERROR_CODES.INVALID_ENVELOPE, check.errors.join(','), { transport: 'file' })
+          // 请求文件由调用方负责回收：服务端实现可能只写响应而不删请求，
+          // 成功匹配响应后必须幂等清理，避免 contract-outbox 长期积累。
+          await removeFileWithRetry(requestFile)
           return parsed
         } catch (error) {
           if (error instanceof ContractTransportError) throw error
         }
         await sleep(pollMs)
       }
-      await fs.unlink(requestFile).catch(() => {})
-      throw new ContractTransportError(ERROR_CODES.TRANSPORT_TIMEOUT, `file contract timeout (>${timeoutMs}ms)`, { transport: 'file', retryable: true })
+      await removeFileWithRetry(requestFile)
+      await removeFileWithRetry(responseFile)
+      throw new ContractTransportError(ERROR_CODES.TRANSPORT_TIMEOUT, `file contract timeout (>${effectiveTimeout}ms)`, { transport: 'file', retryable: true })
     },
   }
 }

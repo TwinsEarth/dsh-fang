@@ -44,7 +44,11 @@ import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
-import { createContractServer, startFileContractServer, METHODS as CONTRACT_METHODS, CONTRACT_VERSION } from '../contract/index.js'
+import {
+  createContractServer, startFileContractServer,
+  createRelayStore, relayHandlers,               // v3.1.35：contract 1.1 回流接口
+  METHODS as CONTRACT_METHODS, CONTRACT_VERSION,
+} from '../contract/index.js'
 import zlib from 'node:zlib'
 
 /**
@@ -1788,10 +1792,19 @@ export function apply(ctx, config) {
     error.code = 'fang-service-unavailable'
     throw error
   }
+  // v3.1.35：contract 1.1 的回流存储。peerLabel 是对端自报标识（不参与鉴权），
+  // 必须写 'dsh-fang-bundle' —— 房主按此判定「已与真实瓮城对接」。
+  const relayStore = createRelayStore({
+    peerLabel: 'dsh-fang-bundle',
+    role: gate.role,
+    instanceId: `fang-${gate.role}-${process.pid}`,
+  })
   const contractServer = createContractServer({
     role: gate.role,
     instanceId: `fang-${gate.role}-${process.pid}`,
     handlers: {
+      // v3.1.35：fang.relay.publish / fang.relay.status（按注册表自动进 hello().methods）
+      ...relayHandlers(relayStore),
       [CONTRACT_METHODS.FORK_SPAWN]: async (params) => {
         const forker = contractService('forker', 'spawn')
         const input = params && typeof params === 'object' ? params : {}
@@ -2912,6 +2925,13 @@ export function apply(ctx, config) {
         })
         route('GET', `${contractPath}/health`, (req, res) => json(res, 200, {
           ok: true, contractVersion: CONTRACT_VERSION, role: gate.role, methods: contractServer.hello().methods,
+        // v3.1.35：回流计数（排障用；只读状态，不暴露可写 store）
+        relay: (() => {
+          try {
+            const s = relayStore.status()
+            return { peer: s?.peer ?? null, cursor: s?.cursor ?? 0, accepted: s?.accepted ?? 0, duplicates: s?.duplicates ?? 0, rejected: s?.rejected ?? 0, lastAt: s?.lastAt ?? null }
+          } catch { return null }
+        })(),
         }))
       }
       // 重启守卫 / supervisor 契约（只读）。不触发重启；写操作仍只走审批 + 外部 supervisor。

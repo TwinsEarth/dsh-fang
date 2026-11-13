@@ -11,7 +11,7 @@
  */
 
 export const CONTRACT_PACKAGE = '@twinsearth/dsh-fang-contract'
-export const CONTRACT_VERSION = '1.0.0'
+export const CONTRACT_VERSION = '1.1.0'
 export const PROTOCOL = 'fang-master'
 export const PROTOCOL_VERSION = 1
 export const MIN_COMPATIBLE_MAJOR = 1
@@ -27,6 +27,8 @@ export const METHODS = Object.freeze({
   DECISION_RESOLVE: 'fang.decision.resolve',
   SESSION_LIST: 'fang.session.list',
   ORCHESTRATOR_STATUS: 'fang.orchestrator.status',
+  RELAY_PUBLISH: 'fang.relay.publish',
+  RELAY_STATUS: 'fang.relay.status',
 })
 
 /** 方法 → 契约版本（用于协商后的方法裁剪）。 */
@@ -40,10 +42,12 @@ export const METHOD_VERSION = Object.freeze({
   [METHODS.DECISION_RESOLVE]: '1.0',
   [METHODS.SESSION_LIST]: '1.0',
   [METHODS.ORCHESTRATOR_STATUS]: '1.0',
+  [METHODS.RELAY_PUBLISH]: '1.1',
+  [METHODS.RELAY_STATUS]: '1.1',
 })
 
 export const CAPABILITIES = Object.freeze([
-  'sync', 'async', 'idempotent', 'stream-events', 'file-outbox',
+  'sync', 'async', 'idempotent', 'stream-events', 'file-outbox', 'event-relay',
 ])
 
 export const ROLES = Object.freeze(['mother', 'essence', 'fork'])
@@ -76,4 +80,15 @@ export const LEGACY_SERVICE_KEYS = Object.freeze({
   decisionCenter: 'fangDecisionCenter',
   sessionCatalog: 'fangSessionCatalog',
   orchestrator: 'fang',
+})
+
+/**
+ * 回流接口的硬上限（1.1）。超限是**协议错误**而不是静默截断：
+ * 调用方必须自己分批，服务端不得悄悄丢事件（回流要可对账）。
+ */
+export const RELAY_LIMITS = Object.freeze({
+  maxBatch: 128,
+  maxEventBytes: 32_000,
+  maxPayloadBytes: 512_000,
+  maxRecords: 5_000,
 })
