@@ -1,3 +1,49 @@
+## v3.1.34（2026-11-13）
+
+**主题：分身会话 1–3 约束与默认空会话；派生弹窗 5 秒兜底；POSIX 工作区编码修复。**
+
+### 一、分身会话数约束 1..3（用户规格）
+
+> 默认一个分身 Web 端的分身会话，默认不能为 0 至少有 1 个（空会话），不超过 3 个，可以有多个分支。
+
+新增 `src/lib/fork-sessions.mjs`：
+
+- **下限 1**：`ensureForkEmptySession()` 在空白派生前补一个空会话；
+  日志严格按 DSH 实测格式生成（5 帧 / `session` v4 / zstd，实测 285–397 B 与真实空会话同构）；
+- **上限 3**：`enforceForkSessionCap()` 保留最新 3 个，其余移入 `quarantine-sessions/`（**不删除**）；
+- **分支豁免**：`keepSessionIds` 里的分支会话不参与淘汰；
+- v3.0.9 的「单会话强制」升级为「1..3 会话护栏」（`applySingleSessionGuard` → `applyForkSessionGuard`）。
+
+### 二、派生弹窗 5 秒兜底
+
+- `DERIVE_PICKER_TIMEOUT_MS = 5000`：倒计时文案「N 秒内不选择将默认新建空会话」；
+- 超时 `settle(null)` → 不导入母体历史，直接派生空会话分身；
+- 新增「新建空会话」按钮可立即跳过；`settled` 幂等 + `clearInterval` 清理。
+
+### 三、POSIX 工作区编码修复（MacMini 分身空列表）
+
+实测：DSH 把 `/Users/fang/Desktop/DS` 编码为 `--Users-fang-Desktop-DS--`，
+fang 的 `encodeWorkspaceKey()` 却编码成 `---Users-fang-Desktop-DS--`（多一个前导 `-`）。
+导入会话时用错误的 key 去合并工作区索引 → 永远匹配不上 → 分身 `workspace.json` 为空
+→ Web UI 里既看不到导入的会话，也没有「新建会话」入口。
+
+修复：折叠非法字符后**去掉首尾多余的 `-`** 再包 `--`。已验证：
+
+```text
+E:\GPT                 → --E-GPT--                    （无回归）
+C:\Users\a\b\c        → --C-Users-a-b-c--            （无回归）
+/Users/fang/Desktop/DS → --Users-fang-Desktop-DS--   （修复）
+/Users/fang/Desktop/DS/→ --Users-fang-Desktop-DS--   （尾斜杠）
+```
+
+### 验证
+
+- 新增 `test/fork-sessions.test.mjs`（6 例）：边界 1..3 / 空会话合法性（zstd 往返解出 5 帧）/
+  下限幂等 / 上限隔离 / 分支豁免 / 空目录 summary；
+- 新增 `test/workspace-key-posix.test.mjs`（5 例）：Windows 无回归、POSIX 不多前导 `-`、
+  尾分隔符、绝不产生三段连字符、空输入；
+- 新增 `test/client-derive-picker-timeout.test.mjs`（4 例）；
+- `test/session-format.test.mjs` 14 例无回归。
 ## v3.1.33（2026-11-13）
 
 **主题：修 macOS 上「启动元主 Web 失败 · runtime-spawn-failed: spawn-error」。**

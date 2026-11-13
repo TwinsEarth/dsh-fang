@@ -2084,6 +2084,9 @@ window.__ModuleLoader__.load({
         doc.body.appendChild(backdrop)
       }
 
+      // v3.1.34：派生弹窗的自动兜底时长（毫秒）。超时未选择 → 默认新建空会话。
+      const DERIVE_PICKER_TIMEOUT_MS = 5000
+
       function showDerivePicker(sessions, essenceName, onPick) {
         const doc = document
         const select = h('select', {
@@ -2093,6 +2096,11 @@ window.__ModuleLoader__.load({
           `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''}`)))
         const hint = h('div', { style: { fontSize: 12, opacity: .7, marginTop: 6 } },
           '选择一个进行中的 DSH 会话，整目录复制进新分身的沙箱（归档会话不列出）。')
+        // v3.1.34：5 秒内不选择 → 默认新建空会话继续派生（不再卡住或报 session-required）。
+        const countdown = h('div', {
+          style: { fontSize: 12, color: '#F5A623', marginTop: 4 },
+          'data-role': 'derive-countdown',
+        }, '')
         const btn = (label, primary) => h('button', {
           type: 'button',
           style: {
@@ -2102,6 +2110,7 @@ window.__ModuleLoader__.load({
           },
         }, label)
         const startBtn = btn('派 生', true)
+        const newSessionBtn = btn('新建空会话', false)
         const cancelBtn = btn('取消', false)
         const card = h('div', {
           role: 'dialog', 'aria-modal': 'true',
@@ -2109,23 +2118,52 @@ window.__ModuleLoader__.load({
         },
         h('div', { style: { fontSize: 14, fontWeight: 600 } }, `派生分身 · 基于「${essenceName}」`),
         hint,
+        countdown,
         select,
-        h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, cancelBtn))
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, newSessionBtn, cancelBtn))
         const backdrop = h('div', {
           style: {
             position: 'fixed', inset: 0, zIndex: 2147483000, display: 'flex',
             alignItems: 'center', justifyContent: 'center', padding: 24, background: 'rgba(0,0,0,.55)',
           },
         }, card)
-        const close = () => backdrop.remove()
+        let settled = false
+        let timer = null
+        let remaining = Math.round(DERIVE_PICKER_TIMEOUT_MS / 1000)
+        const stopTimer = () => {
+          if (timer) { clearInterval(timer); timer = null }
+        }
+        const close = () => {
+          stopTimer()
+          backdrop.remove()
+        }
+        const settle = (value) => {
+          if (settled) return
+          settled = true
+          close()
+          onPick(value)
+        }
+        const tick = () => {
+          remaining -= 1
+          if (remaining <= 0) {
+            // 超时：默认新建空会话（不导入母体历史），派生照常进行。
+            countdown.textContent = '未选择：已默认新建空会话，正在派生…'
+            settle(null)
+            return
+          }
+          countdown.textContent = `${remaining} 秒内不选择将默认新建空会话`
+        }
+        countdown.textContent = `${remaining} 秒内不选择将默认新建空会话`
+        timer = setInterval(tick, 1000)
         startBtn.addEventListener('click', () => {
           const picked = String(select.value || '')
-          if (!picked) { hint.textContent = '请选择一个会话'; return }
-          close()
-          onPick(picked)
+          if (!picked) { hint.textContent = '请选择一个会话（或等倒计时结束自动新建空会话）'; return }
+          settle(picked)
         })
-        cancelBtn.addEventListener('click', close)
-        backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close() })
+        // 「新建空会话」显式入口
+        newSessionBtn.addEventListener('click', () => settle(null))
+        cancelBtn.addEventListener('click', () => { stopTimer(); close() })
+        backdrop.addEventListener('click', (event) => { if (event.target === backdrop) { stopTimer(); close() } })
         doc.body.appendChild(backdrop)
       }
 
@@ -2165,19 +2203,23 @@ window.__ModuleLoader__.load({
           return
         }
         showDerivePicker(sessions, essence.name || essence.id, async (sessionId) => {
-          const session = sessions.find((item) => String(item.sessionId) === String(sessionId))
-          const title = String(session?.title || essence.name || '派生分身').slice(0, 60)
+          // v3.1.34：sessionId 为 null = 超时未选或点了「新建空会话」→ 不导入母体历史。
+          const emptySession = !sessionId
+          const session = emptySession ? null : sessions.find((item) => String(item.sessionId) === String(sessionId))
+          const title = String(session?.title || (emptySession ? '新分身 · 空会话' : essence.name) || '派生分身').slice(0, 60)
           S.busy = 'derive:quick:run'
+          const payload = { title, essenceId: essence.id }
+          if (!emptySession) payload.importSession = { sessionId }
           const out = await api('/fang/api/tasks/create', {
             method: 'POST',
-            body: JSON.stringify({ title, essenceId: essence.id, importSession: { sessionId } }),
+            body: JSON.stringify(payload),
           })
           S.busy = ''
           if (out.status === 200 && out.body?.ok) {
             setNotice({
               tone: 'ok',
-              title: '已派生分身',
-              message: `模板「${essence.name || essence.id}」· 会话 ${short(String(sessionId), 8)}${out.body?.port ? ' · 端口 ' + out.body.port : ''}`,
+              title: emptySession ? '已派生分身（空会话）' : '已派生分身',
+              message: `模板「${essence.name || essence.id}」· ${emptySession ? '新建空会话' : '会话 ' + short(String(sessionId), 8)}${out.body?.port ? ' · 端口 ' + out.body.port : ''}`,
               actions: out.body?.taskId ? [{ label: '打开分身', onClick: () => void openTask({ taskId: out.body.taskId }) }] : [],
             })
           } else {
