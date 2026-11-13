@@ -81,6 +81,13 @@ export function createContractClient(options = {}) {
     async resolveDecision(params, invokeOptions = {}) { return await client.invoke(METHODS.DECISION_RESOLVE, params, invokeOptions) },
     async listSessions(params = {}, invokeOptions = {}) { return await client.invoke(METHODS.SESSION_LIST, params, invokeOptions) },
     async orchestratorStatus(params = {}, invokeOptions = {}) { return await client.invoke(METHODS.ORCHESTRATOR_STATUS, params, invokeOptions) },
+    /** contract 1.1：批量投递回流事件（按 event.id 幂等；返回回执与游标）。 */
+    async publishRelay(events, invokeOptions = {}) {
+      const params = Array.isArray(events) ? { events } : (events && typeof events === 'object' ? events : { events: [] })
+      return await client.invoke(METHODS.RELAY_PUBLISH, params, invokeOptions)
+    },
+    /** contract 1.1：读取对端回流状态（对端自报 peer/cursor/累计计数）。 */
+    async relayStatus(params = {}, invokeOptions = {}) { return await client.invoke(METHODS.RELAY_STATUS, params, invokeOptions) },
   }
   return client
 }

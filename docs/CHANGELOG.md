@@ -1,3 +1,65 @@
+## v3.1.35（2026-11-13）
+
+**主题：适配 @twinsearth/dsh-fang-contract@1.1.0 —— 新增两个回流（relay）方法。**
+
+### 一、同步 vendored 契约副本到 1.1.0
+
+- `src/contract/` 从 npm 包 `@twinsearth/dsh-fang-contract@1.1.0` 逐字节同步（8 个文件，1.0.0 是 7 个）；
+- 新增 `relay.js`（`validateRelayEvents` / `createRelayStore` / `relayHandlers` / `createRelayContractServer`）；
+- `CONTRACT_VERSION` 1.0.0 → **1.1.0**；
+- 新增 `src/contract/VENDOR.json`：钉死来源版本与每个文件的 sha256，供一致性测试比对。
+
+### 二、注册回流 handler
+
+`src/plugins/orchestrator.mjs`：
+
+```js
+const relayStore = createRelayStore({
+  peerLabel: 'dsh-fang-bundle',   // 房主据此判定「已与真实瓮城对接」
+  role: gate.role,
+  instanceId: `fang-${gate.role}-${process.pid}`,
+})
+
+const contractServer = createContractServer({
+  role: gate.role,
+  instanceId: `fang-${gate.role}-${process.pid}`,
+  handlers: {
+    ...relayHandlers(relayStore),  // ← 1.1 新增，只加这一行
+    // …1.0 handler 全部原样保留
+  },
+})
+```
+
+- 方法自动进 `hello().methods`（来自 handler registry），文件兜底与 HTTP `/invoke` 自动生效；
+- `/fang/api/contract/*` 继续走现有 Bearer token，**未新开无鉴权路由**；
+- health 增加只读回流计数 `relay: { peer, cursor, accepted, duplicates, rejected, lastAt }`。
+
+### 三、协议约束（由 1.1.0 实现保证）
+
+- 幂等：同一 `event.id` 重复投递只接受一次，其余计入 `duplicates`；
+- 有界：单批 ≤128 / 单事件 ≤32KB / 整批 ≤512KB，超限抛 `relay-events-invalid`，**不静默截断**；
+- 游标单调：`cursor` 只增不减；
+- peer 自报：`fang.relay.status().peer === 'dsh-fang-bundle'`；
+- 内存有界：`maxRecords: 5000`。
+
+### 四、兼容性
+
+| 瓮城 contract | 房主 | 结果 |
+|---|---|---|
+| 1.1 | 3.3.1 | 回流开启，`peer=dsh-fang-bundle` |
+| 1.1 | 3.3.0 | 老房主不认识新方法，`negotiate()` 裁剪，不受影响 |
+| 1.0（旧瓮城） | 3.3.1 | 回流关闭，房主给出 `peer-contract-without-relay:1.0.0`，其余照常 |
+
+1.0 方法（fork/decision/session/orchestrator）行为**一字未改**。
+
+### 验证
+
+- 新增 `test/contract-vendor-sync.test.mjs`（4 例）：版本钉死 / 8 文件 sha256 逐字节一致 /
+  `relay.js` 在位 / 无游离文件；
+- 新增 `test/contract-relay-1.1.test.mjs`（5 例）：hello 宣告两方法 + `event-relay` /
+  重投幂等 accepted:0 duplicates:1 且 cursor 不倒退 / 超限与空批报错不截断 /
+  `peer === 'dsh-fang-bundle'` / 1.0 方法行为不变；
+- contract 相关测试合计 **38 例全过**。
 ## v3.1.34（2026-11-13）
 
 **主题：分身会话 1–3 约束与默认空会话；派生弹窗 5 秒兜底；POSIX 工作区编码修复。**
