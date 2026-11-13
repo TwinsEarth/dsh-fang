@@ -161,13 +161,27 @@ export function parseWorkspaceIndex(raw) {
 
 /**
  * 工作区绝对路径 → 会话目录名（仅显示/定位，**不可反解**）。
- * 实测 `E:\GPT` → `--E-GPT--`，`C:\Users\a\b\c` → `--C-Users-a-b-c--`：
- * 非 [A-Za-z0-9_-] 的连续字符折叠为单个 '-'，首尾各包 '--'。
+ *
+ * 实测对照（必须与 DSH 完全一致）：
+ *   `E:\GPT`                    → `--E-GPT--`
+ *   `C:\Users\a\b\c`           → `--C-Users-a-b-c--`
+ *   `/Users/fang/Desktop/DS`    → `--Users-fang-Desktop-DS--`   ← POSIX 绝对路径
+ *
+ * v3.1.35 修复：POSIX 绝对路径以 `/` 开头，若只去尾部斜杠，
+ * 开头的 `/` 会被折叠成 `-`，结果变成 `---Users-fang-Desktop-DS--`（多一个前导 -），
+ * 与 DSH 的 `--Users-fang-Desktop-DS--` 不匹配 —— 导入会话时合并工作区索引必然落空，
+ * 分身的 workspace.json 因此为空，Web UI 里既没有工作区也没有会话（MacMini 实测）。
+ *
+ * 规则：非法字符连续段折叠为单个 '-'，随后去掉首尾多余的 '-'，最后首尾各包 '--'。
  */
 export function encodeWorkspaceKey(workspacePath) {
-  const raw = String(workspacePath ?? '').trim().replace(/[\\/]+$/, '')
+  const raw = String(workspacePath ?? '').trim()
   if (!raw) return ''
-  const body = raw.replace(/[^A-Za-z0-9_-]+/g, '-')
+  const body = raw
+    .replace(/[^A-Za-z0-9_-]+/g, '-')   // 分隔符/盘符冒号等折叠
+    .replace(/^-+/, '')                  // 去掉 POSIX 前导斜杠产生的前导 '-'
+    .replace(/-+$/, '')                  // 去掉尾部斜杠产生的尾部 '-'
+  if (!body) return ''
   return `--${body}--`
 }
 

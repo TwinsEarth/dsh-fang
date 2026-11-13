@@ -29,6 +29,7 @@ import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
 import { EssenceManager, OFFICIAL_ESSENCE_ID, VIP_QUOTAS } from '../lib/essence.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
+import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { createBusinessProducers } from '../lib/business-producers.mjs'
@@ -508,7 +509,7 @@ export function apply(ctx, config) {
       projectBytes: t.projectBytes ?? 0,
       essenceId: t.essenceId ?? null,
       // 视图层才扫描会话（normalizeTask 在 apply 早期执行，不能引用后声明的 scanForkSessions）。
-      sessions: (() => { const list = scanForkSessions(t); return { count: list.length, violation: list.length > 1 } })(),
+      sessions: (() => { const list = scanForkSessions(t); return { count: list.length, min: FORK_SESSION_MIN, max: FORK_SESSION_MAX, violation: list.length > FORK_SESSION_MAX, belowFloor: list.length < FORK_SESSION_MIN } })(),
       // 来源原身已被删除：分身仍可运行/归档/还原/删除，但不能重新派生。
       essenceDeleted: Boolean(t.essenceId) && (t.essenceDeleted === true || isTombstoned(t.essenceId)),
       // 方案 B：同一分身可挂多个分支会话，但同时只有一个 active。
@@ -584,7 +585,9 @@ export function apply(ctx, config) {
     return { ok: true, bytes, sessionId, workspacePath, workspaceKey, workspaceTitle, indexFile }
   }
 
-  // v3.0.9 单会话强制：扫分身自己的 sessions，保留最新一个，其余移到 quarantine-sessions/。
+  // v3.1.35：分身会话数约束 1..3（用户规格）。
+  //   · 下限 1：分身 Web 里至少有一个会话（空白派生时自动补空会话）；
+  //   · 上限 3：多出的移到 quarantine-sessions/（不删除）；
   const scanForkSessions = (task) => {
     const root = path.join(String(task?.homeDir ?? ''), 'sessions')
     const out = []
@@ -603,7 +606,7 @@ export function apply(ctx, config) {
     } catch { /* 没有 sessions 目录 */ }
     return out.sort((a, b) => b.mtime - a.mtime)
   }
-  const applySingleSessionGuard = (task) => {
+  const applyForkSessionGuard = (task) => {
     // 受管的分支子会话不参与“单会话”隔离（它们由分支库登记，属于同一分身的合法分支）。
     const branchSessionIds = new Set()
     try {
@@ -615,12 +618,13 @@ export function apply(ctx, config) {
     } catch { /* 无分支库 */ }
     const sessions = scanForkSessions(task).filter((session) => !branchSessionIds.has(session.sessionId))
     const bindBranches = (keptId) => { try { branchStore?.bindSession?.(task.taskId, keptId) } catch { /* ignore */ } }
-    if (sessions.length <= 1) {
+    if (sessions.length <= FORK_SESSION_MAX) {
       const kept = sessions[0]?.sessionId ?? null
       bindBranches(kept)
-      return { ok: true, kept, quarantined: [] }
+      return { ok: true, kept, keptCount: sessions.length, quarantined: [] }
     }
-    const [keep, ...rest] = sessions
+    const keep = sessions[0]
+    const rest = sessions.slice(FORK_SESSION_MAX)
     const stamp = String(nowMs())
     const quarantined = []
     for (const session of rest) {
@@ -637,7 +641,26 @@ export function apply(ctx, config) {
       audit('fork-session-quarantined', { taskId: task.taskId, kept: keep.sessionId, moved: quarantined.length })
     }
     bindBranches(keep.sessionId)
-    return { ok: true, kept: keep.sessionId, quarantined }
+    return { ok: true, kept: keep.sessionId, keptCount: FORK_SESSION_MAX, quarantined }
+  }
+
+  /**
+   * v3.1.35：分身会话下限。已有会话则不动；没有则造一个空会话（DSH 合法格式）。
+   * 分支会话也算已有会话——它们属于同一分身。
+   */
+  const ensureForkSessionFloor = async ({ homeDir, task, cwd }) => {
+    const existing = summarizeForkSessions(homeDir)
+    if (!existing.belowFloor) return { ok: true, created: false, count: existing.count }
+    const workspacePath = String(cwd ?? '').trim()
+      || String(task?.importedSession?.workspacePath ?? '').trim()
+      || layout.forkHomesDir
+    const created = ensureForkEmptySession(homeDir, {
+      workspacePath,
+      workspaceTitle: path.basename(workspacePath) || '新会话',
+    })
+    // 补完空会话后立刻套用上限，避免越界。
+    try { enforceForkSessionCap(homeDir, { max: FORK_SESSION_MAX }) } catch { /* 上限失败不阻塞派生 */ }
+    return { ...created, count: summarizeForkSessions(homeDir).count }
   }
 
   const tombstonesFile = path.join(layout.dataDir, 'deleted-essences.json')
@@ -862,6 +885,19 @@ export function apply(ctx, config) {
             }
             persist()
           }
+        }
+
+        // v3.1.35：分身会话下限 1 —— 没有导入会话时补一个空会话，
+        // 让分身 Web 打开就有可用的会话（用户规格：默认不能为 0）。
+        try {
+          const floors = await ensureForkSessionFloor({ homeDir, task, cwd: input.cwd })
+          task.sessionFloor = floors
+          if (floors?.created) {
+            audit(AUDIT.FORK_CREATED + '-session-floor', { taskId, sessionId: floors.sessionId, workspaceKey: floors.workspaceKey })
+          }
+        } catch (e) {
+          task.sessionFloor = { ok: false, error: String(e?.message ?? e) }
+          audit(AUDIT.FORK_CREATED + '-session-floor-failed', { taskId, error: task.sessionFloor.error })
         }
 
         const started = await f.spawn({
@@ -1454,14 +1490,18 @@ export function apply(ctx, config) {
       return { ok: true, taskId: id, essenceId: task.essenceId, files: picked, configLock, profileReadonly }
     },
 
-    /** 强制单会话：运行中拒绝；停止/归档态把多余会话移到 quarantine-sessions/。 */
+    /**
+     * v3.1.35：分身会话护栏（原「强制单会话」）。运行中拒绝；
+     * 停止/归档态把超过 FORK_SESSION_MAX(3) 的会话移到 quarantine-sessions/（不删除）。
+     * 方法名保留 enforceSingleSession 以免破坏既有调用方与存档。
+     */
     enforceSingleSession(taskId) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
       const live = forker()?.status?.(id)
       if (live?.running) return { ok: false, error: 'task-running', taskId: id }
-      return { ...applySingleSessionGuard(task), taskId: id }
+      return { ...applyForkSessionGuard(task), taskId: id }
     },
 
     async restoreTask(taskId) {
@@ -1491,7 +1531,7 @@ export function apply(ctx, config) {
       }
       // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
       let sessionGuard = null
-      try { sessionGuard = applySingleSessionGuard(task) } catch { sessionGuard = { ok: false } }
+      try { sessionGuard = applyForkSessionGuard(task) } catch { sessionGuard = { ok: false } }
       const started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
