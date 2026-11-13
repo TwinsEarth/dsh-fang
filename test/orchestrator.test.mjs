@@ -852,7 +852,7 @@ test('orchestrator: 元主进行中会话配额（默认 10，超出拒绝再开
   }
 })
 
-test('orchestrator: 强制单会话（运行中拒绝；停止态隔离多余会话）', async () => {
+test('orchestrator: 会话护栏 1..3（运行中拒绝；停止态隔离超过 3 的多余会话）', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-single-'))
   const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
@@ -867,9 +867,11 @@ test('orchestrator: 强制单会话（运行中拒绝；停止态隔离多余会
     const out = await svc.createTask({ title: '单会话分身' })
     assert.equal(out.ok, true)
     const task = svc.listTasks().find((item) => item.taskId === out.taskId)
+    // v3.1.35：上限是 3 —— 造 5 个会话，护栏后应只剩 3 个（空的 isolation 由空会话下限保证）
     const sessionsRoot = path.join(task.homeDir, 'sessions', '--ws--')
-    fs.mkdirSync(path.join(sessionsRoot, '11111111-1111-4111-8111-111111111111'), { recursive: true })
-    fs.mkdirSync(path.join(sessionsRoot, '22222222-2222-4222-8222-222222222222'), { recursive: true })
+    for (let i = 1; i <= 5; i += 1) {
+      fs.mkdirSync(path.join(sessionsRoot, `session-0000000${i}-1111-4111-8111-11111111111${i}`), { recursive: true })
+    }
 
     const runningGuard = svc.enforceSingleSession(task.taskId)
     assert.equal(runningGuard.ok, false)
@@ -878,9 +880,9 @@ test('orchestrator: 强制单会话（运行中拒绝；停止态隔离多余会
     await svc.archiveTask(task.taskId)
     const stoppedGuard = svc.enforceSingleSession(task.taskId)
     assert.equal(stoppedGuard.ok, true)
-    assert.ok(stoppedGuard.quarantined.length >= 1)
-    const remaining = fs.readdirSync(sessionsRoot).filter((name) => fs.statSync(path.join(sessionsRoot, name)).isDirectory())
-    assert.equal(remaining.length, 1, '只允许保留一个会话')
+    assert.ok(stoppedGuard.quarantined.length >= 1, '超过 3 个的会话必须被隔离')
+    const guarded = fs.readdirSync(sessionsRoot).filter((name) => fs.statSync(path.join(sessionsRoot, name)).isDirectory())
+    assert.ok(guarded.length <= 3, `最多保留 3 个会话，实际 ${guarded.length}`)
     assert.equal(fs.existsSync(path.join(task.homeDir, 'quarantine-sessions')), true)
 
     // #7：同一分身、同一会话可派生多个分支
@@ -1183,7 +1185,8 @@ test('orchestrator: 启动时加载已有 tasks.json 不触发 scanForkSessions 
     const list = svc.listTasks()
     assert.equal(list.length, 1)
     assert.equal(list[0].taskId, 'task_seed_loaded')
-    assert.deepEqual(list[0].sessions, { count: 0, violation: false })
+    // v3.1.35：sessions 视图增加 1..3 边界信息（count/min/max/violation/belowFloor）。
+    assert.deepEqual(list[0].sessions, { count: 0, min: 1, max: 3, violation: false, belowFloor: true })
   } finally {
     cleanup(ctx, dataRoot)
   }
@@ -1819,11 +1822,14 @@ test('orchestrator: listForkSessions reads the fork-owned session log and extrac
   }))
   const out = await svc.listForkSessions(task.taskId)
   assert.equal(out.ok, true, JSON.stringify(out))
-  assert.equal(out.sessions.length, 1)
-  assert.equal(out.sessions[0].title, '分身内会话标题')
-  assert.equal(out.sessions[0].titleSource, 'session/title')
-  assert.match(out.sessions[0].preview, /分身内首条消息/)
-  assert.equal(out.sessions[0].workspaceTitle, 'ForkWS')
+  // v3.1.35：空白派生前会自动补一个空会话（下限 1），因此这里至少 1 个。
+  assert.ok(out.sessions.length >= 1, 'must list at least the floor session')
+  const target = out.sessions.find((session) => session.sessionId === sid)
+  assert.ok(target, 'the written fork session must be listed')
+  assert.equal(target.title, '分身内会话标题')
+  assert.equal(target.titleSource, 'session/title')
+  assert.match(target.preview, /分身内首条消息/)
+  assert.equal(target.workspaceTitle, 'ForkWS')
   assert.equal((await svc.listForkSessions('task_nope')).error, 'unknown-task')
   cleanup(ctx, dataRoot)
 })
