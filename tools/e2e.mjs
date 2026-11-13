@@ -469,6 +469,54 @@ check('POST /fang/api/derive accepted with exactly one session',
       check('decision resolution persisted to disk', storedTicket?.status === 'resolved', String(storedTicket?.status ?? 'missing'))
     }
 
+    // ── v3.2.0 四色决策：真实 HTTP → 状态机 → JSON 落库断言 ──────────────
+    const makeDecision = (level, title, extra = {}) => api('/fang/api/decisions/ingest', {
+      method: 'POST',
+      body: JSON.stringify({
+        producer: 'e2e', level, title, context: 'v3.2.0 real four-level policy',
+        options: [{ value: 'go', label: 'Go', isRecommended: true }, { value: 'hold', label: 'Hold' }],
+        timeoutMinutes: 0.001,
+        ...extra,
+      }),
+    })
+    const yellowDecision = await makeDecision('yellow', 'e2e yellow deferred')
+    const blueDecision = await makeDecision('blue', 'e2e blue auto recommended')
+    const greenDecision = await makeDecision('green', 'e2e green immediate', { options: [] })
+    // 红色 timeoutMinutes 仍是归档期限，不使用黄/蓝的 60ms 测试等待窗口。
+    const redDecision = await makeDecision('red', 'e2e red human required', { timeoutMinutes: 60 })
+    check('four-level tickets accepted', [yellowDecision, blueDecision, greenDecision, redDecision].every((r) => r.status === 200 && r.body?.ok === true))
+    const yellowId = String(yellowDecision.body?.ticket?.id ?? '')
+    const blueId = String(blueDecision.body?.ticket?.id ?? '')
+    const greenId = String(greenDecision.body?.ticket?.id ?? '')
+    const redId = String(redDecision.body?.ticket?.id ?? '')
+    check('green resolves immediately without pending alert', greenDecision.body?.ticket?.status === 'resolved' && greenDecision.body?.ticket?.autoResolved === true)
+    check('red remains pending before human choice', redDecision.body?.ticket?.status === 'pending' && redDecision.body?.ticket?.isBlocking === true)
+    await sleep(450)
+    const policyList = await api('/fang/api/decisions?includeArchived=1')
+    const policyItems = Array.isArray(policyList.body?.items) ? policyList.body.items : []
+    const yellowNow = policyItems.find((item) => item.id === yellowId)
+    const blueNow = policyItems.find((item) => item.id === blueId)
+    check('yellow timeout defers but stays pending and answerable', yellowNow?.status === 'pending' && yellowNow?.outcome === 'deferred' && yellowNow?.level === 'yellow' && Number(yellowNow?.deferredAt) > 0)
+    check('blue timeout executes recommended option', blueNow?.status === 'resolved' && blueNow?.resolvedOption === 'go' && blueNow?.autoResolved === true)
+    const lateYellow = await api('/fang/api/decisions/resolve', {
+      method: 'POST', body: JSON.stringify({ id: yellowId, option: 'hold', by: 'e2e-late-human' }),
+    })
+    check('yellow late choice is accepted and marked lateResponse', lateYellow.status === 200 && lateYellow.body?.ticket?.lateResponse === true && lateYellow.body?.ticket?.resolvedOption === 'hold')
+    const redResolved = await api('/fang/api/decisions/resolve', {
+      method: 'POST', body: JSON.stringify({ id: redId, option: 'go', by: 'e2e-human' }),
+    })
+    check('red resumes after explicit human choice', redResolved.status === 200 && redResolved.body?.ticket?.status === 'resolved')
+    const history = await api('/fang/api/decisions?includeArchived=1')
+    const historyItems = Array.isArray(history.body?.items) ? history.body.items : []
+    check('inbox history exposes all four colors', ['red', 'yellow', 'blue', 'green'].every((level) => historyItems.some((item) => item.level === level)))
+    if (fs.existsSync(decisionStore)) {
+      const disk = JSON.parse(fs.readFileSync(decisionStore, 'utf8'))
+      const tickets = Array.isArray(disk.tickets) ? disk.tickets : []
+      check('four-level policy state persisted to disk', tickets.some((item) => item.id === yellowId && item.lateResponse === true)
+        && tickets.some((item) => item.id === blueId && item.autoReason === 'blue-timeout')
+        && tickets.some((item) => item.id === greenId && item.autoReason === 'green-immediate'))
+    }
+
     // ── fork homes removed by delete-archive ───────────────────────────
     const forksRoot = path.join(motherData, 'forks')
     const leftover = fs.existsSync(forksRoot) ? fs.readdirSync(forksRoot) : []

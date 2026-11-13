@@ -34,6 +34,7 @@ import { createAiSecretStore } from '../lib/ai-secret-store.mjs'
 import { createDecisionOutbox, resolveMotherTarget } from '../lib/decision-outbox.mjs'
 import { producerCatalog } from '../lib/producer-contract.mjs'
 import { assertEndpointSafe, classifyEndpointHost } from '../lib/ssrf-guard.mjs'
+import { DECISION_LEVEL_POLICY, decisionPolicy, decisionWaitMs, recommendedDecisionOption } from '../lib/decision-policy.mjs'
 
 export const name = 'fang-decision-center'
 export const inject = []
@@ -75,7 +76,7 @@ export const PM_DECISION_POLICY = Object.freeze({
     '一次只问一个决定点，问题要具体到「选哪个」或「能不能做」',
     '必须给出 2-4 个可执行选项，推荐项放第一个并把标签后缀 "(推荐)"',
     'context 里写清：为什么需要人决定、每个选项的代价与风险、不决定的后果',
-    'red 用于阻塞（人不在就没法继续）；yellow/blue 用于「记录并继续」，不要滥用 red',
+    'red 必须等人工；yellow 等 3 分钟后继续但可补选；blue 等 1 分钟后按推荐执行；green 自动执行并留底',
     '绝对不要因为「不确定」而把问题原样抛回给开发者——先把能自己查的查清',
   ],
 })
@@ -297,6 +298,14 @@ function publicTicket(ticket) {
     resolvedBy: ticket.resolvedBy ?? null,
     resolutionNote: ticket.resolutionNote ?? null,
     customInput: ticket.customInput === true,
+    // v3.2.0：流程等待窗口与归档期限分离；黄色 deferred 后仍可补选。
+    waitMode: ticket.waitMode ?? decisionPolicy(ticket.level).waitMode,
+    waitDeadlineAt: ticket.waitDeadlineAt ?? null,
+    deferredAt: ticket.deferredAt ?? null,
+    autoResolved: ticket.autoResolved === true,
+    autoReason: ticket.autoReason ?? null,
+    lateResponse: ticket.lateResponse === true,
+    policyTimeoutMs: ticket.policyTimeoutMs ?? null,
   }
 }
 
@@ -379,7 +388,7 @@ function applyForkDecisionCenter(ctx, config, gate) {
       if (!tools || typeof tools.register !== 'function') return
       const unregister = tools.register({
         name: 'request_human_decision',
-        description: 'Fork 内请求人类决策（代理到母体决策中心）：黄/蓝/绿立即返回 ticketId；红色等待母体结果或超时回落。\n' + PM_PROACTIVE_HINT,
+        description: 'Fork 内请求人类决策（代理到母体决策中心）：红色等待人工；黄色最多等 3 分钟后继续可补选；蓝色最多等 1 分钟后按推荐自动执行；绿色自动执行留底。\n' + PM_PROACTIVE_HINT,
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -419,20 +428,52 @@ function applyForkDecisionCenter(ctx, config, gate) {
           }
           const ticket = submitted.ticket
           if (!ticket?.id) throw new Error('母体未返回 ticket')
-          if (ticket.isBlocking === true) {
-            const settled = await wait(ticket.id, { signal: exec?.signal })
-            if (!settled.ok) throw new Error(`fork 决策未在时限内完成（${settled.reason}）`)
+          if (ticket.status === 'pending' && (ticket.level === 'red' || ticket.level === 'yellow' || ticket.level === 'blue')) {
+            const remoteWaitMs = ticket.level === 'red'
+              ? waitTimeoutMs
+              : Math.max(1000, Number(ticket.waitDeadlineAt) - Date.now() + 5000)
+            const settled = await wait(ticket.id, { signal: exec?.signal, timeoutMs: remoteWaitMs })
+            if (!settled.ok) {
+              // 黄色轮询超时仍允许流程继续；母体定时器会把 ticket 标成 deferred。
+              if (ticket.level === 'yellow' && settled.reason === 'timeout') {
+                return {
+                  ticketId: ticket.id, level: ticket.level, blocking: false,
+                  status: 'pending', outcome: 'deferred', deferred: true,
+                  continueWithoutDecision: true, canAnswerLater: true, queued: false,
+                }
+              }
+              throw new Error(`fork 决策未在时限内完成（${settled.reason}）`)
+            }
             const resolved = settled.ticket
+            if (resolved.status === 'pending' && resolved.level === 'yellow') {
+              return {
+                ticketId: resolved.id, level: resolved.level, blocking: false,
+                status: 'pending', outcome: 'deferred', deferred: true,
+                continueWithoutDecision: true, canAnswerLater: true,
+                deferredAt: resolved.deferredAt ?? undefined, queued: false,
+              }
+            }
             if (resolved.status !== 'resolved' && resolved.status !== 'abandoned' && resolved.status !== 'expired' && resolved.status !== 'acked') {
               throw new Error(`fork 决策状态异常：${resolved.status}`)
             }
             return {
-              ticketId: resolved.id, level: resolved.level, blocking: true,
+              ticketId: resolved.id, level: resolved.level, blocking: resolved.level === 'red',
               status: resolved.status, outcome: resolved.outcome,
               selectedValue: resolved.resolvedOption ?? undefined,
+              selectedActionId: resolved.selectedActionId ?? undefined,
+              autoResolved: resolved.autoResolved === true,
+              autoReason: resolved.autoReason ?? undefined,
+              queued: false,
             }
           }
-          return { ticketId: ticket.id, level: ticket.level, blocking: false, status: 'pending', queued: false }
+          return {
+            ticketId: ticket.id, level: ticket.level, blocking: false,
+            status: ticket.status, outcome: ticket.outcome ?? ticket.status,
+            autoResolved: ticket.autoResolved === true,
+            selectedValue: ticket.resolvedOption ?? undefined,
+            selectedActionId: ticket.selectedActionId ?? undefined,
+            queued: false,
+          }
         },
       })
       child.effect(() => () => { try { unregister?.() } catch { /* ignore */ } })
@@ -817,6 +858,10 @@ export function apply(ctx, config) {
     ticket.resolutionNote = options.note === undefined || options.note === null
       ? (useCustom ? customText : null)
       : String(options.note)
+    ticket.autoResolved = options.auto === true
+    ticket.autoReason = options.auto === true ? String(options.autoReason ?? options.by ?? 'auto') : null
+    // 黄色超时后流程已继续，但后来的人工选择仍是有效补选，并触发对应动作。
+    ticket.lateResponse = Number(ticket.deferredAt) > 0
     const aiOutcome = recordAiAdoption(ticket, ticket.resolvedOption, ticket.outcome)
     ticket.rev = nextRevision()
     settleWaiter(ticket.id, publicTicket(ticket))
@@ -890,6 +935,59 @@ export function apply(ctx, config) {
     }
     if (changed > 0) save()
     return changed
+  }
+
+  /** v3.2.0：黄色超时只结束流程等待，不结束人工补选窗口。 */
+  const deferYellow = (id) => {
+    const ticket = tickets.get(String(id ?? ''))
+    if (!ticket || ticket.status !== 'pending' || ticket.level !== 'yellow') return false
+    if (ticket.waitDeadlineAt && Number(ticket.waitDeadlineAt) > nowMs()) return false
+    ticket.deferredAt = nowMs()
+    ticket.outcome = 'deferred'
+    ticket.rev = nextRevision()
+    settleWaiter(ticket.id, publicTicket(ticket))
+    save()
+    emitUpdated(ticket)
+    audit('decision-ticket-deferred', { id: ticket.id, waitDeadlineAt: ticket.waitDeadlineAt, deferredAt: ticket.deferredAt })
+    return true
+  }
+
+  /** v3.2.0：蓝/绿按推荐闭环；仅执行 resolve() 已注册的动作，绝不执行任意代码。 */
+  const autoResolveRecommended = (id, reason) => {
+    const ticket = tickets.get(String(id ?? ''))
+    if (!ticket || ticket.status !== 'pending') return false
+    const option = recommendedDecisionOption(ticket.options)
+    const value = option?.value ?? '__ACK__'
+    const result = resolve(ticket.id, value, {
+      by: `auto:${reason}`,
+      note: reason === 'green-immediate' ? '绿色通知自动执行并留底' : '蓝色等待窗口结束，自动按推荐执行',
+      auto: true,
+      autoReason: reason,
+    })
+    return result.ok === true
+  }
+
+  const settlePolicy = (id) => {
+    const ticket = tickets.get(String(id ?? ''))
+    if (!ticket || ticket.status !== 'pending') return false
+    if (ticket.level === 'yellow') return deferYellow(ticket.id)
+    if (ticket.level === 'blue') return autoResolveRecommended(ticket.id, 'blue-timeout')
+    if (ticket.level === 'green') return autoResolveRecommended(ticket.id, 'green-immediate')
+    return false
+  }
+
+  const schedulePolicy = (ticket) => {
+    if (!ticket || ticket.status !== 'pending' || disposed) return
+    if (ticket.level === 'green') { settlePolicy(ticket.id); return }
+    if (ticket.level !== 'yellow' && ticket.level !== 'blue') return
+    const deadline = Number(ticket.waitDeadlineAt)
+    if (!Number.isFinite(deadline)) return
+    const timer = setTimeout(() => {
+      timers.delete(timer)
+      try { settlePolicy(ticket.id) } catch { /* policy timers must not crash the host */ }
+    }, Math.max(0, deadline - nowMs()))
+    timer.unref?.()
+    timers.add(timer)
   }
 
   const create = (input = {}) => {
@@ -1004,6 +1102,11 @@ export function apply(ctx, config) {
     if (level === 'red' && (!Number.isFinite(expiresAt) || expiresAt <= 0)) {
       expiresAt = nowMs() + Math.max(1, cfg.defaultTimeoutMinutes || 360) * 60000
     }
+    // v3.2.0：黄/蓝的 timeoutMinutes 是流程等待窗口，不是 ticket 的归档期限。
+    // 黄色超时后仍需长期可补选；蓝色由策略定时器自动闭环；绿色立即闭环。
+    const policyTimeoutMs = decisionWaitMs(level, raw.timeoutMinutes)
+    const waitDeadlineAt = policyTimeoutMs === null ? null : nowMs() + policyTimeoutMs
+    if (level !== 'red') expiresAt = null
     const ticket = {
       id: newId('dec'),
       level,
@@ -1032,6 +1135,13 @@ export function apply(ctx, config) {
       resolvedBy: null,
       resolutionNote: null,
       ai: null,
+      waitMode: decisionPolicy(level).waitMode,
+      waitDeadlineAt,
+      deferredAt: null,
+      autoResolved: false,
+      autoReason: null,
+      lateResponse: false,
+      policyTimeoutMs,
     }
     ticket.rev = nextRevision()
     tickets.set(ticket.id, ticket)
@@ -1042,11 +1152,17 @@ export function apply(ctx, config) {
       return { ok: false, reason: 'store-unavailable', detail: storeHealth.lastError }
     }
     recordSessionTicket(source.sessionId, source.agentRole)
-    emit('fang/decision-created', publicTicket(ticket))
-    audit('decision-ticket-created', { id: ticket.id, level, source, title: ticket.title, blocking: ticket.isBlocking, budgetDemoted, attentionDemoted, attentionQuota, sessionQuotaDemoted, sessionQuota })
+    audit('decision-ticket-created', { id: ticket.id, level, source, title: ticket.title, blocking: ticket.isBlocking, budgetDemoted, attentionDemoted, attentionQuota, sessionQuotaDemoted, sessionQuota, waitMode: ticket.waitMode, waitDeadlineAt: ticket.waitDeadlineAt })
+    // v3.2.0：绿色先闭环再发 created，避免 SSE/浮标出现一帧“待处理绿色”提醒。
+    if (ticket.level === 'green') settlePolicy(ticket.id)
+    emit('fang/decision-created', publicTicket(tickets.get(ticket.id) ?? ticket))
+    // 黄/蓝由定时器在各自等待窗口结束时推进状态机。
+    if (ticket.level !== 'green') schedulePolicy(ticket)
     // 自动接线：AI 已配置时异步生成建议（不改变 ticket 状态，只写 ticket.ai）。
-    try { queueAutoAdvise(ticket.id) } catch { /* auto advice must never block ticket creation */ }
-    return { ok: true, ticket: publicTicket(ticket) }
+    if (ticket.status === 'pending') {
+      try { queueAutoAdvise(ticket.id) } catch { /* auto advice must never block ticket creation */ }
+    }
+    return { ok: true, ticket: publicTicket(tickets.get(ticket.id) ?? ticket) }
   }
 
   const wait = (id, signal = null) => {
@@ -1054,6 +1170,12 @@ export function apply(ctx, config) {
     const ticket = tickets.get(ticketId)
     if (!ticket) return Promise.reject(new Error(`unknown decision ticket: ${ticketId}`))
     if (ticket.status !== 'pending') return Promise.resolve(publicTicket(ticket))
+    // v3.2.0：恢复/延迟调用时窗口可能已经过去，先按等级策略推进再返回。
+    if ((ticket.level === 'yellow' || ticket.level === 'blue')
+      && Number(ticket.waitDeadlineAt) <= nowMs()) {
+      settlePolicy(ticketId)
+      return Promise.resolve(publicTicket(tickets.get(ticketId) ?? ticket))
+    }
     return new Promise((resolvePromise, rejectPromise) => {
       const waiter = { resolve: resolvePromise, reject: rejectPromise, signal, onAbort: null, timer: null }
       const settleForWaiter = (result) => {
@@ -1082,11 +1204,14 @@ export function apply(ctx, config) {
         if (signal.aborted) { waiter.onAbort(); return }
         signal.addEventListener('abort', waiter.onAbort, { once: true })
       }
-      if (ticket.expiresAt && Number.isFinite(ticket.expiresAt)) {
-        const delay = Math.max(1, ticket.expiresAt - nowMs())
+      const policyDeadline = ticket.level === 'red' ? ticket.expiresAt : ticket.waitDeadlineAt
+      if (policyDeadline && Number.isFinite(policyDeadline)) {
+        const delay = Math.max(1, policyDeadline - nowMs())
         waiter.timer = setTimeout(() => {
           const current = tickets.get(ticketId)
-          if (current && current.status === 'pending') expire(ticketId)
+          if (!current || current.status !== 'pending') return
+          if (current.level === 'red') expire(ticketId)
+          else settlePolicy(ticketId)
         }, delay)
       }
       let set = waiters.get(ticketId)
@@ -1153,6 +1278,13 @@ export function apply(ctx, config) {
         isBlocking: item.isBlocking === true,
         resolvedBy: item.resolvedBy === undefined || item.resolvedBy === null ? null : String(item.resolvedBy),
         resolutionNote: item.resolutionNote === undefined || item.resolutionNote === null ? null : String(item.resolutionNote),
+        waitMode: item.waitMode ?? decisionPolicy(normalizeLevel(item.level, 'gray')).waitMode,
+        waitDeadlineAt: Number(item.waitDeadlineAt) || null,
+        deferredAt: Number(item.deferredAt) || null,
+        autoResolved: item.autoResolved === true,
+        autoReason: item.autoReason ?? null,
+        lateResponse: item.lateResponse === true,
+        policyTimeoutMs: Number(item.policyTimeoutMs) || null,
       }
       if (ticket.status === 'pending') {
         // v3.1.24：进程重启后 pending 仍保留给人回答（浮窗/收件箱可见），
@@ -1167,6 +1299,8 @@ export function apply(ctx, config) {
         recovered = true
       }
       tickets.set(ticket.id, ticket)
+      // v3.2.0：只恢复本版显式带 waitMode 的策略票；旧版 pending 不会被追溯自动执行。
+      if (ticket.status === 'pending' && item.waitMode) schedulePolicy(ticket)
     }
     revision = Math.max(revision, ...tickets.values().map((ticket) => Number(ticket.rev) || 0))
     if (recovered) save()
@@ -2085,6 +2219,7 @@ export function apply(ctx, config) {
       levels: [...LEVELS],
       statuses: [...STATUSES],
       blockingLevels: [...BLOCKING_LEVELS],
+      levelPolicies: DECISION_LEVEL_POLICY,
       maxTickets: cfg.maxTickets,
       maxPendingRed: cfg.maxPendingRed,
       defaultTimeoutMinutes: cfg.defaultTimeoutMinutes,
@@ -2139,7 +2274,7 @@ export function apply(ctx, config) {
         if (!tools || typeof tools.register !== 'function') return
         const unregister = tools.register({
           name: 'request_human_decision',
-          description: '当需要人类授权、选择方案、或汇报重要结果时，创建一张决策中心 ticket。红色会挂起等待；黄/蓝/绿只记录并立即返回。\n' + PM_PROACTIVE_HINT,
+          description: '当需要人类授权、选择方案、或汇报重要结果时，创建一张决策中心 ticket。红色强制等待人工；黄色最多等 3 分钟后继续且可补选；蓝色最多等 1 分钟后按推荐自动执行；绿色自动执行并留底。\n' + PM_PROACTIVE_HINT,
           parameters: {
             type: 'object',
             additionalProperties: false,
@@ -2213,21 +2348,39 @@ export function apply(ctx, config) {
             const created = create({ ...input, source })
             if (!created.ok) throw new Error(`decision center rejected ticket: ${created.reason}`)
             const ticket = created.ticket
-            if (ticket.isBlocking) {
+            // v3.2.0：红=等到人工；黄=最多等 3 分钟后 deferred 继续；蓝=最多等 1 分钟后自动推荐；绿=已闭环。
+            if (ticket.status === 'pending' && (ticket.level === 'red' || ticket.level === 'yellow' || ticket.level === 'blue')) {
               const result = await wait(ticket.id, exec?.signal)
-              const outcome = String(result?.outcome ?? 'expired')
+              const outcome = String(result?.outcome ?? (result.status === 'pending' ? 'deferred' : 'expired'))
+              if (result.status === 'pending' && result.level === 'yellow') {
+                return {
+                  ticketId: result.id, level: result.level, blocking: false,
+                  status: 'pending', outcome: 'deferred', deferred: true,
+                  continueWithoutDecision: true, canAnswerLater: true,
+                  deferredAt: result.deferredAt ?? undefined,
+                }
+              }
               if (outcome !== 'resolved' && outcome !== 'acked') {
                 throw new Error(`用户未处理该决策（outcome=${outcome}）`)
               }
               return {
-                ticketId: ticket.id, level: ticket.level, blocking: true,
+                ticketId: result.id, level: result.level, blocking: result.level === 'red',
                 status: 'resolved', outcome,
                 selectedValue: result.resolvedOption ?? undefined,
                 selectedActionId: result.selectedActionId ?? undefined,
                 payload: result.resolvedPayload ?? undefined,
+                autoResolved: result.autoResolved === true,
+                autoReason: result.autoReason ?? undefined,
+                lateResponse: result.lateResponse === true,
               }
             }
-            return { ticketId: ticket.id, level: ticket.level, blocking: false, status: 'pending', outcome: 'pending' }
+            return {
+              ticketId: ticket.id, level: ticket.level, blocking: false,
+              status: ticket.status, outcome: ticket.outcome ?? ticket.status,
+              autoResolved: ticket.autoResolved === true,
+              selectedValue: ticket.resolvedOption ?? undefined,
+              selectedActionId: ticket.selectedActionId ?? undefined,
+            }
           },
         })
         // PM 交互式选择：独立工具名，语义 = 红色决策 ticket（默认红、阻塞等待选择）。

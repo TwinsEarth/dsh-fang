@@ -3719,15 +3719,31 @@ window.__ModuleLoader__.load({
         if (minutes < 60) return `剩余 ${minutes} 分钟`
         return `剩余 ${Math.floor(minutes / 60)} 小时`
       }
+      const miniDecisionState = (item) => {
+        if (item.status === 'pending') {
+          if (item.level === 'red') return '必须人工选择'
+          if (item.level === 'yellow') {
+            if (item.deferredAt) return '已继续 · 可补选'
+            return item.waitDeadlineAt ? '3 分钟内可选择' : remaining(item.expiresAt)
+          }
+          if (item.level === 'blue') return item.waitDeadlineAt ? '1 分钟后按推荐执行' : remaining(item.expiresAt)
+        }
+        if (item.lateResponse) return '已补选'
+        if (item.autoResolved) return '已自动执行 · 留底'
+        if (item.status === 'resolved') return '已处理 · 留底'
+        return remaining(item.expiresAt)
+      }
       const sourceLabel = (item) => {
         const source = item?.source ?? {}
         return String(source.rawSource || source.agentRole || 'unknown')
           + (source.taskName ? ` · ${source.taskName}` : '')
           + (source.sessionId && source.sessionId !== 'unknown' ? ` · ${source.sessionId}` : '')
       }
+      // v3.2.0：历史也按原颜色可查；pending 排在最前，黄色 deferred 仍可操作。
       const itemsFor = (level) => level === 'gray'
-        ? state.items.filter((item) => item.status !== 'pending')
-        : state.items.filter((item) => item.status === 'pending' && item.level === level)
+        ? state.items.filter((item) => item.status !== 'pending' && item.level === 'gray')
+        : state.items.filter((item) => item.level === level)
+          .sort((a, b) => Number(b.status === 'pending') - Number(a.status === 'pending') || Number(b.createdAt || 0) - Number(a.createdAt || 0))
 
       const load = async () => {
         const result = await api('/fang/api/decisions?includeArchived=1')
@@ -3799,7 +3815,7 @@ window.__ModuleLoader__.load({
                 }
                 list.append(h('div', { class: 'fang-decision-mini-item', 'data-inbox-id': item.id, 'data-level': item.level },
                   h('div', { class: 'fang-decision-mini-title' }, inboxText(item.title) || item.id),
-                  h('div', { class: 'fang-decision-mini-meta' }, `${sourceLabel(item)} · ${remaining(item.expiresAt)}`),
+                  h('div', { class: 'fang-decision-mini-meta' }, `${sourceLabel(item)} · ${miniDecisionState(item)}`),
                   item.context ? h('div', { class: 'fang-decision-mini-context' }, inboxText(item.context, 240)) : null,
                   actions))
               }
@@ -5806,6 +5822,23 @@ window.__ModuleLoader__.load({
         return list
       }
 
+      const decisionStateText = (item) => {
+        if (item.status === 'pending') {
+          if (item.level === 'red') return '暂停中 · 必须人工选择'
+          if (item.level === 'yellow') {
+            return item.deferredAt ? '已超时继续 · 仍可补选' : '等待选择 · 3 分钟后继续'
+          }
+          if (item.level === 'blue') return '等待选择 · 1 分钟后按推荐执行'
+          return '待处理'
+        }
+        if (item.lateResponse) return '已补选 · 结果已留底'
+        if (item.autoResolved) return item.level === 'green' ? '已自动执行 · 留底' : '已按推荐自动执行 · 留底'
+        if (item.status === 'resolved') return item.outcome === 'acked' ? '已知悉 · 留底' : '已处理 · 留底'
+        if (item.status === 'expired') return '已过期'
+        if (item.status === 'abandoned') return '已忽略'
+        return item.status || '已归档'
+      }
+
       function itemNode(item, archived = false) {
         const selected = state.selected.has(item.id)
         const busy = state.busy === 'resolve' || state.busy === 'abandon' || state.busy === 'batch'
@@ -5831,6 +5864,10 @@ window.__ModuleLoader__.load({
               : null),
           item.context ? h('div', { class: 'fang-inbox-item-context' }, inboxText(item.context)) : null,
           h('div', { class: 'fang-inbox-meta' }, `${sourceText(item)} · ${fmtRelative(item.createdAt)}${item.expiresAt ? ' · 到期 ' + fmtRelative(item.expiresAt) : ''}`),
+          h('div', {
+            class: 'fang-inbox-meta',
+            'data-decision-state': item.deferredAt && item.status === 'pending' ? 'deferred' : (item.autoResolved ? 'auto' : item.status),
+          }, decisionStateText(item)),
           item.ai ? h('div', { class: 'fang-inbox-ai-advice' },            h('span', { class: 'fang-inbox-ai-tag' }, 'AI · 未核实'),
             `${item.ai.summary || ''}${item.ai.recommendation ? ' · 推荐：' + item.ai.recommendation : ''}`,
             Array.isArray(item.ai.optionRisks) && item.ai.optionRisks.length
@@ -5921,12 +5958,19 @@ window.__ModuleLoader__.load({
       function groupNode(levelMeta) {
         const level = levelMeta.level
         const archived = level === 'gray'
-        const items = state.items.filter(item => archived ? item.status !== 'pending' : (item.status === 'pending' && item.level === level))
+        // v3.2.0：每种颜色都同时展示待处理与历史；灰色只承担过期/放弃归档。
+        const items = state.items
+          .filter(item => archived ? (item.status !== 'pending' && item.level === 'gray') : item.level === level)
+          .sort((a, b) => {
+            const pendingDelta = Number(b.status === 'pending') - Number(a.status === 'pending')
+            return pendingDelta || Number(b.createdAt || 0) - Number(a.createdAt || 0)
+          })
         if (!items.length) return null
         const collapsed = state.collapsed.has(level)
-        const unread = archived ? 0 : items.length
-        const allSelected = !archived && items.every(item => state.selected.has(item.id))
-        const someSelected = !archived && !allSelected && items.some(item => state.selected.has(item.id))
+        const unread = archived ? 0 : items.filter(item => item.status === 'pending').length
+        const pendingItems = items.filter(item => item.status === 'pending')
+        const allSelected = !archived && pendingItems.length > 0 && pendingItems.every(item => state.selected.has(item.id))
+        const someSelected = !archived && !allSelected && pendingItems.some(item => state.selected.has(item.id))
         let check = null
         if (!archived) {
           check = h('input', {
@@ -5955,7 +5999,7 @@ window.__ModuleLoader__.load({
           h('b', null, levelMeta.label),
           h('span', { style: { fontSize: 11, color: 'inherit', opacity: .8 } }, levelMeta.hint),
           h('span', { class: 'n' }, `${unread} 项 · ${collapsed ? '展开' : '收起'}`))),
-          collapsed ? null : h('div', { role: 'list' }, ...items.slice(0, archived ? 80 : 200).map(item => itemNode(item, archived))))
+          collapsed ? null : h('div', { role: 'list' }, ...items.slice(0, archived ? 80 : 200).map(item => itemNode(item, archived || item.status !== 'pending'))))
       }
 
       /** 批量确认弹窗：返回 Promise<boolean>；Esc/取消/点遮罩 = false。 */
