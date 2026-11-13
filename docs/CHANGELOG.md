@@ -1,3 +1,47 @@
+## v3.1.32（2026-11-13）
+
+**主题：绿色「派生新分身」改为「默认元主 + 选择一个进行中会话」。**
+
+### 实测问题（v3.1.31 界面）
+
+点绿色「派生新分身」后直接出现红色提示：
+
+```text
+派生失败 · session-required
+请求失败：session-required
+派生分身需要先选择一个进行中的会话（一次只能导入一个）
+```
+
+原因：绿色按钮执行的是 `deriveTask({ title: '派生新分身' })`——**没有 sessionId**，
+而 v3.1.30 起服务端 `derive()` 已强制要求一个会话，于是必然被拒。
+同时它也没有关联「开发者推荐（官方）」默认元主。
+
+### 修复
+
+新增 `deriveQuick()`，绿色按钮改走它：
+
+1. 读取 `GET /fang/api/essence/list`，取 `defaultId`（开发者推荐/官方默认元主），
+   没有默认则取第一个活跃元主；没有元主时明确提示先克隆母体；
+2. 读取进行中会话，弹 `showDerivePicker` **单选**一个会话；
+3. `POST /fang/api/tasks/create` 带 `essenceId` + `importSession: { sessionId }`。
+
+空状态里的「派生新分身」同样改走 `deriveQuick()`。
+
+### 验证
+
+- 新增 `test/client-derive-quick.test.mjs`（4 例）：按钮接线、默认元主解析、单选复用、app 暴露；
+- 真实母体实测派生链路：
+
+```text
+模板      : essence-official-dev「开发者推荐（官方）」  ← defaultId 命中
+可选会话  : 26
+tasks/create → 200  ok=true  port=18001
+status    : ready  adapter=true
+imported  : { ok:true, sessionId:…, title:"GPT", workspaceKey:"--E-GPT--" }
+落库      : sessions/--E-GPT--/session-…/session.v4.jsonl.zstd（50,050,146 B）
+profile   : package.json readonly=false，cordis.patch.yml readonly=false
+残留      : reap → removed=true，fork home 已删除
+```
 ## v3.1.31（2026-11-13）
 
 **主题：修「生成元主失败」（折行纯量解析）+ 让 CI 的远端复核/终检真正执行。**
