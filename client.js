@@ -2129,6 +2129,69 @@ window.__ModuleLoader__.load({
         doc.body.appendChild(backdrop)
       }
 
+      /**
+       * v3.1.32：绿色「派生新分身」。
+       *   1) 自动关联默认元主（开发者推荐的模板）；没有默认则取第一个活跃元主；
+       *   2) 弹窗选择一个进行中会话（一次只能导入一个，与服务端 derive 的硬校验一致）。
+       */
+      async function deriveQuick() {
+        if (isBusy()) return
+        S.busy = 'derive:quick'
+        let essence = null
+        try {
+          const listed = await api('/fang/api/essence/list')
+          const data = listed.body ?? {}
+          const essences = Array.isArray(data.essences) ? data.essences.filter((item) => item && item.archived !== true) : []
+          const defaultId = String(data.defaultId ?? '')
+          essence = essences.find((item) => String(item.id) === defaultId) ?? essences[0] ?? null
+        } catch { essence = null }
+        S.busy = ''
+        if (!essence) {
+          setNotice({
+            tone: 'warn',
+            title: '还没有可用的元主模板',
+            message: '先「克隆母体」生成一个元主，或在元主列表里设置默认元主，再派生分身。',
+          })
+          return
+        }
+        S.busy = 'derive:quick:sessions'
+        const res = await api('/fang/api/sessions?limit=200')
+        S.busy = ''
+        const sessions = Array.isArray(res.body?.sessions)
+          ? res.body.sessions.filter((session) => session.archived !== true)
+          : []
+        if (sessions.length === 0) {
+          setNotice({ tone: 'warn', title: '没有可导入的会话', message: '先在 DSH 里开一个对话，再派生分身。' })
+          return
+        }
+        showDerivePicker(sessions, essence.name || essence.id, async (sessionId) => {
+          const session = sessions.find((item) => String(item.sessionId) === String(sessionId))
+          const title = String(session?.title || essence.name || '派生分身').slice(0, 60)
+          S.busy = 'derive:quick:run'
+          const out = await api('/fang/api/tasks/create', {
+            method: 'POST',
+            body: JSON.stringify({ title, essenceId: essence.id, importSession: { sessionId } }),
+          })
+          S.busy = ''
+          if (out.status === 200 && out.body?.ok) {
+            setNotice({
+              tone: 'ok',
+              title: '已派生分身',
+              message: `模板「${essence.name || essence.id}」· 会话 ${short(String(sessionId), 8)}${out.body?.port ? ' · 端口 ' + out.body.port : ''}`,
+              actions: out.body?.taskId ? [{ label: '打开分身', onClick: () => void openTask({ taskId: out.body.taskId }) }] : [],
+            })
+          } else {
+            setNotice({
+              tone: 'bad',
+              title: '派生失败',
+              message: failureHint(out.body?.error || 'http-' + out.status),
+              detail: out.body?.detail || '',
+              actions: [{ label: '重试', onClick: () => void deriveQuick() }],
+            })
+          }
+          await refresh()
+        })
+      }
       async function deriveFromEssence(essence) {
         if (isBusy()) return
         S.busy = 'essence:derive:' + essence.id
@@ -2783,7 +2846,7 @@ window.__ModuleLoader__.load({
         adviseDecision,
         openEssence, copyEssence, archiveEssence, deleteEssence, downloadEssence, essenceImport,
         essenceBackup, essenceRestore, openEssenceDetail, unfreezeEssence, stopEssenceRuntime,
-        openBranches, forkBranch, activateBranch, deriveFromEssence,
+        openBranches, forkBranch, activateBranch, deriveFromEssence, deriveQuick,
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
@@ -3119,7 +3182,8 @@ window.__ModuleLoader__.load({
                 if (node) node.focus?.()
                 return
               }
-              void app.deriveTask({ title: '派生新分身' })
+              // v3.1.32：绿色按钮 = 默认元主 + 选一个进行中会话（不再直接发无会话请求）
+              void app.deriveQuick()
             },
             fk: 'derive',
           })),
@@ -3803,7 +3867,7 @@ window.__ModuleLoader__.load({
             ? ['没有临时内容', '临时 = 快速派生的空白分身（标题为“快速派生”）与空会话。']
             : ['还没有存档', '归档后的分身会出现在这里，可还原或永久删除。']
         body.append(emptyBlock(copy[0], copy[1], key === 'active'
-          ? [button('派生新分身', { size: 'sm', variant: 'primary', onClick: () => void app.deriveTask({ title: '派生新分身' }) })]
+          ? [button('派生新分身', { size: 'sm', variant: 'primary', onClick: () => void app.deriveQuick() })]
           : []))
       } else {
         for (const task of tasks) body.append(renderForkCard(S, app, task, { archived: key === 'archived' }))
