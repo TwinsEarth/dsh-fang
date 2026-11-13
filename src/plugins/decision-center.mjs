@@ -432,7 +432,12 @@ function applyForkDecisionCenter(ctx, config, gate) {
             const remoteWaitMs = ticket.level === 'red'
               ? waitTimeoutMs
               : Math.max(1000, Number(ticket.waitDeadlineAt) - Date.now() + 5000)
-            const settled = await wait(ticket.id, { signal: exec?.signal, timeoutMs: remoteWaitMs })
+            let settled = await wait(ticket.id, { signal: exec?.signal, timeoutMs: remoteWaitMs })
+            if (!settled.ok && ticket.level === 'blue' && settled.reason === 'timeout') {
+              // v3.2.1：轮询窗口与母体自动执行存在毫秒级竞态，失败前再取一次最终状态。
+              const final = await getRemote(ticket.id)
+              if (final.ok && final.ticket && final.ticket.status !== 'pending') settled = { ok: true, ticket: final.ticket }
+            }
             if (!settled.ok) {
               // 黄色轮询超时仍允许流程继续；母体定时器会把 ticket 标成 deferred。
               if (ticket.level === 'yellow' && settled.reason === 'timeout') {
@@ -708,7 +713,9 @@ export function apply(ctx, config) {
       // A waited ticket is a live promise; any blocking ticket (even yellow with
       // isBlocking:true) is a live decision; a pending red is the most expensive
       // attention object even when no one is currently awaited. Never evict them.
-      if (waiters.has(victim.id) || victim.isBlocking === true || (victim.status === 'pending' && victim.level === 'red')) continue
+      // v3.2.1：所有 pending 都仍可回答/等待自动闭环，不能被容量修剪静默删除。
+      // maxTickets 只淘汰已处理历史；黄票尤其必须保留到人工补选。
+      if (victim.status === 'pending' || waiters.has(victim.id) || victim.isBlocking === true) continue
       tickets.delete(victim.id)
       const record = { id: victim.id, level: victim.level, status: victim.status, reason: 'max-tickets', at: nowMs() }
       evicted.push(record)
@@ -941,6 +948,11 @@ export function apply(ctx, config) {
   const deferYellow = (id) => {
     const ticket = tickets.get(String(id ?? ''))
     if (!ticket || ticket.status !== 'pending' || ticket.level !== 'yellow') return false
+    // v3.2.1：调度定时器与 wait 定时器可同时到期；defer 必须幂等，不能重复审计/升 rev。
+    if (ticket.deferredAt) {
+      settleWaiter(ticket.id, publicTicket(ticket))
+      return false
+    }
     if (ticket.waitDeadlineAt && Number(ticket.waitDeadlineAt) > nowMs()) return false
     ticket.deferredAt = nowMs()
     ticket.outcome = 'deferred'
@@ -1172,7 +1184,7 @@ export function apply(ctx, config) {
     if (ticket.status !== 'pending') return Promise.resolve(publicTicket(ticket))
     // v3.2.0：恢复/延迟调用时窗口可能已经过去，先按等级策略推进再返回。
     if ((ticket.level === 'yellow' || ticket.level === 'blue')
-      && Number(ticket.waitDeadlineAt) <= nowMs()) {
+      && ticket.waitDeadlineAt && Number(ticket.waitDeadlineAt) <= nowMs()) {
       settlePolicy(ticketId)
       return Promise.resolve(publicTicket(tickets.get(ticketId) ?? ticket))
     }
@@ -1194,9 +1206,9 @@ export function apply(ctx, config) {
           const set = waiters.get(ticketId)
           if (set) { set.delete(waiter); if (set.size === 0) waiters.delete(ticketId) }
           const current = tickets.get(ticketId)
-          if (current && current.status === 'pending' && (!set || set.size === 0)) {
-            // No process is waiting anymore: do not leave a red card lying about
-            // claiming to be "blocking". Convert it to an audited abandoned ticket.
+          if (current && current.status === 'pending' && current.level === 'red' && (!set || set.size === 0)) {
+            // v3.2.1：只有红色在调用方取消后转为 abandoned。
+            // 黄/蓝只是取消本次流程等待，ticket 必须继续保留：黄色仍可补选，蓝色仍按窗口自动执行。
             abandon(ticketId, { by: 'caller', note: 'caller-aborted' })
           }
           rejectPromise(new Error('decision wait aborted'))
