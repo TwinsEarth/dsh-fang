@@ -181,31 +181,57 @@ export function stripUrlToken(url) {
 
 /** Find a runnable dsh launcher. `.cmd` wrappers are spawned through a shell by the forker. */
 export function resolveCliPath(explicit = '', env = process.env, execPath = process.execPath) {
+  // v3.1.33：平台感知。v3.1.32 及以前只探测 Windows 的 dsh.cmd + 硬编码盘符，
+  // 在 macOS 上必然找不到 launcher → 回落裸 'dsh' → spawn ENOENT → spawn-error。
+  // （MacMini 实测：runtime-spawn-failed: spawn-error, profile=essence-runtime）
+  const isWindows = process.platform === 'win32'
+  // win 用 resources，mac 的 .app 是 Contents/Resources（大写）——按平台给真实大小写优先。
+  const binDirNames = isWindows ? ['resources', 'Resources'] : ['Resources', 'resources']
+  const binNames = isWindows ? ['dsh.cmd', 'dsh.exe', 'dsh'] : ['dsh', 'dsh.sh']
   const candidates = []
-  if (explicit) candidates.push(explicit)
-  if (env.DSH_CLI) candidates.push(env.DSH_CLI)
-  if (env.DSH_INSTALL_DIR) candidates.push(path.join(env.DSH_INSTALL_DIR, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'))
+  const push = (value) => { if (value) candidates.push(value) }
+
+  if (explicit) push(explicit)
+  if (env.DSH_CLI) push(env.DSH_CLI)
+  if (env.DSH_INSTALL_DIR) {
+    for (const dir of binDirNames) {
+      for (const name of binNames) push(path.join(env.DSH_INSTALL_DIR, dir, 'runtime', 'cli', 'bin', name))
+    }
+  }
   for (const dir of String(env.PATH ?? env.Path ?? '').split(path.delimiter)) {
     if (!dir) continue
-    candidates.push(path.join(dir, 'dsh.cmd'), path.join(dir, 'dsh.exe'), path.join(dir, 'dsh'))
+    for (const name of binNames) push(path.join(dir, name))
   }
-  // 新版桌面安装目录不一定叫 E:\DS；从当前宿主可执行文件反推安装根目录：
-  //   <install>\DeepSeek Harness.exe -> <install>\resources\runtime\cli\bin\dsh.cmd
-  // 同时向上探测 4 层，兼容 node.exe 等位于 runtime/ 下的启动器。
+  // 从当前宿主可执行文件反推安装根：
+  //   win : <install>\DeepSeek Harness.exe → <install>\resources\runtime\cli\bin\dsh.cmd
+  //   mac : <app>/Contents/MacOS/DeepSeek Harness → <app>/Contents/Resources/runtime/cli/bin/dsh
   try {
     let dir = path.dirname(String(execPath ?? ''))
-    for (let i = 0; i < 5 && dir; i += 1) {
-      candidates.push(path.join(dir, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'))
-      candidates.push(path.join(dir, 'runtime', 'cli', 'bin', 'dsh.cmd'))
+    for (let i = 0; i < 6 && dir; i += 1) {
+      for (const sub of binDirNames) {
+        for (const name of binNames) {
+          push(path.join(dir, sub, 'runtime', 'cli', 'bin', name))
+          push(path.join(dir, 'runtime', 'cli', 'bin', name))
+        }
+      }
       const parent = path.dirname(dir)
       if (parent === dir) break
       dir = parent
     }
   } catch { /* keep legacy candidates */ }
-  candidates.push(
-    'E:\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd',
-    'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
-  )
+
+  if (isWindows) {
+    push('E:\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd')
+    push('C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd')
+  } else {
+    // macOS / Linux 常见安装位置（含 .app 包内 CLI）
+    push('/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh')
+    push(path.join(String(env.HOME ?? ''), 'Applications', 'DeepSeek Harness.app', 'Contents', 'Resources', 'runtime', 'cli', 'bin', 'dsh'))
+    push('/opt/homebrew/bin/dsh')
+    push('/usr/local/bin/dsh')
+    push('/usr/bin/dsh')
+  }
+
   for (const c of candidates) {
     try { if (c && fs.existsSync(c)) return c } catch { /* next */ }
   }
@@ -2336,7 +2362,18 @@ export function apply(ctx, config) {
         // 契约 file 桥（contract-outbox）；普通分身在 846/1461/1534 行已有同名注入。
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir },
       })
-      if (!started.ok) throw new Error(`runtime-spawn-failed: ${started.error ?? 'unknown'} (forkId=${forkId}, homeDir=${homeDir}, profile=essence-runtime)`)
+      if (!started.ok) {
+        // v3.1.33：把真实 errno 与启动规格带进错误信息，避免只剩一个笼统的 spawn-error。
+        const detail = started.message ? ` message=${started.message}` : ''
+        const spec = started.spec ? ` spec=${started.spec.command} ${(started.spec.args ?? []).join(' ')}` : ''
+        const logTail = Array.isArray(started.log) && started.log.length > 0
+          ? ` log=${String(started.log.slice(-3).join(' | ')).slice(0, 400)}`
+          : ''
+        throw new Error(
+          `runtime-spawn-failed: ${started.error ?? 'unknown'} (forkId=${forkId}, homeDir=${homeDir}, profile=essence-runtime)`
+          + detail + spec + logTail,
+        )
+      }
       return {
         ok: true, essenceId: id, forkId,
         url: started.url, port: started.port, pid: started.pid,

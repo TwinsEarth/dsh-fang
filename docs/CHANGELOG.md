@@ -1,3 +1,61 @@
+## v3.1.33（2026-11-13）
+
+**主题：修 macOS 上「启动元主 Web 失败 · runtime-spawn-failed: spawn-error」。**
+
+### 实测报错（MacMini 母体端）
+
+```text
+启动元主 Web 失败
+请求失败：runtime-failed
+runtime-spawn-failed: spawn-error
+  (forkId=rt-1794546949341-9c73b5,
+   homeDir=/Users/fang/.dsh/fang/desktop/runtime/essence-1794546949341-9c73b5/home,
+   profile=essence-runtime)
+```
+
+### 根因
+
+`resolveCliPath()` 是**纯 Windows 实现**：只探测 `dsh.cmd` / `dsh.exe`，
+安装根反推只拼 `resources/runtime/cli/bin/dsh.cmd`，最后还有两条硬编码盘符：
+
+```js
+'E:\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd',
+'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
+```
+
+macOS 上的真实结构是：
+
+```text
+/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness     ← 宿主
+/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh
+                                         ↑ 大写 Resources，且无 .cmd 扩展名
+```
+
+→ 全部候选都落空 → 回落到裸 `dsh` → 若不在 PATH 中，`spawn('dsh')` 抛 ENOENT
+→ 被 forker 捕获成 `spawn-error` → 元主运行态启动失败。
+
+### 修复
+
+1. `resolveCliPath()` 改为平台感知：
+   - Windows：`dsh.cmd` / `dsh.exe` / `dsh`，目录 `resources` → `Resources`；
+   - macOS/Linux：`dsh` / `dsh.sh`，目录 **`Resources` 优先**（.app 的真实大小写）；
+   - 安装根反推向上 6 层，同时尝试 `resources` 与 `Resources`；
+   - 非 Windows 兜底：`.app/Contents/Resources/runtime/cli/bin/dsh`、`~/Applications/...`、
+     `/opt/homebrew/bin/dsh`、`/usr/local/bin/dsh`、`/usr/bin/dsh`。
+2. spawn 失败的报错带上真实 errno 与启动规格：
+
+```text
+runtime-spawn-failed: spawn-error (forkId=…, homeDir=…, profile=essence-runtime)
+  message=spawn dsh ENOENT
+  spec=/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh --profile … --port …
+  log=…
+```
+
+### 验证
+
+- 新增 `test/cli-resolve-platform.test.mjs`（4 例）：
+  显式路径优先 / PATH 上的无扩展名 launcher / macOS .app Resources 布局 / 绝不回落 Windows 专属路径；
+- Windows 实机解析仍返回 `E:\DSH\DS\resources\runtime\cli\bin\dsh.cmd`（无回归）。
 ## v3.1.32（2026-11-13）
 
 **主题：绿色「派生新分身」改为「默认元主 + 选择一个进行中会话」。**
