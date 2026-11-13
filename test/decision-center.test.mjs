@@ -56,8 +56,12 @@ test('decision center: create / list order / resolve / abandon', () => {
     })
     assert.equal(green.ok, true)
     assert.equal(blue.ok, true)
-    assert.deepEqual(service.list().items.map(item => item.level), ['blue', 'green'])
+    // v3.2.0：绿色创建即自动 ACK 留底，不再占用 pending；蓝色仍在等待窗口内。
+    assert.deepEqual(service.list().items.map(item => item.level), ['blue'])
     assert.equal(service.list().counts.blue, 1)
+    assert.equal(green.ticket.status, 'resolved')
+    assert.equal(green.ticket.outcome, 'acked')
+    assert.equal(green.ticket.autoResolved, true)
 
     const resolved = service.resolve(blue.ticket.id, 'yes', { by: 'tester', note: 'go' })
     assert.equal(resolved.ok, true)
@@ -65,11 +69,12 @@ test('decision center: create / list order / resolve / abandon', () => {
     assert.equal(service.get(blue.ticket.id).resolvedBy, 'tester')
     assert.equal(service.resolve(blue.ticket.id, 'no').reason, 'not-pending')
 
-    const abandoned = service.abandon(green.ticket.id, { by: 'tester' })
+    const yellow = service.create({ level: 'yellow', title: 'archive me', context: 'x', options: [{ value: 'a', label: 'A' }] })
+    const abandoned = service.abandon(yellow.ticket.id, { by: 'tester' })
     assert.equal(abandoned.ok, true)
-    assert.equal(service.get(green.ticket.id).level, 'gray')
-    assert.equal(service.get(green.ticket.id).status, 'abandoned')
-    assert.equal(service.resolve(green.ticket.id, 'x').reason, 'not-pending')
+    assert.equal(service.get(yellow.ticket.id).level, 'gray')
+    assert.equal(service.get(yellow.ticket.id).status, 'abandoned')
+    assert.equal(service.resolve(yellow.ticket.id, 'x').reason, 'not-pending')
   } finally {
     drop(ctx, root)
   }
@@ -139,7 +144,7 @@ test('decision center: persisted pending tickets restore as pending (still answe
   }
 })
 
-test('decision center: registers request_human_decision and non-blocking tool returns immediately', async () => {
+test('decision center: green tool auto-acks immediately and leaves a readable record', async () => {
   const registered = []
   const tools = { register(definition) { registered.push(definition); return () => {} } }
   const { ctx, service, root } = boot({ services: { tools } })
@@ -155,9 +160,11 @@ test('decision center: registers request_human_decision and non-blocking tool re
     )
     assert.equal(result.blocking, false)
     assert.equal(result.level, 'green')
-    const item = service.list().items[0]
+    const item = service.list({ includeArchived: true }).items[0]
     assert.equal(item.source.sessionId, 'session-green')
-    assert.equal(item.status, 'pending')
+    assert.equal(item.status, 'resolved')
+    assert.equal(item.outcome, 'acked')
+    assert.equal(item.autoResolved, true)
   } finally {
     drop(ctx, root)
   }
@@ -425,7 +432,7 @@ test('decision center: submit maps design actions/payload; only red may block', 
   }
 })
 
-test('decision center: batch resolve follows recommendations and acks green tickets', () => {
+test('decision center: batch resolve follows recommendations; green is already auto-acked', () => {
   const { ctx, service, root } = boot()
   try {
     const blue = service.create({
@@ -434,11 +441,12 @@ test('decision center: batch resolve follows recommendations and acks green tick
     })
     const green = service.create({ level: 'green', title: 'done', context: 'x' })
     const out = service.resolveMany([blue.ticket.id, green.ticket.id], { by: 'batch' })
-    assert.equal(out.ok, true)
+    assert.equal(out.ok, false, 'green was already closed at creation and reports not-pending')
     assert.equal(out.results.length, 2)
     assert.equal(service.get(blue.ticket.id).outcome, 'resolved')
     assert.equal(service.get(blue.ticket.id).resolvedOption, 'yes')
     assert.equal(service.get(green.ticket.id).outcome, 'acked')
+    assert.equal(service.get(green.ticket.id).autoResolved, true)
   } finally {
     drop(ctx, root)
   }
@@ -559,16 +567,16 @@ test('decision center: since cursor returns deltas and advances rev', () => {
   }
 })
 
-test('decision center: no-option tickets accept only the explicit ack sentinel', () => {
+test('decision center: no-option green tickets auto-ack exactly once and reject later choices', () => {
   const { ctx, service, root } = boot()
   try {
     const green = service.create({ level: 'green', title: 'ack only', context: 'x' })
-    assert.equal(service.resolve(green.ticket.id, 'anything').reason, 'unknown-option')
-    assert.equal(service.get(green.ticket.id).status, 'pending')
-    const acked = service.resolve(green.ticket.id, '__ACK__')
-    assert.equal(acked.ok, true)
-    assert.equal(acked.ticket.outcome, 'acked')
-    assert.equal(acked.ticket.resolvedOption, null)
+    assert.equal(green.ticket.status, 'resolved')
+    assert.equal(green.ticket.outcome, 'acked')
+    assert.equal(green.ticket.resolvedOption, null)
+    assert.equal(green.ticket.autoResolved, true)
+    assert.equal(service.resolve(green.ticket.id, 'anything').reason, 'not-pending')
+    assert.equal(service.resolve(green.ticket.id, '__ACK__').reason, 'not-pending')
   } finally {
     drop(ctx, root)
   }
@@ -1558,7 +1566,7 @@ test('decision center: quotaStatus reports per-session and per-role daily counts
     assert.deepEqual(stats.sessions, [{ sessionId: 's-a', count: 2 }, { sessionId: 's-b', count: 1 }])
     assert.deepEqual(stats.roles, [{ role: 'pm', count: 2 }, { role: 'worker', count: 1 }])
     assert.equal(stats.total, 3)
-    assert.equal(stats.pending.total, 3)
+    assert.equal(stats.pending.total, 2, 'green is auto-acked and does not remain pending')
     assert.equal(stats.pending.red, 1)
     assert.equal(stats.pending.attentionPoints, 3 + 5 + 0)
     assert.equal(stats.limits.maxPendingRed, 30)
@@ -1680,7 +1688,7 @@ test('decision center: mixed batch resolves successes and reports the failed red
   }
 })
 
-test('decision center: external producer kinds map to attention defaults; PJM timeout auto-grays', async () => {
+test('decision center: external producer kinds map to attention defaults; yellow timeout defers without graying', async () => {
   const { ctx, service, root } = boot({ config: { tickMs: 500, autoAdvise: false } })
   try {
     const base = { producer: 'external', title: 'x', context: 'x', options: [{ value: 'a', label: 'A' }] }
@@ -1690,12 +1698,15 @@ test('decision center: external producer kinds map to attention defaults; PJM ti
     assert.equal(service.ingest({ ...base, title: 'w', kind: 'worker-deviation' }).ticket.level, 'yellow')
     const pjm = service.ingest({ ...base, title: 'pjm timeout', kind: 'pjm-timeout', timeoutMinutes: 0.01 })
     assert.equal(pjm.ticket.level, 'yellow')
-    assert.ok(pjm.ticket.expiresAt > Date.now(), 'PJM timeout ticket must have a deadline')
-    const expired = await waitFor(() => {
+    assert.ok(pjm.ticket.waitDeadlineAt > Date.now(), 'PJM timeout ticket must have a wait deadline')
+    assert.equal(pjm.ticket.expiresAt, null, 'wait deadline is not an archive expiry')
+    const deferred = await waitFor(() => {
       const ticket = service.get(pjm.ticket.id)
-      return ticket.status === 'expired' ? ticket : null
+      return ticket.deferredAt ? ticket : null
     }, { timeout: 3000, interval: 100 })
-    assert.equal(expired.level, 'gray', 'PJM timeout auto-grays')
+    assert.equal(deferred.level, 'yellow', 'yellow stays answerable after the wait window')
+    assert.equal(deferred.status, 'pending')
+    assert.equal(deferred.outcome, 'deferred')
   } finally {
     drop(ctx, root)
   }

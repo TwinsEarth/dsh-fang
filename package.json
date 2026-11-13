@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "3.1.35",
+  "version": "3.2.0",
   "private": true,
   "type": "module",
   "description": "瓮城：DSH 的第一台虚拟机！插件开发狂魔、多任务并发狂与安全焦虑症患者的隔离沙箱：热更新坏了秒回滚，多开不崩各跑各的，危险代码进审核与独立沙箱。1 编排器 + 12 子插件。",

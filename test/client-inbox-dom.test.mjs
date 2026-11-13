@@ -583,4 +583,40 @@ test('client DOM: fork role renders only the host notice, never mother 404 error
   }
 })
 
+test('client DOM: four-level history is visible, yellow stays answerable after defer, green needs no alert', async () => {
+  const now = Date.now()
+  const tickets = [
+    { ...redTicket, id: 'dec_four_r', rev: 1, title: '红色人工决策', status: 'pending' },
+    { ...baseTicket, id: 'dec_four_y', rev: 2, title: '黄色补选决策', status: 'pending', outcome: 'deferred', deferredAt: now - 1000, waitDeadlineAt: now - 1000 },
+    { ...blueTicket, id: 'dec_four_b', rev: 3, title: '蓝色自动推荐记录', status: 'resolved', outcome: 'resolved', autoResolved: true, autoReason: 'blue-timeout', resolvedOption: 'blue' },
+    { ...greenTicket, id: 'dec_four_g', rev: 4, title: '绿色静默留底记录', status: 'resolved', outcome: 'acked', autoResolved: true, autoReason: 'green-immediate' },
+  ]
+  const harness = makeHarness({ tickets })
+  try {
+    const host = mountInbox(harness)
+    await waitFor(() => host.textContent.includes('黄色补选决策'))
+    assert.match(host.textContent, /红色人工决策/)
+    assert.match(host.textContent, /已超时继续 · 仍可补选/)
+    assert.match(host.textContent, /蓝色自动推荐记录/)
+    assert.match(host.textContent, /已按推荐自动执行 · 留底/)
+    // 绿色默认折叠，但展开后能查到自动执行留底，且不产生 pending 强提醒。
+    const greenHead = host.querySelector('.fang-inbox-group[data-level="green"] .fang-inbox-group-head')
+    assert.ok(greenHead, 'green history group must exist even when there is no pending green')
+    greenHead.click()
+    await waitFor(() => host.textContent.includes('绿色静默留底记录'))
+    assert.match(host.textContent, /已自动执行 · 留底/)
+    const alerts = [...harness.window.document.querySelectorAll('[data-red-ticket]')]
+    assert.equal(alerts.length, 1, 'only the pending red ticket may raise a blocking alert')
+    assert.equal(alerts[0].getAttribute('data-red-ticket'), 'dec_four_r')
+    assert.equal(alerts[0].textContent.includes('绿色静默留底记录'), false, 'green never raises a blocking alert')
+    assert.match(host.textContent, /待处理 2/)
+    // deferred yellow remains actionable; resolved blue is read-only history.
+    assert.ok(host.querySelector('[data-inbox-id="dec_four_y"] .fang-inbox-item-actions'))
+    assert.equal(host.querySelector('[data-inbox-id="dec_four_b"] .fang-inbox-item-actions'), null)
+  } finally {
+    try { harness.dispose?.() } catch { /* ignore */ }
+    harness.dom.window.close()
+  }
+})
+
 } // end jsdom-available block

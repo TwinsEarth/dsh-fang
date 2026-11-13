@@ -1,3 +1,39 @@
+## v3.2.0（2026-11-14）
+
+**主题：决策中心四色状态机——红色强制人工、黄色超时继续可补选、蓝色推荐自动执行、绿色静默留底。**
+
+### 红色：强制暂停等待人工
+- 保持唯一硬阻塞等级；未选择前不继续，不由 AI/超时自动代选；人工选择与动作结果落库。
+
+### 黄色：3 分钟后继续，永久可补选
+- 默认等待窗口 3 分钟；窗口结束返回 `outcome=deferred`、`continueWithoutDecision=true`；
+- ticket 保持 `pending` 与原黄色，**不灰化、不过期**，收件箱仍可直接选择；
+- 后续人工选择写 `lateResponse=true`，并在此时执行对应 action handler。
+
+### 蓝色：1 分钟后按推荐自动执行
+- 默认等待 1 分钟；未选择则自动选推荐项（无推荐标记时确定性取第一项）；
+- 写 `autoResolved=true`、`autoReason=blue-timeout`、`resolvedBy=auto:blue-timeout`；
+- 只执行已注册 action handler，`ticket.execution` 记录 running/done/failed。
+
+### 绿色：自动执行并留底，不提醒
+- 创建即按推荐/ACK 闭环，`autoReason=green-immediate`；
+- 不进入 pending 计数、不触发红色强提醒；收件箱绿色分组与历史保留记录。
+
+### 收件箱与历史修复
+- 黄/蓝/绿的已处理记录按原颜色展示，不再只有红色可见；
+- pending 与历史同组展示、pending 置顶；灰色组仅放真正的灰色归档，避免重复；
+- 状态文案覆盖：等待人工、3 分钟后继续、已超时继续可补选、1 分钟后推荐执行、已自动执行、已补选。
+
+### 数据契约
+- 新增 `waitMode`、`waitDeadlineAt`、`deferredAt`、`autoResolved`、`autoReason`、`lateResponse`、`policyTimeoutMs`；
+- `waitDeadlineAt`（流程等待窗口）与 `expiresAt`（归档期限）彻底分离；
+- 重启只恢复带 `waitMode` 的新策略票；旧版 pending 票不会被追溯自动执行。
+
+### 验证
+- 新增 `test/decision-level-policy.test.mjs`（8 例）：四色默认值、红色人工、黄色补选执行、
+  蓝色自动执行、绿色静默、四色历史、JSON 落库与重启恢复、Agent 工具返回；
+- 新增真实 jsdom 收件箱测试：四色历史、黄色补选按钮、绿色无强提醒、pending 计数；
+- 更新原决策测试到新语义；contract/relay 等其它功能不变。
 ## v3.1.35（2026-11-13）
 
 **主题：适配 @twinsearth/dsh-fang-contract@1.1.0 —— 新增两个回流（relay）方法。**
