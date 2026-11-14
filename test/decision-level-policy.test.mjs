@@ -143,8 +143,13 @@ test('policy state persists to JSON and survives a restart without losing yellow
   try {
     yellowId = first.service.create({ level: 'yellow', title: 'restart-y', timeoutMinutes: 0.001, options: [option('a')] }).ticket.id
     blueId = first.service.create({ level: 'blue', title: 'restart-b', timeoutMinutes: 0.001, options: [option('b', true)] }).ticket.id
-    await waitFor(() => first.service.get(yellowId).deferredAt)
-    await waitFor(() => first.service.get(blueId).status === 'resolved')
+    // v3.2.2：显式等待策略结算，避免高负载 CI 下 60ms 定时器与 3s 轮询的竞态。
+    const [yellowSettled, blueSettled] = await Promise.all([
+      first.service.wait(yellowId),
+      first.service.wait(blueId),
+    ])
+    assert.equal(yellowSettled.outcome, 'deferred')
+    assert.equal(blueSettled.status, 'resolved')
     const storeFile = path.join(root, 'decision-center.json')
     const disk = JSON.parse(fs.readFileSync(storeFile, 'utf8'))
     assert.equal(disk.tickets.length, 2)
