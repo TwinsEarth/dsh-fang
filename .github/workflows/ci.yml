@@ -50,6 +50,7 @@ jobs:
         run: |
           mkdir -p dist
           node tools/gate/main-city.mjs --target source --json | tee dist/main-city-gate.json
+          node tools/gate/main-city.mjs --target workflows --json | tee dist/main-city-gate-workflows.json
       - name: 未授权直推 main 的告警（push 事件）
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |

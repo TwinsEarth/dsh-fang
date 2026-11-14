@@ -21,7 +21,7 @@ import { scoreGateFindings } from '../plugins/scorer.mjs'
 import { gateRepairPlan } from '../plugins/healer.mjs'
 import { CRASH_LOOP_DEFAULTS, detectCrashLoop } from './restart-contract.mjs'
 
-export const GATE_TARGETS = Object.freeze(['source', 'package', 'publish', 'install', 'deploy', 'profile'])
+export const GATE_TARGETS = Object.freeze(['source', 'package', 'publish', 'install', 'deploy', 'workflows', 'profile'])
 export const GATE_SEVERITIES = Object.freeze(['blocker', 'warning', 'info'])
 export const DEFAULT_MIN_FREE_BYTES = 512 * 1024 * 1024
 export const RESERVED_PROFILE_NAMES = Object.freeze(['desktop', 'plugin'])
@@ -155,6 +155,8 @@ export function checkSourceTree({ root = process.cwd(), version = '' } = {}) {
   addCheck(checks, 'source: crash-loop breaker present', restart.includes('crash-loop') && restart.includes('clearSafeMode'), 'blocker', 'restart-guard crash-loop breaker')
   addCheck(checks, 'source: gate wired into build', readTextSafe(path.join(base, 'tools/release/build.mjs')).includes('main-city.mjs'), 'blocker', 'build must call the gate')
   addCheck(checks, 'source: gate wired into publish', readTextSafe(path.join(base, 'tools/release/publish-npm.mjs')).includes('main-city.mjs'), 'blocker', 'publish must call the gate')
+  const workflows = checkWorkflows({ root: base })
+  checks.push(...workflows.checks)
 
   const vendor = readJsonSafe(path.join(base, 'src/contract/VENDOR.json'))
   if (!vendor) fail(checks, 'source: vendored contract manifest', 'src/contract/VENDOR.json missing', 're-sync contract from npm')
@@ -175,6 +177,50 @@ export function checkSourceTree({ root = process.cwd(), version = '' } = {}) {
   addCheck(checks, 'source: no hardcoded secrets', secretHits.length === 0, 'blocker', secretHits.length ? secretHits.slice(0, 5).join(',') : 'clean')
 
   return { target: 'source', checks, version: declared }
+}
+
+/**
+ * v3.3.1：第七类目标 workflows —— CI/发布工作流本身的审计。
+ * 工作流是「谁能发布、能写什么」的执行入口；它被改坏时，源码门禁可能完全绕过。
+ */
+export function checkWorkflows({ root = process.cwd() } = {}) {
+  const checks = []
+  const base = path.resolve(String(root))
+  const dir = path.join(base, '.github/workflows')
+  const required = ['ci.yml', 'release.yml']
+  const missing = required.filter((name) => !fs.existsSync(path.join(dir, name)))
+  addCheck(checks, 'workflows: required files', missing.length === 0, 'blocker', missing.length ? `missing=${missing.join(',')}` : 'ci.yml + release.yml', 'restore the CI/release workflows from the repository history')
+
+  const files = []
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) files.push(path.join(dir, entry.name))
+    }
+  } catch { /* missing dir already reported */ }
+  addCheck(checks, 'workflows: files discoverable', files.length >= required.length, 'blocker', `${files.length} files`)
+
+  for (const file of files) {
+    const name = path.basename(file)
+    const text = readTextSafe(file)
+    if (!text.trim()) { fail(checks, `workflows: ${name} not empty`, 'empty workflow'); continue }
+    addCheck(checks, `workflows: ${name} has on/jobs`, /^on:/m.test(text) && /^jobs:/m.test(text), 'blocker', name)
+    addCheck(checks, `workflows: ${name} no pull_request_target`, !/pull_request_target/.test(text), 'blocker', name, 'pull_request_target exposes secrets to fork PRs; use pull_request with explicit env passing')
+    addCheck(checks, `workflows: ${name} no write-all`, !/permissions:\s*write-all/.test(text), 'blocker', name, 'grant the narrowest permission per job')
+    addCheck(checks, `workflows: ${name} no secrets inherit`, !/secrets:\s*inherit/.test(text), 'blocker', name, 'map only the secrets a job needs')
+    const unsafeInterpolation = text.split(/\r?\n/).some((line) => /\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)\s*\}\}/.test(line) && !/^\s*[A-Z][A-Z0-9_]*:\s*\$\{\{/.test(line) && !/^\s*#/.test(line))
+    addCheck(checks, `workflows: ${name} no untrusted title interpolation`, !unsafeInterpolation, 'blocker', name, 'pass PR fields through env:, never interpolate them into run:')
+    addCheck(checks, `workflows: ${name} has job timeouts`, /timeout-minutes:/m.test(text), 'warning', name, 'add timeout-minutes to every job so a stuck runner cannot hang the release')
+  }
+
+  const ci = readTextSafe(path.join(dir, 'ci.yml'))
+  addCheck(checks, 'workflows: ci runs main-city source gate', ci.includes('tools/gate/main-city.mjs') && ci.includes('--target'), 'blocker', 'ci.yml', 'add the main-city source/workflows gate before tests')
+  addCheck(checks, 'workflows: ci runs full test suite', /node --test/.test(ci), 'blocker', 'ci.yml')
+  addCheck(checks, 'workflows: ci matrix 22+24', /node:\s*\[?[^\n]*22/.test(ci) && /node:\s*\[?[^\n]*24/.test(ci), 'warning', 'ci.yml', 'test both supported Node versions')
+  const release = readTextSafe(path.join(dir, 'release.yml'))
+  addCheck(checks, 'workflows: release runs main-city gate', release.includes('tools/gate/main-city.mjs'), 'blocker', 'release.yml', 'add the source gate to the release guard job')
+  addCheck(checks, 'workflows: release builds via gated build.mjs', release.includes('tools/release/build.mjs'), 'blocker', 'release.yml', 'release must use build.mjs (it runs package/publish gates)')
+  addCheck(checks, 'workflows: release grants contents write only where needed', release.includes('permissions:') && !/permissions:\s*write-all/.test(release), 'warning', 'release.yml')
+  return { checks, files: files.map((file) => path.basename(file)) }
 }
 
 function checkStagedPackage({ packageDir, version }) {
@@ -374,6 +420,10 @@ export function runMainGate(options = {}) {
       checks.push(...out.checks)
     }
   }
+  if (target === 'workflows') {
+    const out = checkWorkflows({ root: options.root ?? process.cwd() })
+    checks.push(...out.checks)
+  }
   if (target === 'publish') {
     const out = checkPublishMetadata({ version, tag: options.tag, npmLatest: options.npmLatest, allowExisting: options.allowExisting === true })
     checks.push(...out.checks)
@@ -523,4 +573,4 @@ export function createGatedProfile({ homeDir, profile, bundles = DEFAULT_PROFILE
   }
 }
 
-export const _internals = { checkSourceTree, checkStagedPackage, checkTarball, checkProfile, checkRuntimeGuards, checkPublishMetadata, isInside, pidAlive, diskFree }
+export const _internals = { checkSourceTree, checkStagedPackage, checkTarball, checkProfile, checkRuntimeGuards, checkPublishMetadata, checkWorkflows, isInside, pidAlive, diskFree }
