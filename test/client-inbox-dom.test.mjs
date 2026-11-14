@@ -662,4 +662,40 @@ test('client DOM: items show explicit priority and risk chips from the server pa
   }
 })
 
+test('client DOM: host overlay master toggle hides all fang floating windows and persists the preference', async () => {
+  const harness = makeHarness({ tickets: [] })
+  try {
+    const { window } = harness
+    const registration = harness.registrations.find((item) => item.meta?.id === 'fang-overlay-toggle')
+    assert.ok(registration, 'footer overlay toggle slot must be registered')
+    const element = typeof registration.render === 'function' ? registration.render({}) : registration.render
+    const mount = element?.props?.mount
+    assert.equal(typeof mount, 'function')
+    const host = window.document.createElement('div')
+    window.document.body.append(host)
+    mount(host)
+    const toggle = host.querySelector('[data-fang-entry="overlay-toggle"]')
+    assert.ok(toggle, 'toggle button must mount')
+    assert.equal(window.document.documentElement.getAttribute('data-fang-overlays'), 'visible')
+    // 模拟宿主里的各类浮窗；隐藏开关只切属性，不销毁节点。
+    const overlays = ['fang-relay-fab', 'fang-red-alert-stack', 'fang-inbox-drawer', 'fang-inbox-backdrop', 'mother-palette']
+    const nodes = overlays.map((cls) => { const node = window.document.createElement('div'); node.className = cls; window.document.body.append(node); return node })
+    toggle.click()
+    assert.equal(window.document.documentElement.getAttribute('data-fang-overlays'), 'hidden')
+    assert.equal(window.localStorage.getItem('fang.overlays.hidden'), '1')
+    assert.match(toggle.textContent, /浮窗已隐藏/)
+    assert.equal(toggle.getAttribute('aria-pressed'), 'true')
+    assert.equal(nodes.every((node) => node.isConnected), true, 'hiding must not destroy overlay state')
+    const css = window.document.getElementById('fang-console-v4-style')?.textContent ?? ''
+    assert.match(css, /data-fang-overlays="hidden"/)
+    toggle.click()
+    assert.equal(window.document.documentElement.getAttribute('data-fang-overlays'), 'visible')
+    assert.equal(window.localStorage.getItem('fang.overlays.hidden'), '0')
+    assert.match(toggle.textContent, /浮窗/)
+  } finally {
+    try { harness.dispose?.() } catch { /* ignore */ }
+    harness.dom.window.close()
+  }
+})
+
 } // end jsdom-available block
