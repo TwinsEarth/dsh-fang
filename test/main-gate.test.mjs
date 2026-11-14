@@ -44,7 +44,7 @@ function writeArtifact(root, version = '3.3.0') {
   const manifest = { name: '@twinsearth/fang-dsh-plugin', version, tarball: path.basename(tgz), size: fs.statSync(tgz).size, sha256: hash, files }
   fs.writeFileSync(path.join(dist, 'manifest.json'), JSON.stringify(manifest, null, 2))
   fs.mkdirSync(path.join(dist, 'npm', 'package'), { recursive: true })
-  for (const rel of ['package.json', 'client.js', 'cordis.patch.yml']) fs.writeFileSync(path.join(dist, 'npm', 'package', rel), rel === 'package.json' ? JSON.stringify({ name: '@twinsearth/fang-dsh-plugin', version, private: false, dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } }) : (rel === 'cordis.patch.yml' ? '[]\n' : '// x\n'))
+  for (const rel of ['package.json', 'client.js', 'cordis.patch.yml']) fs.writeFileSync(path.join(dist, 'npm', 'package', rel), rel === 'package.json' ? JSON.stringify({ name: '@twinsearth/fang-dsh-plugin', version, private: false, publishConfig: { access: 'public' }, dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } }) : (rel === 'cordis.patch.yml' ? '[]\n' : '// x\n'))
   for (const rel of ['src/index.mjs', 'src/lib/boot-guard.mjs', 'src/lib/main-gate.mjs', 'src/plugins/restart-guard.mjs', 'tools/gate/main-city.mjs']) {
     fs.mkdirSync(path.dirname(path.join(dist, 'npm', 'package', rel)), { recursive: true })
     fs.writeFileSync(path.join(dist, 'npm', 'package', rel), '// x\n')

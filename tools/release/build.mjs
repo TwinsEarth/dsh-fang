@@ -56,6 +56,7 @@ const stagedPkg = {
   name: PUBLISH_NAME,
   version,
   private: false,
+  publishConfig: { access: 'public' },
   license: 'AGPL-3.0-or-later',
   description: 'dsh-Fang (瓮城) — mother/fork plugin development environment for DeepSeek Harness: one readonly mother, a disposable child dsh-Web per task.',
   repository: { type: 'git', url: 'git+https://github.com/TwinsEarth/dsh-fang.git' },
