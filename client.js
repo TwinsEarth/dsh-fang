@@ -747,6 +747,8 @@ window.__ModuleLoader__.load({
       arrowUp: (size = 14) => glyph(['M12 19V5', 'M6 11l6-6 6 6'], size),
       play: (size = 13) => glyph(['M8 5l11 7-11 7z'], size),
       inbox: (size = 14) => glyph(['M4 5h16v14H4z', 'M4 13h4l2 3h4l2-3h4'], size),
+      eye: (size = 14) => glyph(['M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z', 'M12 9.2a2.8 2.8 0 1 0 0 5.6a2.8 2.8 0 0 0 0-5.6'], size),
+      eyeOff: (size = 14) => glyph(['M3 3l18 18', 'M10.6 10.7a2 2 0 0 0 2.7 2.7', 'M9.9 5.2A10.6 10.6 0 0 1 12 5c6 0 9.5 7 9.5 7a17 17 0 0 1-3.3 4.1', 'M6.6 6.7C4.2 8.6 2.5 12 2.5 12s3.5 7 9.5 7c1.5 0 2.9-.4 4.1-1'], size),
       spinner: (size = 14) => {
         const node = svg('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', class: 'fang-icon fang-spin', 'aria-hidden': 'true', focusable: 'false' })
         node.appendChild(svg('circle', { cx: 12, cy: 12, r: 8.5, stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-dasharray': '38 12' }))
@@ -763,6 +765,61 @@ window.__ModuleLoader__.load({
 
     // 局部图标缓存：同一图标多次创建无妨，但这里给出稳定工厂，避免拼错路径
     const icon = (name, ...args) => ICON[name](...args)
+
+    // ── v3.4.0：宿主浮窗总开关 ─────────────────────────────────────────────
+    // 决策中继 FAB/面板、红色告警、收件箱抽屉/遮罩、Mother 浮窗、通知与弹层
+    // 都挂在宿主 DOM 上；这里只切一个 html[data-fang-overlays] 属性，CSS 统一隐藏，
+    // 不销毁状态（再显示时原样回来）。开关按钮本身在宿主侧栏/面板头，不会被隐藏。
+    const OVERLAY_HIDDEN_KEY = 'fang.overlays.hidden'
+    const OVERLAY_HIDDEN_ATTR = 'data-fang-overlays'
+    function overlaysHidden() {
+      try { return typeof localStorage !== 'undefined' && localStorage.getItem(OVERLAY_HIDDEN_KEY) === '1' } catch { return false }
+    }
+    function applyOverlayVisibility(hidden = overlaysHidden()) {
+      try {
+        const root = typeof document !== 'undefined' ? document.documentElement : null
+        if (root?.setAttribute) root.setAttribute(OVERLAY_HIDDEN_ATTR, hidden ? 'hidden' : 'visible')
+      } catch { /* DOM 不可用（SSR/测试早期）时保持无操作 */ }
+      return hidden
+    }
+    function setOverlaysHidden(hidden, options = {}) {
+      const next = hidden === true
+      try { if (typeof localStorage !== 'undefined') localStorage.setItem(OVERLAY_HIDDEN_KEY, next ? '1' : '0') } catch { /* 隐私模式：只在本次生效 */ }
+      applyOverlayVisibility(next)
+      if (options.silent !== true) {
+        try { window.dispatchEvent(new CustomEvent('fang:overlays-changed', { detail: { hidden: next } })) } catch { /* ignore */ }
+      }
+      return next
+    }
+    function toggleOverlays() { return setOverlaysHidden(!overlaysHidden()) }
+    function overlayToggleLabel(hidden = overlaysHidden()) { return hidden ? '显示浮窗' : '隐藏浮窗' }
+    function mountOverlayToggle(host) {
+      if (!host) return () => {}
+      const buttonNode = h('button', {
+        type: 'button', class: 'fang-overlay-toggle', 'data-fang-entry': 'overlay-toggle',
+        title: '瓮城宿主浮窗总开关：一键隐藏/显示决策浮标、红色告警、收件箱、Mother 浮窗与弹层（偏好会记住）',
+        'aria-label': '瓮城宿主浮窗总开关',
+      })
+      const sync = () => {
+        const hidden = overlaysHidden()
+        buttonNode.classList.toggle('is-off', hidden)
+        buttonNode.setAttribute('aria-pressed', hidden ? 'true' : 'false')
+        buttonNode.title = hidden ? '显示瓮城在宿主的所有浮窗' : '隐藏瓮城在宿主的所有浮窗'
+        buttonNode.replaceChildren(icon(hidden ? 'eyeOff' : 'eye', 14), h('span', { class: 'fang-overlay-toggle-label' }, hidden ? '浮窗已隐藏' : '浮窗'))
+      }
+      buttonNode.addEventListener('click', (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        toggleOverlays()
+      })
+      const onChanged = () => sync()
+      window.addEventListener('fang:overlays-changed', onChanged)
+      sync()
+      host.replaceChildren(buttonNode)
+      return () => {
+        try { window.removeEventListener('fang:overlays-changed', onChanged) } catch { /* ignore */ }
+      }
+    }
 
     // ── 样式：一次注入，类名统一 fang-/fh- 前缀，避免与宿主样式互撞 ──────────
     const STYLE_ID = 'fang-console-v4-style'
@@ -1319,6 +1376,24 @@ window.__ModuleLoader__.load({
 .fang-inbox-confirm-msg{font-size:12.5px;color:#5F6368;margin-top:6px;line-height:1.5}
 .fang-inbox-confirm-detail{font-size:11.5px;color:#6E6E73;background:#FAFAFC;border-radius:8px;padding:6px 8px;margin-top:6px;white-space:pre-wrap;max-height:120px;overflow:auto}
 .fang-inbox-confirm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+/* v3.4.0 宿主浮窗总开关：只隐藏瓮城的浮层，不隐藏宿主自有 UI；开关按钮本身保持可见 */
+html[data-fang-overlays="hidden"] .fang-relay-fab,
+html[data-fang-overlays="hidden"] .fang-relay-panel,
+html[data-fang-overlays="hidden"] .fang-inbox-drawer,
+html[data-fang-overlays="hidden"] .fang-inbox-backdrop,
+html[data-fang-overlays="hidden"] .fang-red-alert-stack,
+html[data-fang-overlays="hidden"] [data-fang-red-alerts],
+html[data-fang-overlays="hidden"] [data-fang-inbox-drawer],
+html[data-fang-overlays="hidden"] [data-fang-inbox-backdrop],
+html[data-fang-overlays="hidden"] .mother-palette,
+html[data-fang-overlays="hidden"] [data-fang-essence-notice],
+html[data-fang-overlays="hidden"] .fang-console .overlay,
+html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
+.fang-overlay-toggle{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border-radius:8px;border:1px solid rgba(16,17,20,.12);background:#fff;color:var(--f-text-2,#6E6E73);cursor:pointer;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;-webkit-app-region:no-drag;user-select:none}
+.fang-overlay-toggle:hover{background:#F5F5F7;color:#1D1D1F}
+.fang-overlay-toggle:focus-visible{outline:2px solid var(--f-focus,#4D6BFE);outline-offset:2px}
+.fang-overlay-toggle.is-off{border-color:rgba(200,16,46,.30);background:#FFF5F7;color:#C8102E}
+.fang-overlay-toggle-label{white-space:nowrap}
 @media (prefers-reduced-motion:reduce){.fang-inbox-drawer{transition:none}.fang-inbox-seat.has-red .fang-inbox-badge{animation:none}}
       `
       target.head.appendChild(style)
@@ -3188,6 +3263,17 @@ window.__ModuleLoader__.load({
             title: '临时 = 快速派生的空白分身与空会话；偏好会记住（localStorage）',
             onClick: () => app.toggleTemporary(), fk: 'temp-toggle', dataBtnId: 'M-02',
           }),
+          (() => {
+            const hidden = overlaysHidden()
+            return button(overlayToggleLabel(hidden), {
+              variant: 'quiet', size: 'sm', icon: icon(hidden ? 'eyeOff' : 'eye', 14),
+              title: hidden
+                ? '显示瓮城在宿主的所有浮窗（决策浮标、红色告警、收件箱、Mother、弹层）'
+                : '一键隐藏瓮城在宿主的所有浮窗；偏好会记住，侧栏底部同样可切换',
+              onClick: () => { toggleOverlays(); app.render(true) },
+              fk: 'overlay-toggle', dataBtnId: 'M-07',
+            })
+          })(),
           button('收件箱', {
             variant: 'ghost', size: 'sm', icon: icon('inbox', 14),
             title: '决策收件箱：独立抽屉；红/黄/蓝/绿/灰分组、未读计数、键盘导航与批量处理',
@@ -7008,15 +7094,27 @@ window.__ModuleLoader__.load({
         __mountForkUiLocks: mountForkUiLocks,
         __mountCloseConfirm: mountCloseConfirm,
         __detectWebRole: detectWebRole,
+        __mountOverlayToggle: mountOverlayToggle,
+        __overlaysHidden: overlaysHidden,
+        __setOverlaysHidden: setOverlaysHidden,
       })
     }
 
     return {
       mountPanel,
-      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole, __mountForkUiLocks: mountForkUiLocks, __mountEssenceUiLocks: mountEssenceUiLocks, __mountCloseConfirm: mountCloseConfirm, __mountDecisionRelay: mountDecisionRelay } : {}),
+      ...(typeof window !== 'undefined' && window.__FANG_TEST_HOOK__ ? { __renderDecisionMini: renderDecisionMini, __mountWebRoleBadge: mountWebRoleBadge, __detectWebRole: detectWebRole, __mountForkUiLocks: mountForkUiLocks, __mountEssenceUiLocks: mountEssenceUiLocks, __mountCloseConfirm: mountCloseConfirm, __mountDecisionRelay: mountDecisionRelay, __mountOverlayToggle: mountOverlayToggle, __overlaysHidden: overlaysHidden, __setOverlaysHidden: setOverlaysHidden } : {}),
       inject: ['slots'],
       apply(ctx) {
         const disposers = []
+        // v3.4.0：恢复宿主浮窗总开关偏好；跨窗口（storage）同步。
+        applyOverlayVisibility()
+        const onOverlayStorage = (event) => {
+          if (!event || event.key !== OVERLAY_HIDDEN_KEY) return
+          applyOverlayVisibility(event.newValue === '1')
+          try { window.dispatchEvent(new CustomEvent('fang:overlays-changed', { detail: { hidden: event.newValue === '1' } })) } catch { /* ignore */ }
+        }
+        try { window.addEventListener('storage', onOverlayStorage) } catch { /* ignore */ }
+        disposers.push(() => { try { window.removeEventListener('storage', onOverlayStorage) } catch { /* ignore */ } })
         // v3.1.12：侧栏 HARNESS 右侧的 Web 端身份徽标（母体 / 元主 / 分身）。
         disposers.push(mountWebRoleBadge())
         // v3.1.19：分身 Web 界面收敛（隐藏「插件」入口 + 「启动」无操作）。
@@ -7156,6 +7254,16 @@ window.__ModuleLoader__.load({
           label: '收件箱',
         }, () => React.createElement(DomMount, {
           mount: (host) => mountInboxSeat(host, inbox, openInbox),
+          style: { display: 'inline-flex', alignItems: 'center' },
+        }))))
+        // v3.4.0：宿主浮窗总开关（侧栏底部常驻，面板头另有一个入口）。
+        disposers.push(ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'fang-overlay-toggle',
+          order: 78,
+          label: '浮窗',
+        }, () => React.createElement(DomMount, {
+          mount: (host) => mountOverlayToggle(host),
           style: { display: 'inline-flex', alignItems: 'center' },
         }))))
         return () => {
