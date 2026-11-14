@@ -47,6 +47,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/CRASH-SAFETY.md',
   'docs/MAIN-CITY-GATE.md',
   'docs/DSH-ARCHITECTURE-MAP.md',
+  'docs/OVERLAY-MASTER-SWITCH.md',
 ])
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze([
