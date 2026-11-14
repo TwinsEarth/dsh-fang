@@ -47,6 +47,15 @@ let allowReport = null
 try { allowReport = JSON.parse(allow.stdout) } catch { allowReport = null }
 add('allow-list self-check', allow.status === 0 && allowReport?.ok === true, allowReport ? `routes=${allowReport.routes?.count ?? '?'} findings=${allowReport.findings?.length ?? '?'}` : (allow.stderr || allow.stdout).slice(-300))
 
+// v3.3.0 主城门禁（源码）：版本/文档/契约副本/防崩溃默认值/构建发布接线。
+const gateSource = nodeRun(['tools/gate/main-city.mjs', '--target', 'source', '--json'])
+let gateSourceReport = null
+try { gateSourceReport = JSON.parse(gateSource.stdout) } catch { gateSourceReport = null }
+const gateSourceBlockers = gateSourceReport?.blockers?.map((item) => item.id) ?? []
+add('main-city: source gate', gateSource.status === 0 && gateSourceReport?.ok === true, gateSourceReport
+  ? `grade=${gateSourceReport.score?.grade ?? '?'} blockers=${gateSourceBlockers.length}${gateSourceBlockers.length ? ':' + gateSourceBlockers.slice(0, 4).join(',') : ''}`
+  : (gateSource.stderr || gateSource.stdout).slice(-300))
+
 // full suite
 const files = listTestFiles()
 const started = Date.now()

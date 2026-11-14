@@ -66,6 +66,44 @@ const EFFECT_RE = /ctx\.effect\s*\(/
 const PROVIDE_RE = /ctx\.provide\s*\(/
 const INJECT_RE = /export\s+const\s+inject\s*=\s*(\[[^\]]*\])/
 
+/** v3.3.0：主城门禁 blocker → 可执行的修复动作（只给建议，不写盘）。 */
+export const GATE_REPAIR_HINTS = Object.freeze({
+  'source: semver': 'fix package.json version to a semver x.y.z',
+  'source: kernel FANG_VERSION': 'update src/kernel/types.mjs FANG_VERSION to the package version',
+  'source: CHANGELOG section': 'add a "## v<version>" section to docs/CHANGELOG.md',
+  'source: AUDIT file': 'add docs/AUDIT-v<version>.md with the release evidence',
+  'source: required guard files': 'restore the missing crash-safety files before building',
+  'source: vendored contract bytes': 're-sync src/contract from the pinned @twinsearth/dsh-fang-contract version',
+  'source: gate wired into build': 'call tools/gate/main-city.mjs from tools/release/build.mjs',
+  'source: gate wired into publish': 'call tools/gate/main-city.mjs from tools/release/publish-npm.mjs',
+  'package: client half': 'restore dsh.client.platform=web in package.json',
+  'package: bundle manifest': 'restore dsh.bundle.patch and the referenced patch file',
+  'artifact: tarball sha256': 'rebuild the artifact; never publish a tarball whose sha256 differs from manifest',
+  'artifact: sha256 sidecar': 'rebuild so the .sha256 sidecar is regenerated with the tarball',
+  'artifact: required files inside tarball': 'add the missing guard/gate files to package.json files and rebuild',
+  'publish: tag matches version': 'recreate the annotated tag as v<package version>',
+  'publish: registry version not already used': 'bump the version; published versions are immutable',
+  'profile: inside home/profiles': 'point --home/--profile at $DSH_HOME/profiles; never write outside it',
+  'profile: no duplicate bundles': 'remove duplicate entries from dsh.profile.bundles',
+  'profile: patch parses': 'repair cordis.patch.yml indentation or restore the previous patch from .gate-backups',
+  'profile: backup available': 'run gate --repair (creates .gate-backups/<stamp>/) before changing the profile',
+  'runtime: no live host on this profile': 'fully exit the DSH client before install/deploy',
+  'runtime: restart safe-mode clear': 'investigate restart safe-mode; clear only via fangRestart.clearSafeMode({by,note})',
+  'runtime: no active crash loop': 'inspect runtime-crash.jsonl and the restart guard; do not redeploy until the loop is understood',
+  'audit: hash chain verifies': 'restore audit.jsonl from backup and investigate tampering; never append to a broken chain',
+  'disk: free space available': 'free disk space before creating profiles or installing packages',
+})
+
+export function gateRepairPlan(findings) {
+  return (Array.isArray(findings) ? findings : [])
+    .filter((item) => item && item.ok !== true)
+    .map((item) => ({
+      id: item.id,
+      severity: item.severity ?? 'blocker',
+      hint: GATE_REPAIR_HINTS[item.id] ?? item.repair ?? 'inspect the gate report and fix the underlying cause; do not bypass',
+    }))
+}
+
 export const GATE_IDS = ['G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7', 'G8', 'G9', 'G10', 'G11', 'G12']
 
 function safeGet(ctx, key) {

@@ -65,11 +65,17 @@ jobs:
           node tools/git/verify-release.mjs --tag "$RELEASE_TAG" --base origin/main --no-artifact --no-write --json | tee dist-release-verify.json
           version=$(node -e "console.log(require('./dist-release-verify.json').version)")
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: main-city gate（源码：版本/契约/防线/发布接线）
+        run: |
+          mkdir -p dist
+          node tools/gate/main-city.mjs --target source --version "${{ steps.check.outputs.version }}" --json | tee dist/main-city-gate.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: release-guard
-          path: dist-release-verify.json
+          path: |
+            dist-release-verify.json
+            dist/main-city-gate.json
           retention-days: 30
 
   # ── 1. 测试（与 PR 相同的矩阵，防止“合并后才发现红”）────────────────────────

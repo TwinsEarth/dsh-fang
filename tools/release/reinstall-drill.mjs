@@ -85,6 +85,19 @@ try {
   install()
   writeProfile()
   check('first install materialized package', fs.existsSync(path.join(pkgDir, 'src', 'index.mjs')))
+  // v3.3.0 主城门禁（安装）：重装 drill 也必须先过 profile/磁盘/运行时防线。
+  try {
+    execFileSync(process.execPath, [
+      path.join(ROOT, 'tools/gate/main-city.mjs'),
+      '--target', 'install', '--home', home, '--profile', 'drill',
+      '--profile-dir', profile, '--package-dir', pkgDir, '--json',
+    ], { encoding: 'utf8', timeout: 120000, stdio: 'pipe' })
+    check('main-city gate (install) PASS', true)
+  } catch (error) {
+    let detail = String(error?.message ?? error)
+    try { const parsed = JSON.parse(String(error.stdout ?? '{}')); detail = (parsed.blockers ?? []).map((item) => item.id + ': ' + item.detail).join(' | ') } catch { /* keep */ }
+    check('main-city gate (install) PASS', false, detail.slice(0, 400))
+  }
 
   // ── 第一次 boot ────────────────────────────────────────────────
   portForStatus = await freePort()

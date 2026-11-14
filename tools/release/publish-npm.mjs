@@ -3,7 +3,7 @@
 // 用法：node tools/release/publish-npm.mjs [--dry]
 import fs from 'node:fs'
 import path from 'node:path'
-import { ROOT, readJson, readSecret, httpJson } from './lib.mjs'
+import { ROOT, readJson, readSecret, httpJson, run } from './lib.mjs'
 
 const args = process.argv.slice(2)
 const dry = args.includes('--dry')
@@ -43,6 +43,24 @@ const payload = JSON.stringify(body)
 console.log(`package : ${pkg.name}@${pkg.version}`)
 console.log(`tarball : ${manifest.tarball} (${fs.statSync(tarball).size} bytes)`)
 console.log(`payload : ${(payload.length / 1024).toFixed(1)} KiB`)
+
+// v3.3.0 主城门禁（发布）：产物/版本/tag/注册表重复发布检查；失败时绝不触碰 registry。
+const gate = run(process.execPath, [
+  'tools/gate/main-city.mjs',
+  '--target', 'publish',
+  '--package-dir', path.join(ROOT, 'dist/npm/package'),
+  '--tarball', tarball,
+  '--dist', path.join(ROOT, 'dist'),
+  '--version', pkg.version,
+  ...(process.env.RELEASE_TAG ? ['--tag', process.env.RELEASE_TAG] : []),
+  ...(process.env.NPM_LATEST ? ['--npm-latest', process.env.NPM_LATEST] : []),
+  '--json',
+], { timeoutMs: 120000 })
+if (gate.status !== 0) {
+  console.error('FAIL main-city gate (publish):\n' + (gate.stderr || gate.stdout).slice(-3000))
+  process.exit(gate.status ?? 1)
+}
+console.log('PASS  main-city gate (publish)')
 
 const token = readSecret('NPM_TOKEN', 'npm-token.txt')
 if (!token) {

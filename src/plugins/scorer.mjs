@@ -452,6 +452,43 @@ function safeGet(ctx, key) {
   try { return ctx?.get?.(key) } catch { return undefined }
 }
 
+export const ADMISSION_DEFAULT_MAX_GRADE = 'B'
+const GRADE_RANK = Object.freeze({ A: 1, B: 2, C: 3, D: 4, E: 5 })
+
+/**
+ * v3.3.0：把「主城门禁」的结构化 findings 折算成 A–E 准入分。
+ * 约定：blocker 直接 E；warning 每项 10 分；info 不扣分。
+ * 默认只放行 A/B（maxGrade='B'），C 及以上阻断——与 healer 静态门禁同一套分档。
+ */
+export function scoreGateFindings(findings, options = {}) {
+  const list = Array.isArray(findings) ? findings : []
+  const maxGrade = String(options.maxGrade ?? ADMISSION_DEFAULT_MAX_GRADE).toUpperCase()
+  if (!GRADE_RANK[maxGrade]) throw new Error('invalid maxGrade: ' + maxGrade)
+  const blockers = list.filter((item) => item && item.severity === 'blocker')
+  const warnings = list.filter((item) => item && item.severity === 'warning')
+  const infos = list.filter((item) => item && item.severity === 'info')
+  // 0 warning = A；1–2 个 = B；3 个起 = C（需修复后重跑）。
+  const S = blockers.length > 0
+    ? 100
+    : warnings.length === 0 ? 0 : Math.min(100, 20 + warnings.length * 10)
+  const grade = gradeOf(S, BAND_DEFAULTS.mother)
+  const reasons = []
+  if (blockers.length > 0) reasons.push('blockers=' + blockers.length)
+  if (warnings.length > 0) reasons.push('warnings=' + warnings.length)
+  if (GRADE_RANK[grade] > GRADE_RANK[maxGrade]) reasons.push('grade=' + grade + '>' + maxGrade)
+  return {
+    ok: blockers.length === 0 && GRADE_RANK[grade] <= GRADE_RANK[maxGrade],
+    grade,
+    S,
+    maxGrade,
+    blockers: blockers.length,
+    warnings: warnings.length,
+    infos: infos.length,
+    reasons,
+    basis: basisOf(ROLE.MOTHER, BAND_DEFAULTS.mother),
+  }
+}
+
 export function apply(ctx, config) {
   const gate = roleGate('scorer', { cfgRole: config?.role, logger: ctx.logger })
   // v2 部署矩阵：scorer 在 mother 与 fork 都激活；这里只守住“未部署角色不得注册服务”。

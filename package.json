@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "3.2.2",
+  "version": "3.3.0",
   "private": true,
   "type": "module",
   "description": "瓮城：DSH 的第一台虚拟机！插件开发狂魔、多任务并发狂与安全焦虑症患者的隔离沙箱：热更新坏了秒回滚，多开不崩各跑各的，危险代码进审核与独立沙箱。1 编排器 + 12 子插件。",
@@ -39,6 +39,7 @@
     "client.js",
     "tools/recover-queue.mjs",
     "tools/mcp/**/*.mjs",
+    "tools/gate/**/*.mjs",
     "tools/decision-ingest.mjs",
     "tools/desktop-launch.mjs",
     "tools/boot-guard.mjs",
@@ -46,6 +47,8 @@
     "docs/PM-DECISION-POLICY.md",
     "docs/WORKFLOW-UI.md",
     "docs/CRASH-SAFETY.md",
+    "docs/DSH-ARCHITECTURE-MAP.md",
+    "docs/MAIN-CITY-GATE.md",
     "docs/FORK-SEED.md",
     "docs/DECISION-RELAY.md",
     "docs/CONTRACT-INTEROP.md",
@@ -82,7 +85,8 @@
     "compat": "node tools/release/compat.mjs",
     "mcp": "node tools/mcp/server.mjs",
     "publish:npm": "node tools/release/publish-npm.mjs",
-    "typecheck": "node tools/release/typecheck.mjs"
+    "typecheck": "node tools/release/typecheck.mjs",
+    "gate": "node tools/gate/main-city.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {
