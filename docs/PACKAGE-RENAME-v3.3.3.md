@@ -1,6 +1,6 @@
 # npm 包改名：@twinsearth/fang-dsh-plugin
 
-生效版本：`v3.3.3`
+生效版本：`v3.3.4`（v3.3.3 因 npm 402 未发布）
 
 ## 新身份
 

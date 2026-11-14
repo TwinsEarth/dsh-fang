@@ -1,6 +1,6 @@
-## v3.3.3（2026-11-14）
+## v3.3.4（2026-11-15）
 
-**主题：npm 包改名 + 队列子插件默认关闭。**
+**主题：npm 包改名 + 队列子插件默认关闭 + 新包公开访问修复。**
 
 ### 1) npm 包改名
 
@@ -18,6 +18,13 @@
 - `/fang/api/status.services.queueJournal` 暴露真实能力；queue client 再做一次能力探测，旧缓存/残留 client 不会显示 UI；
 - 主 client 按 `status.services` 隐藏未激活子插件的对应界面（approver 待批区、forker 看护区）；
 - boot-guard 跳过 disabled 行，不因可选子插件未安装而阻塞启动。
+
+### 3) 新 scoped 包公开访问修复
+
+- npm 对新建 scoped 包默认按私有处理，自定义 REST 发布体缺少 `access: "public"` 时返回 402；
+- `publish-npm.mjs` 增加 `access: "public"`；构建的 staged package 增加 `publishConfig.access = "public"`；
+- 主城门禁新增 `package: publish access public` 检查，防止回归；
+- v3.3.3 未发布成功（tag 已删除，不复用），本版为实际发布版本。
 
 ### 验证
 

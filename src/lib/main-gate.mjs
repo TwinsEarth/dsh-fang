@@ -235,6 +235,7 @@ function checkStagedPackage({ packageDir, version }) {
   addCheck(checks, 'package: version', !version || pkg.version === version, 'blocker', `${pkg.version}${version ? ' vs ' + version : ''}`)
   addCheck(checks, 'package: not private', pkg.private !== true, 'blocker', String(pkg.private))
   addCheck(checks, 'package: client half', pkg.dsh?.client?.platform === 'web', 'blocker', JSON.stringify(pkg.dsh?.client ?? null))
+  addCheck(checks, 'package: publish access public', pkg.publishConfig?.access === 'public' || pkg.access === 'public', 'blocker', String(pkg.publishConfig?.access ?? pkg.access ?? 'missing'), "add publishConfig.access=public so scoped npm publish does not 402")
   const bundlePatch = String(pkg.dsh?.bundle?.patch ?? '').trim()
   addCheck(checks, 'package: bundle manifest', bundlePatch.length > 0, 'blocker', bundlePatch || 'missing dsh.bundle.patch')
   if (bundlePatch) addCheck(checks, 'package: bundle file', fs.existsSync(path.join(dir, bundlePatch)), 'blocker', bundlePatch)

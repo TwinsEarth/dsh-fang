@@ -31,6 +31,9 @@ const versionManifest = {
 const body = {
   _id: pkg.name,
   name: pkg.name,
+  // v3.3.4: scoped packages are private by default at the registry; without
+  // access=public the PUT is rejected with HTTP 402 "sign up for private packages".
+  access: 'public',
   description: pkg.description,
   'dist-tags': { latest: pkg.version },
   versions: { [pkg.version]: versionManifest },
