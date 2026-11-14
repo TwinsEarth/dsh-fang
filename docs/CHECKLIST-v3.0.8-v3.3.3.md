@@ -107,7 +107,7 @@
 - [ ] 构建成功（自建 runner）：`gh run list --workflow release` 中 `build` 绿
 - [ ] 产物齐全：`dist/dsh-fang-3.__.__.tgz`、`.tgz.sha256`、`manifest.json`、`preflight.json`
 - [ ] sha256 一致：`Get-FileHash dist\dsh-fang-3.__.__.tgz -Algorithm SHA256` 与 sidecar 相同
-- [ ] npm 已发布：`npm view @twinsearth/dsh-fang@3.__.__ version`（或 Release 说明记录“跳过”）
+- [ ] npm 已发布：`npm view @twinsearth/fang-dsh-plugin@3.__.__ version`（或 Release 说明记录“跳过”）
 - [ ] GitHub Release 含四个附件：tgz / sha256 / manifest / preflight
 - [ ] Docker（若配置）：`docker pull <user>/dsh-fang:v3.__.__` 成功
 - [ ] 远端健康：`node tools/git/verify-release.mjs --tag v3.__.__ --remote`

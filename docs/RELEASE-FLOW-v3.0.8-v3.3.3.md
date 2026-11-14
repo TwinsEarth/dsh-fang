@@ -393,7 +393,7 @@ schtasks /Run /TN "fang-runner"
 | 层 | 触发条件 | 回滚动作 | 验证 | 命令/接口 |
 |---|---|---|---|---|
 | L0 PR | PR 合并后发现问题，尚未打 tag | `git revert <squash-sha>` → 走 PR | `preflight` GREEN | `git revert <sha> --no-edit` → 推分支 → PR |
-| L1 版本 | tag 已推，npm/GitHub 已发 | **不移动标签**；发下一个补丁版（`vX.Y.Z+1`），旧版 npm `deprecate` | `verify-release --tag 新标签` | `npm deprecate @twinsearth/dsh-fang@X.Y.Z "原因，改用 X.Y.Z+1"` |
+| L1 版本 | tag 已推，npm/GitHub 已发 | **不移动标签**；发下一个补丁版（`vX.Y.Z+1`），旧版 npm `deprecate` | `verify-release --tag 新标签` | `npm deprecate @twinsearth/fang-dsh-plugin@X.Y.Z "原因，改用 X.Y.Z+1"` |
 | L2 母体 | 指针切换后健康检查失败 / 24h 内发现慢 Bug | 指针切回上一代（`current → active-vX.Y.Z-pre`）；保留旧代 24h | `healthz` + 冒烟 | 由 v3.0.10 的 `AtomicSwitcher` 执行：`switch(current, active-v<上一版>)`；文件系统层等价操作：`mklink /J current active-v3.0.9`（Windows）/ `ln -sfn active-v3.0.9 current`（POSIX） |
 | L3 原身 | recompute 后新实例不健康 | 指针回到 `merged-v<上一版>/`，用旧合并结果重启实例 | 实例 `health{adapter:ok}` | v3.0.11 的 recompute 是 copy-on-write：新目录 `merged-v<新版>` 失败则**保留** `merged-v<旧版>`，只切换不删除 |
 | L4 分身 | 分身运行异常 | `vm_restore` 到派生时快照 | 分身 `phase=running` + 命令通道可用 | 派生即快照，恢复是常数时间 |

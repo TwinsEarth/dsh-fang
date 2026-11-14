@@ -1389,6 +1389,54 @@ test('orchestrator: 元主运行态路由对未知元主返回 400（不假装�
   }
 })
 
+test('orchestrator: composer journal routes fail closed when queue-journal sub-plugin is off', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-queue-off-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot, forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' }, authToken: TEST_AUTH_TOKEN,
+    })
+    for (const [method, route] of [
+      ['GET', '/fang/api/composer/journal'],
+      ['GET', '/fang/api/composer/journal/history'],
+      ['POST', '/fang/api/composer/queue'],
+    ]) {
+      const res = makeRes()
+      await webServer.find(method, route).handler(makeReq({}, method), res)
+      assert.equal(res.statusCode, 503, `${method} ${route} must fail closed`)
+      assert.equal(res.json().error, 'queue-journal-disabled')
+      assert.equal(res.json().ok, false)
+    }
+    const status = makeRes()
+    await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
+    assert.equal(status.json().services.queueJournal, false)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: composer journal routes stay available when queue-journal service is present', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-queue-on-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer, [SERVICE.queueJournal]: { version: '0.1.7' } } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot, forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' }, authToken: TEST_AUTH_TOKEN,
+    })
+    const res = makeRes()
+    await webServer.find('GET', '/fang/api/composer/journal').handler(makeReq(undefined, 'GET'), res)
+    assert.notEqual(res.statusCode, 503, 'enabled queue journal must not be gated off')
+    const status = makeRes()
+    await webServer.find('GET', '/fang/api/status').handler(makeReq(undefined, 'GET'), status)
+    assert.equal(status.json().services.queueJournal, true)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders v2', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-http2-'))

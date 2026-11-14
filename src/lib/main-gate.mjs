@@ -48,6 +48,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/MAIN-CITY-GATE.md',
   'docs/DSH-ARCHITECTURE-MAP.md',
   'docs/OVERLAY-MASTER-SWITCH.md',
+  'docs/PACKAGE-RENAME-v3.3.3.md',
 ])
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze([
@@ -230,7 +231,7 @@ function checkStagedPackage({ packageDir, version }) {
   const pkg = readJsonSafe(path.join(dir, 'package.json'))
   if (!pkg) { fail(checks, 'package: staged package.json', dir); return { checks, pkg: null } }
   pass(checks, 'package: staged package.json', `${pkg.name ?? '?'}@${pkg.version ?? '?'}`)
-  addCheck(checks, 'package: name', pkg.name === '@twinsearth/dsh-fang', 'blocker', String(pkg.name))
+  addCheck(checks, 'package: name', pkg.name === '@twinsearth/fang-dsh-plugin', 'blocker', String(pkg.name))
   addCheck(checks, 'package: version', !version || pkg.version === version, 'blocker', `${pkg.version}${version ? ' vs ' + version : ''}`)
   addCheck(checks, 'package: not private', pkg.private !== true, 'blocker', String(pkg.private))
   addCheck(checks, 'package: client half', pkg.dsh?.client?.platform === 'web', 'blocker', JSON.stringify(pkg.dsh?.client ?? null))
@@ -248,7 +249,7 @@ function checkTarball({ distDir, version, tarball, manifest }) {
   let doc = manifest ?? readJsonSafe(path.join(dist, 'manifest.json'))
   if (!doc) { fail(checks, 'artifact: manifest', 'dist/manifest.json missing', 'run build first'); return { checks, manifest: null, tarballPath: null } }
   pass(checks, 'artifact: manifest', `${doc.name}@${doc.version}`)
-  addCheck(checks, 'artifact: manifest name', doc.name === '@twinsearth/dsh-fang', 'blocker', String(doc.name))
+  addCheck(checks, 'artifact: manifest name', doc.name === '@twinsearth/fang-dsh-plugin', 'blocker', String(doc.name))
   addCheck(checks, 'artifact: manifest version', !version || doc.version === version, 'blocker', `${doc.version}${version ? ' vs ' + version : ''}`)
   const tgz = tarball ? path.resolve(tarball) : path.join(dist, path.basename(String(doc.tarball ?? '')))
   if (!fs.existsSync(tgz)) { fail(checks, 'artifact: tarball exists', tgz, 'rebuild the artifact'); return { checks, manifest: doc, tarballPath: tgz } }
@@ -537,7 +538,7 @@ export function formatGateFailure(report) {
 export const DEFAULT_PROFILE_BUNDLES = Object.freeze([
   '@deepseek-ai/dsh-base',
   '@deepseek-ai/dsh-web-app',
-  '@twinsearth/dsh-fang',
+  '@twinsearth/fang-dsh-plugin',
 ])
 
 /**

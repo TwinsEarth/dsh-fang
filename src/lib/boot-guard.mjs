@@ -14,7 +14,7 @@ import { createRequire } from 'node:module'
 
 import { parseYamlSubset } from './rule-registry.mjs'
 
-export const FANG_PACKAGE_NAMES = Object.freeze(['@twinsearth/dsh-fang', '@local/dsh-fang'])
+export const FANG_PACKAGE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@local/dsh-fang'])
 export const SMOKE_TIMEOUT_MS = 8000
 
 /** 找到 profile 里已安装的 fang 包目录（发布名优先，其次本地 link 名）。 */
@@ -35,7 +35,9 @@ export function readBundleRows(pkgDir) {
   const value = parsed?.value
   const insert = Array.isArray(value) ? value.flatMap((item) => Array.isArray(item?.insert) ? item.insert : []) : (Array.isArray(value?.insert) ? value.insert : [])
   const rows = insert.filter((row) => row && typeof row === 'object' && row.id).map((row) => ({
-    id: String(row.id), name: row.name === undefined ? null : String(row.name),
+    id: String(row.id),
+    name: row.name === undefined ? null : String(row.name),
+    disabled: row.disabled === true,
   }))
   return { ok: parsed.errors.length === 0, error: parsed.errors.length ? `patch-parse:${parsed.errors[0]}` : null, rows, parseErrors: parsed.errors }
 }
@@ -109,6 +111,8 @@ export function checkBundleRows(rows, { profileDir, ownPackage = '', timeoutMs =
       continue
     }
     seen.add(row.id)
+    // v3.3.3：disabled 行不会加载；不因可选子插件未安装/未启用而阻塞启动。
+    if (row.disabled === true) continue
     if (!row.name) {
       findings.push({ code: 'row-name-missing', level: 'warn', id: row.id })
       continue

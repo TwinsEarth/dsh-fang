@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto'
 try { dns.setDefaultResultOrder('ipv4first') } catch { /* older node */ }
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-export const PUBLISH_NAME = '@twinsearth/dsh-fang' // npm package name (scoped, public)
+export const PUBLISH_NAME = '@twinsearth/fang-dsh-plugin' // npm package name (scoped, public)
 export const PUBLISH_BASENAME = 'dsh-fang' // tarball file basename
 
 export const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(ROOT, rel), 'utf8'))

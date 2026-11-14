@@ -1,3 +1,29 @@
+## v3.3.3（2026-11-14）
+
+**主题：npm 包改名 + 队列子插件默认关闭。**
+
+### 1) npm 包改名
+
+- 新发布身份：`@twinsearth/fang-dsh-plugin`（v3.3.3）；
+- 旧包 `@twinsearth/dsh-fang` 保留，`findFangPackageDir` / `FORK_BUNDLE_NAMES` 继续兼容旧安装；
+- 本地开发 bundle 名仍是 `@local/dsh-fang`，构建时统一改写为新包名；
+- 发布门禁 registry URL、install/reinstall drill、web-entry 配置键、README/当前流程文档同步新名；
+- 官方插件市场尚未上线（DSH 当前不内置索引源），本版**不提交任何市场收录**。
+
+### 2) 队列子插件默认禁用
+
+- `dsh-fang-queue-journal` 的 bundle 行默认 `disabled: true`；默认不加载、不注册 composer journal UI；
+- queue-journal host half 升级到 `0.1.7`，只有行启用时才 `provide("fangQueueJournal")`；
+- orchestrator 的 `/fang/api/composer/journal`、`/history`、`/composer/queue` 在服务缺失时 **503 `queue-journal-disabled`**（fail-closed）；
+- `/fang/api/status.services.queueJournal` 暴露真实能力；queue client 再做一次能力探测，旧缓存/残留 client 不会显示 UI；
+- 主 client 按 `status.services` 隐藏未激活子插件的对应界面（approver 待批区、forker 看护区）；
+- boot-guard 跳过 disabled 行，不因可选子插件未安装而阻塞启动。
+
+### 验证
+
+- `test/queue-journal-gate.test.mjs`：host half 提供 service、bundle 默认 disabled、boot-guard 跳过 disabled；
+- orchestrator：queue 服务缺失时 3 条 journal/queue 路由全部 503，服务存在时正常；
+- 全量测试 / 真实 e2e / install drill / 主城门禁见构建输出。
 ## v3.3.2（2026-11-14）
 
 **主题：母体（宿主）浮窗总开关——一键隐藏/显示瓮城在宿主的所有浮窗。**

@@ -20,7 +20,7 @@ const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex')
 function temp(prefix) { return fs.mkdtempSync(path.join(os.tmpdir(), prefix)) }
 function rm(dir) { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ } }
 
-function writeProfile(home, name, { bundles = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/dsh-fang'], patch = '[]\n' } = {}) {
+function writeProfile(home, name, { bundles = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'], patch = '[]\n' } = {}) {
   const dir = path.join(home, 'profiles', name)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: `dsh-profile-${name}`, private: true, dsh: { profile: { bundles } } }, null, 2))
@@ -41,10 +41,10 @@ function writeArtifact(root, version = '3.3.0') {
     'package/src/lib/main-gate.mjs', 'package/src/plugins/restart-guard.mjs',
     'package/tools/gate/main-city.mjs',
   ]
-  const manifest = { name: '@twinsearth/dsh-fang', version, tarball: path.basename(tgz), size: fs.statSync(tgz).size, sha256: hash, files }
+  const manifest = { name: '@twinsearth/fang-dsh-plugin', version, tarball: path.basename(tgz), size: fs.statSync(tgz).size, sha256: hash, files }
   fs.writeFileSync(path.join(dist, 'manifest.json'), JSON.stringify(manifest, null, 2))
   fs.mkdirSync(path.join(dist, 'npm', 'package'), { recursive: true })
-  for (const rel of ['package.json', 'client.js', 'cordis.patch.yml']) fs.writeFileSync(path.join(dist, 'npm', 'package', rel), rel === 'package.json' ? JSON.stringify({ name: '@twinsearth/dsh-fang', version, private: false, dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } }) : (rel === 'cordis.patch.yml' ? '[]\n' : '// x\n'))
+  for (const rel of ['package.json', 'client.js', 'cordis.patch.yml']) fs.writeFileSync(path.join(dist, 'npm', 'package', rel), rel === 'package.json' ? JSON.stringify({ name: '@twinsearth/fang-dsh-plugin', version, private: false, dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } }) : (rel === 'cordis.patch.yml' ? '[]\n' : '// x\n'))
   for (const rel of ['src/index.mjs', 'src/lib/boot-guard.mjs', 'src/lib/main-gate.mjs', 'src/plugins/restart-guard.mjs', 'tools/gate/main-city.mjs']) {
     fs.mkdirSync(path.dirname(path.join(dist, 'npm', 'package', rel)), { recursive: true })
     fs.writeFileSync(path.join(dist, 'npm', 'package', rel), '// x\n')
@@ -111,7 +111,7 @@ test('main gate: package gate rejects a staged package without bundle/client man
   try {
     const art = writeArtifact(root)
     const pkgFile = path.join(art.packageDir, 'package.json')
-    fs.writeFileSync(pkgFile, JSON.stringify({ name: '@twinsearth/dsh-fang', version: '3.3.0' }))
+    fs.writeFileSync(pkgFile, JSON.stringify({ name: '@twinsearth/fang-dsh-plugin', version: '3.3.0' }))
     const report = runMainGate({ target: 'package', root, version: '3.3.0', packageDir: art.packageDir, distDir: art.dist, tarball: art.tgz })
     assert.equal(report.ok, false)
     const ids = report.blockers.map((item) => item.id)
@@ -197,7 +197,7 @@ test('main gate: createGatedProfile creates a minimal profile and refuses overwr
     const created = createGatedProfile({ homeDir: home, profile: 'fresh' })
     assert.equal(created.ok, true, JSON.stringify(created))
     const pkg = JSON.parse(fs.readFileSync(path.join(home, 'profiles', 'fresh', 'package.json'), 'utf8'))
-    assert.deepEqual(pkg.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/dsh-fang'])
+    assert.deepEqual(pkg.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'])
     const again = createGatedProfile({ homeDir: home, profile: 'fresh' })
     assert.equal(again.ok, false)
     assert.equal(again.error, 'profile-exists')

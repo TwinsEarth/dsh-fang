@@ -154,5 +154,10 @@
     - id: fang-web-entry
       name: '@twinsearth/dsh-fang-web-entry'
 
+    # v3.3.3: default OFF. Draft/queue recovery is optional; the host half
+    # provides fangQueueJournal only when this row is enabled, and without it
+    # the orchestrator returns 503 queue-journal-disabled for journal/queue
+    # routes. The client half is not loaded, so its composer UI stays hidden.
     - id: fang-queue-journal
       name: '@twinsearth/dsh-fang-queue-journal'
+      disabled: true

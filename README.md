@@ -2,7 +2,7 @@
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-4D6BFE?logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE-CORE)
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
-[![npm latest](https://img.shields.io/npm/v/@twinsearth/dsh-fang.svg?label=npm&color=red)](https://www.npmjs.com/package/@twinsearth/dsh-fang)
+[![npm latest](https://img.shields.io/npm/v/@twinsearth/fang-dsh-plugin.svg?label=npm&color=red)](https://www.npmjs.com/package/@twinsearth/fang-dsh-plugin)
 
 
 # 瓮城：DSH 的第一台虚拟机！
@@ -54,7 +54,7 @@
   宿主侧需**重启**加载、页面刷新即可看到新布局与新标题。
   交付与证据见 [docs/v2.3.1-交付报告.md](docs/v2.3.1-交付报告.md) 与 [docs/UI-瓮城入口.md](docs/UI-瓮城入口.md)。
 - ✅ v2.3.1 已发布：GitHub Release 附 `dsh-fang-2.3.1.tgz` + `manifest.json`，CI/compat 全绿；
-- ⏳ npm：`@twinsearth/dsh-fang@2.3.1` 构建与本地 healthz 已就绪，等待 npm 组织 `@twinsearth` 创建后发布；
+- ⏳ npm：`@twinsearth/fang-dsh-plugin@2.3.1` 构建与本地 healthz 已就绪，等待 npm 组织 `@twinsearth` 创建后发布；
 - 🔒 **main 为 PR-only**：直接 push 会被拒绝；变更走分支 + PR + 维护者手动审核合并（见 [CONTRIBUTING](CONTRIBUTING.md)）。
 
 ---

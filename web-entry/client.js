@@ -52,7 +52,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
           name: 'plugins.bundle.config',
-          key: '@twinsearth/dsh-fang',
+          key: '@twinsearth/fang-dsh-plugin',
           id: 'fang-web-entry',
           order: 10,
         }, WengchengEntry))

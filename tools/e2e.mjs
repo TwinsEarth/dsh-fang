@@ -110,7 +110,11 @@ function makeProfile(homeRoot) {
     dependencies: {},
   }, null, 2))
   fs.writeFileSync(path.join(profileDir, 'cordis.yml'), '[]\n')
-  fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'), '[]\n')
+  // v3.3.3: queue-journal is disabled by default in the bundle. The e2e profile
+  // explicitly enables it so the journal/queue recovery API is exercised; the
+  // default-off + 503 path is covered by unit tests.
+  fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'),
+    '- id: fang-queue-journal\n  disabled: false\n')
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })

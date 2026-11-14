@@ -3322,7 +3322,16 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
     // ── 全局提示（派生结果 / 动作结果 / 接口错误）───────────────────────────
     // 待批区：只读母体聚合接口；不直接跨 fork adapter
     // 瓮城·决策中心：注意力分级面板。红色置顶；绿/灰默认折叠；所有操作等接口返回。
+    // v3.3.3：子插件能力门控。status.services 是宿主实际提供的服务快照；
+    // 缺失/未激活时对应 UI 不绘制（功能路由也会由 orchestrator fail-closed）。
+    function serviceEnabled(S, key) {
+      const services = S?.status?.data?.services
+      if (!services || typeof services !== 'object') return true // 状态未返回时不误隐藏
+      return services[key] !== false
+    }
+
     function renderApprovals(S, app) {
+      if (!serviceEnabled(S, 'approver')) return []
       const state = S.approvals || { state: 'idle', items: [], failed: [], degraded: false, error: '' }
       if (state.state === 'error' && state.items.length === 0) {
         return [h('div', { class: 'notice notice--warn', role: 'status' },
@@ -4704,6 +4713,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
     }
 
     function renderForkSupervision(S, app) {
+      if (!serviceEnabled(S, 'forker')) return null
       const sv = S.forkSupervision || { state: 'idle' }
       if (sv.state === 'idle') return null
       if (sv.state === 'error') {

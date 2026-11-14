@@ -22,7 +22,7 @@ const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-drill-'))
 const profile = path.join(home, 'profiles', 'drill')
-const pkgDir = path.join(profile, 'node_modules', '@twinsearth', 'dsh-fang')
+const pkgDir = path.join(profile, 'node_modules', '@twinsearth', 'fang-dsh-plugin')
 let drillPort = 0
 
 let child = null
@@ -50,8 +50,8 @@ try {
   fs.writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
     name: 'dsh-profile-drill', private: true,
     // 与 pnpm add 落盘一致：客户端半只按 profile 依赖物化，缺依赖时 boot 不会分发 client.js。
-    dependencies: { '@twinsearth/dsh-fang': version },
-    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/dsh-fang'] } },
+    dependencies: { '@twinsearth/fang-dsh-plugin': version },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'] } },
   }, null, 2) + '\n', 'utf8')
   fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), '[]\n', 'utf8')
   check('tarball installed into clean profile', fs.existsSync(path.join(pkgDir, 'src', 'index.mjs')))
@@ -112,10 +112,10 @@ try {
   let boot = ''
   for (let attempt = 0; attempt < 30; attempt += 1) {
     boot = await bootHtml().catch(() => '')
-    if (boot.includes('@twinsearth/dsh-fang/client.js')) break
+    if (boot.includes('@twinsearth/fang-dsh-plugin/client.js')) break
     await sleep(500)
   }
-  check('clean boot lists the fang client half', boot.includes('@twinsearth/dsh-fang/client.js'), boot ? '' : 'boot page unavailable')
+  check('clean boot lists the fang client half', boot.includes('@twinsearth/fang-dsh-plugin/client.js'), boot ? '' : 'boot page unavailable')
   // B1：先同源 bootstrap 安装级 token，再带 x-fang-auth 访问 API
   const authToken = await fetch(`http://127.0.0.1:${port}/fang/api/auth-token?token=${encodeURIComponent(token)}`)
     .then((r) => r.json()).then((b) => b?.token ?? '').catch(() => '')

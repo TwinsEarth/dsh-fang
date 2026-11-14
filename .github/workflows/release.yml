@@ -28,7 +28,7 @@ permissions:
 
 env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-  PUBLISH_NAME: '@twinsearth/dsh-fang'
+  PUBLISH_NAME: '@twinsearth/fang-dsh-plugin'
 
 jobs:
   # ── 0. 守卫：发布闸门的第一道，纯元数据检查，几十秒内出结果 ──────────────────
