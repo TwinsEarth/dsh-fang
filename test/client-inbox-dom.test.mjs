@@ -619,4 +619,47 @@ test('client DOM: four-level history is visible, yellow stays answerable after d
   }
 })
 
+test('client DOM: all four level groups stay visible with zero records and show priority/risk defaults', async () => {
+  const harness = makeHarness({ tickets: [] })
+  try {
+    const host = mountInbox(harness)
+    await waitFor(() => host.querySelector('.fang-inbox-group[data-level="red"]'))
+    for (const level of ['red', 'yellow', 'blue', 'green', 'gray']) {
+      assert.ok(host.querySelector(`.fang-inbox-group[data-level="${level}"]`), `${level} group must exist even with 0 tickets`)
+    }
+    assert.match(host.textContent, /P0 · 高风险 · 阻塞 Agent/)
+    assert.match(host.textContent, /P1 · 中风险/)
+    assert.match(host.textContent, /P2 · 低风险/)
+    assert.match(host.textContent, /P3 · 信息/)
+    assert.match(host.textContent, /暂无紧急决策记录/)
+  } finally {
+    try { harness.dispose?.() } catch { /* ignore */ }
+    harness.dom.window.close()
+  }
+})
+
+test('client DOM: items show explicit priority and risk chips from the server payload', async () => {
+  const harness = makeHarness({
+    tickets: [
+      { ...redTicket, id: 'dec_pr_r', rev: 1, priority: 'P0', risk: 'high' },
+      { ...baseTicket, id: 'dec_pr_y', rev: 2, priority: 'P2', risk: 'high' },
+      { ...blueTicket, id: 'dec_pr_b', rev: 3, priority: 'P2', risk: 'low' },
+      { ...greenTicket, id: 'dec_pr_g', rev: 4, status: 'resolved', outcome: 'acked', autoResolved: true, priority: 'P3', risk: 'info' },
+    ],
+  })
+  try {
+    const host = mountInbox(harness)
+    await waitFor(() => host.textContent.includes('Alpha decision'))
+    assert.ok(host.querySelector('[data-inbox-id="dec_pr_r"] [data-decision-priority="P0"]'))
+    assert.ok(host.querySelector('[data-inbox-id="dec_pr_r"] [data-decision-risk="high"]'))
+    // 覆盖默认：黄票也可显式标 P2 高风险。
+    assert.ok(host.querySelector('[data-inbox-id="dec_pr_y"] [data-decision-priority="P2"]'))
+    assert.ok(host.querySelector('[data-inbox-id="dec_pr_y"] [data-decision-risk="high"]'))
+    assert.ok(host.querySelector('[data-inbox-id="dec_pr_b"] [data-decision-risk="low"]'))
+  } finally {
+    try { harness.dispose?.() } catch { /* ignore */ }
+    harness.dom.window.close()
+  }
+})
+
 } // end jsdom-available block

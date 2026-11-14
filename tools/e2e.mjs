@@ -479,7 +479,7 @@ check('POST /fang/api/derive accepted with exactly one session',
         ...extra,
       }),
     })
-    const yellowDecision = await makeDecision('yellow', 'e2e yellow deferred')
+    const yellowDecision = await makeDecision('yellow', 'e2e yellow deferred', { priority: 'P2', risk: 'high' })
     const blueDecision = await makeDecision('blue', 'e2e blue auto recommended')
     const greenDecision = await makeDecision('green', 'e2e green immediate', { options: [] })
     // 红色 timeoutMinutes 仍是归档期限，不使用黄/蓝的 60ms 测试等待窗口。
@@ -490,6 +490,9 @@ check('POST /fang/api/derive accepted with exactly one session',
     const greenId = String(greenDecision.body?.ticket?.id ?? '')
     const redId = String(redDecision.body?.ticket?.id ?? '')
     check('green resolves immediately without pending alert', greenDecision.body?.ticket?.status === 'resolved' && greenDecision.body?.ticket?.autoResolved === true)
+    check('priority/risk default by level (green=P3/info)', greenDecision.body?.ticket?.priority === 'P3' && greenDecision.body?.ticket?.risk === 'info')
+    check('priority/risk override is honoured (yellow=P2/high)', yellowDecision.body?.ticket?.priority === 'P2' && yellowDecision.body?.ticket?.risk === 'high')
+    check('red default is P0/high', redDecision.body?.ticket?.priority === 'P0' && redDecision.body?.ticket?.risk === 'high')
     check('red remains pending before human choice', redDecision.body?.ticket?.status === 'pending' && redDecision.body?.ticket?.isBlocking === true)
     await sleep(450)
     const policyList = await api('/fang/api/decisions?includeArchived=1')
@@ -514,7 +517,8 @@ check('POST /fang/api/derive accepted with exactly one session',
       const tickets = Array.isArray(disk.tickets) ? disk.tickets : []
       check('four-level policy state persisted to disk', tickets.some((item) => item.id === yellowId && item.lateResponse === true)
         && tickets.some((item) => item.id === blueId && item.autoReason === 'blue-timeout')
-        && tickets.some((item) => item.id === greenId && item.autoReason === 'green-immediate'))
+        && tickets.some((item) => item.id === greenId && item.autoReason === 'green-immediate')
+        && tickets.some((item) => item.id === yellowId && item.priority === 'P2' && item.risk === 'high'))
     }
 
     // ── fork homes removed by delete-archive ───────────────────────────

@@ -34,7 +34,16 @@ import { createAiSecretStore } from '../lib/ai-secret-store.mjs'
 import { createDecisionOutbox, resolveMotherTarget } from '../lib/decision-outbox.mjs'
 import { producerCatalog } from '../lib/producer-contract.mjs'
 import { assertEndpointSafe, classifyEndpointHost } from '../lib/ssrf-guard.mjs'
-import { DECISION_LEVEL_POLICY, decisionPolicy, decisionWaitMs, recommendedDecisionOption } from '../lib/decision-policy.mjs'
+import {
+  DECISION_LEVEL_POLICY,
+  DECISION_PRIORITIES,
+  DECISION_RISKS,
+  decisionPolicy,
+  decisionWaitMs,
+  normalizeDecisionPriority,
+  normalizeDecisionRisk,
+  recommendedDecisionOption,
+} from '../lib/decision-policy.mjs'
 
 export const name = 'fang-decision-center'
 export const inject = []
@@ -76,7 +85,8 @@ export const PM_DECISION_POLICY = Object.freeze({
     '一次只问一个决定点，问题要具体到「选哪个」或「能不能做」',
     '必须给出 2-4 个可执行选项，推荐项放第一个并把标签后缀 "(推荐)"',
     'context 里写清：为什么需要人决定、每个选项的代价与风险、不决定的后果',
-    'red 必须等人工；yellow 等 3 分钟后继续但可补选；blue 等 1 分钟后按推荐执行；green 自动执行并留底',
+    'red 只用于真正阻塞（人不在就没法继续）；yellow 用于影响方向/进度的建议（3 分钟后继续但可补选）；blue 用于低风险日常建议（1 分钟后按推荐执行）；green 用于阶段完成/自动执行留底（不提醒）',
+    '优先级与风险默认随等级：red=P0/high，yellow=P1/medium，blue=P2/low，green=P3/info；确实不符时显式传 priority/risk 覆盖',
     '绝对不要因为「不确定」而把问题原样抛回给开发者——先把能自己查的查清',
   ],
 })
@@ -306,6 +316,9 @@ function publicTicket(ticket) {
     autoReason: ticket.autoReason ?? null,
     lateResponse: ticket.lateResponse === true,
     policyTimeoutMs: ticket.policyTimeoutMs ?? null,
+    // v3.2.2：优先级与风险程度是正式字段，默认由等级推导，调用方可覆盖。
+    priority: ticket.priority ?? decisionPolicy(ticket.level).priority,
+    risk: ticket.risk ?? decisionPolicy(ticket.level).risk,
   }
 }
 
@@ -393,7 +406,9 @@ function applyForkDecisionCenter(ctx, config, gate) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            level: { type: 'string', enum: ['red', 'yellow', 'blue', 'green'], description: '红色会阻塞等待' },
+            level: { type: 'string', enum: ['red', 'yellow', 'blue', 'green'], description: '注意力等级；默认优先级/风险：红=P0/high，黄=P1/medium，蓝=P2/low，绿=P3/info' },
+            priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'], description: '可选：覆盖默认优先级' },
+            risk: { type: 'string', enum: ['high', 'medium', 'low', 'info'], description: '可选：覆盖默认风险' },
             title: { type: 'string' },
             context: { type: 'string' },
             options: {
@@ -445,6 +460,7 @@ function applyForkDecisionCenter(ctx, config, gate) {
                   ticketId: ticket.id, level: ticket.level, blocking: false,
                   status: 'pending', outcome: 'deferred', deferred: true,
                   continueWithoutDecision: true, canAnswerLater: true, queued: false,
+                  priority: ticket.priority, risk: ticket.risk,
                 }
               }
               throw new Error(`fork 决策未在时限内完成（${settled.reason}）`)
@@ -456,6 +472,7 @@ function applyForkDecisionCenter(ctx, config, gate) {
                 status: 'pending', outcome: 'deferred', deferred: true,
                 continueWithoutDecision: true, canAnswerLater: true,
                 deferredAt: resolved.deferredAt ?? undefined, queued: false,
+                priority: resolved.priority, risk: resolved.risk,
               }
             }
             if (resolved.status !== 'resolved' && resolved.status !== 'abandoned' && resolved.status !== 'expired' && resolved.status !== 'acked') {
@@ -468,6 +485,7 @@ function applyForkDecisionCenter(ctx, config, gate) {
               selectedActionId: resolved.selectedActionId ?? undefined,
               autoResolved: resolved.autoResolved === true,
               autoReason: resolved.autoReason ?? undefined,
+              priority: resolved.priority, risk: resolved.risk,
               queued: false,
             }
           }
@@ -1154,6 +1172,8 @@ export function apply(ctx, config) {
       autoReason: null,
       lateResponse: false,
       policyTimeoutMs,
+      priority: normalizeDecisionPriority(raw.priority, level),
+      risk: normalizeDecisionRisk(raw.risk, level),
     }
     ticket.rev = nextRevision()
     tickets.set(ticket.id, ticket)
@@ -1297,6 +1317,8 @@ export function apply(ctx, config) {
         autoReason: item.autoReason ?? null,
         lateResponse: item.lateResponse === true,
         policyTimeoutMs: Number(item.policyTimeoutMs) || null,
+        priority: normalizeDecisionPriority(item.priority, normalizeLevel(item.level, 'gray')),
+        risk: normalizeDecisionRisk(item.risk, normalizeLevel(item.level, 'gray')),
       }
       if (ticket.status === 'pending') {
         // v3.1.24：进程重启后 pending 仍保留给人回答（浮窗/收件箱可见），
@@ -2232,6 +2254,8 @@ export function apply(ctx, config) {
       statuses: [...STATUSES],
       blockingLevels: [...BLOCKING_LEVELS],
       levelPolicies: DECISION_LEVEL_POLICY,
+      priorities: [...DECISION_PRIORITIES],
+      risks: [...DECISION_RISKS],
       maxTickets: cfg.maxTickets,
       maxPendingRed: cfg.maxPendingRed,
       defaultTimeoutMinutes: cfg.defaultTimeoutMinutes,
@@ -2286,12 +2310,14 @@ export function apply(ctx, config) {
         if (!tools || typeof tools.register !== 'function') return
         const unregister = tools.register({
           name: 'request_human_decision',
-          description: '当需要人类授权、选择方案、或汇报重要结果时，创建一张决策中心 ticket。红色强制等待人工；黄色最多等 3 分钟后继续且可补选；蓝色最多等 1 分钟后按推荐自动执行；绿色自动执行并留底。\n' + PM_PROACTIVE_HINT,
+          description: '当需要人类授权、选择方案、或汇报重要结果时，创建一张决策中心 ticket。红色强制等待人工（P0/高）；黄色最多等 3 分钟后继续且可补选（P1/中）；蓝色最多等 1 分钟后按推荐自动执行（P2/低）；绿色自动执行并留底（P3/信息）。必须按风险选等级，不要全部用红色。\n' + PM_PROACTIVE_HINT,
           parameters: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              level: { type: 'string', enum: ['red', 'yellow', 'blue', 'green'], description: '注意力等级；red 会阻塞 Agent' },
+              level: { type: 'string', enum: ['red', 'yellow', 'blue', 'green'], description: '注意力等级（默认优先级/风险：红=P0/high，黄=P1/medium，蓝=P2/low，绿=P3/info）；red 会阻塞 Agent' },
+              priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'], description: '可选：覆盖等级默认优先级' },
+              risk: { type: 'string', enum: ['high', 'medium', 'low', 'info'], description: '可选：覆盖等级默认风险程度' },
               title: { type: 'string', description: '一句话标题' },
               context: { type: 'string', description: '为什么需要人类介入' },
               options: {
@@ -2329,6 +2355,11 @@ export function apply(ctx, config) {
                 outcome: { type: 'string' },
                 selectedValue: { type: 'string' },
                 selectedActionId: { type: 'string' },
+                priority: { type: 'string' },
+                risk: { type: 'string' },
+                autoResolved: { type: 'boolean' },
+                lateResponse: { type: 'boolean' },
+                continueWithoutDecision: { type: 'boolean' },
               },
             },
             render(_args, value) {
@@ -2370,6 +2401,7 @@ export function apply(ctx, config) {
                   status: 'pending', outcome: 'deferred', deferred: true,
                   continueWithoutDecision: true, canAnswerLater: true,
                   deferredAt: result.deferredAt ?? undefined,
+                  priority: result.priority, risk: result.risk,
                 }
               }
               if (outcome !== 'resolved' && outcome !== 'acked') {
@@ -2384,6 +2416,7 @@ export function apply(ctx, config) {
                 autoResolved: result.autoResolved === true,
                 autoReason: result.autoReason ?? undefined,
                 lateResponse: result.lateResponse === true,
+                priority: result.priority, risk: result.risk,
               }
             }
             return {
@@ -2392,13 +2425,14 @@ export function apply(ctx, config) {
               autoResolved: ticket.autoResolved === true,
               selectedValue: ticket.resolvedOption ?? undefined,
               selectedActionId: ticket.selectedActionId ?? undefined,
+              priority: ticket.priority, risk: ticket.risk,
             }
           },
         })
         // PM 交互式选择：独立工具名，语义 = 红色决策 ticket（默认红、阻塞等待选择）。
         const unregisterChoice = tools.register({
           name: 'ask_user_choice',
-          description: 'PM 交互式选择：向人类提出一个带选项的问题，创建红色决策 ticket 并等待选择。'
+          description: 'PM 交互式选择：向人类提出一个带选项的问题。默认红色阻塞；但**必须按风险选等级**：只有人不在就没法继续时才用 red，方向/进度建议用 yellow，低风险日常建议用 blue，阶段完成汇报用 green。不要所有问题都用红色。'
             + '\n凡属下列情形，PM 必须用本工具开票而不是自行决定或把问题丢回给开发者：'
             + PM_DECISION_POLICY.mustAsk.join('；')
             + '。每次只问一个决定点，给 2-4 个选项并标出推荐项。',
@@ -2418,7 +2452,9 @@ export function apply(ctx, config) {
                 },
                 description: '可选项（至少一个）',
               },
-              level: { type: 'string', enum: ['red', 'yellow', 'blue'], description: '保留字段；PM ask_user_choice 固定转红，传入其它等级会被忽略' },
+              level: { type: 'string', enum: ['red', 'yellow', 'blue', 'green'], description: '可选；默认 red（真正阻塞才用红）。yellow=3 分钟可补选，blue=1 分钟按推荐执行，green=自动留底' },
+              priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'], description: '可选：覆盖等级默认优先级' },
+              risk: { type: 'string', enum: ['high', 'medium', 'low', 'info'], description: '可选：覆盖等级默认风险' },
               timeoutMinutes: { type: 'number' },
             },
             required: ['question', 'choices'],
@@ -2439,9 +2475,14 @@ export function apply(ctx, config) {
               }))
               .filter((option) => option.value.length > 0)
             if (!options.length) throw new Error('ask_user_choice requires at least one choice')
+            const level = ['red', 'yellow', 'blue', 'green'].includes(String(input.level))
+              ? String(input.level)
+              : 'red'
             const created = create({
-              // PM 交互式选择永远转红：人类必须显式选，不能被当成黄/蓝低注意力票。
-              level: 'red',
+              // 默认红；只有真正阻塞才用红，常规建议应显式传 yellow/blue，完成汇报传 green。
+              level,
+              priority: input.priority,
+              risk: input.risk,
               title: input.question ?? input.title,
               context: input.context ?? input.question,
               options,
@@ -2457,15 +2498,34 @@ export function apply(ctx, config) {
             })
             if (!created.ok) throw new Error(`decision center rejected choice: ${created.reason}`)
             const ticket = created.ticket
-            if (!ticket.isBlocking) return { ticketId: ticket.id, level: ticket.level, blocking: false, status: 'pending' }
+            if (ticket.status !== 'pending') {
+              return {
+                ticketId: ticket.id, level: ticket.level, blocking: false,
+                status: ticket.status, outcome: ticket.outcome,
+                autoResolved: ticket.autoResolved === true,
+                selectedValue: ticket.resolvedOption ?? undefined,
+                priority: ticket.priority, risk: ticket.risk,
+              }
+            }
             const result = await wait(ticket.id, exec?.signal)
-            const outcome = String(result?.outcome ?? 'expired')
+            const outcome = String(result?.outcome ?? (result.status === 'pending' ? 'deferred' : 'expired'))
+            if (result.status === 'pending' && result.level === 'yellow') {
+              return {
+                ticketId: result.id, level: result.level, blocking: false,
+                status: 'pending', outcome: 'deferred', deferred: true,
+                continueWithoutDecision: true, canAnswerLater: true,
+                priority: result.priority, risk: result.risk,
+              }
+            }
             if (outcome !== 'resolved' && outcome !== 'acked') {
               throw new Error(`用户未处理该选择（outcome=${outcome}）`)
             }
             return {
-              ticketId: ticket.id, level: ticket.level, blocking: true,
+              ticketId: result.id, level: result.level, blocking: result.level === 'red',
               outcome, selectedValue: result.resolvedOption ?? undefined,
+              autoResolved: result.autoResolved === true,
+              lateResponse: result.lateResponse === true,
+              priority: result.priority, risk: result.risk,
             }
           },
         })
