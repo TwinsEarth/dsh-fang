@@ -168,6 +168,69 @@ test('policy state persists to JSON and survives a restart without losing yellow
   } finally { drop(second.ctx, root) }
 })
 
+test('priority and risk default by level and can be explicitly overridden', () => {
+  const { ctx, service, root } = boot()
+  try {
+    const red = service.create({ level: 'red', title: 'r', options: [option('a')] })
+    const yellow = service.create({ level: 'yellow', title: 'y', options: [option('a')] })
+    const blue = service.create({ level: 'blue', title: 'b', options: [option('a')] })
+    const green = service.create({ level: 'green', title: 'g' })
+    assert.deepEqual([red.ticket.priority, red.ticket.risk], ['P0', 'high'])
+    assert.deepEqual([yellow.ticket.priority, yellow.ticket.risk], ['P1', 'medium'])
+    assert.deepEqual([blue.ticket.priority, blue.ticket.risk], ['P2', 'low'])
+    assert.deepEqual([green.ticket.priority, green.ticket.risk], ['P3', 'info'])
+    const security = service.create({ level: 'blue', title: 'security', options: [option('a')], priority: 'P0', risk: 'high' })
+    assert.deepEqual([security.ticket.priority, security.ticket.risk], ['P0', 'high'])
+    const unknown = service.create({ level: 'yellow', title: 'unknown', options: [option('a')], priority: 'P9', risk: 'critical' })
+    assert.deepEqual([unknown.ticket.priority, unknown.ticket.risk], ['P1', 'high'], 'unknown priority falls back; risk alias critical->high')
+    const history = service.list({ includeArchived: true }).items
+    assert.equal(history.find((item) => item.id === security.ticket.id).priority, 'P0')
+  } finally { drop(ctx, root) }
+})
+
+test('ask_user_choice honours explicit yellow/blue/green levels', async () => {
+  const registered = []
+  const tools = { register(definition) { registered.push(definition); return () => {} } }
+  const { ctx, root } = boot({ services: { tools } })
+  try {
+    const tool = registered.find((item) => item.name === 'ask_user_choice')
+    const yellow = await tool.execute({
+      question: 'y?', choices: [{ value: 'a', label: 'A' }], level: 'yellow', timeoutMinutes: 0.001,
+    }, { agent: { id: 'pm-1', role: 'pm' } })
+    assert.equal(yellow.level, 'yellow')
+    assert.equal(yellow.outcome, 'deferred')
+    assert.equal(yellow.priority, 'P1')
+    const blue = await tool.execute({
+      question: 'b?', choices: [{ value: 'a', label: 'A', isRecommended: true }], level: 'blue', timeoutMinutes: 0.001,
+    }, { agent: { id: 'pm-2', role: 'pm' } })
+    assert.equal(blue.level, 'blue')
+    assert.equal(blue.autoResolved, true)
+    assert.equal(blue.selectedValue, 'a')
+    const green = await tool.execute({
+      question: 'done', choices: [{ value: 'ok', label: 'OK' }], level: 'green',
+    }, { agent: { id: 'pm-3', role: 'pm' } })
+    assert.equal(green.level, 'green')
+    assert.equal(green.status, 'resolved')
+    assert.equal(green.autoResolved, true)
+  } finally { drop(ctx, root) }
+})
+
+test('ingest accepts priority/risk and persists them with the ticket', () => {
+  const { ctx, service, root } = boot()
+  try {
+    const out = service.ingest({
+      producer: 'e2e', kind: 'worker-deviation', level: 'yellow', title: 'risk override',
+      priority: 'P2', risk: 'high', options: [option('a')],
+    })
+    assert.equal(out.ticket.priority, 'P2')
+    assert.equal(out.ticket.risk, 'high')
+    const disk = JSON.parse(fs.readFileSync(path.join(root, 'decision-center.json'), 'utf8'))
+    const stored = disk.tickets.find((item) => item.id === out.ticket.id)
+    assert.equal(stored.priority, 'P2')
+    assert.equal(stored.risk, 'high')
+  } finally { drop(ctx, root) }
+})
+
 test('agent tool returns deferred yellow / auto blue / immediate green with explicit outcomes', async () => {
   const registered = []
   const tools = { register(definition) { registered.push(definition); return () => {} } }

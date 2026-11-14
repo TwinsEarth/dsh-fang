@@ -242,7 +242,7 @@ test('decision center: ask_user_choice creates a blocking red ticket and returns
       question: 'Deploy v2?',
       context: 'PM asks for a human choice',
       choices: [{ value: 'yes', label: 'Deploy' }, { value: 'no', label: 'Hold' }],
-      level: 'yellow', // 即使调用方给黄，也必须自动转红
+      // v3.2.2：不传 level 时默认红；显式传 yellow/blue/green 会按对应策略处理。
     }, { agent: { id: 'pm-session', role: 'pm' } })
     const [ticket] = service.list().items
     assert.equal(ticket.level, 'red', 'interactive choice defaults to red')

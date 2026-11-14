@@ -44,3 +44,16 @@ green   创建 ────────────────> resolved/acked 
 - 蓝色窗口结束选择推荐项，`autoReason=blue-timeout`，结果落库。
 - 绿色创建即闭环，`autoReason=green-immediate`，历史保留。
 - 重启后黄色 deferred 与蓝色 resolved 均可恢复；临时测试目录清理后无残留。
+
+## 优先级与风险（v3.2.2）
+
+| 等级 | priority | risk |
+|---|---|---|
+| red | P0 | high |
+| yellow | P1 | medium |
+| blue | P2 | low |
+| green | P3 | info |
+
+- 字段随 ticket 落库，支持调用方覆盖；未知值回落到等级默认。
+- 收件箱四色分组常驻，0 条也展示，避免“没有记录 → 完全看不到该等级”。
+- `ask_user_choice` 默认红，但必须按风险显式选择黄/蓝/绿，不应全部用红色。

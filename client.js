@@ -1269,6 +1269,7 @@ window.__ModuleLoader__.load({
 .fang-inbox-item-actions .fang-inbox-btn{height:24px;padding:0 7px;font-size:11.5px}
 .fang-inbox-ai-advice{font-size:11.5px;color:#0857B8;background:rgba(10,107,224,.06);border-radius:6px;padding:4px 6px;margin-top:4px;white-space:pre-wrap}
 .fang-inbox-empty{padding:28px 16px;text-align:center;color:#86868B;font-size:12px}
+.fang-inbox-empty-group{padding:10px 12px;color:#86868B;font-size:11.5px;background:rgba(127,127,127,.03)}
 .fang-inbox-err{margin:8px 10px;padding:8px 10px;border-radius:8px;background:rgba(200,16,46,.07);color:#C8102E;font-size:12px}
 .fang-inbox-seat{display:inline-flex;align-items:center;justify-content:center;position:relative;width:28px;height:28px;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer}
 .fang-inbox-seat:hover{background:rgba(127,127,127,.1)}
@@ -3705,10 +3706,10 @@ window.__ModuleLoader__.load({
         collapsed: new Set(['green', 'gray']),
       }
       const LEVELS_MINI = [
-        { level: 'red', label: '红色 · 阻塞', tone: 'red' },
-        { level: 'yellow', label: '黄色', tone: 'yellow' },
-        { level: 'blue', label: '蓝色', tone: 'blue' },
-        { level: 'green', label: '绿色', tone: 'green' },
+        { level: 'red', label: '红色 · P0/高', tone: 'red' },
+        { level: 'yellow', label: '黄色 · P1/中', tone: 'yellow' },
+        { level: 'blue', label: '蓝色 · P2/低', tone: 'blue' },
+        { level: 'green', label: '绿色 · P3/信息', tone: 'green' },
         { level: 'gray', label: '灰色归档', tone: 'gray' },
       ]
       const remaining = (expiresAt) => {
@@ -3783,8 +3784,8 @@ window.__ModuleLoader__.load({
         else if (state.error) body.append(h('div', { class: 'notice notice--bad', role: 'alert' }, '决策中心不可用：' + failureHint(state.error)))
         else {
           for (const meta of LEVELS_MINI) {
+            // v3.2.2：右栏也常驻五组，0 条也显示等级与优先级/风险说明。
             const items = itemsFor(meta.level)
-            if (!items.length) continue
             const collapsed = state.collapsed.has(meta.level)
             const group = h('div', { class: 'fang-decision-mini-group', 'data-level': meta.level },
               h('button', {
@@ -3798,6 +3799,7 @@ window.__ModuleLoader__.load({
               }, h('b', null, meta.label), h('span', null, `${items.length} 项 · ${collapsed ? '展开' : '收起'}`)))
             if (!collapsed) {
               const list = h('div', { class: 'fang-decision-mini-list' })
+              if (!items.length) list.append(h('div', { class: 'fang-inbox-empty-group', 'data-empty-level': meta.level }, `暂无${meta.label}记录`))
               for (const item of items.slice(0, 30)) {
                 const actions = h('div', { class: 'fang-decision-mini-actions' })
                 for (const option of (item.options || []).slice(0, 4)) {
@@ -3815,7 +3817,7 @@ window.__ModuleLoader__.load({
                 }
                 list.append(h('div', { class: 'fang-decision-mini-item', 'data-inbox-id': item.id, 'data-level': item.level },
                   h('div', { class: 'fang-decision-mini-title' }, inboxText(item.title) || item.id),
-                  h('div', { class: 'fang-decision-mini-meta' }, `${sourceLabel(item)} · ${miniDecisionState(item)}`),
+                  h('div', { class: 'fang-decision-mini-meta' }, `${sourceLabel(item)} · ${miniDecisionState(item)} · ${item.priority || DECISION_PRIORITY_RISK[item.level]?.priority || '—'} · 风险 ${DECISION_RISK_LABEL[item.risk || DECISION_PRIORITY_RISK[item.level]?.risk] || '—'}`),
                   item.context ? h('div', { class: 'fang-decision-mini-context' }, inboxText(item.context, 240)) : null,
                   actions))
               }
@@ -5047,12 +5049,20 @@ window.__ModuleLoader__.load({
     /** 插件 apply 时注入；主面板 Header 用它兜底打开收件箱（侧栏 Slot 不可用时）。 */
     let openInboxExternally = null
     const INBOX_LEVELS = Object.freeze([
-      { level: 'red', label: '紧急决策', hint: '会阻塞 Agent' },
-      { level: 'yellow', label: '建议决策', hint: '影响方向/进度' },
-      { level: 'blue', label: '日常建议', hint: '可按推荐处理' },
-      { level: 'green', label: '通知与汇报', hint: '默认折叠' },
+      { level: 'red', label: '紧急决策', hint: 'P0 · 高风险 · 阻塞 Agent' },
+      { level: 'yellow', label: '建议决策', hint: 'P1 · 中风险 · 3 分钟后继续可补选' },
+      { level: 'blue', label: '日常建议', hint: 'P2 · 低风险 · 1 分钟后按推荐执行' },
+      { level: 'green', label: '通知与汇报', hint: 'P3 · 信息 · 自动执行留底' },
       { level: 'gray', label: '已归档 / 过期', hint: '只读' },
     ])
+    const DECISION_PRIORITY_RISK = Object.freeze({
+      red: { priority: 'P0', risk: 'high' },
+      yellow: { priority: 'P1', risk: 'medium' },
+      blue: { priority: 'P2', risk: 'low' },
+      green: { priority: 'P3', risk: 'info' },
+      gray: { priority: '—', risk: 'info' },
+    })
+    const DECISION_RISK_LABEL = Object.freeze({ high: '高', medium: '中', low: '低', info: '信息' })
     const INBOX_POLL_MS = 5000
     const inboxText = (value, max = 420) => {
       const text = String(value ?? '').trim()
@@ -5861,7 +5871,15 @@ window.__ModuleLoader__.load({
                 class: 'chip', style: { marginLeft: 6, fontSize: 10 },
                 title: `注意力配额不足（${item.attentionQuota?.scope === 'source' ? '来源' : '全库'} ${item.attentionQuota?.used ?? '?'}/${item.attentionQuota?.limit ?? '?'}），已降一级`,
               }, '注意力降级')
-              : null),
+              : null,
+            (() => {
+              const defaults = DECISION_PRIORITY_RISK[item.level] || DECISION_PRIORITY_RISK.gray
+              const priority = item.priority || defaults.priority
+              const risk = item.risk || defaults.risk
+              return h('span', { style: { marginLeft: 6, display: 'inline-flex', gap: 4, verticalAlign: 'middle' } },
+                h('span', { class: 'chip', 'data-decision-priority': priority, title: '优先级' }, priority),
+                h('span', { class: 'chip', 'data-decision-risk': risk, title: '风险程度' }, `风险 ${DECISION_RISK_LABEL[risk] || risk}`))
+            })()),
           item.context ? h('div', { class: 'fang-inbox-item-context' }, inboxText(item.context)) : null,
           h('div', { class: 'fang-inbox-meta' }, `${sourceText(item)} · ${fmtRelative(item.createdAt)}${item.expiresAt ? ' · 到期 ' + fmtRelative(item.expiresAt) : ''}`),
           h('div', {
@@ -5965,7 +5983,7 @@ window.__ModuleLoader__.load({
             const pendingDelta = Number(b.status === 'pending') - Number(a.status === 'pending')
             return pendingDelta || Number(b.createdAt || 0) - Number(a.createdAt || 0)
           })
-        if (!items.length) return null
+        // v3.2.2：四种颜色分组常驻显示（0 条也给入口），避免“没有记录就完全看不到该等级”。
         const collapsed = state.collapsed.has(level)
         const unread = archived ? 0 : items.filter(item => item.status === 'pending').length
         const pendingItems = items.filter(item => item.status === 'pending')
@@ -5999,7 +6017,9 @@ window.__ModuleLoader__.load({
           h('b', null, levelMeta.label),
           h('span', { style: { fontSize: 11, color: 'inherit', opacity: .8 } }, levelMeta.hint),
           h('span', { class: 'n' }, `${unread} 项 · ${collapsed ? '展开' : '收起'}`))),
-          collapsed ? null : h('div', { role: 'list' }, ...items.slice(0, archived ? 80 : 200).map(item => itemNode(item, archived || item.status !== 'pending'))))
+          collapsed ? null : (items.length
+            ? h('div', { role: 'list' }, ...items.slice(0, archived ? 80 : 200).map(item => itemNode(item, archived || item.status !== 'pending')))
+            : h('div', { class: 'fang-inbox-empty-group', 'data-empty-level': level }, `暂无${levelMeta.label}记录`)))
       }
 
       /** 批量确认弹窗：返回 Promise<boolean>；Esc/取消/点遮罩 = false。 */
@@ -6081,13 +6101,15 @@ window.__ModuleLoader__.load({
         if (state.state === 'loading' && !state.items.length) body.append(h('div', { class: 'fang-inbox-empty' }, icon('spinner', 16), ' 正在读取收件箱…'))
         else if (state.state === 'error' && !state.items.length) {
           body.append(h('div', { class: 'fang-inbox-err', role: 'alert' }, `收件箱不可用：${failureHint(state.error || 'network')}`))
-        } else if (!state.items.length) {
-          body.append(h('div', { class: 'fang-inbox-empty' },
-            '收件箱是空的。', h('br'), '决策中心创建的红/黄/蓝/绿 ticket 会出现在这里。'))
         } else {
+          if (!state.items.length) {
+            body.append(h('div', { class: 'fang-inbox-empty' },
+              '收件箱是空的；四个等级的分组仍然保留，用于确认决策中心可用。', h('br'),
+              '红=P0/高，黄=P1/中，蓝=P2/低，绿=P3/信息。'))
+          }
+          // v3.2.2：分组常驻（含 0 条），不再因为无记录而整组消失。
           for (const meta of INBOX_LEVELS) {
-            const node = groupNode(meta)
-            if (node) body.append(node)
+            body.append(groupNode(meta))
           }
         }
         if (state.error && state.items.length) body.prepend(h('div', { class: 'fang-inbox-err', role: 'status' }, `刷新失败：${failureHint(state.error)}（显示上次结果）`))
