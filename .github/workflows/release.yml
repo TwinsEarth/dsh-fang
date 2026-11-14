@@ -69,6 +69,7 @@ jobs:
         run: |
           mkdir -p dist
           node tools/gate/main-city.mjs --target source --version "${{ steps.check.outputs.version }}" --json | tee dist/main-city-gate.json
+          node tools/gate/main-city.mjs --target workflows --json | tee dist/main-city-gate-workflows.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

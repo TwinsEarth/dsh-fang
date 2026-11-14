@@ -1,3 +1,33 @@
+## v3.3.1（2026-11-14）
+
+**主题：主城门禁补第七类目标 `workflows`——CI/发布工作流自身也要过审计。**
+
+### 为什么
+
+工作流是「谁能发布、能写什么」的执行入口；如果 CI/Release 被改成 `pull_request_target`、`write-all`、
+`secrets: inherit`，或者把 PR 标题直接插值进 `run:`，源码门禁可以被完全绕过。
+因此把 workflows 提升为与源码/产物同级的门禁目标，而不是只检查业务代码。
+
+### 新增检查
+
+- `workflows` 目标：必需 `ci.yml` + `release.yml`，`on/jobs` 结构、每 job timeout；
+- 阻断：`pull_request_target`、`permissions: write-all`、`secrets: inherit`、
+  `github.event.pull_request.title/body/head.ref` 直接插值进 `run:`；
+- 阻断：CI 必须调用 `tools/gate/main-city.mjs` 且跑全量测试；
+- 阻断：Release 必须调用 source gate 且通过 `tools/release/build.mjs`（内含 package/publish gate）；
+- `source` 目标同时跑 workflows 检查（双保险）。
+
+### 接线
+
+- CI hygiene：`--target source` + `--target workflows` 两步；
+- Release guard：`--target source` + `--target workflows`；
+- CLI：`GATE_TARGETS` 现为 source/package/publish/install/deploy/**workflows**/profile。
+
+### 验证
+
+- main-gate 新增 workflows 用例：真实仓库 GREEN；临时注入 `pull_request_target` 变红；
+  缺少 release.yml 变红；
+- 现有 package/publish/profile/runtime/崩溃循环测试保持。
 ## v3.3.0（2026-11-14）
 
 **主题：主城门禁——打包、发布、安装、部署、新建 profile 全部先过瓮城查验。**

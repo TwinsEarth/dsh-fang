@@ -52,6 +52,35 @@ function writeArtifact(root, version = '3.3.0') {
   return { dist, tgz, manifest, packageDir: path.join(dist, 'npm', 'package') }
 }
 
+test('main gate: workflows target passes real CI/release and blocks dangerous workflow edits', () => {
+  const root = path.resolve(import.meta.dirname, '..')
+  const good = runMainGate({ target: 'workflows', root })
+  assert.equal(good.ok, true, JSON.stringify(good.blockers))
+  assert.equal(good.score.grade, 'A')
+
+  const fake = temp('fang-gate-workflows-')
+  try {
+    const dir = path.join(fake, '.github', 'workflows')
+    fs.mkdirSync(dir, { recursive: true })
+    const gateLine = '          node tools/gate/main-city.mjs --target source --json\n'
+    const testLine = '      - run: node --test --test-concurrency=1 "test/*.test.mjs"\n'
+    const matrix = '    strategy:\n      matrix:\n        node: [22, 24]\n'
+    fs.writeFileSync(path.join(dir, 'ci.yml'), 'name: ci\non: [push]\njobs:\n  test:\n    runs-on: windows-latest\n    timeout-minutes: 25\n' + matrix + '    steps:\n' + gateLine + testLine)
+    fs.writeFileSync(path.join(dir, 'release.yml'), 'name: release\non:\n  push:\n    tags: ["v*"]\njobs:\n  guard:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    permissions:\n      contents: write\n    steps:\n' + gateLine + '      - run: node tools/release/build.mjs\n')
+    const green = runMainGate({ target: 'workflows', root: fake })
+    assert.equal(green.ok, true, JSON.stringify(green.blockers))
+    // pull_request_target + untrusted title interpolation must be blockers.
+    fs.appendFileSync(path.join(dir, 'ci.yml'), '\n# pull_request_target\n')
+    const unsafe = runMainGate({ target: 'workflows', root: fake })
+    assert.equal(unsafe.ok, false)
+    assert.ok(unsafe.blockers.some((item) => item.id.includes('no pull_request_target')))
+    fs.rmSync(path.join(dir, 'release.yml'))
+    const missing = runMainGate({ target: 'workflows', root: fake })
+    assert.equal(missing.ok, false)
+    assert.ok(missing.blockers.some((item) => item.id === 'workflows: required files'))
+  } finally { rm(fake) }
+})
+
 test('main gate: real source tree passes (A grade)', () => {
   const root = path.resolve(import.meta.dirname, '..')
   const report = runMainGate({ target: 'source', root })

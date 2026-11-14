@@ -2,7 +2,7 @@
 
 > 目标：任何会影响 DSH 端安全的动作——打包、发布、安装、部署、新建 profile——都必须先通过同一套可复核检查。门禁拿不到证据时 **fail-closed**，不允许「先上再补」。
 
-## 1. 六个入口
+## 1. 七个入口
 
 | target | 何时 | 关键检查 |
 |---|---|---|
@@ -11,6 +11,7 @@
 | `publish` | npm 发布前 | package 检查 + tag 与版本一致 + registry 同版本重复发布阻断（可显式 `--allow-existing`） |
 | `install` | 干净 profile 安装 | package + profile 路径/捆绑去重/patch 可解析 + 无活跃宿主 + 崩溃循环/safe-mode + 审计链 + 磁盘 |
 | `deploy` | 重启/部署前 | install 检查 + 备份（可 `--repair` 自动建）+ supervisor 证据 |
+| `workflows` | CI/发布工作流变更 | 必需 ci/release、禁止 pull_request_target/write-all/secrets inherit、禁止 PR 字段直接插值 run、必须接 source gate 与 build.mjs |
 | `profile` | 新建/覆盖 profile | 名称白名单、禁止 `desktop`/`plugin`、路径必须在 `$DSH_HOME/profiles`、磁盘、已存在须 `--force` + 自动备份 |
 
 ## 2. 输出与退出码
