@@ -42,7 +42,7 @@ test('client half renders the link and backup button', () => {
   mod.apply(ctx)
   assert.equal(registrations.length, 1)
   assert.equal(registrations[0].options.name, 'plugins.bundle.config')
-  assert.equal(registrations[0].options.key, '@twinsearth/dsh-fang')
+  assert.equal(registrations[0].options.key, '@twinsearth/fang-dsh-plugin')
   const tree = JSON.stringify(registrations[0].component())
   assert.equal(tree.includes('打开瓮城桌面'), true)
   assert.equal(tree.includes('备份母体'), true)

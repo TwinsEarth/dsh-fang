@@ -92,7 +92,7 @@ export function atomicReplaceDir(sourceDir, targetDir) {
 }
 
 
-const FORK_BUNDLE_NAMES = Object.freeze(['@local/dsh-fang', '@twinsearth/dsh-fang'])
+const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@local/dsh-fang'])
 
 /** 分身 profile 可解析的 fang bundle 路径（npm 安装名/开发 link 名都接受）。 */
 function forkBundlePath(profileDir) {
@@ -299,6 +299,10 @@ export function apply(ctx, config) {
   }
 
   const safeGet = (key) => { try { return ctx.get(key) } catch { return undefined } }
+  // v3.3.3: queue journal is an optional sub-plugin. Its host half provides
+  // SERVICE.queueJournal; without it the journal/queue routes must fail closed
+  // and the client half is never registered (row disabled -> no UI).
+  const queueJournalEnabled = () => Boolean(safeGet(SERVICE.queueJournal))
   /**
    * 宿主内部生产者 → 决策中心（best-effort，绝不改变原流程结果）。
    * 用于 MirrorUpgrade / EssenceManager 这类仓内对象；外部系统（PM/PJM/Worker/
@@ -829,7 +833,7 @@ export function apply(ctx, config) {
 
         // 防御：分身的 profile 必须能解析本 bundle；否则派生出来的是一个"没有 /fang 路由"的
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
-        // npm 安装名是 @twinsearth/dsh-fang；开发 link 才是 @local/dsh-fang。两者都算可用。
+        // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @local/dsh-fang 继续兼容。
         const forkProfileDir = path.join(homeDir, 'profiles', profile)
         const forkBundle = forkBundlePath(forkProfileDir)
         if (!forkBundle) {
@@ -1741,6 +1745,8 @@ export function apply(ctx, config) {
           adapter: !!safeGet(SERVICE.adapter),
           commercial: !!safeGet(SERVICE.commercial),
           sessionCatalog: !!safeGet(SERVICE.sessionCatalog),
+          decisionCenter: !!safeGet(SERVICE.decisionCenter),
+          queueJournal: queueJournalEnabled(),
         },
         // 重启守卫摘要（只读）：Client Header 用它显示 mode/红灯策略；无守卫时 available:false。
         restart: restartSummary(restartView()),
@@ -2786,6 +2792,12 @@ export function apply(ctx, config) {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify(obj))
       }
+      // v3.3.3: queue journal route gate (json is in this scope).
+      const queueJournalGate = (res) => {
+        if (queueJournalEnabled()) return false
+        json(res, 503, { ok: false, error: 'queue-journal-disabled', detail: 'enable the fang-queue-journal sub-plugin to use composer journal/queue recovery' })
+        return true
+      }
       const readBody = (req) => new Promise((resolve) => {
         let raw = ''
         req.on('data', (c) => { raw += c; if (raw.length > 1_000_000) req.destroy() })
@@ -3683,6 +3695,7 @@ export function apply(ctx, config) {
       // so a restart/crash can offer recovery. Nothing is auto-sent.
       routeMethods(`${prefix}/api/composer/journal`, {
         GET: (req, res) => {
+          if (queueJournalGate(res)) return
           const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
           const key = query.get('key') || ''
           // list=1 is the recovery list: every saved session draft/queue, newest first.
@@ -3693,6 +3706,7 @@ export function apply(ctx, config) {
           return json(res, 200, { ok: true, entry: composerJournal.get(key) })
         },
         POST: async (req, res) => {
+          if (queueJournalGate(res)) return
           const body = await readBody(req)
           const key = String(body?.key ?? '')
           if (!key) return json(res, 400, { ok: false, error: 'journal-key-required' })
@@ -3707,6 +3721,7 @@ export function apply(ctx, config) {
       // v3.1.21：append-only 历史快照（主 journal 被覆盖时的兜底恢复源）。
       routeMethods(`${prefix}/api/composer/journal/history`, {
         GET: (req, res) => {
+          if (queueJournalGate(res)) return
           const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
           const limit = Math.max(1, Math.min(200, Number(query.get('limit') || 20)))
           const sessionKey = String(query.get('sessionKey') || '')
@@ -3717,6 +3732,7 @@ export function apply(ctx, config) {
       // Restore saved queue rows into the official Session inbox WITHOUT waking the
       // agent. The queue journal is a recovery surface; it must not send messages.
       route('POST', `${prefix}/api/composer/queue`, async (req, res) => {
+        if (queueJournalGate(res)) return
         const body = await readBody(req)
         const sessionId = String(body?.sessionId ?? '').trim()
         const items = Array.isArray(body?.items) ? body.items : []

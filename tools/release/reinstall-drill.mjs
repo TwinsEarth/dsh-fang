@@ -26,7 +26,7 @@ const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-reinstall-'))
 const profile = path.join(home, 'profiles', 'drill')
-const pkgDir = path.join(profile, 'node_modules', '@twinsearth', 'dsh-fang')
+const pkgDir = path.join(profile, 'node_modules', '@twinsearth', 'fang-dsh-plugin')
 const dataDir = path.join(home, 'fang', 'drill')
 const checks = []
 const check = (name, ok, detail = '') => { checks.push({ name, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ' + detail : ''}`) }
@@ -46,8 +46,8 @@ const writeProfile = () => {
   fs.mkdirSync(profile, { recursive: true })
   fs.writeFileSync(path.join(profile, 'package.json'), JSON.stringify({
     name: 'dsh-profile-reinstall', private: true,
-    dependencies: { '@twinsearth/dsh-fang': version },
-    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/dsh-fang'] } },
+    dependencies: { '@twinsearth/fang-dsh-plugin': version },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'] } },
   }, null, 2) + '\n', 'utf8')
   fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), '[]\n', 'utf8')
 }

@@ -104,7 +104,7 @@ options:
 
 async function npmLatest(version) {
   try {
-    const res = await fetch('https://registry.npmjs.org/@twinsearth%2Fdsh-fang', { signal: AbortSignal.timeout(15000) })
+    const res = await fetch('https://registry.npmjs.org/@twinsearth%2Ffang-dsh-plugin', { signal: AbortSignal.timeout(15000) })
     if (!res.ok) return { ok: false, detail: `registry HTTP ${res.status}` }
     const body = await res.json()
     return { ok: true, latest: String(body?.['dist-tags']?.latest ?? '') }

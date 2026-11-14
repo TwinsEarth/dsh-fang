@@ -35,7 +35,7 @@ for (const rel of files) {
   fs.mkdirSync(path.dirname(dest), { recursive: true })
   if (/\.(mjs|js|json|yml|yaml|md|txt)$/.test(rel)) {
     let text = fs.readFileSync(src, 'utf8')
-    // The published package is `dsh-fang`, so bundle row names and client ids must match it.
+    // The published package is `@twinsearth/fang-dsh-plugin`, so bundle row names and client ids must match it.
     text = text.split('@local/dsh-fang').join(PUBLISH_NAME)
     fs.writeFileSync(dest, text, 'utf8')
   } else {
