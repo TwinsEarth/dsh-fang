@@ -29,7 +29,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
 import { EXIT, RISK_RANK } from '../kernel/core.mjs'
 import { sha256 } from '../kernel/fsx.mjs'
-import { canonical } from '../kernel/ledger.mjs'
+import { appendChained, canonical, verifyChain } from '../kernel/ledger.mjs'
 
 export const CONTRACT_VERSION = 1
 export const APPROVAL_KIND = 'fang-restart-approval'
@@ -647,4 +647,106 @@ export function summarizeApproval(inspected) {
     blockedReason: inspected?.blockedReason ?? null,
     reason: inspected?.manifestVerification?.reason ?? inspected?.reason ?? null,
   }
+}
+
+
+// ── v3.3.0 崩溃循环制动（纯函数，供 restart-guard / main-city gate / watchdog 共用）──
+export const CRASH_LOOP_DEFAULTS = Object.freeze({
+  windowMs: 15 * 60_000,
+  threshold: 3,
+})
+
+/** 容错解析 crash ledger（JSONL）；坏行跳过，供「只读判死」使用。 */
+export function parseCrashLedgerText(text) {
+  const out = []
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    if (!line.trim()) continue
+    try {
+      const rec = JSON.parse(line)
+      if (rec && typeof rec === 'object') out.push(rec)
+    } catch { /* 坏行不是证据 */ }
+  }
+  return out
+}
+
+/**
+ * 崩溃循环判定：windowMs 内 >= threshold 次崩溃 = active。
+ * 只看数字 at；没有 at 的记录不参与，避免用无时间证据误杀。
+ */
+export function detectCrashLoop(input, options = {}) {
+  const opts = {
+    now: Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now(),
+    windowMs: Number(options.windowMs) > 0 ? Number(options.windowMs) : CRASH_LOOP_DEFAULTS.windowMs,
+    threshold: Number(options.threshold) > 0 ? Math.floor(Number(options.threshold)) : CRASH_LOOP_DEFAULTS.threshold,
+  }
+  const records = Array.isArray(input) ? input : parseCrashLedgerText(input)
+  const recent = records
+    .map((rec) => Number(rec?.at))
+    .filter((at) => Number.isFinite(at) && at > 0 && opts.now - at <= opts.windowMs)
+    .sort((a, b) => a - b)
+  const active = recent.length >= opts.threshold
+  return {
+    active,
+    count: recent.length,
+    threshold: opts.threshold,
+    windowMs: opts.windowMs,
+    firstAt: recent[0] ?? null,
+    lastAt: recent[recent.length - 1] ?? null,
+    reason: active ? 'crash-loop' : 'below-threshold',
+  }
+}
+
+/** 读取 crash ledger 文件并判定；文件不存在/不可读 = 空证据（inactive）。 */
+export function readCrashLoop(file, options = {}) {
+  try {
+    const raw = fs.readFileSync(String(file ?? ''), 'utf8')
+    return detectCrashLoop(raw, options)
+  } catch {
+    return detectCrashLoop([], options)
+  }
+}
+
+/**
+ * v3.3.0：离线人工解除 restart 崩溃循环安全模式。
+ * 只做三件事：归档 runtime-crash.jsonl、把 safe-mode.json 标成人工清除、写一条链式审计（若账本可读）。
+ * 不做重启、不改 profile、不删除崩溃证据。
+ */
+export function clearCrashLoopSafeMode(dataDir, options = {}) {
+  const by = options && options.by !== undefined ? options.by : ''
+  const note = options && options.note !== undefined ? options.note : ''
+  const now = Number(options && options.now) > 0 ? Number(options.now) : Date.now()
+  const base = String(dataDir ?? '').trim()
+  if (!base) return { ok: false, reason: 'data-dir-required' }
+  const stateDir = base + '/restart'
+  const safeFile = stateDir + '/safe-mode.json'
+  const crashFile = stateDir + '/runtime-crash.jsonl'
+  let current = null
+  try { current = JSON.parse(fs.readFileSync(safeFile, "utf8")) } catch { current = null }
+  if (!current || current.active !== true) return { ok: true, cleared: false, reason: 'not-active', file: safeFile }
+  const stamp = new Date(now).toISOString().replace(/[:.]/g, '-')
+  let archived = null
+  try {
+    if (fs.existsSync(crashFile)) {
+      archived = crashFile + '.cleared-' + stamp
+      fs.renameSync(crashFile, archived)
+    }
+    fs.mkdirSync(stateDir, { recursive: true })
+    fs.writeFileSync(safeFile, JSON.stringify({
+      version: 1, active: false, reason: 'cleared', at: now, clearedAt: now,
+      clearedBy: String(by ?? '').slice(0, 200) || null,
+      note: String(note ?? '').slice(0, 500) || null,
+      archived,
+    }, null, 2) + '\n', 'utf8')
+  } catch (error) {
+    return { ok: false, cleared: false, reason: 'clear-failed', error: String(error?.message ?? error) }
+  }
+  let audit = null
+  try {
+    const ledger = base + '/audit.jsonl'
+    const chain = verifyChain(ledger)
+    if (chain.ok) {
+      audit = appendChained(ledger, { kind: 'restart-safe-mode-cleared', by: String(by ?? '') || null, note: String(note ?? '') || null, archived, at: new Date(now).toISOString() })
+    }
+  } catch { /* 审计失败不阻断人工恢复 */ }
+  return { ok: true, cleared: true, file: safeFile, archived, audit }
 }

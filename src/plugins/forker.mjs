@@ -61,6 +61,7 @@ import {
 } from '../kernel/index.mjs'
 import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
+import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
 
 export const name = 'fang-forker'
@@ -867,6 +868,21 @@ export function apply(ctx, config) {
     const homeDir = path.resolve(homeRaw)
     const profile = safeProfile(opts.profile ?? (cleanTemplate ? forkProfileTag : path.basename(sourceTemplateDir)))
     const profileDir = path.join(homeDir, 'profiles', profile)
+    // v3.3.0 主城门禁（新建 profile）：分身/元主运行态首次落盘前必须过路径/磁盘/门禁。
+    // 已存在的 profile 走 restart 路径，不重复新建检查。
+    if (!exists(profileDir)) {
+      const gate = runMainGate({
+        target: 'profile',
+        homeDir,
+        profile,
+        profileDir,
+        create: true,
+        force: false,
+      })
+      if (!gate.ok) {
+        return { ok: false, error: 'main-city-gate-blocked', detail: formatGateFailure(gate), gate }
+      }
+    }
     ensureDir(homeDir)
     ensureDir(profileDir)
 

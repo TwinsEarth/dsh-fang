@@ -55,6 +55,19 @@ try {
   }, null, 2) + '\n', 'utf8')
   fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), '[]\n', 'utf8')
   check('tarball installed into clean profile', fs.existsSync(path.join(pkgDir, 'src', 'index.mjs')))
+  // v3.3.0 主城门禁（安装）：干净 profile 在 boot 前必须通过 profile/磁盘/运行时防线检查。
+  try {
+    execFileSync(process.execPath, [
+      path.join(ROOT, 'tools/gate/main-city.mjs'),
+      '--target', 'install', '--home', home, '--profile', 'drill',
+      '--profile-dir', profile, '--package-dir', pkgDir, '--json',
+    ], { encoding: 'utf8', timeout: 120000, stdio: 'pipe' })
+    check('main-city gate (install) PASS', true)
+  } catch (error) {
+    let detail = String(error?.message ?? error)
+    try { const parsed = JSON.parse(String(error.stdout ?? '{}')); detail = (parsed.blockers ?? []).map((item) => item.id + ': ' + item.detail).join(' | ') } catch { /* keep */ }
+    check('main-city gate (install) PASS', false, detail.slice(0, 400))
+  }
   // 启动前自检：bundle 行/模块解析/隔离 import 冒烟；失败时 install drill 直接红。
   try {
     const guard = execFileSync(process.execPath, [path.join(ROOT, 'tools', 'boot-guard.mjs'), '--profile-dir', profile, '--json'], { encoding: 'utf8', timeout: 120000 })

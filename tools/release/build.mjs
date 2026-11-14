@@ -124,6 +124,23 @@ if (allow.status !== 0) {
 }
 console.log('PASS  allow-list (package)')
 
+// v3.3.0 主城门禁（产物）：在最终 tarball + staged package 上复验；
+// 任何 blocker 都让构建失败，不允许把「能打包但过不了门」的产物带走。
+const gate = run(process.execPath, [
+  'tools/gate/main-city.mjs',
+  '--target', 'package',
+  '--package-dir', pkgDir,
+  '--tarball', tarball,
+  '--dist', path.join(ROOT, 'dist'),
+  '--version', version,
+  '--json',
+], { timeoutMs: 120000 })
+if (gate.status !== 0) {
+  console.error('FAIL main-city gate (package):\n' + (gate.stderr || gate.stdout).slice(-3000))
+  process.exit(gate.status ?? 1)
+}
+console.log('PASS  main-city gate (package)')
+
 console.log(`PASS  build ${PUBLISH_NAME}@${version}`)
 console.log(`      tarball : dist/${path.basename(tarball)} (${manifest.size} bytes, ${manifest.entries} entries)`)
 console.log(`      sha256  : ${manifest.sha256}`)

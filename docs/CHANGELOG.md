@@ -1,3 +1,56 @@
+## v3.3.0（2026-11-14）
+
+**主题：主城门禁——打包、发布、安装、部署、新建 profile 全部先过瓮城查验。**
+
+### 为什么
+
+DSH 是「一切皆是插件」的 Agent 运行时：profile 层叠、插件副作用、Session 日志、沙箱/审批/守卫共同构成系统。
+一次错误的 profile 写入、错误的发布产物或崩溃循环重启，可能造成崩溃、卡死、错乱，甚至重装都难以恢复。
+因此把「进主城」的动作收敛到同一个 fail-closed 门禁，而不是依赖每次发布时的临时检查。
+
+### 新增：`src/lib/main-gate.mjs` + `tools/gate/main-city.mjs`
+
+- 六个 target：`source` / `package` / `publish` / `install` / `deploy` / `profile`；
+- 统一 blocker/warning/info、修复建议、评分（A–E，A/B 才放行）、JSON 报告；
+- 产物校验 sha256/sidecar/manifest/必需文件/禁用条目；
+- profile 校验路径不越界、bundle 不重复、patch 可解析、活跃宿主拒绝、备份要求；
+- 运行时防线：崩溃循环、restart 安全模式、审计哈希链；
+- `profile --create` 是唯一允许的建 profile 路径，先过门禁再写；
+- `--repair` 在写 profile 前生成 `.gate-backups/<stamp>/`；
+- 门禁结论写入链式审计（`main-city-gate`），链坏时拒绝追加。
+
+### 接线（Fail-closed）
+
+| 链路 | 接入点 |
+|---|---|
+| 构建 | `tools/release/build.mjs` 末尾跑 `--target package`，blocker 即构建失败 |
+| 预检 | `tools/release/preflight.mjs` 跑 `--target source` |
+| 发布 | `tools/release/publish-npm.mjs` 先跑 `--target publish`，再触碰 registry |
+| 安装 | `install-drill` / `reinstall-drill` 在 boot 前跑 `--target install` |
+| 部署 | `restart-watchdog` 在 boot-guard 之后跑 `--target deploy`（execute 时自动备份） |
+| 新建 profile | `forker.provision` 新 profile 首次落盘前跑 `--target profile --create` |
+| CI | ci hygiene / release guard 增加 source gate |
+
+### 重启卫士：崩溃循环制动
+
+- `detectCrashLoop`：15 分钟内 ≥3 次 uncaughtException = 崩溃循环；
+- 崩溃循环自动写 `restart/safe-mode.json`，**即使 enforce + allowProcessRestart + supervisor 全绿也拒绝交接执行权**；
+- `clearSafeMode({by,note})` 归档 crash ledger 后人工恢复，并写链式审计；
+- 启动/status/policy/executionContract 全部暴露 safeMode/crashLoop。
+
+### 评分、审批、审计、修复
+
+- scorer：新增 `scoreGateFindings`（0 warning=A / 1–2=B / 3+=C / blocker=E）；
+- approver：门禁在写 profile 前生成审批式快照（`.gate-backups`），不覆盖；
+- auditor：部署/安装/发布校验链，坏链拒绝；门禁结论写链；
+- healer：提供修复建议，不确定时 fail-closed（门禁 blocker）。
+
+### 验证
+
+- 新增 `test/main-gate.test.mjs`（9 例）：源码/产物/发布/profile/运行时/崩溃/建 profile/评分；
+- 新增 `test/restart-crash-loop.test.mjs`（3 例）：检测、安全模式、人工解除；
+- 现有 forker/restart/approver/auditor/scorer 测试全部保持；
+- 真实 e2e 仍为 95/95。
 ## v3.2.2（2026-11-14）
 
 **主题：决策等级显式化——优先级 P0–P3、风险程度 high/medium/low/info，四色分组常驻。**

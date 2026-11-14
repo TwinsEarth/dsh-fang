@@ -21,7 +21,7 @@ import {
   resolveFangLayout, resolveProfileDir, resolveDshHome, parseWebUrl,
   exists, readJson, readJsonl, isLink, verifyChain, FANG_VERSION,
 } from '../src/kernel/index.mjs'
-import { readRestartStatus } from '../src/lib/restart-contract.mjs'
+import { readRestartStatus, clearCrashLoopSafeMode } from '../src/lib/restart-contract.mjs'
 
 function parseArgs(argv) {
   const args = { _: [] }
@@ -364,6 +364,25 @@ switch (cmd) {
     try { code = await cmdRestartStatus(layout, args) } catch (error) { console.error(String(error?.message ?? error)); code = 1 }
     break
   }
+  case 'restart-safe': {
+    const action = args._[1] ?? 'status'
+    const safeFile = path.join(layout.dataDir, 'restart', 'safe-mode.json')
+    if (action === 'clear') {
+      const result = clearCrashLoopSafeMode(layout.dataDir, { by: args.by ?? 'fangctl', note: args.note ?? '' })
+      if (args.json) console.log(JSON.stringify(result, null, 2))
+      else if (result.ok) console.log(result.cleared ? `safe-mode cleared; crash ledger archived: ${result.archived ?? '(none)'}` : 'safe-mode is not active')
+      else console.error(`FAIL ${result.reason}: ${result.error ?? ''}`)
+      code = result.ok ? 0 : 1
+      break
+    }
+    let doc = null
+    try { doc = JSON.parse(fs.readFileSync(safeFile, 'utf8')) } catch { doc = null }
+    if (args.json) console.log(JSON.stringify({ file: safeFile, safeMode: doc }, null, 2))
+    else if (!doc || doc.active !== true) console.log(`safe-mode: clear (${safeFile})`)
+    else console.log(`safe-mode: ACTIVE reason=${doc.reason ?? '?'} at=${fmtTime(doc.at)} crashCount=${doc.crashCount ?? '?'} file=${safeFile}`)
+    code = 0
+    break
+  }
   case 'verify': code = cmdVerify(layout); break
   case 'tail': code = cmdTail(layout, Number(args._[1] ?? 20)); break
   case 'doctor': code = cmdDoctor(layout); break
@@ -383,7 +402,7 @@ switch (cmd) {
     break
   }
   default:
-    console.log('usage: fangctl.mjs <status|forks|verify|tail [n]|doctor|restart-status [limit]|parse-url <line>|approvals|approve <source:id>|deny <source:id>> [--profile name] [--data-root dir] [--url url] [--token token] [--note text] [--by who] [--json]')
+    console.log('usage: fangctl.mjs <status|forks|verify|tail [n]|doctor|restart-status [limit]|restart-safe [status|clear]|parse-url <line>|approvals|approve <source:id>|deny <source:id>> [--profile name] [--data-root dir] [--url url] [--token token] [--note text] [--by who] [--json]')
     code = 64
 }
 process.exitCode = code

@@ -40,6 +40,7 @@ import {
 import { readForkSupervisionSettings } from '../src/lib/fork-supervision-settings.mjs'
 import { detectDesktopProfileDir, runBootGuard } from '../src/lib/desktop-launch.mjs'
 import { GATED_RESTART_EXIT, verifyApprovalForPid, writeRestartReceipt } from './restart-supervisor.mjs'
+import { runMainGate, formatGateFailure } from '../src/lib/main-gate.mjs'
 
 export const WATCHDOG_ID = 'fang-restart-watchdog'
 export const MARKER_FILENAME = 'supervisor.present'
@@ -508,11 +509,31 @@ export async function main(argv = process.argv.slice(2)) {
     const profileDir = String(parsed.options.profileDir ?? '').trim()
       || detectDesktopProfileDir({ env: process.env, args: parsed.relaunch })
     if (profileDir) {
-      guard = () => runBootGuard(profileDir, {
-        dataRoot: dataDir,
-        safeModeOnFailure: parsed.options.execute === true && parsed.options.safeModeOnFailure !== false,
-      })
-      console.log(`[restart-watchdog] boot-guard profile: ${profileDir}`)
+      guard = async () => {
+        const boot = runBootGuard(profileDir, {
+          dataRoot: dataDir,
+          safeModeOnFailure: parsed.options.execute === true && parsed.options.safeModeOnFailure !== false,
+        })
+        if (!boot.ok) return boot
+        // v3.3.0 主城门禁（部署）：profile/审计链/崩溃循环/备份/磁盘；execute 时自动做备份。
+        const profileName = path.basename(path.resolve(profileDir))
+        const homeDir = path.dirname(path.dirname(path.resolve(profileDir)))
+        const gate = runMainGate({
+          target: 'deploy',
+          homeDir,
+          profile: profileName,
+          profileDir: path.resolve(profileDir),
+          dataDir,
+          repair: parsed.options.execute === true,
+          requireBackup: parsed.options.execute === true,
+          supervisorPresent: parsed.options.execute === true,
+        })
+        if (!gate.ok) {
+          return { ok: false, error: 'main-city-gate-blocked', reason: formatGateFailure(gate), gate, profileDir }
+        }
+        return { ok: true, boot, gate, profileDir }
+      }
+      console.log(`[restart-watchdog] boot-guard + main-city deploy gate: ${profileDir}`)
     } else {
       console.log('[restart-watchdog] boot-guard skipped: profile not detected (pass --profile-dir)')
     }

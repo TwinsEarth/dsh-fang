@@ -46,6 +46,10 @@ jobs:
           mkdir -p dist
           node tools/git/pr-gate.mjs --json > dist/pr-gate.json || { cat dist/pr-gate.json; exit 1; }
           node -e "const r=require('./dist/pr-gate.json');console.log('pr-gate GREEN v'+r.version)"
+      - name: main-city gate（源码：版本/契约/防线/发布接线）
+        run: |
+          mkdir -p dist
+          node tools/gate/main-city.mjs --target source --json | tee dist/main-city-gate.json
       - name: 未授权直推 main 的告警（push 事件）
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |

@@ -41,6 +41,8 @@ import {
   pruneRestartState,
   receiptFile,
   reconcileRestartState,
+  readCrashLoop,
+  detectCrashLoop,
   resolveHmacSecret,
   summarizeApproval,
   summarizeApprovalCounts,
@@ -160,6 +162,31 @@ export function apply(ctx, config) {
   const supervisorMarkerFile = path.join(stateDir, 'supervisor.present')
   const bootStateFile = path.join(stateDir, 'boot-state.json')
   const crashLedgerFile = path.join(stateDir, 'runtime-crash.jsonl')
+  const safeModeFile = path.join(stateDir, 'safe-mode.json')
+  const readSafeMode = () => {
+    const doc = readJson(safeModeFile, null)
+    return doc && doc.active === true
+      ? { active: true, reason: String(doc.reason ?? 'unknown'), at: Number(doc.at) || 0, crashCount: Number(doc.crashCount) || 0, file: safeModeFile }
+      : { active: false, reason: null, at: 0, crashCount: 0, file: safeModeFile }
+  }
+  let safeMode = readSafeMode()
+  const crashLoopAtBoot = readCrashLoop(crashLedgerFile)
+  if (crashLoopAtBoot.active && !safeMode.active) {
+    safeMode = {
+      active: true,
+      reason: 'crash-loop',
+      at: Date.now(),
+      crashCount: crashLoopAtBoot.count,
+      file: safeModeFile,
+      windowMs: crashLoopAtBoot.windowMs,
+      threshold: crashLoopAtBoot.threshold,
+    }
+    try {
+      ensureDir(stateDir)
+      writeJsonAtomic(safeModeFile, { version: 1, active: true, reason: 'crash-loop', at: safeMode.at, crashCount: safeMode.crashCount, windowMs: crashLoopAtBoot.windowMs, threshold: crashLoopAtBoot.threshold })
+    } catch { /* 安全模式落盘失败也不能阻断启动；内存 active 仍生效 */ }
+    log('warn', 'crash loop detected (' + crashLoopAtBoot.count + '/' + crashLoopAtBoot.threshold + ' in ' + crashLoopAtBoot.windowMs + 'ms): restart handoff disabled until manual clear')
+  }
   const SUPERVISOR_MARKER_TTL_MS = 60000
   const pidAlive = (pid) => {
     if (!Number.isInteger(pid) || pid <= 0) return false
@@ -234,11 +261,17 @@ export function apply(ctx, config) {
   /** 三重门禁：enforce ∧ allowProcessRestart ∧ supervisor 在位，才允许把执行权交出去。 */
   const executionArmed = () => {
     const supervisor = detectSupervisor()
+    const crashLoop = readCrashLoop(crashLedgerFile)
+    const sm = readSafeMode()
+    if (sm.active) safeMode = sm
     return {
-      armed: cfg.mode === 'enforce' && cfg.allowProcessRestart === true && supervisor.present === true,
+      // v3.3.0：崩溃循环/安全模式下即使三重门禁全绿，也绝不交接执行权。
+      armed: cfg.mode === 'enforce' && cfg.allowProcessRestart === true && supervisor.present === true && safeMode.active !== true,
       supervisor,
       mode: cfg.mode,
       allowProcessRestart: cfg.allowProcessRestart === true,
+      safeMode: { ...safeMode },
+      crashLoop,
     }
   }
   writeHostPid()
@@ -734,6 +767,8 @@ export function apply(ctx, config) {
       supervisorPresent: supervisor.present === true,
       supervisor,
       executionArmed: gateState.armed === true,
+      safeMode: { ...gateState.safeMode },
+      crashLoop: gateState.crashLoop,
       execution: { executed: false, decisionOnly: true },
     }
   }
@@ -756,6 +791,8 @@ export function apply(ctx, config) {
       supervisorPresent: supervisor.present === true,
       supervisor,
       executionArmed: gateState.armed === true,
+      safeMode: { ...gateState.safeMode },
+      crashLoop: gateState.crashLoop,
     }
   }
 
@@ -774,6 +811,8 @@ export function apply(ctx, config) {
       manifestTtlMs: cfg.manifestTtlMs,
       supervisorPresent: gateState.supervisor.present === true,
       executionArmed: gateState.armed === true,
+      safeMode: { ...gateState.safeMode },
+      crashLoop: gateState.crashLoop,
       approval: {
         kind: APPROVAL_KIND,
         dir: approvedDir,
@@ -905,6 +944,8 @@ export function apply(ctx, config) {
       add('pid-file-foreign-live', 'warn', `pid=${pidDoc.pid}`)
     }
     if (lastUncleanBoot) add('unclean-boot', 'warn', `${lastUncleanBoot.state} pid=${lastUncleanBoot.pid ?? 'n/a'}`)
+    if (safeMode.active) add('safe-mode-active', 'block', `${safeMode.reason} at=${safeMode.at || 'n/a'} crashCount=${safeMode.crashCount || 0}`)
+    if (crashLoopAtBoot.active) add('crash-loop', 'warn', `${crashLoopAtBoot.count}/${crashLoopAtBoot.threshold} in ${crashLoopAtBoot.windowMs}ms`)
     let crashCount = 0
     try {
       const raw = readTextSafe(crashLedgerFile, '')
@@ -921,8 +962,41 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 人工解除安全模式：归档 crash ledger，避免下一次启动按旧证据再次触发。 */
+  const clearSafeMode = (options = {}) => {
+    if (!safeMode.active) return { ok: true, cleared: false, reason: 'not-active' }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    let archived = null
+    try {
+      if (fs.existsSync(crashLedgerFile)) {
+        archived = `${crashLedgerFile}.cleared-${stamp}`
+        fs.renameSync(crashLedgerFile, archived)
+      }
+    } catch (error) {
+      return { ok: false, cleared: false, reason: 'archive-failed', error: errText(error) }
+    }
+    try {
+      ensureDir(stateDir)
+      writeJsonAtomic(safeModeFile, {
+        version: 1, active: false, reason: 'cleared',
+        at: Date.now(), clearedAt: Date.now(),
+        clearedBy: options.by ? String(options.by).slice(0, 200) : null,
+        note: options.note ? String(options.note).slice(0, 500) : null,
+        archived,
+      })
+    } catch (error) {
+      return { ok: false, cleared: false, reason: 'persist-failed', error: errText(error) }
+    }
+    safeMode = { active: false, reason: null, at: 0, crashCount: 0, file: safeModeFile }
+    audit('restart-safe-mode-cleared', { by: options.by ?? null, note: options.note ?? null, archived })
+    log('warn', `safe mode cleared manually (by=${String(options.by ?? 'unknown').slice(0, 80)})`)
+    return { ok: true, cleared: true, archived, file: safeModeFile }
+  }
+
   const service = {
     request, decideOnly, state, impact, policy, executionContract, approvals, executionStatus, verifyApproval, selfCheck,
+    safeMode: () => ({ ...safeMode, crashLoop: readCrashLoop(crashLedgerFile) }),
+    clearSafeMode,
     runtimeGuard: () => ({
       lastUncleanBoot,
       bootStateFile,
