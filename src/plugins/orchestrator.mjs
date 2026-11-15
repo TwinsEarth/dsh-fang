@@ -94,6 +94,37 @@ export function atomicReplaceDir(sourceDir, targetDir) {
 
 
 const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@local/dsh-fang'])
+// build.mjs rewrites @local/dsh-fang to the published package name.
+const CURRENT_FANG_BUNDLE = '@local/dsh-fang'
+
+function profileBundles(profileDir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(String(profileDir ?? ''), 'package.json'), 'utf8'))
+    const bundles = Array.isArray(pkg?.dsh?.profile?.bundles) ? pkg.dsh.profile.bundles.map(String) : []
+    const deps = pkg?.dependencies && typeof pkg.dependencies === 'object' ? Object.keys(pkg.dependencies) : []
+    return { bundles, deps, pkg }
+  } catch {
+    return { bundles: [], deps: [], pkg: null }
+  }
+}
+
+/**
+ * v3.3.7: an essence captured by an older release can still declare the legacy
+ * `@twinsearth/dsh-fang` bundle while the current fork has no such package.
+ * Such an essence is not a valid fork template; deriving from it creates a
+ * process whose Adapter never mounts (404). Treat it as stale and fall back to
+ * the clean template instead of silently producing a zombie fork.
+ */
+export function profileUsesCurrentFangBundle(profileDir) {
+  const { bundles, deps, pkg } = profileBundles(profileDir)
+  if (!pkg) return true // unknown template: don't reject (caller has its own checks)
+  const declared = new Set([...bundles, ...deps])
+  if (declared.has(CURRENT_FANG_BUNDLE) || declared.has('@twinsearth/fang-dsh-plugin')) return true
+  // Only a positively-declared legacy bundle is stale. Templates that don't
+  // declare fang at all (unit-test fixtures, custom hosts) are left to the
+  // existing forkBundlePath probe.
+  return !(declared.has('@twinsearth/dsh-fang') || declared.has('@local/dsh-fang-legacy'))
+}
 
 /** 分身 profile 可解析的 fang bundle 路径（npm 安装名/开发 link 名都接受）。 */
 function forkBundlePath(profileDir) {
@@ -785,6 +816,7 @@ export function apply(ctx, config) {
         if (presetId && essenceManager.getMeta(presetId)?.id) essenceIdInput = presetId
       }
       let sourceEssence = null
+      let templateFallback = null
       if (essenceIdInput) {
         const essenceId = essenceIdInput
         const meta = essenceManager.getMeta(essenceId)
@@ -794,7 +826,17 @@ export function apply(ctx, config) {
         if (meta.archived === true) return { ok: false, error: 'essence-archived' }
         await essenceManager.ensureFresh(essenceId)
         const fresh = essenceManager.getMeta(essenceId)
-        sourceEssence = { id: essenceId, name: meta.name, fingerprint: fresh?.lastMergedFingerprint ?? null }
+        const mergedDir = essenceManager.mergedProfileDir(essenceId)
+        // v3.3.7: an old essence can still declare the legacy bundle while the
+        // current profile has no such package. Deriving from it produces a
+        // process whose Adapter never mounts (404), so fall back to the clean
+        // template built from the current mother instead of a zombie fork.
+        if (!profileUsesCurrentFangBundle(mergedDir)) {
+          templateFallback = { from: essenceId, name: String(meta.name ?? ''), reason: 'stale-legacy-bundle' }
+          audit('fork-template-stale', { essenceId, name: String(meta.name ?? ''), fallback: 'clean-template' })
+        } else {
+          sourceEssence = { id: essenceId, name: meta.name, fingerprint: fresh?.lastMergedFingerprint ?? null }
+        }
       }
       const profileTemplate = sourceEssence
         ? essenceManager.mergedProfileDir(sourceEssence.id)
@@ -808,6 +850,7 @@ export function apply(ctx, config) {
         createdAt: nowMs(),
         collaborators: Array.isArray(input.collaborators) ? input.collaborators : [],
         template,
+        templateFallback,
         essenceId: sourceEssence?.id ?? null,
         sourceEssence,
         adapter: { ok: false, error: 'handshaking' },
@@ -839,7 +882,7 @@ export function apply(ctx, config) {
           persist()
           return { ok: false, error: 'provision-failed', detail: provisioned.error }
         }
-        audit(AUDIT.FORK_CREATED, { taskId, forkId: taskId, title, homeDir, profile })
+        audit(AUDIT.FORK_CREATED, { taskId, forkId: taskId, title, homeDir, profile, templateFallback })
 
         // 防御：分身的 profile 必须能解析本 bundle；否则派生出来的是一个"没有 /fang 路由"的
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。

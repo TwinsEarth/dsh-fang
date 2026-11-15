@@ -1,3 +1,24 @@
+## v3.3.7（2026-11-15）
+
+**主题：放开门禁，用户两次确认后可自动看护并执行母体重启。**
+
+### 新增
+
+- `restart-guard.autoWatchdog`：批准后无 supervisor 时自动启动 watchdog；
+- `tools/restart-watchdog.mjs` / `tools/restart-supervisor.mjs` 加入 npm 包与主城门禁；
+- watchdog 写 `supervisor.present` 后 guard 再查三重门禁，避免“先 exit 再发现没人拉”；
+- 失败 fail-closed：工具缺失/启动超时/无 marker 不写清单、不退出；
+- bundle 默认改为 enforce + allowProcessRestart + autoWatchdog（仍需用户两次确认）。
+
+### 角色边界
+
+- 自动看护仅接在 mother 的 restart-guard；
+- fork / 元主运行态仍由 Forker / EssenceRuntime 监督，不直接 exit(75)。
+
+### 验证
+
+- restart-guard 33 pass；orchestrator 68 pass；
+- 全量测试/真实 e2e/install drill 见构建输出。
 ## v3.3.6（2026-11-15）
 
 **主题：重启母体增加红色风险弹窗、分身预确认与二次点击放行。**

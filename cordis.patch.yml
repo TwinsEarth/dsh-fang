@@ -82,10 +82,11 @@
     - id: fang-restart-guard
       name: '@local/dsh-fang/restart-guard'
       config:
-        mode: observe
+        mode: enforce
         authMode: manual
         strictRedLine: true
-        allowProcessRestart: false
+        allowProcessRestart: true
+        autoWatchdog: true
         autoPromoteAfterHours: 24
 
     - id: fang-adapter
