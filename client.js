@@ -749,6 +749,7 @@ window.__ModuleLoader__.load({
       inbox: (size = 14) => glyph(['M4 5h16v14H4z', 'M4 13h4l2 3h4l2-3h4'], size),
       eye: (size = 14) => glyph(['M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z', 'M12 9.2a2.8 2.8 0 1 0 0 5.6a2.8 2.8 0 0 0 0-5.6'], size),
       eyeOff: (size = 14) => glyph(['M3 3l18 18', 'M10.6 10.7a2 2 0 0 0 2.7 2.7', 'M9.9 5.2A10.6 10.6 0 0 1 12 5c6 0 9.5 7 9.5 7a17 17 0 0 1-3.3 4.1', 'M6.6 6.7C4.2 8.6 2.5 12 2.5 12s3.5 7 9.5 7c1.5 0 2.9-.4 4.1-1'], size),
+      power: (size = 14) => glyph(['M12 3v8', 'M6.3 6.3a8 8 0 1 0 11.4 0'], size, 2),
       spinner: (size = 14) => {
         const node = svg('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', class: 'fang-icon fang-spin', 'aria-hidden': 'true', focusable: 'false' })
         node.appendChild(svg('circle', { cx: 12, cy: 12, r: 8.5, stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-dasharray': '38 12' }))
@@ -2796,6 +2797,67 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         if (S.link.state === 'idle') void loadLink()
       }
 
+      // v3.3.6：重启母体 = 红色风险 + 分身预确认 + 二次点击，缺一不放行。
+      async function openRestartDialog() {
+        lockScroll()
+        S.modal = {
+          kind: 'restart', loading: true, view: null, impact: null, forkChecked: false, busy: false, error: '',
+          forkId: null, returnFk: document.activeElement?.getAttribute?.('data-fk') || '',
+        }
+        render(true)
+        const [view, impact] = await Promise.all([
+          api('/fang/api/restart'),
+          api('/fang/api/restart/impact'),
+        ])
+        if (!S.modal || S.modal.kind !== 'restart') return
+        S.modal.loading = false
+        S.modal.view = view.body ?? null
+        S.modal.impact = impact.body ?? null
+        S.modal.error = view.status === 200 ? '' : (view.body?.error || 'restart-unavailable')
+        const live = (S.status?.data?.tasks?.list || []).filter((t) => String(t.status) === 'running' || String(t.status) === 'ready')
+        S.modal.forkId = live[0]?.taskId ?? null
+        render(true)
+      }
+
+      async function submitRestart() {
+        const modal = S.modal
+        if (!modal || modal.kind !== 'restart' || modal.busy) return
+        if (modal.forkChecked !== true) {
+          modal.error = '请先在分身确认影响，再点击二次确认。'
+          render(true)
+          return
+        }
+        modal.busy = true
+        modal.error = ''
+        render(true)
+        const res = await api('/fang/api/restart/request', {
+          method: 'POST',
+          body: JSON.stringify({
+            reason: 'fang-panel-manual',
+            confirmation: { forkChecked: true, finalConfirm: true, forkId: modal.forkId, at: Date.now() },
+          }),
+        })
+        modal.busy = false
+        if (res.status !== 200 || res.body?.ok === false) {
+          modal.error = res.body?.detail || res.body?.error || ('http-' + res.status)
+          render(true)
+          return
+        }
+        const out = res.body ?? {}
+        closeModal()
+        const handoff = out.execution?.handoff?.requested === true
+        const executed = out.execution?.executed === true
+        setNotice({
+          tone: handoff ? 'bad' : 'warn',
+          title: handoff ? '已放行：等待 supervisor 重启宿主' : '已红色审批放行（未武装）',
+          message: handoff
+            ? '守卫已写授权清单并准备退出 75；外部 supervisor 会拉起新宿主。'
+            : `当前 guardMode=${out.execution?.guardMode ?? 'observe'}、allowProcessRestart=${out.execution?.allowProcessRestart === true}。不会自动退出/重启宿主；先启动 supervisor 再武装。`,
+          detail: executed ? 'execution.executed=true' : (out.authorization?.manifestPath ? 'manifest: ' + out.authorization.manifestPath : ''),
+        })
+        await refresh()
+      }
+
       // ── 键盘：浮窗 Esc / Tab 焦点陷阱；编辑 Enter/Esc 在输入元素上处理 ──────
       function onRootKeydown(event) {
         if (!S.modal) return
@@ -2954,6 +3016,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
+        openRestartDialog, submitRestart,
         archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         decideApproval,
@@ -3274,6 +3337,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               fk: 'overlay-toggle', dataBtnId: 'M-07',
             })
           })(),
+          restart?.available
+            ? button('重启母体', {
+              variant: 'danger-quiet', size: 'sm', icon: icon('power', 14),
+              title: '红色风险：先看影响 → 在分身确认 → 二次确认后放行（不会在无 supervisor 时偷偷退出）',
+              onClick: () => void app.openRestartDialog(), fk: 'restart', dataBtnId: 'M-08',
+            })
+            : null,
           button('收件箱', {
             variant: 'ghost', size: 'sm', icon: icon('inbox', 14),
             title: '决策收件箱：独立抽屉；红/黄/蓝/绿/灰分组、未读计数、键盘导航与批量处理',
@@ -4516,6 +4586,67 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
     }
 
     // ── 确认 / 输入 浮窗 ─────────────────────────────────────────────────
+    // v3.3.6: 红色重启风险 + 分身预确认 + 二次点击。
+    function renderRestartModal(S, app) {
+      const modal = S.modal
+      const state = modal.view?.state || {}
+      const impact = modal.impact?.impact || {}
+      const tasks = Array.isArray(S.status?.data?.tasks?.list) ? S.status.data.tasks.list : []
+      const liveForks = tasks.filter((task) => String(task.status) === 'running' || String(task.status) === 'ready')
+      const armed = state.executionArmed === true || modal.impact?.executionArmed === true
+      const supervisor = state.supervisorPresent === true || modal.impact?.supervisorPresent === true
+      const canConfirm = modal.forkChecked === true && liveForks.length > 0 && !modal.busy && !modal.loading
+      return h('div', { class: 'overlay', 'data-overlay': '1', onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() } },
+        h('div', { class: 'glass', role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'fang-restart-title', 'data-restart-confirm': '1' },
+          h('div', { class: 'glass-head' },
+            h('div', { class: 'glass-head-main' },
+              h('div', { class: 'glass-title', id: 'fang-restart-title' }, icon('power', 18), '重启母体 · 红色风险'),
+              h('div', { class: 'glass-sub' }, '第一步：在分身确认影响；第二步：二次点击才放行。')),
+            button('', { variant: 'quiet', size: 'sm', iconOnly: true, icon: icon('close', 15), ariaLabel: '取消', onClick: () => app.closeModal() })),
+          h('div', { class: 'glass-body' },
+            modal.loading ? h('div', { class: 'loading-line' }, icon('spinner', 14), '读取重启守卫与影响范围…') : null,
+            modal.error ? h('div', { class: 'notice notice--warn', role: 'alert' }, h('div', { class: 'notice-main' }, h('div', { class: 'notice-title' }, '不能重启'), h('div', { class: 'notice-text' }, modal.error))) : null,
+            h('div', { class: 'notice', style: { borderLeft: '5px solid var(--f-red)', background: 'var(--f-red-wash, #FFF5F7)' } },
+              h('div', { class: 'notice-main' },
+                h('div', { class: 'notice-title', style: { color: 'var(--f-red, #C8102E)' } }, icon('alert', 15), '红色重启风险'),
+                h('div', { class: 'notice-text' },
+                  '重启会中断当前所有会话、工具调用和未完成的 Agent Loop；运行中的分身可能成为孤儿或被 supervisor 回收；未保存的输入/队列可能丢失。已写入 staging 的插件只有重启后才生效。'))),
+            h('div', { class: 'kv', style: { marginTop: '8px' } },
+              h('span', null, '执行模式'), h('b', null, String(state.mode ?? modal.impact?.mode ?? '—')),
+              h('span', null, 'allowProcessRestart'), h('b', null, String(state.allowProcessRestart === true || modal.impact?.allowProcessRestart === true)),
+              h('span', null, 'supervisor'), h('b', null, supervisor ? '在位' : '不在位'),
+              h('span', null, '执行武装'), h('b', null, armed ? '已武装' : '未武装（只记录审批）'),
+              h('span', null, '活跃分身'), h('b', null, `${impact.activeForks?.length ?? 0} 个`),
+              h('span', null, '待批提升'), h('b', null, `${impact.pendingPromotes?.length ?? 0} 个`),
+              h('span', null, '脏缓冲'), h('b', null, `${impact.dirtyBuffers?.length ?? 0} 个`)),
+            liveForks.length === 0
+              ? h('div', { class: 'notice notice--info', style: { marginTop: '10px' } },
+                h('div', { class: 'notice-main' }, h('div', { class: 'notice-title' }, '没有运行中的分身'), h('div', { class: 'notice-text' }, '先派生或打开一个分身，在里面确认影响后，才能进行第二次重启确认。')))
+              : h('div', { style: { marginTop: '10px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+                button('打开分身检查', { size: 'sm', variant: 'ghost', icon: icon('external', 12), onClick: () => liveForks[0] && void app.openTask(liveForks[0]) }),
+                button(modal.forkChecked ? '已在分身确认 ✓' : '我已在分身确认', {
+                  size: 'sm', variant: modal.forkChecked ? 'primary' : 'info', disabled: modal.forkChecked || modal.busy,
+                  onClick: () => {
+                    const first = liveForks[0]
+                    if (!first) return
+                    modal.forkId = first.taskId
+                    modal.forkChecked = true
+                    app.render(true)
+                  },
+                }),
+                h('span', { class: 'hint' }, `分身：${short(liveForks[0].taskId, 12)}`)),
+            h('div', { style: { marginTop: '10px', fontSize: '12px', color: armed ? 'var(--f-text-3)' : 'var(--f-red, #C8102E)' } },
+              armed
+                ? '已武装：二次确认后守卫会写授权清单并退出 75，由外部 supervisor 拉起新宿主。'
+                : '未武装：二次确认只会记录红色审批，不会自动退出/重启宿主。需要先启动 supervisor 并开启 enforce + allowProcessRestart。')),
+          h('div', { class: 'glass-foot' },
+            button('取消', { size: 'sm', variant: 'ghost', onClick: () => app.closeModal() }),
+            button(modal.busy ? '提交中…' : '二次确认：放行重启', {
+              size: 'sm', variant: 'danger', disabled: !canConfirm, busy: modal.busy, fk: 'restart-confirm',
+              onClick: () => void app.submitRestart(),
+            }))))
+    }
+
     function renderConfirmModal(S, app) {
       const modal = S.modal
       const expected = String(modal.expected || '')
@@ -4834,6 +4965,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         if (S.modal.kind === 'mother') frag.append(renderMotherModal(S, app))
           else if (S.modal.kind === 'essence') frag.append(renderEssenceModal(S, app))
         else if (S.modal.kind === 'branches') frag.append(renderBranchModal(S, app))
+        else if (S.modal.kind === 'restart') frag.append(renderRestartModal(S, app))
         else if (S.modal.kind === 'confirm') frag.append(renderConfirmModal(S, app))
         else if (S.modal.kind === 'prompt') frag.append(renderPromptModal(S, app))
       }
