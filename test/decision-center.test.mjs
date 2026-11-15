@@ -8,7 +8,22 @@ import path from 'node:path'
 
 import { makeCtx } from './helpers.mjs'
 import { SERVICE } from '../src/kernel/index.mjs'
-import { apply, Config } from '../src/plugins/decision-center.mjs'
+import { apply, Config, toLosslessJson } from '../src/plugins/decision-center.mjs'
+
+test('decision center: tool results are lossless JSON (no undefined properties)', () => {
+  const result = toLosslessJson({
+    ticketId: 'dec_1',
+    selectedValue: undefined,
+    selectedActionId: undefined,
+    payload: undefined,
+    ok: true,
+    nested: { drop: undefined, keep: 1 },
+    nonfinite: Number.NaN,
+    big: 10n,
+  })
+  assert.deepEqual(result, { ticketId: 'dec_1', ok: true, nested: { keep: 1 }, nonfinite: null, big: '10' })
+  assert.equal(Object.values(result).some((value) => value === undefined), false)
+})
 
 function boot({ config = {}, services = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-decision-'))
@@ -165,6 +180,27 @@ test('decision center: green tool auto-acks immediately and leaves a readable re
     assert.equal(item.status, 'resolved')
     assert.equal(item.outcome, 'acked')
     assert.equal(item.autoResolved, true)
+  } finally {
+    drop(ctx, root)
+  }
+})
+
+test('decision center: resolved request_human_decision result has no undefined fields', async () => {
+  const registered = []
+  const tools = { register(definition) { registered.push(definition); return () => {} } }
+  const { ctx, service, root } = boot({ services: { tools } })
+  try {
+    const tool = registered.find((item) => item.name === 'request_human_decision')
+    const pending = tool.execute({
+      level: 'red', title: 'lossless', context: 'must survive JSON',
+      options: [{ value: 'a', label: 'A' }],
+    }, { agent: { id: 'lossless-session' } })
+    const ticket = await waitFor(() => service.list().items.find((item) => item.title === 'lossless'))
+    service.resolve(ticket.id, 'a', { by: 'tester' })
+    const result = await pending
+    assert.equal(result.selectedValue, 'a')
+    assert.equal(Object.values(result).some((value) => value === undefined), false, 'undefined would fail DSH lossless JSON')
+    assert.doesNotThrow(() => JSON.parse(JSON.stringify(result)))
   } finally {
     drop(ctx, root)
   }

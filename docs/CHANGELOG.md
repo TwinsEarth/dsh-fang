@@ -1,3 +1,17 @@
+## v3.3.9（2026-11-15）
+
+**P0：决策中心工具结果非 lossless JSON。**
+
+### 修复
+
+- `request_human_decision` / `ask_user_choice` 的所有 execute 返回值统一经 `toLosslessJson`；
+- 删除 `undefined` 字段，非法数值转 null，BigInt 转字符串；
+- 覆盖母体与 fork 两条工具注册。
+
+### 验证
+
+- 新增 resolved 结果无 undefined 回归测试；
+- decision-center tests 全绿。
 ## v3.3.8（2026-11-15）
 
 **主题：默认元主自动同步到当前版本，避免升级后仍派生旧 3.x 快照。**
