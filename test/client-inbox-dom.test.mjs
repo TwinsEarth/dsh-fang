@@ -252,6 +252,16 @@ test('client DOM: inbox groups, collapse, ACK, batch partial failure and SSE mer
   }
 })
 
+test('client source: inbox body has a real constrained scroll area and visible scrollbar', () => {
+  assert.match(source, /\.fang-inbox-body\{[^}]*flex:1 1 0[^}]*height:0[^}]*overflow-y:scroll/, 'body must be a flex-sized scroll container')
+  assert.match(source, /\.fang-inbox-body\{[^}]*overscroll-behavior:contain/, 'wheel must stay inside the drawer')
+  assert.match(source, /\.fang-inbox-body::-webkit-scrollbar\{width:12px/, 'drawer needs a draggable scrollbar')
+  assert.match(source, /\.fang-inbox-body::-webkit-scrollbar-thumb/, 'drawer needs a visible thumb')
+  assert.match(source, /\.fang-inbox-drawer\{[^}]*height:100vh[^}]*overflow:hidden/, 'drawer must own the viewport height')
+  assert.match(source, /const onInboxWheel = \(event\) =>/, 'wheel fallback must exist')
+  assert.match(source, /root\.addEventListener\('wheel', onInboxWheel, \{ passive: false \}\)/, 'wheel fallback must be passive:false')
+})
+
 test('client source: full decision center is not rendered by the main panel', () => {
   assert.equal(source.includes('function renderDecisionCenter'), false, 'old main-panel renderer must stay removed')
   assert.ok(source.includes('sidebar.right.pane.tab'), 'inbox must have an independent sidebar tab')
