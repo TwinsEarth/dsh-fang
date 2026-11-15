@@ -50,6 +50,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/APPROVAL-DRILL.md',
   'docs/RESTART-CONFIRMATION.md',
   'docs/AUTO-WATCHDOG.md',
+  'docs/ESSENCE-AUTO-SYNC.md',
 ])
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze([

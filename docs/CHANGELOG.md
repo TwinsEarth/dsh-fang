@@ -1,3 +1,18 @@
+## v3.3.8（2026-11-15）
+
+**主题：默认元主自动同步到当前版本，避免升级后仍派生旧 3.x 快照。**
+
+### 新增
+
+- `profileUsesCurrentFangBundle` 增加同名 bundle 的**版本**判断；
+- 启动后异步检测默认元主，旧则 capture 当前 profile + setDefault；
+- 审计 `essence-auto-refreshed`，状态字段 `essenceAutoRefresh`；
+- 失败不阻塞启动，派生请求仍有 clean-template 兜底。
+
+### 验证
+
+- 旧 legacy bundle / 同名旧版本 → false；当前版本 → true；
+- 全量测试/构建见输出。
 ## v3.3.7（2026-11-15）
 
 **主题：放开门禁，用户两次确认后可自动看护并执行母体重启。**
