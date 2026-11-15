@@ -1736,6 +1736,9 @@ test('decision center: external producer kinds map to attention defaults; yellow
     assert.equal(pjm.ticket.level, 'yellow')
     assert.ok(pjm.ticket.waitDeadlineAt > Date.now(), 'PJM timeout ticket must have a wait deadline')
     assert.equal(pjm.ticket.expiresAt, null, 'wait deadline is not an archive expiry')
+    // Arm the wait chain but never await it: the bounded poll below decides,
+    // so a missed policy timer cannot hang the whole Node 22 suite.
+    void service.wait(pjm.ticket.id).catch(() => {})
     const deferred = await waitFor(() => {
       const ticket = service.get(pjm.ticket.id)
       return ticket.deferredAt ? ticket : null

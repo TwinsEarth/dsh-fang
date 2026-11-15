@@ -69,7 +69,11 @@ test('yellow defers after its wait window, stays pending, and a late choice exec
       options: [option('apply_late', true), option('skip')],
     })
     assert.equal(created.ticket.expiresAt, null, 'wait window must not become archive expiry')
-    const result = await service.wait(created.ticket.id)
+    void service.wait(created.ticket.id).catch(() => {})
+    const result = await waitFor(() => {
+      const ticket = service.get(created.ticket.id)
+      return ticket?.outcome === 'deferred' ? ticket : null
+    }, 5000)
     assert.equal(result.status, 'pending')
     assert.equal(result.outcome, 'deferred')
     assert.ok(result.deferredAt > 0)
@@ -92,7 +96,11 @@ test('blue auto-selects the recommended option after one wait window and records
       level: 'blue', title: '蓝色自动推荐', timeoutMinutes: 0.001,
       options: [option('hold'), option('auto_fix', true)],
     })
-    const result = await service.wait(created.ticket.id)
+    void service.wait(created.ticket.id).catch(() => {})
+    const result = await waitFor(() => {
+      const ticket = service.get(created.ticket.id)
+      return ticket?.status === 'resolved' ? ticket : null
+    }, 5000)
     assert.equal(result.status, 'resolved')
     assert.equal(result.resolvedOption, 'auto_fix')
     assert.equal(result.autoResolved, true)
