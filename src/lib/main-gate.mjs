@@ -53,6 +53,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/ESSENCE-AUTO-SYNC.md',
   'docs/DECISION-LOSSLESS.md',
   'docs/INBOX-SCROLL.md',
+  'docs/TEST-STABILITY-v3.4.0.md',
 ])
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze([
