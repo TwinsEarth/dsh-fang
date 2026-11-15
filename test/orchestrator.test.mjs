@@ -28,6 +28,12 @@ test('orchestrator: stale legacy essence bundle is rejected as a fork template',
     assert.equal(orchestrator.profileUsesCurrentFangBundle(root), false)
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
       name: 'new', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'] } },
+      dependencies: { '@twinsearth/fang-dsh-plugin': '3.3.0' },
+    }))
+    assert.equal(orchestrator.profileUsesCurrentFangBundle(root), false)
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      name: 'current', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'] } },
+      dependencies: { '@twinsearth/fang-dsh-plugin': FANG_VERSION },
     }))
     assert.equal(orchestrator.profileUsesCurrentFangBundle(root), true)
   } finally {

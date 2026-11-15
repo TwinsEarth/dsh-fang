@@ -119,11 +119,24 @@ export function profileUsesCurrentFangBundle(profileDir) {
   const { bundles, deps, pkg } = profileBundles(profileDir)
   if (!pkg) return true // unknown template: don't reject (caller has its own checks)
   const declared = new Set([...bundles, ...deps])
-  if (declared.has(CURRENT_FANG_BUNDLE) || declared.has('@twinsearth/fang-dsh-plugin')) return true
-  // Only a positively-declared legacy bundle is stale. Templates that don't
-  // declare fang at all (unit-test fixtures, custom hosts) are left to the
-  // existing forkBundlePath probe.
-  return !(declared.has('@twinsearth/dsh-fang') || declared.has('@local/dsh-fang-legacy'))
+  const current = declared.has(CURRENT_FANG_BUNDLE) || declared.has('@twinsearth/fang-dsh-plugin')
+  if (!current) {
+    // Only a positively-declared legacy bundle is stale. Templates that don't
+    // declare fang at all (unit-test fixtures, custom hosts) are left to the
+    // existing forkBundlePath probe.
+    return !(declared.has('@twinsearth/dsh-fang') || declared.has('@local/dsh-fang-legacy'))
+  }
+  // v3.3.8: same package name but an older exact version is stale too. This is
+  // the normal upgrade case (3.3.7 essence after installing 3.3.8).
+  const dependencies = pkg?.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
+  const declaredVersion = String(
+    dependencies['@twinsearth/fang-dsh-plugin'] ||
+    dependencies['@local/dsh-fang'] ||
+    dependencies['@twinsearth/dsh-fang'] ||
+    '',
+  ).replace(/^[~^]/, '')
+  if (/^\d+\.\d+\.\d+/.test(declaredVersion) && declaredVersion !== FANG_VERSION) return false
+  return true
 }
 
 /** 分身 profile 可解析的 fang bundle 路径（npm 安装名/开发 link 名都接受）。 */
@@ -732,6 +745,50 @@ export function apply(ctx, config) {
     try { return String(readJson(defaultEssenceFile, {})?.essenceId ?? '') } catch { return '' }
   }
   const writeDefaultEssenceId = (essenceId) => writeJsonAtomic(defaultEssenceFile, { essenceId: String(essenceId), at: nowMs() })
+  // v3.3.8: after an upgrade the default essence still pins the previous fang
+  // version. Auto-capture the current mother profile as a fresh essence and make
+  // it default, so future forks never start from an old snapshot.
+  let autoRefreshPromise = null
+  let lastAutoRefresh = null
+  const refreshStaleDefaultEssenceIfNeeded = () => {
+    if (autoRefreshPromise) return autoRefreshPromise
+    autoRefreshPromise = (async () => {
+      // Two defaults exist: default-essence.json (quick derive) and the mirror
+      // default used by the essence list/UI. Accept either; capture({setDefault})
+      // writes only the mirror default, so reading the file alone would skip.
+      const mirrorDefault = typeof essenceManager.getDefault === 'function' ? essenceManager.getDefault() : null
+      const essenceId = readDefaultEssenceId() || String(mirrorDefault?.essenceId ?? '')
+      if (!essenceId) return (lastAutoRefresh = { ok: true, skipped: 'no-default-essence' })
+      const meta = essenceManager.getMeta(essenceId)
+      if (!meta?.id) return (lastAutoRefresh = { ok: false, skipped: 'default-essence-missing', essenceId })
+      const mergedDir = essenceManager.mergedProfileDir(essenceId)
+      if (profileUsesCurrentFangBundle(mergedDir)) {
+        return (lastAutoRefresh = { ok: true, skipped: 'already-current', essenceId })
+      }
+      try {
+        const captured = essenceManager.captureFromProfile(templateDir(), {
+          name: `${DEFAULT_ESSENCE_NAME} · 自动同步 ${FANG_VERSION}`,
+          tier: meta.tier ?? 'free',
+          includeDependencies: true,
+          includeSettings: true,
+        })
+        essenceManager.setDefault(captured.meta.id)
+        writeDefaultEssenceId(captured.meta.id)
+        audit('essence-auto-refreshed', {
+          from: essenceId, to: captured.meta.id, fromVersion: String(meta?.fangVersion ?? 'unknown'), version: FANG_VERSION,
+        })
+        return (lastAutoRefresh = {
+          ok: true, from: essenceId, to: captured.meta.id, version: FANG_VERSION,
+          name: captured.meta.name,
+        })
+      } catch (error) {
+        const detail = String(error?.message ?? error)
+        audit('essence-auto-refresh-failed', { from: essenceId, error: detail })
+        return (lastAutoRefresh = { ok: false, from: essenceId, error: detail })
+      }
+    })().finally(() => { autoRefreshPromise = null })
+    return autoRefreshPromise
+  }
   const listInstalledPlugins = async () => {
     try {
       const pm = safeGet('pluginManager')
@@ -1780,6 +1837,7 @@ export function apply(ctx, config) {
           sessionsRoot: layout.sessionsRoot || '',
         },
         mother: { profile: motherProfile, cliPath: cliPath(), template: templateDir() },
+        essenceAutoRefresh: lastAutoRefresh,
         tasks: { total: list.length, ready, running, max: cfg.maxForks, list },
         // v1 兼容视图：Client 徽标与旧调用方仍读 forks.*
         forks: { total: list.length, running: ready + running, max: cfg.maxForks, list },
@@ -1805,6 +1863,9 @@ export function apply(ctx, config) {
         restart: restartSummary(restartView()),
       }
     },
+
+    /** v3.3.8：手动/启动后检测默认元主是否落后，旧则自动 capture 并 setDefault。 */
+    refreshDefaultEssence: () => refreshStaleDefaultEssenceIfNeeded(),
 
     /** 母体重启的唯一入口：转交 restart-guard，自身永不直接退出进程。 */
     async requestMotherRestart(reason = 'manual', options = {}) {
@@ -1844,6 +1905,12 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => ctx.provide(SERVICE.orchestrator, service))
+  // v3.3.8：启动后异步自愈默认元主；不阻塞 boot，不 unref 也不会阻止退出。
+  {
+    const timer = setTimeout(() => { void refreshStaleDefaultEssenceIfNeeded() }, 1500)
+    timer.unref?.()
+    ctx.effect(() => () => clearTimeout(timer))
+  }
 
   // v3.1.15：fang-master 契约服务（dsh-Master 通过 local/http/file/legacy 四层传输调用）。
   const contractCfg = {
@@ -3601,6 +3668,15 @@ export function apply(ctx, config) {
         const body = await readBody(req)
         try { return json(res, 200, { ok: true, essence: mirrorService.createEssence(body) }) } catch (error) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) })
+        }
+      })
+      // v3.3.8：手动触发默认元主版本自愈（启动时也会异步触发）。
+      route('POST', `${prefix}/api/essence/auto-refresh`, async (req, res) => {
+        try {
+          const result = await service.refreshDefaultEssence()
+          return json(res, result?.ok === false ? 500 : 200, { ok: result?.ok !== false, result })
+        } catch (error) {
+          return json(res, 500, { ok: false, error: 'essence-auto-refresh-failed', detail: String(error?.message ?? error) })
         }
       })
       // v3.0.9 母体 → 元主：从当前母体 profile 的可写层生成一个可配置元主。
