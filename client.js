@@ -1277,7 +1277,7 @@ window.__ModuleLoader__.load({
 .fang-inbox-btn--primary{background:#0A6BE0;border-color:#0A6BE0;color:#fff}
 .fang-inbox-btn--primary:hover{background:#0857B8}
 .fang-inbox-btn--danger{color:#C8102E;border-color:rgba(200,16,46,.3)}
-.fang-inbox-ai{padding:8px 12px;border-bottom:1px solid var(--f-inbox-border);font-size:12px;color:var(--f-inbox-text2);flex:0 0 auto}
+.fang-inbox-ai{padding:8px 12px;border-bottom:1px solid var(--f-inbox-border);font-size:12px;color:var(--f-inbox-text2);flex:0 0 auto;max-height:32vh;overflow:auto;overscroll-behavior:contain}
 .fang-inbox-ai summary{cursor:pointer;color:var(--f-inbox-text2)}
 .fang-inbox-ai-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;align-items:center}
 .fang-inbox-ai input,.fang-inbox-ai select{height:26px;padding:0 6px;border-radius:7px;border:1px solid rgba(16,17,20,.14);font:inherit;font-size:12px;background:#fff;color:#1D1D1F}
@@ -1299,7 +1299,11 @@ window.__ModuleLoader__.load({
 .fang-inbox-exec--running{color:#0857B8}
 .fang-inbox-toolbar{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--f-inbox-border);flex-wrap:wrap;flex:0 0 auto}
 .fang-inbox-hint{font-size:11.5px;color:#86868B}
-.fang-inbox-body{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 10px 16px;display:flex;flex-direction:column;gap:8px}
+.fang-inbox-body{flex:1 1 0;height:0;min-height:0;overflow-y:scroll;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:rgba(16,17,20,.32) rgba(16,17,20,.06);padding:8px 10px 16px;display:flex;flex-direction:column;gap:8px}
+.fang-inbox-body::-webkit-scrollbar{width:12px;height:12px}
+.fang-inbox-body::-webkit-scrollbar-track{background:rgba(16,17,20,.05);border-radius:999px}
+.fang-inbox-body::-webkit-scrollbar-thumb{background:rgba(16,17,20,.30);border:3px solid #fff;border-radius:999px;background-clip:padding-box}
+.fang-inbox-body::-webkit-scrollbar-thumb:hover{background:rgba(16,17,20,.46);border:2px solid #fff;background-clip:padding-box}
 .fang-inbox-group{border:1px solid var(--f-inbox-border);border-radius:12px;overflow:hidden;background:#fff}
 .fang-inbox-group-head{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:0;background:var(--f-inbox-surface2);cursor:pointer;font:inherit;text-align:left;color:inherit}
 .fang-inbox-group-toggle{display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:0;cursor:pointer}
@@ -1353,7 +1357,7 @@ window.__ModuleLoader__.load({
 .fang-decision-mini-context{font-size:11px;color:var(--f-text-2,#5F6368);margin-top:2px;overflow-wrap:anywhere}
 .fang-decision-mini-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .fang-decision-mini-actions .fang-inbox-btn{height:22px;font-size:11px;padding:0 7px}
-.fang-inbox-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,92vw);z-index:2147483001;background:#fff;border-left:1px solid rgba(16,17,20,.12);box-shadow:-18px 0 48px rgba(0,0,0,.18);transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
+.fang-inbox-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,92vw);height:100vh;height:100dvh;max-height:100vh;min-height:0;overflow:hidden;z-index:2147483001;background:#fff;border-left:1px solid rgba(16,17,20,.12);box-shadow:-18px 0 48px rgba(0,0,0,.18);transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
 .fang-inbox-drawer.is-open{transform:none}
 .fang-inbox-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.26);z-index:2147483000;animation:fang-fade .15s ease}
 .fang-inbox-stream{font-size:11px;color:#17803D;white-space:nowrap}
@@ -6392,6 +6396,23 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           else if (options.drawer) options.onClose?.()
         }
       }
+      // v3.3.10: Electron wheel 事件在收件箱里可能落到底层（body overflow 被宿主锁住），
+      // 显式把滚轮转给当前 .fang-inbox-body，保证鼠标滚轮可用。
+      const onInboxWheel = (event) => {
+        if (event.ctrlKey || event.defaultPrevented) return
+        const target = event.target
+        if (target?.closest?.('.fang-inbox-ai, textarea, select, .fang-inbox-item-context, .fang-inbox-confirm')) return
+        const body = root.querySelector('.fang-inbox-body')
+        if (!body) return
+        const max = body.scrollHeight - body.clientHeight
+        if (max <= 0) return
+        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? body.clientHeight : 1
+        const delta = Number(event.deltaY) * unit
+        if (!Number.isFinite(delta) || delta === 0) return
+        event.preventDefault()
+        body.scrollTop = Math.max(0, Math.min(max, body.scrollTop + delta))
+      }
+      root.addEventListener('wheel', onInboxWheel, { passive: false })
       root.addEventListener('keydown', onKeyDown)
       root.addEventListener('click', () => { focusRoot(); store.markSeen() })
       root.addEventListener('focus', () => store.markSeen())
@@ -6403,6 +6424,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       return () => {
         disposed = true
         try { unsubscribe() } catch { /* ignore */ }
+        try { root.removeEventListener('wheel', onInboxWheel) } catch { /* ignore */ }
         try { root.removeEventListener('keydown', onKeyDown) } catch { /* ignore */ }
         host.replaceChildren()
       }

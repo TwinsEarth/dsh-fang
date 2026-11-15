@@ -1,3 +1,18 @@
+## v3.3.10（2026-11-15）
+
+**修复：收件箱无法鼠标滚轮滚动、无滚动条。**
+
+### 修复
+
+- `.fang-inbox-body` 明确 `flex:1 1 0; height:0; overflow-y:scroll`；
+- 收件箱 drawer 固定 `100vh/100dvh`，AI 区限高 32vh；
+- 增加 12px WebKit 滚动条与轨道/滑块样式；
+- 增加 wheel 兜底，滚轮显式转给收件箱 body。
+
+### 验证
+
+- `client-inbox-dom` 20 pass；
+- 全量构建/e2e 见输出。
 ## v3.3.9（2026-11-15）
 
 **P0：决策中心工具结果非 lossless JSON。**
