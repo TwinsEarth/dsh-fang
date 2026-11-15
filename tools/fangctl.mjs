@@ -387,7 +387,24 @@ switch (cmd) {
   case 'tail': code = cmdTail(layout, Number(args._[1] ?? 20)); break
   case 'doctor': code = cmdDoctor(layout); break
   case 'approvals': {
-    try { code = await cmdApprovals(args) } catch (error) { console.error(String(error?.message ?? error)); code = 1 }
+    try {
+      if (args._[1] === 'drill') {
+        const out = await approvalRequest(args, '/fang/api/approvals/drill', { method: 'POST', body: {} })
+        if (args.json) console.log(JSON.stringify(out.body, null, 2))
+        else if (out.status === 200 && out.body?.ok) {
+          console.log('approval drill: GREEN')
+          console.log(`  request   : ${out.body.drill?.request?.id ?? '-'} ${out.body.drill?.request?.kind ?? '-'}/${out.body.drill?.request?.risk ?? '-'} → ${out.body.drill?.request?.outcome ?? '-'}`)
+          console.log(`  pending   : ${out.body.drill?.pendingBefore ?? '-'} → ${out.body.drill?.pendingAfter ?? '-'}`)
+          console.log(`  rollback  : ${out.body.drill?.rollback?.ok === true ? 'ok' : 'FAIL'} restored=${out.body.drill?.rollback?.restored === true}`)
+          console.log(`  residue   : ${out.body.drill?.cleanup === true ? 'clean' : 'kept'}`)
+        } else {
+          console.error(`FAIL approval drill: HTTP ${out.status} ${out.text.slice(0, 300)}`)
+        }
+        code = out.status === 200 && out.body?.ok === true ? 0 : 1
+        break
+      }
+      code = await cmdApprovals(args)
+    } catch (error) { console.error(String(error?.message ?? error)); code = 1 }
     break
   }
   case 'approve':
@@ -402,7 +419,7 @@ switch (cmd) {
     break
   }
   default:
-    console.log('usage: fangctl.mjs <status|forks|verify|tail [n]|doctor|restart-status [limit]|restart-safe [status|clear]|parse-url <line>|approvals|approve <source:id>|deny <source:id>> [--profile name] [--data-root dir] [--url url] [--token token] [--note text] [--by who] [--json]')
+    console.log('usage: fangctl.mjs <status|forks|verify|tail [n]|doctor|restart-status [limit]|restart-safe [status|clear]|parse-url <line>|approvals [drill]|approve <source:id>|deny <source:id>> [--profile name] [--data-root dir] [--url url] [--token token] [--note text] [--by who] [--json]')
     code = 64
 }
 process.exitCode = code

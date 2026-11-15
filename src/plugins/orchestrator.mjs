@@ -22,6 +22,7 @@ import {
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-store.mjs'
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
+import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
 import { MirrorManager } from '../lib/mirror.mjs'
@@ -105,6 +106,15 @@ function forkBundlePath(profileDir) {
 
 export const name = 'fang-orchestrator'
 export const inject = []
+
+/**
+ * v3.3.5: a fork participates in the mother's approval aggregation only while it
+ * is actually alive. Failed/stopped/reaped forks are offline state, not approval
+ * failures; they must not turn the inbox `degraded`.
+ */
+export function isLiveForkForApprovals(_task, status) {
+  return status === TASK_STATUS.READY || status === TASK_STATUS.RUNNING
+}
 
 export const Config = z.object({
   role: z.union([z.const('mother'), z.const('fork')]).default('mother')
@@ -3173,8 +3183,15 @@ export function apply(ctx, config) {
           failed.push({ taskId: null, error: String(error?.message ?? error) })
         }
 
-        const forkResults = await Promise.all([...tasks.values()]
-          .filter((task) => task?.url)
+        // v3.3.5: only live forks are aggregated. A dead/stopped fork is an
+        // expected offline state, not an approval failure; keep it in `skipped`
+        // so the panel can show it without marking the whole inbox degraded.
+        const forkTasks = [...tasks.values()].filter((task) => task?.url)
+        const liveForkTasks = forkTasks.filter((task) => isLiveForkForApprovals(task, taskView(task).status))
+        const skipped = forkTasks
+          .filter((task) => !liveForkTasks.includes(task))
+          .map((task) => ({ taskId: task.taskId, status: taskView(task).status, reason: 'fork-offline' }))
+        const forkResults = await Promise.all(liveForkTasks
           .map(async (task) => {
             if (task.adapter && task.adapter.ok === false) {
               return { task, ok: false, error: task.adapter.error ?? 'adapter-unavailable' }
@@ -3212,7 +3229,31 @@ export function apply(ctx, config) {
           }
         }
         items.sort((a, b) => (Number(a.deadlineAt) || Number.MAX_SAFE_INTEGER) - (Number(b.deadlineAt) || Number.MAX_SAFE_INTEGER))
-        return json(res, 200, { ok: true, degraded: failed.length > 0, items, failed })
+        return json(res, 200, { ok: true, degraded: failed.length > 0, items, failed, skipped })
+      })
+
+      // v3.3.5: isolated approval drill. Runs the real approver request → decide →
+      // snapshot → rollback path in a temp dataRoot; never touches production data.
+      // This gives a live host a way to prove the approval chain executes.
+      route('POST', `${prefix}/api/approvals/drill`, async (req, res) => {
+        try {
+          const out = await runApprovalDrill()
+          const cleanup = cleanupApprovalDrill(out)
+          return json(res, out.ok && cleanup ? 200 : 500, {
+            ok: out.ok && cleanup,
+            drill: {
+              request: out.request ?? null,
+              pendingBefore: out.pendingBefore ?? null,
+              pendingAfter: out.pendingAfter ?? null,
+              snapshot: out.snapshot ? { ok: out.snapshot.ok !== false, tag: out.snapshot.tag ?? null } : null,
+              rollback: out.rollback ? { ok: out.rollback.ok === true, restored: out.restored === true } : null,
+              cleanup,
+            },
+            error: out.error ?? null,
+          })
+        } catch (error) {
+          return json(res, 500, { ok: false, error: 'approval-drill-failed', detail: String(error?.message ?? error) })
+        }
       })
 
       // Decide one approval by source. The response is the real adapter/approver result;
