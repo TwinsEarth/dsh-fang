@@ -36,6 +36,8 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'src/lib/fork-supervisor.mjs',
   'src/lib/restart-contract.mjs',
   'src/lib/main-gate.mjs',
+  'src/lib/approval-drill.mjs',
+  'tools/approval-drill.mjs',
   'src/plugins/restart-guard.mjs',
   'src/plugins/scorer.mjs',
   'src/plugins/approver.mjs',
@@ -49,6 +51,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/DSH-ARCHITECTURE-MAP.md',
   'docs/OVERLAY-MASTER-SWITCH.md',
   'docs/PACKAGE-RENAME-v3.3.3.md',
+  'docs/APPROVAL-DRILL.md',
 ])
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze([

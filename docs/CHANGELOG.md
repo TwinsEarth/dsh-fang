@@ -1,3 +1,27 @@
+## v3.3.5（2026-11-15）
+
+**主题：审批/提升/回滚从“已加载”变成可执行、可验证。**
+
+### 修复
+
+- `/fang/api/approvals` 只聚合 `ready/running` 分身；
+- 死分身/停止/回收的分身进入 `skipped`，不再导致整个审批聚合 `degraded=true`；
+- 只有活跃分身的真实 adapter 失败才进入 `failed`。
+
+### 新增
+
+- `src/lib/approval-drill.mjs` + `tools/approval-drill.mjs`：临时 dataRoot 内真实执行
+  `requestPromotion(red) → pending → decide(approved) → snapshot → rollback`；
+- `POST /fang/api/approvals/drill`：运行中宿主可通过同一路由执行隔离 drill，不写生产数据；
+- `fangctl approvals drill --url ...` 命令；
+- 测试：`test/approval-drill.test.mjs`，orchestrator `/approvals` 聚合跳过离线分身 + drill 路由。
+
+### 验证
+
+```text
+approval drill: outcome=approved pending 1→0 snapshot=ok rollback=ok restored=true residue=clean
+orchestrator tests: 67 pass
+```
 ## v3.3.4（2026-11-15）
 
 **主题：npm 包改名 + 队列子插件默认关闭 + 新包公开访问修复。**

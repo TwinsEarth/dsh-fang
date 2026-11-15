@@ -19,6 +19,14 @@ import { MirrorManager } from '../src/lib/mirror.mjs'
 import { readForkSupervisionSettings } from '../src/lib/fork-supervision-settings.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
+test('orchestrator: approval aggregation skips offline forks instead of degrading the inbox', () => {
+  assert.equal(orchestrator.isLiveForkForApprovals({}, 'ready'), true)
+  assert.equal(orchestrator.isLiveForkForApprovals({}, 'running'), true)
+  assert.equal(orchestrator.isLiveForkForApprovals({}, 'failed'), false)
+  assert.equal(orchestrator.isLiveForkForApprovals({}, 'stopped'), false)
+  assert.equal(orchestrator.isLiveForkForApprovals({}, 'reaped'), false)
+})
+
 const hasRemote = await import('../src/lib/remote.mjs').then(() => true).catch(() => false)
 const skipNoRemote = hasRemote ? {} : { skip: 'src/lib/remote.mjs not delivered yet (T5)' }
 
@@ -2211,6 +2219,33 @@ test('orchestrator: approvals aggregate local pending and decide without faking 
       source: 'mother', approvalId: 'apr_1', outcome: 'maybe',
     })
     assert.equal(bad.statusCode, 400)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: approval drill route executes a real red promotion + snapshot/rollback in isolation', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-approval-drill-route-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot, forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' }, authToken: TEST_AUTH_TOKEN,
+    })
+    const res = makeRes()
+    await webServer.find('POST', '/fang/api/approvals/drill').handler(makeReq({}, 'POST'), res)
+    assert.equal(res.statusCode, 200)
+    const body = res.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.drill.request.kind, 'promotion')
+    assert.equal(body.drill.request.risk, 'red')
+    assert.equal(body.drill.request.outcome, 'approved')
+    assert.equal(body.drill.pendingBefore, 1)
+    assert.equal(body.drill.pendingAfter, 0)
+    assert.equal(body.drill.rollback.ok, true)
+    assert.equal(body.drill.rollback.restored, true)
+    assert.equal(body.drill.cleanup, true)
   } finally {
     cleanup(ctx, dataRoot)
   }
