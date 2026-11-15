@@ -121,10 +121,19 @@ test('history exposes red/yellow/blue/green records with their own colors', asyn
   const { ctx, service, root } = boot()
   try {
     service.create({ level: 'red', title: 'r', options: [option('a')] })
-    service.create({ level: 'yellow', title: 'y', timeoutMinutes: 0.001, options: [option('a')] })
-    service.create({ level: 'blue', title: 'b', timeoutMinutes: 0.001, options: [option('a', true)] })
+    const yellowCreated = service.create({ level: 'yellow', title: 'y', timeoutMinutes: 0.001, options: [option('a')] })
+    const blueCreated = service.create({ level: 'blue', title: 'b', timeoutMinutes: 0.001, options: [option('a', true)] })
     service.create({ level: 'green', title: 'g' })
-    await waitFor(() => service.list({ includeArchived: true }).items.filter((item) => item.level === 'blue' && item.status === 'resolved').length === 1)
+    // Start the wait chains so their policy timers are armed, but never await
+    // them: the bounded poll below decides pass/fail instead of a lost timer.
+    void service.wait(yellowCreated.ticket.id).catch(() => {})
+    void service.wait(blueCreated.ticket.id).catch(() => {})
+    await waitFor(() => {
+      const items = service.list({ includeArchived: true }).items
+      const yellow = items.find((item) => item.level === 'yellow')
+      const blue = items.find((item) => item.level === 'blue')
+      return yellow?.outcome === 'deferred' && blue?.status === 'resolved'
+    }, 5000)
     const history = service.list({ includeArchived: true })
     for (const level of ['red', 'yellow', 'blue', 'green']) {
       assert.ok(history.items.some((item) => item.level === level), `${level} must appear in history`)
@@ -143,13 +152,19 @@ test('policy state persists to JSON and survives a restart without losing yellow
   try {
     yellowId = first.service.create({ level: 'yellow', title: 'restart-y', timeoutMinutes: 0.001, options: [option('a')] }).ticket.id
     blueId = first.service.create({ level: 'blue', title: 'restart-b', timeoutMinutes: 0.001, options: [option('b', true)] }).ticket.id
-    // v3.2.2：显式等待策略结算，避免高负载 CI 下 60ms 定时器与 3s 轮询的竞态。
-    const [yellowSettled, blueSettled] = await Promise.all([
-      first.service.wait(yellowId),
-      first.service.wait(blueId),
-    ])
-    assert.equal(yellowSettled.outcome, 'deferred')
-    assert.equal(blueSettled.status, 'resolved')
+    // v3.4.0: arm both wait chains (so their policy timers exist), but never
+    // await them. The bounded poll decides; a lost Node22 timer can no longer
+    // hang the whole suite, and the timer is still exercised for real.
+    void first.service.wait(yellowId).catch(() => {})
+    void first.service.wait(blueId).catch(() => {})
+    await waitFor(() => {
+      const items = first.service.list({ includeArchived: true }).items
+      const yellow = items.find((item) => item.id === yellowId)
+      const blue = items.find((item) => item.id === blueId)
+      return yellow?.outcome === 'deferred' && blue?.status === 'resolved'
+    }, 5000)
+    assert.equal(first.service.get(yellowId).outcome, 'deferred')
+    assert.equal(first.service.get(blueId).status, 'resolved')
     const storeFile = path.join(root, 'decision-center.json')
     const disk = JSON.parse(fs.readFileSync(storeFile, 'utf8'))
     assert.equal(disk.tickets.length, 2)
