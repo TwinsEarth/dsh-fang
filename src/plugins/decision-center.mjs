@@ -65,6 +65,26 @@ const SOURCE_ROLES = Object.freeze(['pm', 'pjm', 'worker', 'system'])
  *  - red（阻塞）必须由人显式选择，任何情况下都不允许 AI 自选；
  *  - 低风险且可回滚的推进不必开票（否则会变成注意力噪音）。
  */
+/**
+ * v3.3.9 P0: DSH validates a tool result as lossless JSON. `undefined`
+ * properties (e.g. selectedValue when a ticket resolves without a value) are
+ * not lossless and make the whole tool call fail after the ticket was already
+ * created. Project every tool result through this lossless value.
+ */
+export function toLosslessJson(value) {
+  try {
+    const text = JSON.stringify(value, (_key, item) => {
+      if (typeof item === 'bigint') return item.toString()
+      if (typeof item === 'number' && !Number.isFinite(item)) return null
+      if (typeof item === 'function' || typeof item === 'symbol') return undefined
+      return item
+    })
+    return text === undefined ? null : JSON.parse(text)
+  } catch {
+    return { ok: false, error: 'non-lossless-json-result' }
+  }
+}
+
 export const PM_DECISION_POLICY = Object.freeze({
   version: 1,
   mustAsk: [
@@ -439,7 +459,7 @@ function applyForkDecisionCenter(ctx, config, gate) {
             taskId,
           })
           if (submitted.queued) {
-            return { queued: true, status: 'queued', ticketId: null, level: input.level ?? 'yellow', reason: submitted.reason ?? null }
+            return toLosslessJson({ queued: true, status: 'queued', ticketId: null, level: input.level ?? 'yellow', reason: submitted.reason ?? null })
           }
           const ticket = submitted.ticket
           if (!ticket?.id) throw new Error('母体未返回 ticket')
@@ -456,29 +476,29 @@ function applyForkDecisionCenter(ctx, config, gate) {
             if (!settled.ok) {
               // 黄色轮询超时仍允许流程继续；母体定时器会把 ticket 标成 deferred。
               if (ticket.level === 'yellow' && settled.reason === 'timeout') {
-                return {
+                return toLosslessJson({
                   ticketId: ticket.id, level: ticket.level, blocking: false,
                   status: 'pending', outcome: 'deferred', deferred: true,
                   continueWithoutDecision: true, canAnswerLater: true, queued: false,
                   priority: ticket.priority, risk: ticket.risk,
-                }
+                })
               }
               throw new Error(`fork 决策未在时限内完成（${settled.reason}）`)
             }
             const resolved = settled.ticket
             if (resolved.status === 'pending' && resolved.level === 'yellow') {
-              return {
+              return toLosslessJson({
                 ticketId: resolved.id, level: resolved.level, blocking: false,
                 status: 'pending', outcome: 'deferred', deferred: true,
                 continueWithoutDecision: true, canAnswerLater: true,
                 deferredAt: resolved.deferredAt ?? undefined, queued: false,
                 priority: resolved.priority, risk: resolved.risk,
-              }
+              })
             }
             if (resolved.status !== 'resolved' && resolved.status !== 'abandoned' && resolved.status !== 'expired' && resolved.status !== 'acked') {
               throw new Error(`fork 决策状态异常：${resolved.status}`)
             }
-            return {
+            return toLosslessJson({
               ticketId: resolved.id, level: resolved.level, blocking: resolved.level === 'red',
               status: resolved.status, outcome: resolved.outcome,
               selectedValue: resolved.resolvedOption ?? undefined,
@@ -487,16 +507,16 @@ function applyForkDecisionCenter(ctx, config, gate) {
               autoReason: resolved.autoReason ?? undefined,
               priority: resolved.priority, risk: resolved.risk,
               queued: false,
-            }
+            })
           }
-          return {
+          return toLosslessJson({
             ticketId: ticket.id, level: ticket.level, blocking: false,
             status: ticket.status, outcome: ticket.outcome ?? ticket.status,
             autoResolved: ticket.autoResolved === true,
             selectedValue: ticket.resolvedOption ?? undefined,
             selectedActionId: ticket.selectedActionId ?? undefined,
             queued: false,
-          }
+          })
         },
       })
       child.effect(() => () => { try { unregister?.() } catch { /* ignore */ } })
@@ -2396,18 +2416,18 @@ export function apply(ctx, config) {
               const result = await wait(ticket.id, exec?.signal)
               const outcome = String(result?.outcome ?? (result.status === 'pending' ? 'deferred' : 'expired'))
               if (result.status === 'pending' && result.level === 'yellow') {
-                return {
+                return toLosslessJson({
                   ticketId: result.id, level: result.level, blocking: false,
                   status: 'pending', outcome: 'deferred', deferred: true,
                   continueWithoutDecision: true, canAnswerLater: true,
                   deferredAt: result.deferredAt ?? undefined,
                   priority: result.priority, risk: result.risk,
-                }
+                })
               }
               if (outcome !== 'resolved' && outcome !== 'acked') {
                 throw new Error(`用户未处理该决策（outcome=${outcome}）`)
               }
-              return {
+              return toLosslessJson({
                 ticketId: result.id, level: result.level, blocking: result.level === 'red',
                 status: 'resolved', outcome,
                 selectedValue: result.resolvedOption ?? undefined,
@@ -2417,16 +2437,16 @@ export function apply(ctx, config) {
                 autoReason: result.autoReason ?? undefined,
                 lateResponse: result.lateResponse === true,
                 priority: result.priority, risk: result.risk,
-              }
+              })
             }
-            return {
+            return toLosslessJson({
               ticketId: ticket.id, level: ticket.level, blocking: false,
               status: ticket.status, outcome: ticket.outcome ?? ticket.status,
               autoResolved: ticket.autoResolved === true,
               selectedValue: ticket.resolvedOption ?? undefined,
               selectedActionId: ticket.selectedActionId ?? undefined,
               priority: ticket.priority, risk: ticket.risk,
-            }
+            })
           },
         })
         // PM 交互式选择：独立工具名，语义 = 红色决策 ticket（默认红、阻塞等待选择）。
@@ -2499,34 +2519,34 @@ export function apply(ctx, config) {
             if (!created.ok) throw new Error(`decision center rejected choice: ${created.reason}`)
             const ticket = created.ticket
             if (ticket.status !== 'pending') {
-              return {
+              return toLosslessJson({
                 ticketId: ticket.id, level: ticket.level, blocking: false,
                 status: ticket.status, outcome: ticket.outcome,
                 autoResolved: ticket.autoResolved === true,
                 selectedValue: ticket.resolvedOption ?? undefined,
                 priority: ticket.priority, risk: ticket.risk,
-              }
+              })
             }
             const result = await wait(ticket.id, exec?.signal)
             const outcome = String(result?.outcome ?? (result.status === 'pending' ? 'deferred' : 'expired'))
             if (result.status === 'pending' && result.level === 'yellow') {
-              return {
+              return toLosslessJson({
                 ticketId: result.id, level: result.level, blocking: false,
                 status: 'pending', outcome: 'deferred', deferred: true,
                 continueWithoutDecision: true, canAnswerLater: true,
                 priority: result.priority, risk: result.risk,
-              }
+              })
             }
             if (outcome !== 'resolved' && outcome !== 'acked') {
               throw new Error(`用户未处理该选择（outcome=${outcome}）`)
             }
-            return {
+            return toLosslessJson({
               ticketId: result.id, level: result.level, blocking: result.level === 'red',
               outcome, selectedValue: result.resolvedOption ?? undefined,
               autoResolved: result.autoResolved === true,
               lateResponse: result.lateResponse === true,
               priority: result.priority, risk: result.risk,
-            }
+            })
           },
         })
         child.effect(() => () => { try { unregister?.() } catch { /* ignore */ } })

@@ -51,6 +51,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/RESTART-CONFIRMATION.md',
   'docs/AUTO-WATCHDOG.md',
   'docs/ESSENCE-AUTO-SYNC.md',
+  'docs/DECISION-LOSSLESS.md',
 ])
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze([
