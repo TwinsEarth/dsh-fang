@@ -641,6 +641,14 @@ export function apply(ctx, config) {
       risk, reason, scope, origin,
       digests: Array.isArray(input.digests) ? input.digests.map(String) : [],
       forcedApproval: input.forcedApproval === true,
+      confirmation: input.confirmation && typeof input.confirmation === 'object'
+        ? {
+          forkChecked: input.confirmation.forkChecked === true,
+          finalConfirm: input.confirmation.finalConfirm === true,
+          forkId: input.confirmation.forkId ? String(input.confirmation.forkId).slice(0, 200) : null,
+          at: Number(input.confirmation.at) || null,
+        }
+        : null,
       impactSource,
       requestedAt: t0,
       deadlineAt: t0 + cfg.approvalTimeoutMs,
@@ -666,6 +674,7 @@ export function apply(ctx, config) {
       id: req.id, risk: req.risk, reason, scope, origin, digests: req.digests,
       forcedApproval: req.forcedApproval, guardMode: cfg.mode, authMode: cfg.authMode,
       strictRedLine: cfg.strictRedLine, tempEffectiveManual,
+      confirmation: req.confirmation,
       impactSource, impact: impactReport,
     })
     emit(REQUESTED_TOPIC, { id: req.id, risk: req.risk })

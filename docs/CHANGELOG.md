@@ -1,3 +1,26 @@
+## v3.3.6（2026-11-15）
+
+**主题：重启母体增加红色风险弹窗、分身预确认与二次点击放行。**
+
+### 新增
+
+- 面板头「重启母体」按钮；
+- `GET /fang/api/restart/impact`：只读影响面与武装状态；
+- `POST /fang/api/restart/request`：缺 `forkChecked`/`finalConfirm` 返回 428；
+- 红色弹窗展示：中断会话/工具调用、分身孤儿、未发送队列丢失、staging 需重启生效；
+- 第一步必须点「我已在分身确认」，第二步才启用「二次确认：放行重启」。
+
+### 安全边界
+
+- guard 未武装（observe / allowProcessRestart=false / 无 supervisor）时，只记录红色审批，不自动退出；
+- 只有 enforce + allowProcessRestart + supervisor 在位，才 exit 75 交给外部 supervisor；
+- 不把审批通过伪装成已重启。
+
+### 验证
+
+- orchestrator restart confirmation tests；
+- restart-guard 审计含 confirmation；
+- 全量测试/真实 e2e/install drill 见构建输出。
 ## v3.3.5（2026-11-15）
 
 **主题：审批/提升/回滚从“已加载”变成可执行、可验证。**

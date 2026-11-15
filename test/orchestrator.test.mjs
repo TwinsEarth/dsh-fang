@@ -271,6 +271,36 @@ test('orchestrator: GET /fang/api/restart is a read-only view of the supervisor 
   }
 })
 
+test('orchestrator: POST /fang/api/restart/request requires forkChecked + finalConfirm', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-restart-confirm-http-'))
+  const ctx = makeCtx({
+    services: {
+      [SERVICE.forker]: makeFakeForker(),
+      webServer,
+      [SERVICE.restart]: makeRestartGuardStub(),
+    },
+  })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot, forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' }, authToken: TEST_AUTH_TOKEN,
+    })
+    const missing = makeRes()
+    await webServer.find('POST', '/fang/api/restart/request').handler(makeReq({ reason: 'manual' }, 'POST'), missing)
+    assert.equal(missing.statusCode, 428)
+    assert.equal(missing.json().error, 'restart-confirmation-required')
+    const acceptedShape = makeRes()
+    await webServer.find('POST', '/fang/api/restart/request').handler(makeReq({
+      reason: 'manual', confirmation: { forkChecked: true, finalConfirm: true, at: Date.now() },
+    }, 'POST'), acceptedShape)
+    assert.equal(acceptedShape.statusCode, 409)
+    assert.equal(acceptedShape.json().error, 'restart-guard-unavailable')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: role matrix — a fork never lets orchestrator activate', async () => {
   const previous = process.env.DSH_FANG_ROLE
   process.env.DSH_FANG_ROLE = 'fork'
@@ -1894,7 +1924,10 @@ test('orchestrator: requestMotherRestart treats auto-allow as an allowed decisio
   const restart = { request: async () => ({ id: 'rst_auto', outcome: 'auto-allow', decision: 'auto-allow' }) }
   const { ctx, svc, dataRoot } = await boot({ extraServices: { [SERVICE.restart]: restart } })
   try {
-    const out = await svc.requestMotherRestart('policy-auto')
+    const refused = await svc.requestMotherRestart('policy-auto')
+    assert.equal(refused.ok, false)
+    assert.equal(refused.error, 'restart-confirmation-required')
+    const out = await svc.requestMotherRestart('policy-auto', { confirmation: { forkChecked: true, finalConfirm: true } })
     assert.equal(out.ok, true)
     assert.equal(out.outcome, 'auto-allow')
   } finally {

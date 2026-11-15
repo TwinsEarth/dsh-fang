@@ -1764,7 +1764,20 @@ export function apply(ctx, config) {
     },
 
     /** 母体重启的唯一入口：转交 restart-guard，自身永不直接退出进程。 */
-    async requestMotherRestart(reason = 'manual') {
+    async requestMotherRestart(reason = 'manual', options = {}) {
+      // v3.3.6: human restart requires two explicit confirmations:
+      //   1) forkChecked — user has checked the impact in a fork;
+      //   2) finalConfirm — the second red confirmation click.
+      // API callers that omit them are refused before touching the guard.
+      const confirmation = options?.confirmation && typeof options.confirmation === 'object' ? options.confirmation : null
+      if (!confirmation || confirmation.forkChecked !== true || confirmation.finalConfirm !== true) {
+        return {
+          ok: false,
+          error: 'restart-confirmation-required',
+          required: { forkChecked: true, finalConfirm: true },
+          detail: '请先在分身确认影响，再进行第二次确认；缺失确认时不会创建重启请求。',
+        }
+      }
       const guard = safeGet(SERVICE.restart)
       if (!guard || typeof guard.request !== 'function') {
         return { ok: false, error: 'restart-guard-unavailable' }
@@ -1774,6 +1787,12 @@ export function apply(ctx, config) {
         risk: 'red',
         scope: 'mother',
         origin: 'fang:orchestrator',
+        confirmation: {
+          forkChecked: true,
+          finalConfirm: true,
+          at: Number(confirmation.at) || Date.now(),
+          forkId: confirmation.forkId ? String(confirmation.forkId).slice(0, 200) : null,
+        },
       })
       // auto-allow is a successful policy decision, not a denial.
       const allowed = decision?.outcome === 'approved' || decision?.outcome === 'auto-allow'
@@ -2965,6 +2984,43 @@ export function apply(ctx, config) {
         const guard = safeGet(SERVICE.restart)
         if (!guard || typeof guard.selfCheck !== 'function') return json(res, 503, { ok: false, error: 'restart-guard-unavailable' })
         return json(res, 200, guard.selfCheck())
+      })
+      // v3.3.6: red restart UI data. Read-only impact + execution state; no restart.
+      route('GET', `${prefix}/api/restart/impact`, (req, res) => {
+        const guard = safeGet(SERVICE.restart)
+        if (!guard || typeof guard.impact !== 'function') return json(res, 503, { ok: false, error: 'restart-guard-unavailable' })
+        try {
+          const view = restartView()
+          return json(res, 200, {
+            ok: true,
+            impact: guard.impact(),
+            executionArmed: view.executionArmed === true,
+            supervisorPresent: view.supervisorPresent === true,
+            mode: view.mode ?? null,
+            allowProcessRestart: view.allowProcessRestart === true,
+            note: view.executionArmed === true
+              ? '已武装：二次确认后守卫会把执行权交给 supervisor 并退出 75。'
+              : '未武装：二次确认只会记录红色审批，不会自动退出/重启宿主。',
+          })
+        } catch (error) {
+          return json(res, 500, { ok: false, error: 'restart-impact-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      // v3.3.6: two-step human restart. Confirmation is enforced here and again
+      // by service.requestMotherRestart; missing fields are rejected with 428.
+      route('POST', `${prefix}/api/restart/request`, async (req, res) => {
+        const body = await readBody(req)
+        const confirmation = body?.confirmation && typeof body.confirmation === 'object' ? body.confirmation : null
+        if (!confirmation || confirmation.forkChecked !== true || confirmation.finalConfirm !== true) {
+          return json(res, 428, {
+            ok: false,
+            error: 'restart-confirmation-required',
+            required: { forkChecked: true, finalConfirm: true },
+            detail: '请先在分身确认影响，再进行第二次确认；缺失确认时不会创建重启请求。',
+          })
+        }
+        const out = await service.requestMotherRestart(String(body?.reason ?? 'manual'), { confirmation })
+        return json(res, out.ok === false ? 409 : 200, out)
       })
       route('GET', `${prefix}/api/upgrade/status`, (req, res) => {
         let mirror = null

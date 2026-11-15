@@ -52,6 +52,7 @@ const REQUIRED_SOURCE_FILES = Object.freeze([
   'docs/OVERLAY-MASTER-SWITCH.md',
   'docs/PACKAGE-RENAME-v3.3.3.md',
   'docs/APPROVAL-DRILL.md',
+  'docs/RESTART-CONFIRMATION.md',
 ])
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze([
