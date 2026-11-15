@@ -16,6 +16,8 @@
 //   * needs-approval 时通过 ctx.get(SERVICE.approver)?.request(...) 走审批；审批服务缺失或抛错 => fail-closed。
 import path from 'node:path'
 import fs from 'node:fs'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { AUDIT, EXIT, GUARD_STATE, RISK, SERVICE, bus, newId, newUuid, riskAtLeast, z } from '../kernel/index.mjs'
 import {
   appendJsonl,
@@ -57,6 +59,8 @@ const DEFAULTS = Object.freeze({
   strictRedLine: true,
   approvalTimeoutMs: 300000,
   allowProcessRestart: false,
+  autoWatchdog: false,
+  autoWatchdogTimeoutMs: 4000,
   autoPromoteAfterHours: 24,
   dataRoot: '',
   manifestTtlMs: 60000,
@@ -73,6 +77,10 @@ export const Config = z.object({
     .description('审批等待上限（毫秒）；审批服务本身也会收到 ttlMs'),
   allowProcessRestart: z.boolean().default(false)
     .description('第二把钥匙：默认 false。只有 enforce + true + supervisor 在位时才在批准后 exit(75) 交接执行权'),
+  autoWatchdog: z.boolean().default(false)
+    .description('v3.3.7：批准后若没有 supervisor，自动启动 restart-watchdog 作为看护并再次检查三重门禁；只在 enforce + allowProcessRestart 下生效'),
+  autoWatchdogTimeoutMs: z.number().min(500).max(30000).default(4000)
+    .description('等待 watchdog 写出 supervisor.present 的上限（毫秒）'),
   autoPromoteAfterHours: z.union([6, 12, 24]).default(24)
     .description('保留字段（bundle 配置兼容）：自动晋升归属编排器/晋升流程，本插件不消费'),
   dataRoot: z.string().default('')
@@ -490,13 +498,72 @@ export function apply(ctx, config) {
   }
 
   /**
+   * v3.3.7：用户选择「自动看护」。批准后若没有 supervisor，由本进程启动
+   * restart-watchdog（独立进程），等它写出 supervisor.present 后再检查三重门禁。
+   * 只有 enforce + allowProcessRestart + 两次确认才允许走到这里；任何一步失败都
+   * fail-closed，不写授权清单、不退出。
+   */
+  const startAutoWatchdog = async (req) => {
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+    const tool = path.join(packageRoot, 'tools', 'restart-watchdog.mjs')
+    if (!fs.existsSync(tool)) return { ok: false, error: 'auto-watchdog-tool-missing', detail: tool }
+    if (req?.confirmation?.forkChecked !== true || req?.confirmation?.finalConfirm !== true) {
+      return { ok: false, error: 'auto-watchdog-confirmation-required' }
+    }
+    const relaunch = [process.execPath, ...process.argv.slice(1)]
+    if (!relaunch[0]) return { ok: false, error: 'auto-watchdog-relaunch-missing' }
+    const node = String(process.env.DSH_NODE_EXECUTABLE ?? '').trim() || process.execPath
+    const env = { ...process.env }
+    if (String(node).toLowerCase().endsWith('.exe')) env.ELECTRON_RUN_AS_NODE = '1'
+    const args = [
+      tool, '--execute',
+      '--data-root', layout.dataDir,
+      '--state-dir', stateDir,
+      '--pid-file', layout.pidFile || path.join(layout.dataDir, 'fang.pid'),
+      '--poll-ms', '500',
+    ]
+    const profileDir = String(process.env.DSH_PROFILE_DIR ?? '').trim()
+    if (profileDir) args.push('--profile-dir', profileDir)
+    args.push('--', ...relaunch)
+    let child
+    try {
+      child = spawn(node, args, { cwd: packageRoot, detached: true, stdio: 'ignore', windowsHide: true, env })
+      child.unref()
+    } catch (error) {
+      return { ok: false, error: 'auto-watchdog-spawn-failed', detail: errText(error) }
+    }
+    const deadline = Date.now() + Number(cfg.autoWatchdogTimeoutMs) || 4000
+    while (Date.now() < deadline) {
+      const supervisor = detectSupervisor()
+      if (supervisor.present) {
+        audit('restart-auto-watchdog', { id: req.id, pid: child.pid, supervisor: supervisor.id, via: supervisor.via, relaunch })
+        return { ok: true, pid: child.pid, supervisor, relaunch }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80))
+    }
+    try { process.kill(Number(child.pid), 'SIGTERM') } catch { /* best effort */ }
+    return { ok: false, error: 'auto-watchdog-timeout', pid: child.pid }
+  }
+
+  /**
    * executing 阶段：默认只记录状态（不退出/不重启）。
    * 批准必须落盘授权清单；写不进去 => fail-closed，按拒绝处理。
    * 三重门禁（enforce + allowProcessRestart + supervisor 在位）齐了才把执行权交出去：
    * 清单/审计/事件落盘后 exit(75)，由 watchdog 拉起新宿主并写回执。
    */
-  const finishApproved = (req, { decision, by = null, outcome, approvalId = null, t0 }) => {
+  const finishApproved = async (req, { decision, by = null, outcome, approvalId = null, t0 }) => {
     const approvedAt = Date.now()
+    let autoWatchdog = null
+    let gateState = executionArmed()
+    // 用户选择 auto-watchdog：没有 supervisor 时先启动看护，再重新计算三重门禁。
+    // 只有明确开启且 enforce + allowProcessRestart 才尝试；否则仍按原 observe 语义。
+    if (cfg.autoWatchdog === true && cfg.mode === 'enforce' && cfg.allowProcessRestart === true && gateState.supervisor.present !== true) {
+      autoWatchdog = await startAutoWatchdog(req)
+      if (autoWatchdog.ok !== true) {
+        return finishDenied(req, autoWatchdog.error ?? 'auto-watchdog-failed', 'denied', { by, approvalId, error: autoWatchdog.detail ?? null, ms: Date.now() - t0 })
+      }
+      gateState = executionArmed()
+    }
     let manifest
     try {
       manifest = writeApprovalManifest(req, { by, outcome, approvalId, approvedAt })
@@ -508,7 +575,6 @@ export function apply(ctx, config) {
     }
     machine.state = GUARD_STATE.EXECUTING
     if (machine.pending) machine.pending.phase = GUARD_STATE.EXECUTING
-    const gateState = executionArmed()
     const handoff = gateState.armed === true
     persistState(handoff ? {
       handoff: { to: 'supervisor', via: gateState.supervisor.via, at: Date.now(), exitCode: EXIT.RESTART },
@@ -521,6 +587,7 @@ export function apply(ctx, config) {
       plannedExitCode: EXIT.RESTART, // 与 forker.classifyExit 的 restart-request 契约对齐
       manifestDigest: manifest.digest,
       manifestExpiresAt: manifest.expiresAt,
+      autoWatchdog,
       handoff: handoff ? {
         requested: true, to: 'supervisor', via: gateState.supervisor.via,
         id: gateState.supervisor.id, exitCode: EXIT.RESTART,
@@ -549,6 +616,7 @@ export function apply(ctx, config) {
       impactSource: req.impactSource ?? null, ms: result.ms,
       manifestDigest: manifest.digest, manifestExpiresAt: manifest.expiresAt,
       manifestPath: authorization.manifestPath,
+      autoWatchdog: autoWatchdog ? { ok: autoWatchdog.ok === true, pid: autoWatchdog.pid ?? null, error: autoWatchdog.error ?? null } : null,
       handoff: handoff ? { to: 'supervisor', via: gateState.supervisor.via, exitCode: EXIT.RESTART } : null,
     })
     emit(RESOLVED_TOPIC, { id: req.id, outcome, reason: req.reason, risk: req.risk, approvalId })

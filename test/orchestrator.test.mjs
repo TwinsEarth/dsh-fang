@@ -19,6 +19,22 @@ import { MirrorManager } from '../src/lib/mirror.mjs'
 import { readForkSupervisionSettings } from '../src/lib/fork-supervision-settings.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
+test('orchestrator: stale legacy essence bundle is rejected as a fork template', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-stale-essence-'))
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      name: 'old', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/dsh-fang'] } },
+    }))
+    assert.equal(orchestrator.profileUsesCurrentFangBundle(root), false)
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      name: 'new', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'] } },
+    }))
+    assert.equal(orchestrator.profileUsesCurrentFangBundle(root), true)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('orchestrator: approval aggregation skips offline forks instead of degrading the inbox', () => {
   assert.equal(orchestrator.isLiveForkForApprovals({}, 'ready'), true)
   assert.equal(orchestrator.isLiveForkForApprovals({}, 'running'), true)
