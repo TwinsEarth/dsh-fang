@@ -146,6 +146,8 @@ export const Config = z
       .default(true)
       .description('true：用内置干净模板（不继承母体脏 profile）；false：沿用 profileTemplate'),
     bundleName: z.string().default('@local/dsh-fang').description('干净模板 profile.bundles 的第三个 bundle'),
+    coreMode: z.union([z.const('stock'), z.const('accelerated')]).default('stock').description('new fork uses stock or accelerated DSH core'),
+    acceleratedCliPath: z.string().default('').description('accelerated DSH CLI path'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),
     // v3.1.12：新机器/新用户的干净分身默认不带第三方插件；这里按“安装不激活 /
     // 安装并激活”两组清单给每个新分身装默认插件（开关可关；失败不阻塞分身启动）。
@@ -997,7 +999,7 @@ export function apply(ctx, config) {
     const forkId = String(opts.forkId ?? '').trim() || newId('fork')
     const homeDir = String(opts.homeDir ?? '').trim()
     const profile = safeProfile(opts.profile ?? 'default')
-    const cliPath = String(opts.cliPath ?? cfg.cliPath ?? '').trim()
+    const cliPath = String(opts.cliPath ?? (cfg.coreMode === 'accelerated' && cfg.acceleratedCliPath ? cfg.acceleratedCliPath : cfg.cliPath) ?? '').trim()
     const timeoutMs = Math.max(1, Math.floor(Number(opts.timeoutMs ?? cfg.startTimeoutMs) || DEFAULTS.startTimeoutMs))
     const maxLogLines = Math.max(1, Math.floor(Number(cfg.maxLogLines) || DEFAULTS.maxLogLines))
 

@@ -42,6 +42,7 @@ import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { openDecisionEventStream } from '../lib/decision-events.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
+import { acceleratedWebStatus, startAcceleratedWeb, stopAcceleratedWeb } from '../lib/accelerated-web.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
@@ -179,6 +180,13 @@ export const Config = z.object({
     .description('新用户自动生成“默认元宝”（仅当没有任何用户元主、且默认插件已有安装时；失败不影响启动）'),
   cliPath: z.string().default('')
     .description('dsh 启动器路径；留空自动探测（PATH 上的 dsh / 安装目录 dsh.cmd）'),
+  accelerated: z.object({
+    cliPath: z.string().default('').description('加速版 DSH CLI 入口（@twinsearth/dsh 的 bin；留空 = FANG_ACCEL_CLI）'),
+    profile: z.string().default('fang-accelerated').description('加速版 sidecar 的 profile 名'),
+    port: z.number().min(1).max(65535).default(18080).description('加速版 sidecar 的固定端口'),
+    home: z.string().default('').description('加速版 sidecar 的 DSH_HOME；留空 = 当前 DSH_HOME'),
+    enabled: z.boolean().default(false).description('允许母体面板启动加速版 sidecar'),
+  }).default({}),
   dataRoot: z.string().default('')
     .description('数据根目录；留空 = $DSH_HOME/fang/<profileTag>'),
   forksRoot: z.string().default('')
@@ -3085,6 +3093,27 @@ export function apply(ctx, config) {
         })(),
         }))
       }
+      // 加速版 Web sidecar：原厂进程不动；启动/停止/查看第二个 @twinsearth DSH Web。
+      const acceleratedHome = String(cfg.accelerated?.home ?? '').trim() || String(process.env.DSH_HOME ?? '').trim()
+      route('GET', `${prefix}/api/accelerated/status`, async (req, res) => {
+        if (cfg.accelerated?.enabled !== true) return json(res, 200, { ok: true, enabled: false, running: false, state: null })
+        return json(res, 200, await acceleratedWebStatus({ dataDir: layout.dataDir }))
+      })
+      route('POST', `${prefix}/api/accelerated/start`, async (req, res) => {
+        if (cfg.accelerated?.enabled !== true) return json(res, 403, { ok: false, error: 'accelerated-disabled' })
+        const result = await startAcceleratedWeb({
+          dataDir: layout.dataDir,
+          cliPath: cfg.accelerated?.cliPath ?? '',
+          profile: cfg.accelerated?.profile ?? 'fang-accelerated',
+          port: cfg.accelerated?.port ?? 18080,
+          home: acceleratedHome,
+        })
+        return json(res, result.ok ? 200 : 502, result)
+      })
+      route('POST', `${prefix}/api/accelerated/stop`, async (req, res) => {
+        if (cfg.accelerated?.enabled !== true) return json(res, 403, { ok: false, error: 'accelerated-disabled' })
+        return json(res, 200, await stopAcceleratedWeb({ dataDir: layout.dataDir }))
+      })
       // 重启守卫 / supervisor 契约（只读）。不触发重启；写操作仍只走审批 + 外部 supervisor。
       route('GET', `${prefix}/api/restart`, (req, res) => {
         const view = restartView()
