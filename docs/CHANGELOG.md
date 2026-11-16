@@ -1,3 +1,21 @@
+## v3.4.2（2026-11-16）
+
+**加速 Web sidecar + 母体面板加速模式。**
+
+### 新增
+
+- `src/lib/accelerated-web.mjs`：启动/停止/状态、独立 profile/端口、同 `DSH_HOME` 的 `@twinsearth/dsh` Web sidecar；
+- `/fang/api/accelerated/status|start|stop`；
+- 母体面板「加速模式」按钮：原厂进程不变，启动 sidecar 后打开新窗口；
+- forker `coreMode: stock|accelerated` 与 `acceleratedCliPath`；
+- 路由契约 85 → 88。
+
+### 验证
+
+- forker/compat 40 pass；orchestrator 68 pass；
+- sidecar 实际启动/停止验证通过；
+- 原厂启动器与 core 保持不动。
+
 ## v3.4.0（2026-11-15）
 
 **收件箱滚动修复 + 测试稳定性修复（3.3.10 的发布阻断解除）。**
