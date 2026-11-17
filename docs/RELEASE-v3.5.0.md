@@ -22,14 +22,14 @@
 ## 2. 发布前检查（全部只读，先跑再发）
 
 ```powershell
-# A. contract 仓库
-cd E:\GPT\dsh-fang-contract
+# A. contract 仓库（本机示例：contract 检出目录）
+cd <contract-repo>
 npm test                        # 17/17 pass（2026-11-17 实测）
 git status --porcelain          # 必须干净
 node -e "console.log(require('./package.json').version)"   # 1.2.0
 
 # B. dsh-fang 仓库（当前分支 feat/accel-p0）
-cd E:\GPT\dsh-fang
+cd <dsh-fang-repo>
 node tools/release/preflight.mjs --e2e     # 必须 GREEN（tests 全绿 + e2e 117/117 + allow-list + main-city）
 npm run release:check                      # 发布顺序/版本一致性/registry/artifact 检查
 
