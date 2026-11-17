@@ -110,7 +110,8 @@
     "setup:lsp-live": "node tools/release/lsp-live-setup.mjs",
     "test:lsp-live": "node tools/e2e.mjs --lsp",
     "test:lsp-bundle": "node tools/release/lsp-bundle-install.mjs",
-    "verify:lsp-evidence": "node tools/release/lsp-evidence.mjs"
+    "verify:lsp-evidence": "node tools/release/lsp-evidence.mjs",
+    "check:lsp-mother": "node tools/release/lsp-mother-check.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {
