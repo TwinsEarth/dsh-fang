@@ -3360,7 +3360,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
                 : '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing'),
               onClick: async () => {
                 if (next === 'accelerated' && !installed) {
-                  toast({ tone: 'warn', title: '分身Core核心加速引擎', message: '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing') })
+                  toast({ tone: 'warn', title: '分身Core核心加速引擎', message: '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing') + '（设置未改变）' })
                   return
                 }
                 try {

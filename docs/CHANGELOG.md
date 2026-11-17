@@ -18,6 +18,7 @@
 - forker：`provision({coreMode:'accelerated'})` 生成极简 profile；`spawn` 按 coreMode 解析 CLI，缺失即失败（**删除静默回退 stock**）；加速模式跳过 fork-seed、官方 node_modules 镜像与官方 headless overlay；`publicFork.coreMode`；
 - 开关**不是热更新**：只决定「下一次打开分身」用哪个 core；新派生 / 归档还原 / autostart 会在启动前按开关**重新 provision** 该分身 profile（会话目录不动），运行中的分身保持原 core 直到重新打开；
 - 面板按钮文案：**「分身Core核心加速引擎：官方 / 一键加速」**；切换后提示「重新打开分身 Web 生效」；
+- **未安装加速核 fail-closed**：点「一键加速」→ 明确提示 `accelerated-cli-missing`（设置未改变）；服务端 POST 同样返回 409 + `unchanged:true` 且不写设置；GET 视图 `effectiveMode:null` + `blocked`（不做静默 stock 降级）；
 - orchestrator：新派生/归档还原/autostart 读取开关；`taskView.coreMode`；加速缺失错误透传 `accelerated-cli-missing` + `searched`；会话策略：**默认只新会话**（`new`），`copy` 允许把旧会话**复制成新副本**导入（绝不原地挂载），`inherit` 归一为 `copy`；
 - client.js：母体头部「分身核心：原版/加速版」开关（M-09）+ 分身卡「加速核」徽标 + 刷新轮询 `/fang/api/fork-core`；
 - approver：Windows ACL 检查改为「仅宽泛主体 + 写权限」才禁用文件桥（继承只读条目不再误判）。

@@ -85,6 +85,7 @@ npm run test:accel-live                                                   # fork
 | 数据安全 | 重新 provision 只重放 profile 配置；分身 `sessions/` 与生产数据不动 |
 | 分身卡徽标 | `taskView.coreMode` / `publicFork.coreMode` → 卡片显示「加速核」 |
 | 启动失败 | 加速核缺失 → 任务错误 `accelerated-cli-missing`（附 `searched` 轨迹），**绝不静默回退 stock**；端口继续池预分配 + 冲突拒绝 |
+| 切档防护 | `POST /fang/api/fork-core` 请求 `mode:'accelerated'` 但加速核未安装 → **409 `accelerated-cli-missing` + `unchanged:true`**，设置文件不写；GET 视图 `effectiveMode:null` + `blocked:'accelerated-cli-missing'`（不伪装成 stock） |
 | 会话策略 | **`sessionMode:'new'`（默认）**：加速分身只建新会话，旧会话不导入；**`sessionMode:'copy'`**：允许导入旧会话，但只把会话目录**复制成新副本**进分身 home（绝不原地挂载/读原会话）；`inherit` 为旧别名，统一归一为 `copy` |
 | 审计 | 切换写 `fork-core-settings` 与 `fang/fork-core-switched` 事件/审计 |
 

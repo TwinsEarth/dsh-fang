@@ -44,7 +44,7 @@ import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 // P0: the former "accelerated Web sidecar" (a second mother Web) was retired — the
 // accelerator serves fork Web UIs only. See /fang/api/fork-core.
-import { readForkCoreSettings, writeForkCoreSettings } from '../lib/fork-core-settings.mjs'
+import { readForkCoreSettings, resolveForkCoreState, writeForkCoreSettings } from '../lib/fork-core-settings.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
@@ -3202,12 +3202,13 @@ export function apply(ctx, config) {
           : { installable: true, accelerated: { installed: false, version: null, error: 'forker-unavailable' }, forks: {} }
         const settings = forkCoreSettings()
         const installed = base?.accelerated?.installed === true
+        const state = resolveForkCoreState(settings, { installed })
         return {
           ok: true,
-          mode: settings.mode,
-          sessionMode: settings.sessionMode,
-          effectiveMode: settings.mode === 'accelerated' && !installed ? 'stock' : settings.mode,
-          blocked: settings.mode === 'accelerated' && !installed ? 'accelerated-cli-missing' : null,
+          mode: state.mode,
+          sessionMode: state.sessionMode,
+          effectiveMode: state.effectiveMode,
+          blocked: state.blocked,
           accelerated: base?.accelerated ?? { installed: false, version: null },
           forks: base?.forks ?? {},
           essence: 'stock',
@@ -3225,6 +3226,20 @@ export function apply(ctx, config) {
         }
         if (body?.sessionMode !== undefined && !['new', 'copy', 'inherit'].includes(String(body.sessionMode))) {
           return json(res, 400, { ok: false, error: 'invalid-fork-session-mode' })
+        }
+        // 服务端同样 fail-closed：未安装加速核时拒绝切到加速档，且绝不写设置（不改档、不静默降级）。
+        if (String(body?.mode ?? '') === 'accelerated') {
+          const view = forkCoreView()
+          if (view.accelerated?.installed !== true) {
+            return json(res, 409, {
+              ok: false,
+              error: 'accelerated-cli-missing',
+              unchanged: true,
+              detail: '加速核未安装：设置未修改',
+              accelerated: view.accelerated,
+              searched: view.accelerated?.searched ?? [],
+            })
+          }
         }
         const written = writeForkCoreSettings(layout.dataDir, {
           ...(body?.mode !== undefined ? { mode: String(body.mode) } : {}),

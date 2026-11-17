@@ -45,8 +45,24 @@ export function normalizeForkCoreSettings(raw) {
   }
 }
 
-/** Read `<dataDir>/fork-core.json`; a missing/corrupt file means stock/new. */
-export function readForkCoreSettings(dataDir, { readImpl = readJson } = {}) {
+/**
+ * Pure: resolve the panel/API view from persisted settings + install state.
+ * When high gear is selected without an installed accelerated core this MUST NOT
+ * report a silent stock fallback: `effectiveMode` is null and `blocked` explains why.
+ * @returns {{mode:string, sessionMode:string, effectiveMode:string|null, blocked:string|null}}
+ */
+export function resolveForkCoreState(settings, { installed = false } = {}) {
+  const normalized = normalizeForkCoreSettings(settings)
+  const blocked = normalized.mode === 'accelerated' && installed !== true ? 'accelerated-cli-missing' : null
+  return {
+    mode: normalized.mode,
+    sessionMode: normalized.sessionMode,
+    effectiveMode: blocked ? null : normalized.mode,
+    blocked,
+  }
+}
+
+/** Read `<dataDir>/fork-core.json`; a missing/corrupt file means stock/new. */export function readForkCoreSettings(dataDir, { readImpl = readJson } = {}) {
   const file = path.join(String(dataDir ?? ''), FORK_CORE_FILE)
   try {
     return normalizeForkCoreSettings(readImpl(file, null))

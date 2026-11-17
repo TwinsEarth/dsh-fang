@@ -15,6 +15,7 @@ import {
   normalizeForkCoreSettings,
   normalizeForkSessionMode,
   readForkCoreSettings,
+  resolveForkCoreState,
   writeForkCoreSettings,
 } from '../src/lib/fork-core-settings.mjs'
 
@@ -72,6 +73,20 @@ test('missing dataDir is an explicit write error', () => {
   assert.deepEqual(writeForkCoreSettings('', { mode: 'stock' }), { ok: false, error: 'no-data-dir' })
 })
 
+test('resolveForkCoreState: no silent stock fallback when high gear is uninstalled', () => {
+  const stock = resolveForkCoreState({ mode: 'stock', sessionMode: 'new' }, { installed: false })
+  assert.deepEqual(stock, { mode: 'stock', sessionMode: 'new', effectiveMode: 'stock', blocked: null })
+
+  const blocked = resolveForkCoreState({ mode: 'accelerated', sessionMode: 'new' }, { installed: false })
+  assert.equal(blocked.mode, 'accelerated')
+  assert.equal(blocked.effectiveMode, null)
+  assert.equal(blocked.blocked, 'accelerated-cli-missing')
+
+  const ready = resolveForkCoreState({ mode: 'accelerated', sessionMode: 'copy' }, { installed: true })
+  assert.equal(ready.effectiveMode, 'accelerated')
+  assert.equal(ready.blocked, null)
+})
+
 test('routes and UI are wired (source guards)', () => {
   const orchestrator = fs.readFileSync(path.join(REPO, 'src', 'plugins', 'orchestrator.mjs'), 'utf8')
   assert.match(orchestrator, /routeMethods\(`\$\{prefix\}\/api\/fork-core`, \{/)
@@ -87,9 +102,14 @@ test('routes and UI are wired (source guards)', () => {
   // 旧会话只以副本进入加速分身（绝不原地挂载）；`new` 时跳过导入。
   assert.match(orchestrator, /coreSettings\.sessionMode === 'copy'/)
   assert.match(orchestrator, /copied: true, source: 'copy'/)
+  // 未安装加速核：服务端 fail-closed（409 + unchanged），且视图不做静默降级。
+  assert.match(orchestrator, /view\.accelerated\?\.installed !== true/)
+  assert.match(orchestrator, /unchanged: true/)
+  assert.match(orchestrator, /resolveForkCoreState/)
   assert.match(orchestrator, /accelerated-new-session/)
   const client = fs.readFileSync(path.join(REPO, 'client.js'), 'utf8')
   assert.match(client, /分身Core核心加速引擎：(官方|一键加速)/)
+  assert.match(client, /设置未改变/)
   assert.match(client, /重新打开分身 Web 生效/)
   assert.match(client, /dataBtnId: 'M-09'/)
   assert.match(client, /'data-core': 'accelerated'/)
