@@ -247,6 +247,40 @@ async function main() {
     check('GET /fang/api/sync/status 200', syncStatus.status === 200 && syncStatus.body?.ok === true, JSON.stringify(syncStatus.body ?? null).slice(0, 160))
     const bridgeStatus = await api('/fang/api/bridge/status')
     check('GET /fang/api/bridge/status fail-closed', bridgeStatus.status === 200 && bridgeStatus.body?.ok === false && bridgeStatus.body?.code === 'bridge-unavailable', JSON.stringify(bridgeStatus.body ?? null).slice(0, 160))
+
+    // ── P1/D2：分身核心开关（面板「官方 / 一键加速」）契约 ──────────────────
+    const forkCore = await api('/fang/api/fork-core')
+    const fc = forkCore.body ?? {}
+    check('GET /fang/api/fork-core 200 + shape', forkCore.status === 200 && fc.ok === true
+      && ['stock', 'accelerated'].includes(fc.mode)
+      && ['new', 'copy'].includes(fc.sessionMode)
+      && (fc.effectiveMode === null || ['stock', 'accelerated'].includes(fc.effectiveMode))
+      && typeof fc.accelerated === 'object' && fc.accelerated !== null
+      && typeof fc.accelerated.installed === 'boolean'
+      && fc.accelerated.limitBytes === 1024 * 1024 * 1024
+      && typeof fc.accelerated.requiresConfirmation === 'boolean'
+      && typeof fc.forks?.stock === 'number' && typeof fc.forks?.accelerated === 'number',
+      JSON.stringify({ status: forkCore.status, mode: fc.mode, sessionMode: fc.sessionMode, accel: fc.accelerated ?? null }).slice(0, 200))
+    check('fork-core essence is pinned to stock', fc.essence === 'stock')
+    const modeBefore = fc.mode
+    if (fc.accelerated?.installed !== true) {
+      // 未安装加速核：服务端必须 fail-closed（409 + unchanged），且设置不被修改。
+      const rejected = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: 'accelerated' }) })
+      check('fork-core rejects accelerated without install (409 unchanged)', rejected.status === 409
+        && rejected.body?.error === 'accelerated-cli-missing' && rejected.body?.unchanged === true,
+        JSON.stringify({ status: rejected.status, error: rejected.body?.error, unchanged: rejected.body?.unchanged }))
+      const after = await api('/fang/api/fork-core')
+      check('fork-core setting unchanged after rejection', after.body?.mode === modeBefore && after.body?.blocked === null,
+        JSON.stringify({ before: modeBefore, after: after.body?.mode }))
+    } else {
+      const toAccel = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: 'accelerated' }) })
+      check('fork-core switch to accelerated persisted', toAccel.status === 200 && toAccel.body?.mode === 'accelerated' && toAccel.body?.effectiveMode === 'accelerated',
+        JSON.stringify({ status: toAccel.status, mode: toAccel.body?.mode, effective: toAccel.body?.effectiveMode }))
+      const backToStock = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: 'stock' }) })
+      check('fork-core switch back to stock persisted', backToStock.status === 200 && backToStock.body?.mode === 'stock',
+        JSON.stringify({ status: backToStock.status, mode: backToStock.body?.mode }))
+    }
+
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
     check('mother exposes 8 mother-side services', Object.values(status.body?.services ?? {}).filter(Boolean).length >= 5)
 

@@ -32,7 +32,7 @@
 - 加速核真机安装：`@twinsearth/dsh 3.5.0`（651 包）；
 - `accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真派生通过（identity role=fork, version=3.5.0）；
 - 单测：accelerated-install 10、accelerated-fork 9、fork-core-settings 8；
-- `tools/e2e.mjs` 95/95；allow-list 110 路由 findings=0；main-city source gate grade=A。
+- `tools/e2e.mjs` **99/99**（新增 fork-core 契约断言：view shape、essence=stock、未安装切档 409+unchanged、设置不变）；allow-list 110 路由 findings=0；main-city source gate grade=A；`tools/ui-rich-smoke.mjs` 新增 FORK-CORE-00..04（按钮文案/切换 toast/回切/加速核徽标/端点）
 
 ### 注意
 
