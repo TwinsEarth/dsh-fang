@@ -85,7 +85,6 @@ async function waitFor(fn, { timeoutMs = 60000, intervalMs = 500, label = 'condi
   return { ok: false, error: `timeout waiting for ${label}`, last }
 }
 
-/** Create a real multi-frame session log + workspace index so /api/sessions can be asserted. */
 function seedSession(homeRoot, { sessionId, workspacePath, title }) {
   const sessionsDir = path.join(homeRoot, 'sessions', encodeWorkspaceKey(workspacePath), sessionId)
   fs.mkdirSync(sessionsDir, { recursive: true })
@@ -102,6 +101,21 @@ function seedSession(homeRoot, { sessionId, workspacePath, title }) {
     global: { initialized: true, defaultWorkspaceId: 'ws-e2e', workspaceIds: ['ws-e2e'], archivedSessionIds: [], pinnedSessionIds: [] },
     tables: { workspaces: { 'ws-e2e': { path: workspacePath, title: 'E2E', sessionIds: [sessionId], createdAt: '2026-10-16T05:35:00.313Z', updatedAt: '2026-11-01T02:44:03.199Z' } } },
   }, null, 2))
+}
+
+/**
+ * M3.3 workspaceRoot 策略：把一个 fork 任务（含 workspace 索引）登记进任务 registry，
+ * 让母体的 LSP 允许根自动登记该 fork 的工作区（“母体 + 所有 fork 工作区根，显式登记”）。
+ */
+function seedLspForkTask(homeRoot, forkHome) {
+  const dataDir = path.join(homeRoot, 'fang', 'e2e')
+  fs.mkdirSync(dataDir, { recursive: true })
+  const file = path.join(dataDir, 'tasks.json')
+  let existing = { version: 2, forks: [] }
+  try { existing = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* first run */ }
+  const forks = Array.isArray(existing.forks) ? existing.forks.filter((task) => task?.forkId !== 'lsp-fork-probe') : []
+  forks.push({ forkId: 'lsp-fork-probe', homeDir: forkHome, coreMode: 'accelerated', status: 'running', createdAt: new Date().toISOString() })
+  fs.writeFileSync(file, JSON.stringify({ version: 2, at: new Date().toISOString(), forks }, null, 2))
 }
 
 function makeProfile(homeRoot) {
@@ -123,6 +137,17 @@ function makeProfile(homeRoot) {
     fs.mkdirSync(lspWorkspace, { recursive: true })
     fs.writeFileSync(path.join(lspWorkspace, 'a.ts'), 'export const base = 1\nexport function add(x: number) {\n  return x + base\n}\n')
     fs.writeFileSync(path.join(lspWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, target: 'ES2022', module: 'ESNext' }, include: ['a.ts'] }, null, 2))
+    // Fork workspace fixture: the task registry entry below registers this root explicitly.
+    const forkHome = path.join(homeRoot, 'lsp-fork-home')
+    const forkWorkspace = path.join(homeRoot, 'lsp-fork-workspace')
+    fs.mkdirSync(path.join(forkHome, 'storages'), { recursive: true })
+    fs.mkdirSync(forkWorkspace, { recursive: true })
+    fs.writeFileSync(path.join(forkWorkspace, 'a.ts'), 'export const forkBase = 2\nexport function forkUse(x: number) {\n  return x + forkBase\n}\n')
+    fs.writeFileSync(path.join(forkHome, 'storages', 'workspace.json'), JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { initialized: true, workspaceIds: ['fw-lsp'] },
+      tables: { workspaces: { 'fw-lsp': { path: forkWorkspace, title: 'LSP fork', sessionIds: [] } } },
+    }, null, 2))
   }
   const lspDelegate = LSP_MODE
     ? '        lsp:\n          allowedRoots:\n            - ' + JSON.stringify(lspWorkspace) + '\n'
@@ -183,6 +208,8 @@ async function main() {
   const E2E_SESSION_ID = 'session-11111111-2222-4333-8444-555555555555'
   const E2E_WS_PATH = 'E:\\e2e-ws'
   const LSP_WS = path.join(homeRoot, 'lsp-workspace')
+  const LSP_FORK_HOME = path.join(homeRoot, 'lsp-fork-home')
+  const LSP_FORK_WS = path.join(homeRoot, 'lsp-fork-workspace')
   seedSession(homeRoot, { sessionId: E2E_SESSION_ID, workspacePath: E2E_WS_PATH, title: E2E_NATIVE_TITLE })
   const profileDir = makeProfile(homeRoot)
   console.log(`e2e: home=${homeRoot}`)
@@ -392,6 +419,7 @@ async function main() {
       && delegatedSlow.body?.ok === false && delegatedSlow.body?.error?.code === 'contract-timeout',
       JSON.stringify({ status: delegatedSlow.status, code: delegatedSlow.body?.error?.code ?? null }).slice(0, 160))
     // B-6：LSP 委托——路线 A 真实 provider（--lsp）或测试缝（默认）；写类子命令可读拒绝。
+    if (LSP_MODE) seedLspForkTask(homeRoot, LSP_FORK_HOME)
     const lspReadParams = LSP_MODE
       ? { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_WS }
       : { tool: 'lsp', action: 'definition', file: 'example.mjs', line: 1, character: 1 }
@@ -427,6 +455,11 @@ async function main() {
         JSON.stringify({ status: lspDiagnostics.status, code: lspDiagnostics.body?.error?.code ?? null, provider: lspDiagnostics.body?.result?.provider ?? null }).slice(0, 180))
     }
     if (LSP_MODE) {
+      const lspForkRoot = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_FORK_WS })
+      check('delegated lsp auto-registers fork workspace root (task registry explicit registration)', lspForkRoot.status === 200
+        && lspForkRoot.body?.ok === true && lspForkRoot.body?.result?.provider === 'mother-lsp'
+        && lspForkRoot.body.result.kind === 'locations' && lspForkRoot.body.result.locations.length > 0,
+        JSON.stringify({ status: lspForkRoot.status, code: lspForkRoot.body?.error?.code ?? null, detail: lspForkRoot.body?.error?.detail ?? null }).slice(0, 240))
       const lspHover = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'hover', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_WS })
       check('delegated lsp hover via real mother provider returns normalized hover', lspHover.status === 200
         && lspHover.body?.ok === true && lspHover.body?.result?.provider === 'mother-lsp'
