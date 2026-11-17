@@ -49,6 +49,10 @@ import {
   capabilityCatalog, checkDelegation, createDelegationGate, DELEGATE_ERROR, delegationAuditRecord,
   DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
 } from '../lib/contract-delegation.mjs'
+import {
+  PRO_CAPABILITIES, PRO_STAGE, checkProGate, createProApprovalStore, normalizeProConfig,
+  proAuditRecord, providerMissingResult, runProCapability,
+} from '../lib/pro-delegation.mjs'
 import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
 import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
@@ -242,6 +246,14 @@ export const Config = z.object({
       readTimeoutMs: z.number().min(100).max(120000).default(5000),
       writeTimeoutMs: z.number().min(100).max(600000).default(30000),
       maxConcurrent: z.number().min(1).max(64).default(4).description('委托并发上限；超过立即 contract-rate-limited（fail-closed，不排队）'),
+      pro: z.object({
+        enabled: z.boolean().default(false).description('B-8 专业版总开关：默认 false，未开启时 fang.code.run 一律拒绝'),
+        allow: z.array(z.string()).default([]).description('逐项手动授权激活列表（每项独立显式 allow）'),
+        approvalTtlMs: z.number().min(1000).max(3600000).default(120000),
+        maxConcurrent: z.number().min(1).max(8).default(1),
+        timeoutMs: z.number().min(100).max(600000).default(30000),
+        maxOutputBytes: z.number().min(1024).max(1048576).default(65536),
+      }).default({}),
     }).default({}),
   }).default({}),
 })
@@ -2080,6 +2092,9 @@ export function apply(ctx, config) {
   })
   const delegationCfg = normalizeDelegationConfig(cfg.contract?.delegate ?? {})
   const delegationGate = createDelegationGate({ maxConcurrent: delegationCfg.maxConcurrent })
+  const proCfg = normalizeProConfig(cfg.contract?.delegate?.pro ?? {})
+  const proGate = createDelegationGate({ maxConcurrent: proCfg.maxConcurrent })
+  const proApprovals = createProApprovalStore()
   const delegateUnavailable = (message, code = DELEGATE_ERROR.UNAVAILABLE) => { const error = new Error(message); error.code = code; throw error }
   const contractServer = createContractServer({
     role: gate.role,
@@ -3325,6 +3340,33 @@ export function apply(ctx, config) {
           const delegated = body?.meta?.delegate === true
           const source = String(body?.meta?.source ?? body?.meta?.instanceId ?? '').slice(0, 120)
           if (delegated) {
+            // B-8 激活链（专业版，默认关闭）：① 开关 → ② 逐项 allow → ③ 每次调用审批票 →
+            // ④ 审计 + 资源限额。缺一环即显式拒绝（错误码 + detail.stage/reason），不静默降级。
+            if (PRO_CAPABILITIES.includes(String(body?.method ?? ''))) {
+              const proGateResult = checkProGate({ method: body?.method, config: proCfg, ticketId: body?.params?.approvalTicket, source, params: body?.params })
+              if (proGateResult.ok !== true) {
+                try { audit('contract-delegate', proAuditRecord({ method: body?.method, source, outcome: 'rejected', stage: proGateResult.stage, error: proGateResult.code, ticketId: body?.params?.approvalTicket, limits: proCfg })) } catch { /* audit optional */ }
+                return json(res, 200, createResponse({ id: body?.id, error: { code: proGateResult.code, message: proGateResult.message, detail: { stage: proGateResult.stage, digest: proGateResult.digest ?? null } } }))
+              }
+              if (exceedPayloadLimit(body?.params, delegationCfg.maxPayloadBytes)) {
+                try { audit('contract-delegate', proAuditRecord({ method: body?.method, source, outcome: 'rejected', stage: PRO_STAGE.LIMIT_EXCEEDED, error: DELEGATE_ERROR.INVALID, ticketId: body?.params?.approvalTicket, limits: proCfg })) } catch { /* audit optional */ }
+                return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.INVALID, message: 'delegated payload exceeds maxPayloadBytes', detail: { stage: PRO_STAGE.LIMIT_EXCEEDED } } }))
+              }
+              const consumed = proApprovals.consume({ id: body?.params?.approvalTicket, capability: body?.method, source, digest: proGateResult.digest })
+              if (consumed.ok !== true) {
+                try { audit('contract-delegate', proAuditRecord({ method: body?.method, source, outcome: 'rejected', stage: consumed.stage ?? PRO_STAGE.APPROVAL_INVALID, error: DELEGATE_ERROR.APPROVAL_REQUIRED, ticketId: body?.params?.approvalTicket, limits: proCfg })) } catch { /* audit optional */ }
+                return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.APPROVAL_REQUIRED, message: `approval ticket rejected: ${consumed.reason ?? 'invalid'}`, detail: { stage: PRO_STAGE.APPROVAL_INVALID, reason: consumed.reason ?? 'invalid' } } }))
+              }
+              const proRun = await runProCapability({
+                execute: () => providerMissingResult(body?.method),
+                timeoutMs: proCfg.timeoutMs,
+                maxOutputBytes: proCfg.maxOutputBytes,
+                gate: proGate,
+              })
+              const proOutcome = proRun.code === DELEGATE_ERROR.RATE_LIMITED ? 'rate-limited' : (proRun.ok === true ? 'ok' : 'error')
+              try { audit('contract-delegate', proAuditRecord({ method: body?.method, source, outcome: proOutcome, stage: proRun.stage, error: proRun.ok === true ? null : proRun.code, ticketId: body?.params?.approvalTicket, latencyMs: proRun.latencyMs, limits: proCfg })) } catch { /* audit optional */ }
+              return json(res, 200, createResponse({ id: body?.id, error: { code: proRun.code, message: proRun.message, detail: { stage: proRun.stage, activation: 'verified', limits: { timeoutMs: proCfg.timeoutMs, maxConcurrent: proCfg.maxConcurrent, maxOutputBytes: proCfg.maxOutputBytes } } } }))
+            }
             const decision = checkDelegation({ method: body?.method, allow: delegationCfg.allow, config: delegationCfg })
             if (decision.ok !== true) {
               try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rejected', error: decision.error, latencyMs: 0 })) } catch { /* audit optional */ }
@@ -3357,6 +3399,32 @@ export function apply(ctx, config) {
           }
           const out = await contractServer.invoke(body)
           return json(res, 200, out)
+        })
+        // B-8 专业版审批票签发（每次调用一张，一次性 + TTL；签发需要母体操作者 token）。
+        route('POST', `${contractPath}/pro/approval`, async (req, res) => {
+          if (!contractCfg.token) return json(res, 503, { ok: false, code: 'contract-token-required' })
+          if (!contractAuthorized(req)) return json(res, 401, { ok: false, code: 'contract-unauthorized' })
+          const body = await readBody(req)
+          if (!body || typeof body !== 'object') return json(res, 400, { ok: false, code: 'invalid-envelope' })
+          const capability = String(body.capability ?? '').trim()
+          if (!PRO_CAPABILITIES.includes(capability)) return json(res, 200, { ok: false, code: DELEGATE_ERROR.UNSUPPORTED, stage: 'not-pro', message: `not a pro capability: ${capability || '(empty)'}` })
+          if (proCfg.enabled !== true) return json(res, 200, { ok: false, code: DELEGATE_ERROR.UNSUPPORTED, stage: PRO_STAGE.DISABLED, message: 'pro capability disabled (default off): enable contract.delegate.pro.enabled first' })
+          if (!proCfg.allow.includes(capability)) return json(res, 200, { ok: false, code: DELEGATE_ERROR.UNSUPPORTED, stage: PRO_STAGE.NOT_ALLOWED, message: `pro capability not activated: add '${capability}' to contract.delegate.pro.allow` })
+          const issued = proApprovals.issue({ capability, source: String(body.source ?? '').slice(0, 120), digest: '', ttlMs: proCfg.approvalTtlMs })
+          if (issued.ok !== true) return json(res, 200, { ok: false, code: DELEGATE_ERROR.INVALID, stage: 'invalid-request', message: String(issued.reason ?? 'cannot issue approval') })
+          try { audit('contract-delegate', proAuditRecord({ method: capability, source: body.source, outcome: 'approval-issued', stage: 'approval-issued', ticketId: issued.ticket.id, limits: proCfg })) } catch { /* audit optional */ }
+          return json(res, 200, { ok: true, approval: { id: issued.ticket.id, capability: issued.ticket.capability, source: issued.ticket.source, expiresAt: issued.ticket.expiresAt } })
+        })
+        route('GET', `${contractPath}/pro/status`, (req, res) => {
+          if (!contractCfg.token) return json(res, 503, { ok: false, code: 'contract-token-required' })
+          if (!contractAuthorized(req)) return json(res, 401, { ok: false, code: 'contract-unauthorized' })
+          return json(res, 200, {
+            ok: true,
+            enabled: proCfg.enabled,
+            allow: [...proCfg.allow],
+            pendingTickets: proApprovals.pendingCount(),
+            limits: { approvalTtlMs: proCfg.approvalTtlMs, maxConcurrent: proCfg.maxConcurrent, timeoutMs: proCfg.timeoutMs, maxOutputBytes: proCfg.maxOutputBytes },
+          })
         })
         route('GET', `${contractPath}/health`, (req, res) => json(res, 200, {
           ok: true, contractVersion: CONTRACT_VERSION, role: gate.role, methods: contractServer.hello().methods,

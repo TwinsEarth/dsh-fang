@@ -1,3 +1,7 @@
+## Unreleased（v3.5.0 发布后）
+
+- **B-8 专业版激活链**（`fang.code.run`，默认关闭）：① `contract.delegate.pro.enabled`（默认 false）→ ② `pro.allow` 逐项显式授权 → ③ 每次调用一次性审批票（`POST /fang/api/contract/pro/approval`，TTL + 能力/参数摘要绑定，重放显式拒绝）→ ④ 审计（stage/outcome/limits，ticket 仅存哈希）+ 资源限额（`maxConcurrent`/`timeoutMs`/`maxOutputBytes`）；四环缺一即显式拒绝（错误码 + `detail.stage`）。当前无 `code-runtime` provider，四环通过后仍 `contract-unavailable` + `stage='provider-missing'`（无副作用、不假成功）。新增 `src/lib/pro-delegation.mjs`、`test/pro-delegation.test.mjs`（10 项）、e2e 5 项（**121/121**）；文档 `docs/B-CONTRACT-CAPABILITIES.md` §0.7。
+
 ## v3.5.0（2026-11-17）
 
 **加速分身：P0 地基 + P1 开关与运行 + P2 兼容与文档。**

@@ -52,6 +52,13 @@
 - 本审计；
 - `package.json` `test:accel-live` 脚本。
 
+### 发布后（Unreleased）：B-8 专业版激活链
+
+- `src/lib/pro-delegation.mjs`：① `pro.enabled` 默认 false → ② `pro.allow` 逐项显式授权 → ③ 一次性审批票（TTL + 能力/参数摘要绑定，重放/过期/串用显式拒绝）→ ④ 审计（stage/outcome/limits，ticket 仅哈希）+ 限额（`maxConcurrent`/`timeoutMs`/`maxOutputBytes`）；
+- Orchestrator：`fang.code.run` 走激活链（`detail.stage` 显式可读）；`POST /fang/api/contract/pro/approval` 签票、`GET /fang/api/contract/pro/status` 可观测；无 `code-runtime` provider → 四环通过后仍 `contract-unavailable`（`stage='provider-missing'`，无副作用）；
+- 测试：`test/pro-delegation.test.mjs` 10 项；e2e **121/121**（新增 5 项：无票/签票/执行验证/重放/status）；
+- 文档：`docs/B-CONTRACT-CAPABILITIES.md` §0.7。
+
 ## 3. 验证证据（本机实测）
 
 ```
