@@ -75,4 +75,5 @@ main-city source gate               grade=A blockers=0
 
 - 版本：3.5.0（开发完成，未发布）；
 - 路由契约：86；
+- **D2 下一阶段**：B（无头能力契约委托）与 UI client half 浏览器映射已立项（`docs/D2-NEXT-PHASE.md`），**不阻塞 v3.5.0 发布**；
 - 未执行：push / tag / GitHub Release / npm publish。发布需用户明确指令并走主城门禁。

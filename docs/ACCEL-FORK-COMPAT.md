@@ -117,6 +117,8 @@ node tools/release/accel-alias-spike.mjs --accel-nm <accel>/node_modules --essen
 
 **推荐 D2 形态**：`C（alias 层）为主 + A（核心映射）自动完成 + B（契约委托）兜底 + 不支持清单显式展示`。
 
+> **B 与 UI client half 已列为下一阶段**：范围/设计/验收/风险见 [`docs/D2-NEXT-PHASE.md`](D2-NEXT-PHASE.md)；v3.5.0 发布不依赖它们。
+
 ## 5. 复现命令（升级加速核后必须重跑这三条 + 插件面冒烟）
 
 ```powershell
