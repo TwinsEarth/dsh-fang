@@ -33,7 +33,7 @@
 - 加速核真机安装：`@twinsearth/dsh 3.5.0`（651 包）；
 - `accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真派生通过（identity role=fork, version=3.5.0）；
 - 单测：accelerated-install 10、accelerated-fork 9、fork-core-settings 8；
-- **M1 能力注册表**：fang 层 `CAPABILITY_CATALOG` + `DEFAULT_READ_ALLOW`；hello 广告按实际注册 handler（新增 3 个委托方法）；白名单校验/错误码表/版本裁剪（1.0 对端裁剪 1.1 方法）/payload 64KiB 上限均有单测（`test/contract-registry.test.mjs`）；vendored 契约 SDK 保持 1.1.0 逐字节不变；
+- **M1 能力注册表**：`CAPABILITY_CATALOG` + `DEFAULT_READ_ALLOW`；hello 广告按实际注册 handler（新增 3 个委托方法）；白名单校验/错误码表/版本裁剪（1.1 对端裁剪 1.2 方法）/payload 64KiB 上限均有单测（`test/contract-registry.test.mjs`）；**contract SDK 升到 1.2.0（仅追加）**：METHODS/METHOD_VERSION/ERROR_CODES 追加委托方法与 7 个委托错误码；vendored `src/contract` 从 contract 仓库重新同步（8 文件 sha256 钉死）；
 - `npm run probe:mother`（`tools/release/mother-capability-probe.mjs`）：只读探测生产母体服务/契约就绪（实测 `sessionCatalog` READY、`/fang/api/sessions` 200）；
 - **B 契约委托 P0**（`src/lib/contract-delegation.mjs` + orchestrator invoke 守卫）：`envelope.meta.delegate=true` 才走委托白名单（默认只读 5 项）、64KiB / 5s 限额超时、`contract-unavailable/unsupported/timeout/invalid-request` 错误码、每次委托审计 `{capability,source,outcome,latencyMs}`；未声明 delegate 的旧调用方语义不变；
 - **M5 审计与限流**：委托并发上限 `contract.delegate.maxConcurrent`（默认 4，超限立即 `contract-rate-limited`，fail-closed 不排队）；委托审计覆盖成功/拒绝/超时/限流（`{capability,source,outcome,error,latencyMs}`）；e2e 审计账本完整性 + 并发压测（`maxConcurrent=2` → ok=2/limited=6）；

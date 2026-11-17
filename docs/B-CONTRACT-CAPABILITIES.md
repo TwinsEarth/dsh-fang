@@ -17,7 +17,7 @@
 | 审计 | 每次委托写 `contract-delegate`：`{capability, source, outcome, error, latencyMs}`（拒绝/成功/错误都记） |
 | 新增方法 | `fang.capability.list`、`fang.decision.list`、`fang.approvals.list`、`fang.session.events`（母体 sessionCatalog.readHead 有界头读，≤200 行 / ≤256KB；服务缺失显式报错）、`fang.tool.invoke`（首批 `tool:'lsp'`） |
 
-**e2e 真实断言**（`tools/e2e.mjs`，2026-11-17）：hello 200/`contractVersion=1.1.0`/**14 个方法**；`capability.list` 返回只读 5 项；`fang.fork.spawn` 委托被拒 `contract-unsupported`；`fang.orchestrator.status` 委托成功；`fang.session.list` 缺服务映射 `contract-unavailable`。
+**e2e 真实断言**（`tools/e2e.mjs`，2026-11-17）：hello 200/`contractVersion=1.2.0`/**18 个方法**；`capability.list` 返回只读 6 项；`fang.fork.spawn` 委托被拒 `contract-unsupported`；`fang.orchestrator.status` 委托成功；`fang.session.list` 缺服务映射 `contract-unavailable`。
 
 **未实现（待确认后推进）**：P1 `fang.tool.invoke`（lsp）/ `fang.chat.import`；异步长任务模型；背压/并发上限；分侧调用方身份（目前记录 `meta.source` 审计，未做 per-fork 鉴权策略）；UI client half。
 
@@ -44,13 +44,13 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | M1 要求 | 实现 | 单测 |
 |---|---|---|
 | 能力注册表 | `CAPABILITY_CATALOG`（fang 委托层，6 项只读）+ `DEFAULT_READ_ALLOW`；未登记默认拒绝 | `M1 registry: fang delegation catalog is append-only, read-only and whitelist-consistent` |
-| hello 广告 | `contract.hello` 广告 **实际注册的 handler**（新增 3 个委托方法随注册自动出现；vendored contract SDK 保持 1.1.0 逐字节不变） | `M1 hello advertises fang-layer handlers registered on the contract server` |
+| hello 广告 | `contract.hello` 广告 **实际注册的 handler**（新增 3 个委托方法随注册自动出现；vendored contract SDK 已升到 **1.2.0**，委托方法与错误码进入 append-only 注册表） | `M1 hello advertises registered methods` |
 | 白名单校验 | invoke 路由 `meta.delegate=true` + `checkDelegation()`；未登记 → `contract-unsupported`；`enabled:false` → `contract-unavailable` | `checkDelegation: disabled → contract-unavailable, not listed → contract-unsupported, listed → ok` |
 | 错误码 | fang 委托层稳定表：`contract-unavailable/unauthorized/unsupported/timeout/invalid-request`（唯一性 + 稳定性断言） | `M1 error codes: fang delegation codes are a unique, stable append-only table` |
 | 版本裁剪 | `negotiate()` 按 `METHOD_VERSION` 裁剪：1.0 对端拿不到 1.1 方法（relay），1.1 对端完整可见 | 2 个 `M1 version trimming` 用例 |
 | payload 上限 | `exceedPayloadLimit()`（默认 64KiB）→ `contract-invalid-request` | `exceedPayloadLimit: default 64KiB boundary` |
 
-> 设计取舍：为保持 vendored contract SDK（`@twinsearth/dsh-fang-contract@1.1.0`）**逐字节一致**（有 vendor-sync 门禁），委托方法名/错误码注册在 fang 层；hello 广告仍由实际注册 handler 驱动，对端看到的能力与白名单一致。
+> 设计取舍：契约 SDK 1.2.0 仅做 **append-only**（新增 3 个委托方法 + 7 个委托错误码 + METHOD_VERSION；不改既有方法语义）；vendored 副本已从 contract 仓库重新同步（8 文件 sha256 钉死，vendor-sync 门禁绿色）。委托白名单/限额/审计仍由 fang 层实现。
 
 ### 0.3 M2 验收（P0 只读四件 + B-5 复用，2026-11-17）
 
@@ -158,7 +158,7 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 
 ## 4. 契约版本与兼容
 
-- **只能追加方法**（现有约定）；新增方法标记 `METHOD_VERSION = '1.2'`，`CONTRACT_VERSION` 1.1 → **1.2**（需用户确认）；
+- **只能追加方法**（现有约定）；新增方法标记 `METHOD_VERSION = '1.2'`，`CONTRACT_VERSION` 1.1 → **1.2.0（用户已确认，已实施）**；vendored `src/contract` 从 contract 仓库 1.2.0 重新同步（8 文件 sha256 钉死）；
 - `contract.hello` 自动广告已注册方法（server.js 由 handlers 生成 methods 列表），旧调用方不受影响；
 - 未登记/旧版本 → `unsupported-method` / `unsupported-version`（可读错误，不静默）。
 
@@ -187,4 +187,4 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 1. `fang.code.run`（P2，高风险，需单独评审）；
 2. LSP **真实执行 provider** 接入母体 DSH 工具运行时（需确认工具调用 API）；
 3. UI client half 浏览器映射（独立阶段，先做单个 spike）；
-4. 契约 SDK 版本：保持 vendored `1.1.0` 逐字节不变（委托方法/错误码为 fang 层 append-only，不升契约包）。
+4. 契约 SDK 版本：**已按用户确认升到 1.2.0（仅追加）**；vendored 副本从 contract 仓库重新同步（8 文件 sha256 钉死），旧 1.1 对端按 METHOD_VERSION 自动裁剪 1.2 方法。

@@ -5,15 +5,17 @@
 // 仅处理委托调用（envelope.meta.delegate === true）；未带该标记的旧调用方保持既有语义。
 // 设计：默认拒绝（fail-closed）；未登记能力返回 contract-unsupported；委托层关闭返回 contract-unavailable。
 
-// 这些错误码属于 fang 委托层（vendored contract SDK 保持 1.1.0 不改，避免破坏 vendored 契约逐字节校验）。
+import { ERROR_CODES } from '../contract/constants.js'
+
+// B 委托错误码统一来自 contract SDK 1.2（append-only 注册表）。
 export const DELEGATE_ERROR = Object.freeze({
-  UNAVAILABLE: 'contract-unavailable',
-  UNAUTHORIZED: 'contract-unauthorized',
-  UNSUPPORTED: 'contract-unsupported',
-  TIMEOUT: 'contract-timeout',
-  INVALID: 'contract-invalid-request',
-  APPROVAL_REQUIRED: 'contract-approval-required',
-  RATE_LIMITED: 'contract-rate-limited',
+  UNAVAILABLE: ERROR_CODES.CONTRACT_UNAVAILABLE,
+  UNAUTHORIZED: ERROR_CODES.CONTRACT_UNAUTHORIZED,
+  UNSUPPORTED: ERROR_CODES.CONTRACT_UNSUPPORTED,
+  TIMEOUT: ERROR_CODES.CONTRACT_TIMEOUT,
+  INVALID: ERROR_CODES.CONTRACT_INVALID_REQUEST,
+  APPROVAL_REQUIRED: ERROR_CODES.CONTRACT_APPROVAL_REQUIRED,
+  RATE_LIMITED: ERROR_CODES.CONTRACT_RATE_LIMITED,
 })
 
 export const DELEGATE_KIND = Object.freeze({ READ: 'read', WRITE: 'write' })
@@ -23,14 +25,14 @@ export const DELEGATE_KIND = Object.freeze({ READ: 'read', WRITE: 'write' })
  * @typedef {{method:string, kind:'read'|'write', approval:'none'|'required', since:string, summary:string}} CapabilityDescriptor
  */
 export const CAPABILITY_CATALOG = Object.freeze([
-  { method: 'fang.capability.list', kind: 'read', approval: 'none', since: '1.1', summary: '列出已放行的委托能力（引导方法，总是可用）' },
+  { method: 'fang.capability.list', kind: 'read', approval: 'none', since: '1.2', summary: '列出已放行的委托能力（引导方法，总是可用）' },
   { method: 'fang.orchestrator.status', kind: 'read', approval: 'none', since: '1.0', summary: '母体 orchestrator 状态' },
   { method: 'fang.session.list', kind: 'read', approval: 'none', since: '1.0', summary: '母体会话目录（只读）' },
-  { method: 'fang.session.events', kind: 'read', approval: 'none', since: '1.1', summary: '母体会话有界头读（只读；<200 行）' },
-  { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体决策中心快照（只读）' },
-  { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体审批队列（只读）' },
-  { method: 'fang.tool.invoke', kind: 'write', approval: 'required', since: '1.1', summary: '工具委托（首批 lsp：只读子命令放行，写类需审批；默认不在白名单）' },
-  { method: 'fang.chat.import', kind: 'write', approval: 'required', since: '1.1', summary: '官方会话导入（默认 dryRun；真实导入需审批；默认不在白名单）' },
+  { method: 'fang.session.events', kind: 'read', approval: 'none', since: '1.2', summary: '母体会话有界头读（只读；<200 行）' },
+  { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.2', summary: '母体决策中心快照（只读）' },
+  { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.2', summary: '母体审批队列（只读）' },
+  { method: 'fang.tool.invoke', kind: 'write', approval: 'required', since: '1.2', summary: '工具委托（首批 lsp：只读子命令放行，写类需审批；默认不在白名单）' },
+  { method: 'fang.chat.import', kind: 'write', approval: 'required', since: '1.2', summary: '官方会话导入（默认 dryRun；真实导入需审批；默认不在白名单）' },
 ])
 
 export const DEFAULT_READ_ALLOW = Object.freeze([

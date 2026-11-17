@@ -22,7 +22,7 @@ import vm from 'node:vm'
 import zlib from 'node:zlib'
 
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
-import { createEnvelope } from '../src/contract/index.js'
+import { CONTRACT_VERSION as E2E_CONTRACT_VERSION, createEnvelope } from '../src/contract/index.js'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const KEEP = process.argv.includes('--keep')
@@ -290,7 +290,7 @@ async function main() {
     const helloRes = await api('/fang/api/contract/hello', { method: 'POST', headers: contractAuth, body: '{}' })
     const hello = helloRes.body?.result ?? helloRes.body ?? {}
     check('contract.hello advertises version + methods', helloRes.status === 200
-      && String(hello.contractVersion ?? '').startsWith('1.')
+      && hello.contractVersion === E2E_CONTRACT_VERSION && hello.contractVersion === '1.2.0'
       && Array.isArray(hello.methods) && hello.methods.includes('fang.session.list')
       && Array.isArray(hello.capabilities),
       JSON.stringify({ status: helloRes.status, version: hello.contractVersion, methods: (hello.methods ?? []).length }).slice(0, 180))

@@ -11,7 +11,7 @@
  */
 
 export const CONTRACT_PACKAGE = '@twinsearth/dsh-fang-contract'
-export const CONTRACT_VERSION = '1.1.0'
+export const CONTRACT_VERSION = '1.2.0'
 export const PROTOCOL = 'fang-master'
 export const PROTOCOL_VERSION = 1
 export const MIN_COMPATIBLE_MAJOR = 1
@@ -29,6 +29,10 @@ export const METHODS = Object.freeze({
   ORCHESTRATOR_STATUS: 'fang.orchestrator.status',
   RELAY_PUBLISH: 'fang.relay.publish',
   RELAY_STATUS: 'fang.relay.status',
+  // contract 1.2：B 契约委托（只读能力 + 受控工具/导入；白名单由宿主层校验）
+  CAPABILITY_LIST: 'fang.capability.list',
+  DECISION_LIST: 'fang.decision.list',
+  APPROVALS_LIST: 'fang.approvals.list',
 })
 
 /** 方法 → 契约版本（用于协商后的方法裁剪）。 */
@@ -44,6 +48,9 @@ export const METHOD_VERSION = Object.freeze({
   [METHODS.ORCHESTRATOR_STATUS]: '1.0',
   [METHODS.RELAY_PUBLISH]: '1.1',
   [METHODS.RELAY_STATUS]: '1.1',
+  [METHODS.CAPABILITY_LIST]: '1.2',
+  [METHODS.DECISION_LIST]: '1.2',
+  [METHODS.APPROVALS_LIST]: '1.2',
 })
 
 export const CAPABILITIES = Object.freeze([
@@ -63,6 +70,14 @@ export const ERROR_CODES = Object.freeze({
   REMOTE_ERROR: 'remote-error',
   ALL_TRANSPORTS_FAILED: 'all-transports-failed',
   HANDLER_THREW: 'handler-threw',
+  // contract 1.2：B 委托错误码（append-only）
+  CONTRACT_UNAVAILABLE: 'contract-unavailable',
+  CONTRACT_UNAUTHORIZED: 'contract-unauthorized',
+  CONTRACT_UNSUPPORTED: 'contract-unsupported',
+  CONTRACT_TIMEOUT: 'contract-timeout',
+  CONTRACT_INVALID_REQUEST: 'contract-invalid-request',
+  CONTRACT_APPROVAL_REQUIRED: 'contract-approval-required',
+  CONTRACT_RATE_LIMITED: 'contract-rate-limited',
 })
 
 /**

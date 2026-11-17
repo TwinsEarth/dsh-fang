@@ -123,9 +123,11 @@ export function createRelayStore(options = {}) {
     }
     counters.batches += 1
     const acceptedIds = []
-    let duplicates = 0
+    let alreadySeen = 0
+    let inBatchDuplicates = 0
+    let rejectedCount = 0
     for (const event of validated.accepted) {
-      if (seen.has(event.id)) { duplicates += 1; continue }
+      if (seen.has(event.id)) { alreadySeen += 1; continue }
       seen.set(event.id, { at: nowMs(now), cursor: cursor + 1 })
       cursor += 1
       counters.accepted += 1
@@ -133,13 +135,17 @@ export function createRelayStore(options = {}) {
       remember({ id: event.id, type: event.type, at: event.at, cursor })
       lastAt = nowMs(now)
     }
-    counters.duplicates += duplicates
     for (const item of validated.rejected) {
       // 批内重复计入 duplicates；其余非法条目计入 rejected 并留原因（有界）。
-      if (item.reason === 'duplicate-in-batch') { duplicates += 1; counters.duplicates += 1; continue }
-      counters.rejected += 1
+      if (item.reason === 'duplicate-in-batch') { inBatchDuplicates += 1; continue }
+      rejectedCount += 1
       if (lastErrors.length < 50) lastErrors.push({ id: item.id, reason: item.reason })
     }
+    // 两个计数分开累计：duplicates = 已存在 + 批内重复；rejected 只数真正非法的条目。
+    // （1.1.0 曾用 `validated.rejected.length - duplicates` 计算 rejected，重投时会得到负数。）
+    const duplicates = alreadySeen + inBatchDuplicates
+    counters.duplicates += duplicates
+    counters.rejected += rejectedCount
     const batchId = String(params?.batchId ?? `batch-${counters.batches}`)
     const receipt = Object.freeze({
       ok: true,
@@ -147,7 +153,7 @@ export function createRelayStore(options = {}) {
       taskId: params?.taskId === undefined ? null : String(params.taskId),
       accepted: acceptedIds.length,
       duplicates,
-      rejected: validated.rejected.length - duplicates,
+      rejected: rejectedCount,
       cursor,
       acceptedIds,
       peer: peerLabel,

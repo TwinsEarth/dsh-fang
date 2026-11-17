@@ -14,7 +14,7 @@
 
 | 能力域 | 典型接口 | 现状 |
 |---|---|---|
-| 工具执行 | `/fang/api/contract`（contract 1.1）+ adapter 命令通道 | 已有骨架，需补白名单与错误语义 |
+| 工具执行 | `/fang/api/contract`（contract 1.2）+ adapter 命令通道 | 已有骨架，需补白名单与错误语义 |
 | 会话操作 | 会话查询/导出（只读优先） | 已有 `/fang/api/sessions` 只读目录 |
 | 决策/审批 | decisions/approvals API | 已有（母体侧） |
 | 查询/统计 | status/supervision 等只读接口 | 已有 |

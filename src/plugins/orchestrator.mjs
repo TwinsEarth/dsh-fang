@@ -2111,7 +2111,7 @@ export function apply(ctx, config) {
       },
       [CONTRACT_METHODS.ORCHESTRATOR_STATUS]: async () => service.status(),
       // ── B 委托：只读能力（白名单在 invoke 路由统一校验；这里只做能力实现）──
-      'fang.capability.list': async () => ({
+      [CONTRACT_METHODS.CAPABILITY_LIST]: async () => ({
         enabled: true,
         contractVersion: CONTRACT_VERSION,
         capabilities: capabilityCatalog(delegationCfg.allow),
@@ -2203,7 +2203,7 @@ export function apply(ctx, config) {
           return { sleptMs: ms }
         },
       } : {}),
-      'fang.decision.list': async (params) => {
+      [CONTRACT_METHODS.DECISION_LIST]: async (params) => {
         const center = contractService('decisionCenter', 'snapshot', false)
         if (!center || typeof center.snapshot !== 'function') return delegateUnavailable('fang decision center is unavailable')
         const snapshot = center.snapshot()
@@ -2211,7 +2211,7 @@ export function apply(ctx, config) {
         const limit = Math.min(50, Math.max(1, Number(params?.limit) || 20))
         return { items: items.slice(0, limit).map((t) => ({ id: t.id, level: t.level, status: t.status, title: t.title, priority: t.priority ?? null, risk: t.risk ?? null, at: t.createdAt ?? t.at ?? null })), total: items.length }
       },
-      'fang.approvals.list': async (params) => {
+      [CONTRACT_METHODS.APPROVALS_LIST]: async (params) => {
         const approver = contractService('approver', 'pending', false)
         if (!approver) return delegateUnavailable('fang approver is unavailable')
         const pending = typeof approver.pending === 'function' ? approver.pending() : []
