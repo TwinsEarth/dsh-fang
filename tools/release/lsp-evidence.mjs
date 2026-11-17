@@ -68,6 +68,38 @@ if (!stage) {
   check('E9 stdio config servers{command,args,extensionToLanguage}; per-workspace lazy pooled; same execution world', /extensionToLanguage/.test(stdioReadme) && /On the first query for a workspace/.test(stdioReadme) && /pooled/.test(stdioReadme) && /trusts its configured server and adds no sandbox confinement/.test(stdioReadme), 'dsh-lsp-stdio/README.md')
 }
 
+// E10: model-facing lsp tool is 1-based and requires an Agent Session (workspaceRoot from session cwd).
+const toolCandidates = [
+  process.env.FANG_E2E_LSP_STAGE,
+  'E:\\GPT\\.tmp\\e2e-lsp-stage',
+  path.join(os.tmpdir(), 'fang-lsp-stage'),
+].filter(Boolean)
+const toolStage = toolCandidates.find((candidate) => { try { return fs.existsSync(path.join(candidate, 'node_modules', '@deepseek-ai', 'dsh-tool-lsp', 'README.md')) } catch { return false } })
+if (!toolStage) {
+  info('E10 model lsp tool contract', 'staging tree absent; run `npm run setup:lsp-live` to enable static verification')
+} else {
+  const toolReadme = fs.readFileSync(path.join(toolStage, 'node_modules', '@deepseek-ai', 'dsh-tool-lsp', 'README.md'), 'utf8')
+  const toolCode = fs.readFileSync(path.join(toolStage, 'node_modules', '@deepseek-ai', 'dsh-tool-lsp', 'lib', 'index.js'), 'utf8')
+  check('E10 lsp tool: operation/file_path/line/character 1-based, Agent Session required', /file_path/.test(toolReadme) && /positive one-based/.test(toolReadme) && /requires an Agent Session/.test(toolReadme) && /LSP_WORKSPACE_REQUIRED/.test(toolCode), 'dsh-tool-lsp README + lib/index.js')
+}
+
+// E11: no local TypeScript language server binary (rust-analyzer may exist for Rust only — not a TS fixture server).
+const whereResult = process.platform === 'win32'
+  ? spawnSync('where', ['typescript-language-server'], { encoding: 'utf8', windowsHide: true })
+  : spawnSync('sh', ['-c', 'command -v typescript-language-server'], { encoding: 'utf8' })
+const tlsMissing = whereResult.status !== 0
+const rustAnalyzer = process.platform === 'win32' ? spawnSync('where', ['clangd', 'pyright'], { encoding: 'utf8', windowsHide: true }) : { status: 1 }
+check('E11 no local typescript-language-server on PATH (bundle/server source needed)', tlsMissing, tlsMissing ? 'where=missing' : `where=${String(whereResult.stdout ?? '').trim()}`)
+info('E11 other servers', 'clangd/pyright/gopls missing; rust-analyzer may exist for Rust only (not a TS fixture server)')
+
+// E12: delegation layer already has whitelist / validation / classification / approval gate / audit / e2e seam.
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..')
+const delegationSrc = fs.readFileSync(path.join(repoRoot, 'src', 'lib', 'lsp-delegation.mjs'), 'utf8')
+const orchestrationSrc = fs.readFileSync(path.join(repoRoot, 'src', 'plugins', 'orchestrator.mjs'), 'utf8')
+const e2eSrc = fs.readFileSync(path.join(repoRoot, 'tools', 'e2e.mjs'), 'utf8')
+check('E12 delegation layer: validateToolInvoke + read/write/test classification', /export function validateToolInvoke/.test(delegationSrc) && /export function classifyLspAction/.test(delegationSrc) && /LSP_WRITE_ACTIONS/.test(delegationSrc), 'src/lib/lsp-delegation.mjs')
+check('E12 delegation layer: whitelist + approval gate + audit + e2e seam', /delegationCfg\.allow/.test(orchestrationSrc) && /DELEGATE_ERROR\.APPROVAL_REQUIRED/.test(orchestrationSrc) && /contract-delegate/.test(orchestrationSrc) && /FANG_CONTRACT_TEST_HOOKS/.test(orchestrationSrc) && /test-seam-only/.test(e2eSrc), 'src/plugins/orchestrator.mjs + tools/e2e.mjs')
+
 const failed = checks.filter((item) => !item.ok && !item.skipped)
 if (asJson) console.log(JSON.stringify({ ok: failed.length === 0, checks }, null, 2))
 console.log(`${failed.length ? 'RED' : 'GREEN'}  lsp evidence  ${checks.length - failed.length}/${checks.length} (E1/E2/E5 live; E3/E4 documented)`)

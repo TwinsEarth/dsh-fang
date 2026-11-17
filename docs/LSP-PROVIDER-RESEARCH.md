@@ -169,6 +169,12 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 > **实现对齐结论（E6–E9）**：E6 决定我们只做 seam 消费者（不注册自有 provider、不伪造 provider 枚举）；E7 决定参数 0-based UTF-16 透传 + 结果 1-based 展示的契约口径；E8 决定动作闭集与 diagnostics/write 类的处置；E9 决定 stdio 配置形态、bundle 最小组合（fs-local/subprocess-local）以及“无沙箱 → 允许根 fail-closed”的安全边界。
 
+| **E10** | 模型工具 `lsp` 参数 `operation/file_path/line/character`（**1-based**），**要求 Agent Session**（无 Session → `LSP_WORKSPACE_REQUIRED`），`workspaceRoot` 取 Session 当前工作目录 | `dsh-tool-lsp/README.md`：positive one-based、requires an Agent Session、Session cwd 作为 workspaceRoot；`lib/index.js`：`LSP_WORKSPACE_REQUIRED`（自动复核 PASS） | 与 E7 能力缝口径**刻意不同**：模型工具 1-based + Session，委托层 0-based + 显式 workspaceRoot。fang 委托**不走模型工具**，两者互不依赖；`dsh-tool-lsp` 仅为可选母体 Agent 工具 |
+| **E11** | 本机没有可服务 TypeScript 的 LSP 服务器可执行文件 | `where typescript-language-server` → missing；clangd/pyright/gopls missing；`E:\DSH` 树内无 `typescript-language-server*`；**rust-analyzer 存在（仅 Rust，不能服务 TS fixture）**（自动复核 PASS） | 语言服务器必须来自 bundle 依赖（已锁定 `typescript-language-server@6.1.0`）或系统安装；bundle 默认 PATH 解析，装后需确认可执行 |
+| **E12** | 委托层现有 `fang.tool.invoke:lsp` 已具备：白名单、`validateToolInvoke`、读/写分类、审批门禁、审计、e2e 测试缝 | `src/lib/lsp-delegation.mjs`、`src/plugins/orchestrator.mjs`、`tools/e2e.mjs` 静态断言（自动复核 PASS） | B-6 只需在既有委托层上接真实 provider，不新增通道/白名单机制；审计/并发/超时复用 M5 |
+
+> **E10–E12 对齐结论**：E10 说明模型工具（1-based + Session）与委托层（0-based + 显式 root）是**两条独立入口**，不可混用坐标口径；E11 说明语言服务器来源必须显式（bundle 依赖或系统安装），本机默认不可用；E12 说明 B-6 是“在既有委托层上接 seam”，不新增通道。
+
 ### 6.1 路线 B（fork-local）契约口径（已定；安装仍默认关闭）
 
 用户方向：**路线 B fork-local；先只做契约口径修订，等语言服务器来源确定**。已定口径：
