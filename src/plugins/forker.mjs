@@ -923,13 +923,26 @@ export function apply(ctx, config) {
       // plugin surface (third-party packages + @deepseek-ai/* alias stubs); otherwise
       // fall back to the minimal accelerated profile.
       const sourceProfileDir = String(opts.sourceProfileDir ?? '').trim()
+      // 与 spawn() 相同的加速核 home 解析；此前误用了 spawn 作用域的变量（ReferenceError 被
+      // try/catch 吞掉 → essence 派生的加速分身总是静默退回 minimal，插件面不生效）。
+      const accelHome = String(layout?.fangHome ?? '').trim()
+        || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
       let accelNodeModules = ''
       try {
-        const resolvedAccel = resolveAcceleratedCore({ cliPath: cfg.acceleratedCliPath ?? '', env: process.env, fangHome: acceleratedHome })
+        const resolvedAccel = resolveAcceleratedCore({ cliPath: cfg.acceleratedCliPath ?? '', env: process.env, fangHome: accelHome })
         if (resolvedAccel.ok === true && resolvedAccel.cliPath) {
           accelNodeModules = accelNodeModulesRoot(resolvedAccel.cliPath)
         }
       } catch { /* keep minimal profile */ }
+      // 原身派生的加速分身必须同步插件面；解析不到加速核模块树时显式失败，绝不静默退回 minimal
+      // （静默退回会让分身“能启动但插件全失效”，属于最难排查的假成功）。
+      if (sourceProfileDir && !accelNodeModules) {
+        return {
+          ok: false,
+          error: 'accelerated-sync-unavailable',
+          detail: 'source profile was given but the accelerated node_modules tree could not be resolved',
+        }
+      }
       const written = writeAcceleratedForkProfile({
         profileDir,
         fangRoot: FANG_ROOT,

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
-// Client layout regression (v3.1.9): with many essences and forks the two console
-// columns must each be a fixed-height scroll area (wheel + draggable scrollbar), and
-// the middle handle is the size splitter.
+// Client layout regression (v3.5.3): the mother console is three blocks —
+//   left column: decision center (top) / forks (bottom) with a horizontal splitter,
+//   right column: mother & essence.
+// Both scroll areas stay fixed-height scroll containers, and both splitters persist
+// their ratio locally.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -39,7 +41,7 @@ const tasks = Array.from({ length: 24 }, (_, i) => ({
   sessions: { count: 0, violation: false }, essenceDeleted: false,
   branch: { activeBranchId: 'main', sessionId: `s${i}`, count: 1 },
   pid: 100 + i, port: 18000 + i, url: `http://127.0.0.1:${18000 + i}/`, homeDir: 'h', profile: 'p',
-  createdAt: now, restarts: 0, adapter: { ok: true, version: '3.1.9', protocol: 3, error: '' },
+  createdAt: now, restarts: 0, adapter: { ok: true, version: '3.5.3', protocol: 3, error: '' },
   collaborators: [], seed: null, importedSession: null, archivedAt: null, archiveRemote: null,
 }))
 
@@ -54,7 +56,7 @@ function makeHarness() {
   }
   window.fetch = async (url) => {
     const u = String(url)
-    if (u.includes('/fang/api/status')) return jsonResponse({ ok: true, version: '3.1.9', role: 'mother', profileTag: 'test',
+    if (u.includes('/fang/api/status')) return jsonResponse({ ok: true, version: '3.5.3', role: 'mother', profileTag: 'test',
       tasks: { ready: 24, total: 24, max: 8, list: [], capacity: { slots: 7, limit: 5, used: 5 } },
       forks: { total: 24, running: 24, max: 8, list: [] }, mother: { profile: 'desktop' } })
     if (u.includes('/fang/api/tasks/sessions')) return jsonResponse({ ok: true, sessions: [], total: 0, degraded: [] })
@@ -115,7 +117,7 @@ const waitFor = async (fn, { timeout = 2500, interval = 20 } = {}) => {
   throw new Error('waitFor timeout')
 }
 
-test('client layout: the main slot fills a DSH-like fixed-height panel and both columns scroll', async () => {
+test('client layout: three blocks — decision (left top) / forks (left bottom) / mother (right)', async () => {
   const harness = makeHarness()
   const { host } = mountConsole(harness)
   const doc = harness.window.document
@@ -130,28 +132,41 @@ test('client layout: the main slot fills a DSH-like fixed-height panel and both 
     && doc.querySelectorAll('.panel-scroll[data-sk="left"] .essence-card').length === essences.length)
   const consoleEl = doc.querySelector('.fang-console')
   const body = doc.querySelector('.fang-body')
-  const panels = [...doc.querySelectorAll('.panel')]
+  const panels = [...doc.querySelectorAll('.fang-body > .fang-col > .panel, .fang-body > .panel')]
   assert.ok(consoleEl && body, 'console and body must render')
-  assert.equal(panels.length, 2, 'one panel per work zone')
-  const [left, right] = panels
-  const leftScroll = left.querySelector(':scope > .panel-scroll[data-sk="left"]')
-  const rightScroll = right.querySelector(':scope > .panel-scroll[data-sk="right"]')
-  assert.ok(leftScroll, 'the mother panel owns one left scroll area')
-  assert.ok(rightScroll, 'the fork panel owns one right scroll area')
+  assert.equal(panels.length, 3, 'three work zones: decision + forks + mother')
 
-  // Many essences must live *inside* the left scroll area — never as a sibling that
-  // would squash the session list (the v3.1.8 “can't select many mothers” bug).
-  const essenceList = leftScroll.querySelector('[data-zone="essence-list"]')
-  assert.ok(essenceList, 'essence cards render inside the left scroll area')
+  const leftCol = body.querySelector(':scope > .fang-col--left[data-zone="left-column"]')
+  assert.ok(leftCol, 'left column carries decision + forks')
+  const decisionPanel = leftCol.querySelector(':scope > [data-zone="decision"]')
+  const forkPanel = leftCol.querySelector(':scope > [data-zone="derived"]')
+  const motherPanel = body.querySelector(':scope > [data-zone="mother"]')
+  assert.ok(decisionPanel, 'decision center is the top block of the left column')
+  assert.ok(forkPanel, 'forks panel is the bottom block of the left column')
+  assert.ok(motherPanel, 'mother & essence panel is the right column')
+  assert.equal(decisionPanel.compareDocumentPosition(forkPanel) & decisionPanel.DOCUMENT_POSITION_FOLLOWING ? true : false, true, 'decision sits above forks')
+
+  const motherScroll = motherPanel.querySelector(':scope > .panel-scroll[data-sk="left"]')
+  const forkScroll = forkPanel.querySelector(':scope > .panel-scroll[data-sk="right"]')
+  assert.ok(motherScroll, 'the mother panel owns the left scroll area')
+  assert.ok(forkScroll, 'the fork panel owns the right scroll area')
+
+  // Many essences must live *inside* the mother scroll area (never as a sibling).
+  const essenceList = motherScroll.querySelector('[data-zone="essence-list"]')
+  assert.ok(essenceList, 'essence cards render inside the mother panel scroll area')
   assert.equal(essenceList.querySelectorAll('.essence-card').length, essences.length)
-  assert.equal(left.querySelector(':scope > [data-zone="essence-list"]'), null, 'essence list is not outside the scroller')
-  assert.ok(rightScroll.querySelectorAll('.fork-card').length > 0, 'fork cards render inside the right scroll area')
-  assert.equal(right.querySelector(':scope > .panel-scroll[data-sk="right"]') === rightScroll, true)
+  assert.equal(motherPanel.querySelector(':scope > [data-zone="essence-list"]'), null, 'essence list is not outside the scroller')
+  assert.ok(forkScroll.querySelectorAll('.fork-card').length > 0, 'fork cards render inside the fork scroll area')
+  // 决策中心不再嵌在分身滚动区。
+  assert.equal(forkScroll.querySelector('.fang-decision-mini'), null, 'decision center is not inside the fork scroller')
+  assert.ok(decisionPanel.querySelector('.fang-decision-mini'), 'decision center renders in its own panel')
 
-  // The injected stylesheet must pin the height chain and expose a draggable scrollbar.
+  // The injected stylesheet must pin the height chain, expose the three-block grid and draggable scrollbars.
   const css = [...doc.querySelectorAll('style')].map((node) => node.textContent).join('\n')
   assert.match(css, /\.fang-console\{[^}]*height:100%[^}]*overflow:hidden/)
   assert.match(css, /\.fang-body\{[^}]*align-items:stretch[^}]*height:100%[^}]*overflow:hidden/)
+  assert.match(css, /\.fang-col--left\{[^}]*grid-template-rows:[^}]*minmax\(120px,[^}]*minmax\(160px,/)
+  assert.match(css, /\.fang-decision-panel \.fang-decision-mini\{[^}]*height:100%/)
   assert.match(css, /\.panel\{[^}]*height:100%[^}]*max-height:100%/)
   assert.match(css, /\.panel-scroll\{[^}]*overflow-y:auto[^}]*scrollbar-gutter:stable/)
   assert.match(css, /\.panel-scroll::-webkit-scrollbar\{width:12px/)
@@ -160,17 +175,30 @@ test('client layout: the main slot fills a DSH-like fixed-height panel and both 
   harness.window.close()
 })
 
-test('client layout: the middle split handle is registered for width resizing', async () => {
+test('client layout: two splitters — columns (left/right) and decision/forks (vertical)', async () => {
   const harness = makeHarness()
   const { host } = mountConsole(harness)
   const doc = harness.window.document
-  await waitFor(() => doc.querySelector('.fang-split-handle'))
-  const handle = doc.querySelector('.fang-split-handle')
-  assert.ok(handle, 'the middle split handle exists')
-  assert.equal(handle.getAttribute('role') ?? '', 'separator')
-  // The splitter persists the chosen ratio; the grid is driven by CSS variables/inline columns.
-  assert.ok(doc.querySelector('.fang-body'), 'body grid exists for the splitter')
-  assert.ok(host.querySelector('.fang-body'))
+  await waitFor(() => doc.querySelector('.fang-split-handle') && doc.querySelector('.fang-vsplit-handle'))
+  const colHandle = doc.querySelector('.fang-split-handle')
+  const rowHandle = doc.querySelector('.fang-vsplit-handle')
+  assert.ok(colHandle, 'the column splitter exists')
+  assert.ok(rowHandle, 'the decision/forks splitter exists')
+  assert.equal(colHandle.getAttribute('role') ?? '', 'separator')
+  assert.equal(colHandle.getAttribute('aria-orientation') ?? '', 'vertical')
+  assert.equal(rowHandle.getAttribute('role') ?? '', 'separator')
+  assert.equal(rowHandle.getAttribute('aria-orientation') ?? '', 'horizontal')
+  assert.ok(host.querySelector('.fang-body'), 'body grid exists for the splitters')
+
+  // 垂直分隔条：双击恢复 50:50，并写入本机偏好；键盘上下键可微调。
+  const leftCol = doc.querySelector('.fang-col--left')
+  assert.match(leftCol.style.gridTemplateRows, /minmax\(120px,[^)]*\)\s+12px\s+minmax\(160px,/)
+  const dbl = new harness.window.MouseEvent('dblclick', { bubbles: true })
+  rowHandle.dispatchEvent(dbl)
+  assert.equal(harness.window.localStorage.getItem('fang.panel.decision.split'), '0.5')
+  const key = new harness.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
+  rowHandle.dispatchEvent(key)
+  assert.ok(Number(harness.window.localStorage.getItem('fang.panel.decision.split')) > 0.5, 'ArrowDown grows the decision block')
   harness.window.close()
 })
 

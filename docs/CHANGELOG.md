@@ -1,3 +1,21 @@
+## v3.5.3（2026-11-18 已发布）
+
+**母体操作面板三块（母体&元主 / 决策中心 / 分身）；修复原身派生加速分身的插件面同步。**
+
+### 新增与变更
+
+- **母体操作面板三块布局**（2026-11-18）：左列为「决策中心（上）/ 分身（下）」并带水平分隔条（拖动或 ↑/↓ 微调，双击恢复 50:50，比例存本机 `fang.panel.decision.split`）；右列为「母体&元主」；列分隔条保留（`fang.panel.split`）。决策中心不再嵌在分身滚动区，成为独立面板块（`data-zone="decision"`）。
+
+### 修复
+
+- **修复：原身派生的「加速核心」分身插件面不同步（静默退回 minimal）**（2026-11-18）：
+  `forker.provision()` 在 accelerated 分支里误用了 `spawn()` 作用域的 `acceleratedHome`，`ReferenceError` 被
+  空 `catch` 吞掉 → `accelNodeModules` 恒为空 → `writeAcceleratedForkProfile()` 静默走 minimal 分支
+  （`sync=null`）。表现为：加速分身能启动，但**原身/生产 profile 的第三方插件与 client half 全部失效**，
+  即「Core 引擎无法启动 & 无效」类假成功。修复：在 `provision()` 内按同一规则解析加速核 home；
+  并在「给了 source profile 却解析不到加速核模块树」时**显式失败 `accelerated-sync-unavailable`**，
+  不再静默退回。回归测试 `test/forker-accelerated-sync.test.mjs` 3 项。
+
 ## v3.5.2（2026-11-17 已发布）
 
 **LSP 能力缝（路线 A/B）+ M5 回流对端 + B-8 专业版激活链 + UI client half 映射 + release 自检修正。**
