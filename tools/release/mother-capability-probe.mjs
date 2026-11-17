@@ -47,6 +47,47 @@ const sessionItems = Array.isArray(sessions.body?.sessions) ? sessions.body.sess
 const sessionCatalogReady = services.sessionCatalog === true || (sessions.ok === true && Array.isArray(sessions.body?.sessions))
 const contractMethods = Array.isArray(contractHealth.body?.methods) ? contractHealth.body.methods : []
 
+// B-6 LSP probe (delegation): capability.list lspProvider + optional real definition/hover.
+let lsp = null
+if (token && contractMethods.includes('fang.capability.list')) {
+  let sequence = 0
+  const invoke = async (method, params = null) => {
+    const envelope = {
+      protocol: 'fang-master', protocolVersion: 1,
+      id: `probe-${Date.now().toString(36)}-${++sequence}`,
+      method, params,
+      meta: { at: Date.now(), delegate: true, source: 'mother-capability-probe' },
+    }
+    try {
+      const response = await fetch(`${base}/fang/api/contract/invoke`, {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json', authorization: '' },
+        body: JSON.stringify(envelope),
+        signal: AbortSignal.timeout(30000),
+      })
+      const body = await response.json().catch(() => null)
+      return { status: response.status, body }
+    } catch (error) {
+      return { status: 0, body: null, error: String(error?.message ?? error) }
+    }
+  }
+  const caps = await invoke('fang.capability.list')
+  const provider = caps.body?.result?.lspProvider ?? null
+  lsp = { provider }
+  const workspaceRoot = arg('workspace-root', '')
+  const definitionFile = arg('definition-file', arg('file', ''))
+  if (provider?.available === true && workspaceRoot && definitionFile) {
+    const line = Number.parseInt(arg('line', '0'), 10) || 0
+    const character = Number.parseInt(arg('character', '0'), 10) || 0
+    const params = { tool: 'lsp', action: 'definition', file: definitionFile, line, character, workspaceRoot }
+    const definition = await invoke('fang.tool.invoke', params)
+    const hover = await invoke('fang.tool.invoke', { ...params, action: 'hover' })
+    lsp.definition = { ok: definition.body?.ok === true, body: definition.body, status: definition.status }
+    lsp.hover = { ok: hover.body?.ok === true, body: hover.body, status: hover.status }
+  }
+}
+
+
 const report = {
   generatedAt: new Date().toISOString(),
   base,
@@ -62,7 +103,9 @@ const report = {
     'fang.orchestrator.status': status.ok === true,
     'fang.session.list': sessionCatalogReady === true,
     'fang.capability.list': contractMethods.some((m) => m === 'fang.capability.list'),
+    ...(lsp ? { 'fang.tool.invoke:lsp': lsp.provider?.available === true } : {}),
   },
+  lsp,
   evidence: {
     sessionsStatus: sessions.status,
     sessionsSample: sessionItems.slice(0, 3).map((s) => ({ sessionId: s.sessionId, title: s.title ?? null, updatedAt: s.updatedAt ?? null })),
@@ -70,11 +113,20 @@ const report = {
   },
 }
 
+const lspLines = lsp ? [
+  `lsp: provider.available=${lsp.provider?.available === true} default=${lsp.provider?.default ?? 'n/a'} actions=${(lsp.provider?.actions ?? []).join(',') || '(none)'} providers=${Object.keys(lsp.provider?.providers ?? {}).join(',') || '(none)'}`,
+  ...(lsp.definition ? [`lsp.definition: ${lsp.definition.ok ? 'PASS' : 'FAIL'} ${JSON.stringify(lsp.definition.body?.result ?? lsp.definition.body?.error ?? { status: lsp.definition.status }).slice(0, 300)}`] : []),
+  ...(lsp.hover ? [`lsp.hover: ${lsp.hover.ok ? 'PASS' : 'FAIL'} ${JSON.stringify(lsp.hover.body?.result ?? lsp.hover.body?.error ?? { status: lsp.hover.status }).slice(0, 300)}`] : []),
+] : ['lsp: SKIP (no token or delegation methods absent)']
+
 console.log(hasFlag('json') ? JSON.stringify(report, null, 2) : [
   `mother ${base} role=${report.mother.role} version=${report.mother.version} status=${report.mother.status} auth=${report.authenticated}`,
   `contract version=${report.contract.version ?? 'n/a'} methods=${contractMethods.length} delegation=${report.contract.hasDelegation}`,
   `readiness: ${Object.entries(report.readiness).map(([k, v]) => `${k}=${v ? 'READY' : 'MISSING'}`).join(' | ')}`,
+  ...lspLines,
   `evidence: /fang/api/sessions -> ${sessions.status} (${sessionItems.length} item(s))`,
 ].join('\n'))
 
-process.exit(sessionCatalogReady ? 0 : 1)
+const requireLsp = hasFlag('require-lsp')
+const lspReady = lsp?.provider?.available === true
+process.exit(sessionCatalogReady && (!requireLsp || lspReady) ? 0 : 1)

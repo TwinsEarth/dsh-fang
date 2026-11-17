@@ -216,6 +216,177 @@ export function writeAliasStubs({ profileNodeModules = '', accelNodeModules = ''
   return { resolved, unsupported, stubCount }
 }
 
+/**
+ * Client halves resolved by the accelerated web shell as *static* modules (the shell's
+ * `staticModules` table), not as `@twinsearth` packages. Kept explicit: the accelerated
+ * client bundles require these exact names, so a third-party bundle rewritten to them works
+ * without an extra client row.
+ */
+export const STATIC_CLIENT_MODULES = Object.freeze([
+  '@twinsearth/dsh-client-ui-primitives',
+  '@twinsearth/dsh-client-store',
+  '@twinsearth/dsh-client-ui-slots',
+  '@twinsearth/dsh-client-ui-dockkit',
+])
+
+/** Every browser-module id the accelerated fork can satisfy for a client half. */
+export function availableClientModules(accelNodeModules) {
+  const available = new Set(STATIC_CLIENT_MODULES)
+  try {
+    const scopeDir = path.join(accelNodeModules, ACCEL_SCOPE.slice(0, -1))
+    for (const entry of fs.readdirSync(scopeDir)) {
+      const dir = path.join(scopeDir, entry)
+      let pkg = null
+      try { pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) } catch { pkg = null }
+      const hasClient = (pkg?.dsh?.client && typeof pkg.dsh.client === 'object')
+        || Boolean(pkg?.exports?.['./client'])
+        || fs.existsSync(path.join(dir, 'lib', 'client.js'))
+      if (hasClient) available.add(`${ACCEL_SCOPE}${entry}`)
+    }
+  } catch { /* best effort: static table still applies */ }
+  return available
+}
+
+/**
+ * Rewrite `@deepseek-ai/*` browser-module specifiers to the accelerated scope for client
+ * halves. Only specs with an accelerated counterpart are rewritten; the rest are reported
+ * verbatim so the UI can list unsupported client halves explicitly (never silent).
+ */
+export function rewriteClientSpecifiers(text, available = new Set()) {
+  const mapped = []
+  const unsupported = []
+  const output = String(text ?? '').replace(/@deepseek-ai\/([a-z0-9][a-z0-9-]*)/giu, (spec, name) => {
+    const target = `${ACCEL_SCOPE}${name}`
+    if (available.has(target)) {
+      mapped.push({ from: `@deepseek-ai/${name}`, to: target })
+      return target
+    }
+    unsupported.push(spec)
+    return spec
+  })
+  return { text: output, mapped, unsupported: [...new Set(unsupported)] }
+}
+
+function clientEntryFiles(pluginDir, pkgJson) {
+  const files = new Set()
+  const clientExport = pkgJson?.exports?.['./client']
+  const pick = typeof clientExport === 'string'
+    ? clientExport
+    : (clientExport && typeof clientExport === 'object' ? clientExport.default ?? clientExport.import ?? '' : '')
+  if (typeof pick === 'string' && pick) files.add(path.resolve(pluginDir, pick))
+  const fallback = path.join(pluginDir, 'lib', 'client.js')
+  if (fs.existsSync(fallback)) files.add(fallback)
+  return [...files].filter((file) => {
+    try { return fs.statSync(file).isFile() } catch { return false }
+  })
+}
+
+/**
+ * Rewrite a copied third-party plugin's browser side: `dsh.client.inject` / `external`
+ * declarations and its `./client` bundle specifiers. Package files are copied first, so this
+ * only touches the fork's private copy.
+ */
+export function rewriteClientHalfPackage({ pluginDir = '', available = new Set() } = {}) {
+  const pkgFile = path.join(pluginDir, 'package.json')
+  let pkg = null
+  try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')) } catch { return null }
+  const mapped = []
+  const unsupported = []
+  const declaration = pkg?.dsh?.client
+  let declarationChanged = false
+  if (declaration && typeof declaration === 'object') {
+    for (const field of ['inject', 'external']) {
+      if (!Array.isArray(declaration[field])) continue
+      const rewritten = declaration[field].map((spec) => {
+        const result = rewriteClientSpecifiers(spec, available)
+        mapped.push(...result.mapped)
+        unsupported.push(...result.unsupported)
+        if (result.text !== spec) declarationChanged = true
+        return result.text
+      })
+      declaration[field] = [...new Set(rewritten)]
+    }
+    if (declarationChanged) fs.writeFileSync(pkgFile, `${JSON.stringify(pkg, null, 2)}\n`)
+  }
+  const clientFiles = clientEntryFiles(pluginDir, pkg)
+  for (const file of clientFiles) {
+    let text = ''
+    try { text = fs.readFileSync(file, 'utf8') } catch { continue }
+    const result = rewriteClientSpecifiers(text, available)
+    mapped.push(...result.mapped)
+    unsupported.push(...result.unsupported)
+    if (result.text !== text) fs.writeFileSync(file, result.text)
+  }
+  const dedupe = (items) => [...new Map(items.map((item) => [JSON.stringify(item), item])).values()]
+  return {
+    package: typeof pkg?.name === 'string' ? pkg.name : path.basename(pluginDir),
+    mapped: dedupe(mapped),
+    unsupported: [...new Set(unsupported)],
+    clientFiles: clientFiles.map((file) => path.relative(pluginDir, file).replace(/\\/g, '/')),
+  }
+}
+
+/**
+ * Profile rows disabled in the source (desktop-shell supplied equivalents) that the
+ * accelerated *web* composition still needs. Enabling them is a deliberate, named
+ * override — never a blanket "enable every disabled client row".
+ */
+export const CLIENT_ROW_ENABLE_OVERRIDES = Object.freeze([
+  { id: 'ui-theme', reason: 'desktop shell supplies theme; accelerated web composition provides it as the theme client half' },
+])
+
+/** Re-enable the named client rows in a profile patch (JSON/JSON-array text). */
+export function applyClientRowOverrides(patchText) {
+  const original = String(patchText ?? '')
+  const applied = []
+  let parsed = null
+  try { parsed = JSON.parse(original) } catch { parsed = null }
+  if (parsed !== null) {
+    const targetIds = new Set(CLIENT_ROW_ENABLE_OVERRIDES.map((override) => override.id))
+    const walk = (node) => {
+      if (Array.isArray(node)) { for (const item of node) walk(item); return }
+      if (!node || typeof node !== 'object') return
+      if (targetIds.has(node.id) && node.disabled === true) {
+        node.disabled = false
+        applied.push({ id: node.id, reason: CLIENT_ROW_ENABLE_OVERRIDES.find((override) => override.id === node.id)?.reason ?? '' })
+      }
+      for (const value of Object.values(node)) walk(value)
+    }
+    walk(parsed)
+    if (applied.length) return { text: JSON.stringify(parsed, null, 2), applied }
+    return { text: original, applied }
+  }
+  let text = original
+  for (const override of CLIENT_ROW_ENABLE_OVERRIDES) {
+    const escaped = override.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const blockPattern = new RegExp(`(\\{[^{}]*"id"\\s*:\\s*"${escaped}"\\s*,?[^{}]*?\\})`, 'g')
+    text = text.replace(blockPattern, (block) => {
+      if (!/"disabled"\s*:\s*true/.test(block)) return block
+      applied.push({ id: override.id, reason: override.reason })
+      return block.replace(/"disabled"\s*:\s*true/, '"disabled": false')
+    })
+  }
+  return { text, applied }
+}
+
+/** 路线 B（增强）：fork-local LSP 所需的加速核 client/host 包。 */
+export const FORK_LSP_PACKAGES = Object.freeze([
+  '@twinsearth/dsh-lsp',
+  '@twinsearth/dsh-lsp-stdio',
+  '@twinsearth/dsh-tool-lsp',
+])
+
+/**
+ * Detect whether the accelerated core can host a fork-local LSP stack (route B).
+ * Detection only — provisioning stays opt-in; absent packages mean the fork keeps
+ * delegating to the mother (route A) or reporting contract-unavailable.
+ */
+export function detectForkLspSupport(accelNodeModules) {
+  const packages = FORK_LSP_PACKAGES.map((name) => ({ name, installed: accelHasPackage(accelNodeModules, name) }))
+  const missing = packages.filter((item) => item.installed !== true).map((item) => item.name)
+  return { available: missing.length === 0, packages, missing }
+}
+
 function copyPackageDir(source, target) {
   fs.mkdirSync(target, { recursive: true })
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
@@ -256,6 +427,8 @@ export function buildSyncedAcceleratedProfile({ sourceProfileDir = '', accelNode
   let patchText = ''
   try { patchText = String(fs.readFileSync(sourcePatchFile, 'utf8')) } catch { patchText = '' }
   patchText = rewriteScope(patchText).replace(/^\uFEFF/, '')
+  const rowOverrides = applyClientRowOverrides(patchText)
+  patchText = rowOverrides.text
   if (patchText.trim().startsWith('{')) patchText = `[${patchText}]`
   if (!patchText.trim()) patchText = '[]\n'
   return {
@@ -266,6 +439,7 @@ export function buildSyncedAcceleratedProfile({ sourceProfileDir = '', accelNode
     bundles: { translated: translated.bundles, mapped: translated.mapped, unsupported: translated.unsupported },
     pluginPackages: translated.bundles.filter((bundle) => !bundle.startsWith(ACCEL_SCOPE) && !isFangBundle(bundle)),
     deps,
+    rowOverrides: rowOverrides.applied,
   }
 }
 
@@ -330,13 +504,18 @@ export function writeAcceleratedForkProfile(options = {}) {
   fs.mkdirSync(path.join(moduleDir, '@twinsearth'), { recursive: true })
   let alias = null
   let copiedPlugins = []
+  const clientAliases = []
   if (synced) {
+    const clientAvailable = availableClientModules(accelNodeModules)
     const sourceModules = path.join(synced.source, 'node_modules')
     for (const bundle of synced.pluginPackages) {
       const from = path.join(sourceModules, ...bundle.split('/'))
       if (!fs.existsSync(from)) continue
-      copyPackageDir(from, path.join(moduleDir, ...bundle.split('/')))
+      const targetDir = path.join(moduleDir, ...bundle.split('/'))
+      copyPackageDir(from, targetDir)
       copiedPlugins.push(bundle)
+      const rewritten = rewriteClientHalfPackage({ pluginDir: targetDir, available: clientAvailable })
+      if (rewritten) clientAliases.push(rewritten)
     }
     // Link the rest of the source module tree by entry junctions (never the whole tree:
     // each plugin must keep resolving through the fork profile, where alias stubs live).
@@ -399,12 +578,18 @@ export function writeAcceleratedForkProfile(options = {}) {
     junctions,
     warning,
     overlay,
+    forkLsp: accelNodeModules ? detectForkLspSupport(accelNodeModules) : null,
     sync: synced ? {
       source: synced.source,
       mapped: synced.bundles.mapped,
       unsupportedBundles: synced.bundles.unsupported,
       copiedPlugins,
       alias,
+      clientAliases,
+      rowOverrides: synced.rowOverrides ?? [],
+      unsupportedClientHalves: clientAliases
+        .filter((item) => item.unsupported.length > 0)
+        .map((item) => ({ package: item.package, unsupported: item.unsupported })),
     } : null,
   }
 }

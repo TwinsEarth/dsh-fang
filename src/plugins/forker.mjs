@@ -944,7 +944,7 @@ export function apply(ctx, config) {
       }
       warnings.push(...(Array.isArray(written.warning) ? written.warning : []))
       if (written.overlay?.ok !== true) warnings.push(`accelerated-model-overlay:${written.overlay?.error ?? 'unknown'}`)
-      accelerated = { bundles: written.bundles, overlay: written.overlay, junctions: written.junctions, sync: written.sync ?? null }
+      accelerated = { bundles: written.bundles, overlay: written.overlay, junctions: written.junctions, sync: written.sync ?? null, forkLsp: written.forkLsp ?? null }
     } else if (useCleanTemplate) {
       // Forker-owned clean template: never written into the mother profile directory.
       const cleanDir = path.join(homeDir, 'templates', forkProfileTag)

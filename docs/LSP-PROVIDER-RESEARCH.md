@@ -109,7 +109,7 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 ### 3.3 验收（实现阶段）
 
-- [ ] 母体安装 LSP 栈后，`/fang/api/contract/invoke` 的 `fang.capability.list` 中出现 `fang.tool.invoke` 且 **provider='mother-lsp'**（不是 test-hook）；
+- [ ] 母体安装 LSP 栈后，`/fang/api/contract/invoke` 的 `fang.capability.list` 中出现 `fang.tool.invoke` 且 **provider='mother'**（不是 test-hook）；
 - [ ] 真实语言服务器（先 TS）对 fixture 文件返回 definition/hover；
 - [ ] 越界 `workspaceRoot` 被拒（`contract-invalid-request`），审计可见；
 - [ ] 无 provider 时仍显式 `contract-unavailable`（不虚假成功）；
@@ -119,19 +119,126 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 | 决策点 | 选项 | 建议 |
 |---|---|---|
-| 语言服务器来源 | ① bundle 依赖 npm `typescript-language-server`；② 系统安装；③ 先支持 clangd/rust-analyzer 等已有服务器 | ① 最可控（随 bundle 版本化），但增包体 |
-| 安装位置 | ① 仅母体（路线 A）；② 仅加速分身（路线 B）；③ 两者都装、能力目录区分 | ③ 渐进：先 A（本次目标），B 作为后续增强 |
-| workspaceRoot 允许范围 | ① 仅母体工作区；② 母体 + 所有 fork 工作区根（显式登记）；③ 任意路径 | ②：显式登记、realpath 校验、审计 |
-| 写类 LSP（rename/format） | ① 不提供；② 自研 provider + 审批 | ①：跟随官方语义，不扩大攻击面 |
-| 是否同时给母体 Agent 挂 `lsp` 工具 | ① 是（装 dsh-tool-lsp）；② 只给委托用 | ①：一次装齐，母体自身也受益 |
+| 语言服务器来源 | ① bundle 依赖 npm `typescript-language-server`；② 系统安装；③ 先支持 clangd/rust-analyzer 等已有服务器 | ✅ **已定 ①**：bundle 依赖 npm `typescript-language-server` + `typescript@5.9.3`（随 bundle 版本化） |
+| 安装位置 | ① 仅母体（路线 A）；② 仅加速分身（路线 B）；③ 两者都装、能力目录区分 | ✅ **已定 ③**：先 A（本次目标已打通真实闭环），B 作为后续增强；`lsp-provider/` 配置型 bundle 可装两处 |
+| workspaceRoot 允许范围 | ① 仅母体工作区；② 母体 + 所有 fork 工作区根（显式登记）；③ 任意路径 | ✅ **已定 ②**：配置根 + 任务 registry 的 fork 工作区根自动登记（`includeForkWorktrees` 可关）、realpath 校验、审计 |
+| 写类 LSP（rename/format） | ① 不提供；② 自研 provider + 审批 | ✅ **已定 ①**：不提供（跟随官方只读语义） |
+| 是否同时给母体 Agent 挂 `lsp` 工具 | ① 是（装 dsh-tool-lsp）；② 只给委托用 | ✅ **已定 ①**：bundle patch 同时挂载 `dsh-tool-lsp`，母体自身也受益 |
 
-## 5. 下一步（建议排期）
+## 6. 决策落地（2026-11-17，已实现代码）
 
-1. **M3.2 母体 LSP 栈原型**：bundle + 安装到测试 profile，boot 校验 `ctx.lsp` 存在、`tools` 里出现 `lsp`（可选）；
-2. **M3.3 真实 provider 接入**：fang 插件实现 `ctx.lsp.query` 映射 + workspaceRoot 策略 + 审计；
-3. **M3.4 e2e**：TS fixture 真实 definition/hover + 越界拒绝；
-4. **M3.5 决策落地**：语言服务器来源/版本随 bundle 依赖锁定；
-5. 视需要再评估路线 B（fork-local）。
+用户确认：**路线 A 先行（对应 B-6 目标），路线 B 作为增强，能力目录按 provider 区分**。已实现：
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| 路线 A 真实 provider 适配 | `src/lib/lsp-provider.mjs`：契约动作 `definition/references/implementation/hover` → `ctx.lsp.query` 四操作；1-based→0-based；locations/hover 归一化；seam 错误码映射（`LSP_UNAVAILABLE`→contract-unavailable 等）；**workspaceRoot 显式传入 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝，fail-closed）** | `test/lsp-provider.test.mjs` 6 项 |
+| 契约口径对齐 | `src/lib/lsp-delegation.mjs` 只读四动作；legacy `format/rename/codeAction/apply` → `contract-unsupported`；**`diagnostics` 仅测试缝可用且不 advertise**；位置必填校验 | `test/lsp-delegation.test.mjs` 5 项；e2e 更新 |
+| 能力目录按 provider 区分 | `fang.capability.list` 的 `fang.tool.invoke` 带 `provider:{available,default,services,actions}`，顶层 `lspProvider`；未安装时为 `available:false`（显式，不假成功） | e2e provider-tagged 断言 |
+| 路线 B（增强）探测 | `detectForkLspSupport(accelNodeModules)`：检测 `@twinsearth/dsh-lsp`/`dsh-lsp-stdio`/`dsh-tool-lsp`；结果暴露在 `writeAcceleratedForkProfile(...).forkLsp`，默认不启用 | `test/accelerated-alias.test.mjs` |
+| 诚实边界 | 母体正式 profile 尚未安装 LSP 栈；未安装时读类动作显式 `contract-unavailable`。**但路线 A 真实 provider 已在隔离 staging 中跑通**：`npm run setup:lsp-live` → `npm run test:lsp-live`（e2e `--lsp` 模式，真实官方 LSP 栈 + typescript-language-server）| e2e `--lsp`：**119/119**，`definition` 返回 `provider='mother'` + 1 个 location，`hover` 返回归一化 hover；`diagnostics` 真实 provider 下被 `contract-unsupported`（test-seam-only） |
+
+**真实 provider e2e（路线 A 真实闭环，2026-11-17 实测）**：
+- 准备：`npm run setup:lsp-live`（隔离 staging 安装 `@deepseek-ai/dsh-lsp@0.2.2-rc.3` 三件套 + `typescript-language-server` + `typescript@5.9.3`；不写用户 profile）；
+- 运行：`npm run test:lsp-live`（`tools/e2e.mjs --lsp`：profile 内挂载 dsh-lsp/dsh-lsp-stdio，`ctx.lsp` 就绪，fang 委托走真实 provider）；
+- 断言（**125/125**）：catalog provider=`mother`、actions 4 项；definition → `mother` + 真实 location；hover → 归一化；**越界 workspaceRoot → `contract-unauthorized`（root policy）**；**fork 工作区根自动登记后可查询（任务 registry 显式登记）**；**references 跨文件解析**（base.ts + a.ts）；**文件逃逸根 → contract-invalid-request（file-outside-root）**；**审计含 `tool:'lsp'` 的 workspaceRoot/outcome trail（ok/denied）**；diagnostics → `contract-unsupported`（test-seam-only）；legacy 写类仍可读拒绝。
+
+**安装形态（已按决策实现）**：`lsp-provider/` 配置型 bundle（`@twinsearth/dsh-fang-lsp`，最小组合 = **fs-local + subprocess-local + dsh-lsp + dsh-lsp-stdio + dsh-tool-lsp**；本 DSH 解析器要求 `insert:` + id，裸 `- name:` 行实测被静默忽略）：
+- 依赖：官方三件套 `0.2.2-rc.3` + npm `typescript-language-server` + `typescript@5.9.3`；
+- patch：挂载 `dsh-lsp`（seam）+ `dsh-lsp-stdio`（TS/TSX/JS/JSX 映射）+ `dsh-tool-lsp`（母体 Agent 的 lsp 工具）；
+- 安装：母体 profile（A，本次目标）优先，加速分身 profile（B）作为后续增强；安装后若 PATH 无语言服务器，用 profile patch 覆盖 `command` 为绝对路径；
+- 完整性测试：`test/lsp-provider-bundle.test.mjs` 3 项（依赖钉死/挂载行/只读口径）。
+
+**验收命令**：`npm run probe:mother -- --base <url> --token <token> --require-lsp --workspace-root <root> --definition-file <file> --line 0 --character 0`（真实 definition+hover；provider 缺失时退出非 0）。
+
+**剩余（安装到正式 profile）**：① 在插件面板把 `lsp-provider/` 安装进母体正式 profile（bundle 已就绪；当前正式 profile 仍 fang 3.4.2，需先升级 3.5.0）；② 配置 profile patch（语言服务器绝对路径 + `allowedRoots`）；③ 重启后跑 `npm run check:lsp-mother` + `probe:mother` + 真实 LSP 探测。**执行清单见 [`docs/INSTALL-LSP-MOTHER.md`](INSTALL-LSP-MOTHER.md)（含当前实测状态与回滚）。**
+
+### 6.0 安装前提证据（E1–E5，2026-11-17 复核）
+
+复现：`npm run verify:lsp-evidence`（E1/E2/E5 自动复核；E3/E4 记录自本分支调研时的 asar 提取，方法见行内）。
+
+| 编号 | 事实 | 证据/方法 | 对安装的含义 |
+|---|---|---|---|
+| E1 | 运行版本 = `@deepseek-ai/dsh` **0.2.2-rc.3**（Desktop asar） | `dsh --version` → `0.2.2-rc.3`（自动复核 PASS） | bundle 依赖必须与运行时同版本（0.2.2-rc.3） |
+| E2 | 官方 LSP 包在 npm 有 **0.2.2-rc.3**；`latest` tag 只到 `0.0.1-rc.1` | `npm view @deepseek-ai/dsh-lsp versions` 含 0.2.2-rc.3；`dist-tags.latest=0.0.1-rc.1`（自动复核 PASS） | **必须显式按版本安装**，不能用 latest |
+| E3 | Desktop 安装**未携带 LSP trio**，官方 bundle 目录无 LSP 可选 bundle | 提取 asar：`@deepseek-ai` 331 个包中无 `dsh-lsp*`；`dsh-official-bundles/lib/index.js` 全文无 lsp（调研记录） | 必须走 **config-only bundle**（依赖+patch 行） |
+| E4 | LSP 依赖的底座插件已存在母体安装 | 提取 asar：`dsh-fs-local`、`dsh-subprocess-local`、`dsh-working-directory` 均在 `@deepseek-ai/`（调研记录） | bundle patch 显式挂载 fs-local/subprocess-local 即可用 |
+| E5 | 加速核 3.5.0 npm 有 `@twinsearth/dsh-lsp@3.5.0` 三件套；本机加速 CLI 未安装 | `npm view` 三件套 → 3.5.0；`D:\ToFuture\accel\cli\node_modules\@twinsearth` 无 `dsh-lsp*`（自动复核 PASS） | fork-local 需显式安装后才可用；当前 `forkLsp.available=false` |
+
+| **E6** | 能力缝 = Cordis 服务 `ctx.lsp`：`registerProvider(provider)` + `query(request, signal)` | `dsh-lsp/lib/types/index.d.ts`：`class Lsp extends Service`；`query(request: LspQueryRequest, signal?: AbortSignal)`（自动复核 PASS） | fang 只作为消费者调用 `query`；官方类型**没有 provider 枚举 API**，故目录在 seam 存在时按闭集 advertise 四个只读操作（自定义 provider 的 `supportedOperations` 交集是前向兼容守卫） |
+| **E7** | 查询必填 `workspaceRoot`；四操作闭集；位置 0-based UTF-16；结果为 `{kind:'locations',locations,resolvedWorkspaceUri}` / `{kind:'hover',hover}` | `types.d.ts`：`LspQueryRequest` / `LspQueryResult` / `LspOperation`（自动复核 PASS） | 委托参数 line/character 按 0-based 透传；结果归一化为 `{path,line,character}`（1-based 展示）并保留 `resolvedWorkspaceUri`；`workspaceRoot` 必填 → 允许根 realpath 校验 |
+| **E8** | 能力缝**故意不暴露** diagnostics / rename / format / symbol / 通用 JSON-RPC | `dsh-lsp/README.md`：read-only、no JSON-RPC escape、diagnostics 需单独 freshness/accumulation 规则（自动复核 PASS） | 动作集合保持 4 只读；diagnostics 仅测试缝且 nonProduction；写类无对象（通用审批门禁保留给未来自定义 provider） |
+| **E9** | stdio 配置 `servers{<id>:{command,args?,extensionToLanguage,env?,...}}`；按 workspace 懒启动并**池化**；**trusts configured server、无沙箱**，要求 fs/subprocess 同一执行世界 | `dsh-lsp-stdio/README.md`：per-workspace lazy + one pooled process per canonical workspace + security boundary（自动复核 PASS） | bundle patch 显式挂载 `dsh-fs-local` + `dsh-subprocess-local`（同执行世界）；无沙箱 → 母体必须限制允许根（fail-closed） |
+
+> **实现对齐结论（E6–E9）**：E6 决定我们只做 seam 消费者（不注册自有 provider、不伪造 provider 枚举）；E7 决定参数 0-based UTF-16 透传 + 结果 1-based 展示的契约口径；E8 决定动作闭集与 diagnostics/write 类的处置；E9 决定 stdio 配置形态、bundle 最小组合（fs-local/subprocess-local）以及“无沙箱 → 允许根 fail-closed”的安全边界。
+
+| **E10** | 模型工具 `lsp` 参数 `operation/file_path/line/character`（**1-based**），**要求 Agent Session**（无 Session → `LSP_WORKSPACE_REQUIRED`），`workspaceRoot` 取 Session 当前工作目录 | `dsh-tool-lsp/README.md`：positive one-based、requires an Agent Session、Session cwd 作为 workspaceRoot；`lib/index.js`：`LSP_WORKSPACE_REQUIRED`（自动复核 PASS） | 与 E7 能力缝口径**刻意不同**：模型工具 1-based + Session，委托层 0-based + 显式 workspaceRoot。fang 委托**不走模型工具**，两者互不依赖；`dsh-tool-lsp` 仅为可选母体 Agent 工具 |
+| **E11** | 本机没有可服务 TypeScript 的 LSP 服务器可执行文件 | `where typescript-language-server` → missing；clangd/pyright/gopls missing；`E:\DSH` 树内无 `typescript-language-server*`；**rust-analyzer 存在（仅 Rust，不能服务 TS fixture）**（自动复核 PASS） | 语言服务器必须来自 bundle 依赖（已锁定 `typescript-language-server@6.1.0`）或系统安装；bundle 默认 PATH 解析，装后需确认可执行 |
+| **E12** | 委托层现有 `fang.tool.invoke:lsp` 已具备：白名单、`validateToolInvoke`、读/写分类、审批门禁、审计、e2e 测试缝 | `src/lib/lsp-delegation.mjs`、`src/plugins/orchestrator.mjs`、`tools/e2e.mjs` 静态断言（自动复核 PASS） | B-6 只需在既有委托层上接真实 provider，不新增通道/白名单机制；审计/并发/超时复用 M5 |
+
+> **E10–E12 对齐结论**：E10 说明模型工具（1-based + Session）与委托层（0-based + 显式 root）是**两条独立入口**，不可混用坐标口径；E11 说明语言服务器来源必须显式（bundle 依赖或系统安装），本机默认不可用；E12 说明 B-6 是“在既有委托层上接 seam”，不新增通道。
+
+### 6.1 路线 B（fork-local）契约口径（已定；安装仍默认关闭）
+
+用户方向：**路线 B fork-local；先只做契约口径修订，等语言服务器来源确定**。已定口径：
+
+1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A）；fork-local LSP 在加速分身本地 `ctx.lsp` 执行，**不走契约委托**；
+2. **能力目录按 provider 区分**只描述母体真实 provider（`mother`）与是否存在测试缝；不 advertise `fork-local`（无虚假条目）；`actions` 取真实交集；
+3. **fork-local 可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）与任务记录 `accelerated.forkLsp` 呈现——属于任务视图能力，不是契约能力；
+4. **安装默认关闭**：语言服务器来源已定为 ①（bundle 依赖 npm `typescript-language-server`，随 bundle 版本化）；路线 B 的安装作为后续增强，**不自动装载到 fork profile**，需显式安装/启用；
+5. 本次仅做上述口径修订 + 探测字段传播（`forkLsp` 进任务记录），**不改 profile 组合、不装包**。
+
+**待决**：语言服务器来源与版本锁定策略；确定后再评估 fork-local provider 的启用开关与能力目录呈现（届时仍走分身本地，不进契约）。
+
+
+### 6.2 M3.5 决策落地：语言服务器来源/版本锁定 + 路线 B 再评估（2026-11-17）
+
+**来源/版本锁定（已落地）**：
+- 语言服务器来源 = **bundle 依赖 npm `typescript-language-server`**（用户决策 ①），随 bundle 版本化；
+- 精确锁定：`typescript-language-server@6.1.0` + `typescript@5.9.3`（TS 7 native preview 无 `lib/typescript.js`，语言服务器初始化会失败）；官方 LSP 三件套锁 `0.2.2-rc.3`；
+- 证据文件 [`lsp-provider/LOCKED-VERSIONS.json`](../lsp-provider/LOCKED-VERSIONS.json) 与 package.json 双向一致性由 `test/lsp-provider-bundle.test.mjs` 断言（4 项）；
+- 可复现安装：`npm run setup:lsp-live` 使用同一组精确版本（setup 脚本已钉死 tls 6.1.0）；
+- 升级纪律：任一项升级必须同时更新 package.json + LOCKED-VERSIONS.json，并重跑 `setup:lsp-live` → `test:lsp-live`（e2e --lsp 125/125）→ `test:lsp-bundle`（5/5）。
+
+- **母体委托可行（2026-11-17 确认）**：`ctx.get('lsp').query({operation,filePath,position,workspaceRoot})` 即可，无需 Agent Session、不走 tools 服务；`dsh-tool-lsp` 的 Agent Session 要求（E10）只影响模型工具，不影响委托（E7 能力缝）。
+
+**验证（锁版本后）**：e2e `--lsp` **125/125**；`test:lsp-bundle` **5/5**；默认 e2e 118/118；全量单测 1247 pass。
+
+**路线 B（fork-local）再评估（本次结论：暂缓，保留探测）**：
+- 现状：`detectForkLspSupport()` 已探测加速核 `@twinsearth/dsh-lsp*`；`forkLsp` 已进任务记录；`lsp-provider/` bundle 可直接复用于 fork profile；npm 已有 `@twinsearth/dsh-lsp@3.5.0`（但加速 CLI 当前未安装）；
+- 触发条件（满足任一再做）：① 母体 LSP 不可用/离线但仍需读类能力；② 需要 fork 独立工作区语义/性能隔离；③ 母体安装策略不允许装语言服务器；
+- 代价/风险：每个 fork 多一套语言服务器进程与索引内存；profile 包体增大；加速核 3.5.0 与官方 seam 0.2.2-rc.3 的 API 兼容需实测；fork-local 不走契约委托（审计范围仍在母体委托侧）；
+- 当前动作：**不安装、不默认启用**；fork-local 能力仅显示在任务记录 `accelerated.forkLsp`，契约目录不 advertise；等触发条件出现再做安装开关与 e2e。
+
+
+### 6.3 两条路线并存与安全边界（E5 事实，2026-11-17）
+
+- **E5 事实**：npm 已发布同版本 LSP trio（`@twinsearth/dsh-lsp@3.5.0` 三件套），但本机加速 CLI **尚未安装**（`forkLsp.available=false`）；安装后 LSP 可跑在**分身自己的 workspace/worktree**，语义优于把分身文件路径交给母体进程。
+- **母体委托的边界**：`workspaceRoot` 由委托方传入，`dsh-lsp-stdio` 明确 “trusts its configured server, 无沙箱”；若母体不限制允许根，等于把母体进程的文件读取面扩大到调用方任意路径。因此母体执行**允许根 realpath 包含校验（fail-closed）+ 审计**，越界返回 `contract-invalid-request`。
+- **并存的理由**：fork-local 无法覆盖“LSP 服务器只装在母体/共享缓存”的场景；母体 provider 保持默认，fork-local 作为增强。
+- **能力目录区分**：`lspProvider.providers` 显式列出 `mother`（mode=delegated / source=mother-process）与 `fork-local`（mode=local / source=fork-worktree），各自只 advertise 实提供能力；未安装时 `available:false / actions:[]`；测试缝只以 `nonProduction` 标记出现。
+- **当前状态**：母体真实 provider 已闭环（staging e2e）；fork-local 探测已就绪但加速 CLI 未安装 LSP trio（`forkLsp.available=false`），安装开关默认关闭。
+
+### 6.4 路线 B 安装形态：fork-local 变体（默认关闭，后续增强）
+
+- **可复用的是 patch 形状，不是依赖域**：`lsp-provider/`（母体）依赖 `@deepseek-ai/*@0.2.2-rc.3`；
+  加速分身是 `@twinsearth` 3.5.0 体系，必须使用 **`@twinsearth/dsh-lsp@3.5.0` 三件套**（E5）。
+  为此新增同形状变体 [`lsp-provider-fork/`](../lsp-provider-fork/README.md)（`@twinsearth/dsh-fang-lsp-fork`）。
+- **变体内容**：patch = seam（`@twinsearth/dsh-lsp`）+ stdio（同版本语言服务器配置模板）+ 可选 tool（`@twinsearth/dsh-tool-lsp`）；
+  fs-local / subprocess-local / working-directory 由加速核自带（本机实查三者存在），无需重复插入；
+  依赖锁定 `typescript-language-server@6.1.0` + `typescript@5.9.3`。
+- **语义**：fork-local 的 LSP 跑在分身自己的 workspace/worktree，**不经过契约委托**（不进白名单/审批/审计）；
+  能力目录以 `provider: 'fork-local'`（mode=local）区分。
+- **默认关闭**：当前不自动安装/不默认启用；`detectForkLspSupport()` 如实报 `available=false`（加速 CLI 未装 trio）。
+- **后续启用前提**：① 加速核安装同版本 trio；② 装进**分身 profile 模板**（fork profile 每次从模板重放，装单个 fork home 会被冲掉）；
+  ③ 显式开关；④ command 不在 PATH 时覆盖绝对路径；⑤ 分身侧验 `ctx.get('lsp')` + 本地 definition/hover，契约目录 `providers['fork-local'].mode=local`。
+
+## 7. 原下一步（已由 §6 取代）
+
+1. ~~M3.2 母体 LSP 栈原型~~ → provider 适配代码已完成，安装待办；
+2. ~~M3.3 真实 provider 接入~~ → `ctx.lsp.query` 映射/根策略/归一化已完成；
+3. M3.4 e2e：TS fixture 真实 definition/hover（阻塞于语言服务器安装）；
+4. M3.5：语言服务器来源/版本随 bundle 锁定；
+5. 路线 B（fork-local）：已具备安装探测与目录区分，默认关闭。
 
 ---
 

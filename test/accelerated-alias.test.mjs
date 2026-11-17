@@ -13,8 +13,13 @@ const FANG_ROOT = path.resolve(HERE, '..')
 
 import {
   ACCEL_BUNDLES_WITH_FANG,
+  applyClientRowOverrides,
+  availableClientModules,
   buildSyncedAcceleratedProfile,
   classifyAliasSpec,
+  rewriteClientHalfPackage,
+  rewriteClientSpecifiers,
+  detectForkLspSupport,
   scanDeepseekSpecs,
   translateBundles,
   writeAcceleratedForkProfile,
@@ -44,11 +49,14 @@ function makeAccelTree() {
     'dsh-session': { exports: { '.': './lib/index.js', './surface': './lib/types/surface.js' } },
     'dsh-mcp-client': { exports: { '.': './lib/index.js' } },
     'dsh-tool-bash': { exports: { '.': './lib/index.js' } },
+    'dsh-client-locale': { exports: { '.': './lib/index.js', './client': './lib/client.js' } },
+    'dsh-api-remotes': { exports: { '.': './lib/index.js', './client': './lib/client.js' } },
   }
   for (const [name, meta] of Object.entries(packages)) {
     const dir = path.join(root, '@twinsearth', name)
     writeJson(path.join(dir, 'package.json'), { name: `@twinsearth/${name}`, version: '3.5.0', type: 'module', exports: meta.exports })
     writeFile(path.join(dir, 'lib', 'index.js'), `export const impl = '${name}'\n`)
+    if (meta.exports['./client']) writeFile(path.join(dir, 'lib', 'client.js'), `export const client = '${name}'\n`)
     if (meta.exports['./surface']) writeFile(path.join(dir, 'lib', 'types', 'surface.js'), 'export const surface = true\n')
   }
   return root
@@ -74,9 +82,21 @@ function makeSourceProfile() {
   })
   writeFile(path.join(dir, 'node_modules', 'dsh-context', 'lib', 'index.js'),
     "import '@deepseek-ai/dsh-session'\nimport '@deepseek-ai/dsh-session/surface'\nimport '@deepseek-ai/dsh-tool-bash'\nimport '@deepseek-ai/dsh-desktop'\nexport const context = true\n")
+  writeJson(path.join(dir, 'node_modules', 'dsh-context', 'package.json'), {
+    name: 'dsh-context',
+    version: '1.0.0',
+    type: 'module',
+    exports: { '.': './lib/index.js', './client': './lib/client.js' },
+    dsh: { client: { platform: 'web', inject: ['@deepseek-ai/dsh-api-remotes', '@deepseek-ai/dsh-client-locale', '@deepseek-ai/dsh-desktop'], external: ['@deepseek-ai/dsh-client-ui-primitives'] } },
+  })
+  writeFile(path.join(dir, 'node_modules', 'dsh-context', 'lib', 'client.js'),
+    "window.__ModuleLoader__.load({id:'dsh-context',factory:(e)=>{e('@deepseek-ai/dsh-client-locale');e('@deepseek-ai/dsh-client-ui-primitives');e('@deepseek-ai/dsh-desktop');return {}}})\n")
   writeFile(path.join(dir, 'node_modules', '@openviking', 'dsh-memory-plugin', 'mcp.mjs'),
     "import '@deepseek-ai/dsh-mcp-client'\nexport const memory = true\n")
-  writeFile(path.join(dir, 'cordis.patch.yml'), JSON.stringify({ insert: [{ id: 'x', name: '@deepseek-ai/dsh-llm' }] }))
+  writeFile(path.join(dir, 'cordis.patch.yml'), JSON.stringify({ insert: [
+    { id: 'x', name: '@deepseek-ai/dsh-llm' },
+    { id: 'ui-theme', name: '@deepseek-ai/dsh-client-ui-theme', config: { fontSize: 16 }, disabled: true },
+  ] }))
   return dir
 }
 
@@ -156,6 +176,79 @@ test('writeAliasStubs: unsupported entries carry the disposition category', () =
   const bySpec = Object.fromEntries(out.unsupported.map((u) => [u.spec, u.category]))
   assert.equal(bySpec['@deepseek-ai/dsh-desktop'], 'desktop-only')
   assert.equal(bySpec['@deepseek-ai/dsh-tool-lsp'], 'string-reference')
+})
+
+test('availableClientModules: static shell seeds + accelerated client halves (any dsh-* package with ./client)', () => {
+  const accel = makeAccelTree()
+  const available = availableClientModules(accel)
+  assert.ok(available.has('@twinsearth/dsh-client-ui-primitives'))
+  assert.ok(available.has('@twinsearth/dsh-client-store'))
+  assert.ok(available.has('@twinsearth/dsh-client-locale'))
+  assert.ok(available.has('@twinsearth/dsh-api-remotes'))
+  assert.equal(available.has('@twinsearth/dsh-tool-bash'), false)
+})
+
+test('rewriteClientSpecifiers: browser specifiers map to the accelerated scope; unsupported stay verbatim', () => {
+  const available = new Set(['@twinsearth/dsh-client-locale', '@twinsearth/dsh-client-ui-primitives'])
+  const result = rewriteClientSpecifiers("require('@deepseek-ai/dsh-client-locale');require('@deepseek-ai/dsh-client-ui-primitives');require('@deepseek-ai/dsh-desktop')", available)
+  assert.match(result.text, /@twinsearth\/dsh-client-locale/)
+  assert.match(result.text, /@twinsearth\/dsh-client-ui-primitives/)
+  assert.match(result.text, /@deepseek-ai\/dsh-desktop/)
+  assert.deepEqual(result.mapped.map((item) => item.to).sort(), ['@twinsearth/dsh-client-locale', '@twinsearth/dsh-client-ui-primitives'])
+  assert.deepEqual(result.unsupported, ['@deepseek-ai/dsh-desktop'])
+})
+
+test('writeAcceleratedForkProfile: third-party client halves are rewritten and unsupported ids reported', () => {
+  const accel = makeAccelTree()
+  const source = makeSourceProfile()
+  const home = temp('fang-home-client-')
+  const profileDir = path.join(home, 'profiles', 'web-accel')
+  const out = writeAcceleratedForkProfile({
+    profileDir, fangRoot: FANG_ROOT, homeDir: home, motherHome: '', profileName: 'web-accel',
+    sourceProfileDir: source, accelNodeModules: accel,
+  })
+  assert.equal(out.ok, true)
+  const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'node_modules', 'dsh-context', 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dsh.client.inject, ['@twinsearth/dsh-api-remotes', '@twinsearth/dsh-client-locale', '@deepseek-ai/dsh-desktop'])
+  assert.deepEqual(pkg.dsh.client.external, ['@twinsearth/dsh-client-ui-primitives'])
+  const clientBundle = fs.readFileSync(path.join(profileDir, 'node_modules', 'dsh-context', 'lib', 'client.js'), 'utf8')
+  assert.match(clientBundle, /@twinsearth\/dsh-client-locale/)
+  assert.match(clientBundle, /@twinsearth\/dsh-client-ui-primitives/)
+  assert.match(clientBundle, /@deepseek-ai\/dsh-desktop/, 'unsupported spec must stay verbatim, not be silently dropped')
+  const report = out.sync.clientAliases.find((item) => item.package === 'dsh-context')
+  assert.ok(report.mapped.some((item) => item.to === '@twinsearth/dsh-client-ui-primitives'))
+  assert.deepEqual(out.sync.unsupportedClientHalves, [{ package: 'dsh-context', unsupported: ['@deepseek-ai/dsh-desktop'] }])
+})
+
+test('applyClientRowOverrides: re-enables only the named web-required client row', () => {
+  const patch = '[{"insert":[{"id":"ui-theme","name":"@twinsearth/dsh-client-ui-theme","disabled":true},{"id":"dsh-desktop","name":"@twinsearth/dsh-desktop","disabled":true}]}]'
+  const result = applyClientRowOverrides(patch)
+  assert.match(result.text, /"id": "ui-theme"[\s\S]{0,220}?"disabled": false/)
+  assert.match(result.text, /"id": "dsh-desktop"[\s\S]{0,220}?"disabled": true/, 'other disabled rows stay disabled')
+  assert.deepEqual(result.applied.map((item) => item.id), ['ui-theme'])
+})
+
+test('buildSyncedAcceleratedProfile: web-required client rows are re-enabled and reported', () => {
+  const accel = makeAccelTree()
+  const source = makeSourceProfile()
+  const built = buildSyncedAcceleratedProfile({ sourceProfileDir: source, accelNodeModules: accel, profileName: 'p2', fangRoot: FANG_ROOT })
+  assert.equal(built.ok, true)
+  assert.match(built.patchText, /"id": "ui-theme"[\s\S]{0,220}?"disabled": false/)
+  assert.deepEqual(built.rowOverrides.map((item) => item.id), ['ui-theme'])
+})
+
+test('detectForkLspSupport: reports route B readiness from the accelerated module tree', () => {
+  const accel = makeAccelTree()
+  const before = detectForkLspSupport(accel)
+  assert.equal(before.available, false)
+  assert.deepEqual(before.missing.sort(), ['@twinsearth/dsh-lsp', '@twinsearth/dsh-lsp-stdio', '@twinsearth/dsh-tool-lsp'])
+  for (const name of ['dsh-lsp', 'dsh-lsp-stdio', 'dsh-tool-lsp']) {
+    const dir = path.join(accel, '@twinsearth', name)
+    writeJson(path.join(dir, 'package.json'), { name: `@twinsearth/${name}`, version: '3.5.0', type: 'module', exports: { '.': './lib/index.js' } })
+  }
+  const after = detectForkLspSupport(accel)
+  assert.equal(after.available, true)
+  assert.deepEqual(after.missing, [])
 })
 
 test('writeAcceleratedForkProfile(synced): copies plugins, writes stubs, reports sync', () => {

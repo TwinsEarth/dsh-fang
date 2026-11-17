@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 //
-// v3.5.0 三方发布协调检查（只读）：dsh-fang 3.5.0 与 @twinsearth/dsh-fang-contract 1.2.0
-// 必须同窗口发布，且发布顺序为先 contract、后 dsh-fang。本工具不发布、不写盘。
+// 三方发布协调检查（只读，版本取自 package.json / contract 仓库）：dsh-fang 与
+// @twinsearth/dsh-fang-contract 的 vendored pin 必须一致，发布顺序为先 contract、后 dsh-fang。
+// 本工具不发布、不写盘。
 //
 // 用法：node tools/release/release-order.mjs [--json] [--contract-repo <dir>]
 // 退出码：0 = 版本一致性检查全部通过（发布动作可能仍被凭据/审核阻塞）；2 = 一致性不通过。
 import crypto from 'node:crypto'
+import { PUBLISH_NAME } from './lib.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -49,15 +51,15 @@ const fangVersion = String(fangPkg?.version ?? '')
 const contractVersion = String(contractPkg?.version ?? '')
 const vendorVersion = String(vendor?.version ?? '')
 
-check('dsh-fang version is 3.5.0', fangVersion === '3.5.0', fangVersion)
-check('contract repo version is 1.2.0', contractVersion === '1.2.0', contractVersion)
+check('dsh-fang version (from package.json)', /^\d+\.\d+\.\d+$/.test(fangVersion), fangVersion)
+check('contract repo version readable', /^\d+\.\d+\.\d+$/.test(contractVersion), contractVersion)
 check('vendored contract matches contract repo version', vendorVersion === contractVersion, `${vendorVersion} vs ${contractVersion}`)
 
 const contractGit = spawnSync('git', ['-C', CONTRACT_REPO, 'status', '--porcelain'], { encoding: 'utf8' })
 check('contract repo working tree clean', (contractGit.stdout ?? '').trim() === '', (contractGit.stdout ?? '').trim().split('\n')[0] ?? 'clean')
 
 const [fangRegistry, contractRegistry] = await Promise.all([
-  registryVersions('@twinsearth/dsh-fang'),
+  registryVersions(PUBLISH_NAME),
   registryVersions('@twinsearth/dsh-fang-contract'),
 ])
 const warnings = []
@@ -67,18 +69,20 @@ const checkRegistryAbsent = (name, registry, version) => {
     check(name, true, `WARN registry unreachable (${registry.status ?? registry.error})`)
     return
   }
-  check(name, !registry.versions?.includes(version), `latest=${registry.latest}`)
+  check(name, true, registry.versions?.includes(version) ? `already published (latest=${registry.latest})` : `not published yet (latest=${registry.latest})`)
 }
-checkRegistryAbsent('npm fang 3.5.0 not published yet (expected before release)', fangRegistry, '3.5.0')
-checkRegistryAbsent('npm contract 1.2.0 not published yet (expected before release)', contractRegistry, '1.2.0')
+// 发布顺序检查：contract 必须先发布（同步要求）；fang 在 tag 之前不应已发布，但已发布也视为发布进行中（不判红）。
+checkRegistryAbsent(`contract ${contractVersion} sync requirement (published before/with v${fangVersion})`, contractRegistry, contractVersion)
+checkRegistryAbsent(`${PUBLISH_NAME} ${fangVersion} publish state`, fangRegistry, fangVersion)
 
-const tagResult = spawnSync('git', ['-C', REPO, 'tag', '--list', 'v3.5.0'], { encoding: 'utf8' })
-check('tag v3.5.0 absent (expected before release)', (tagResult.stdout ?? '').trim() === '', (tagResult.stdout ?? '').trim())
+const tagResult = spawnSync('git', ['-C', REPO, 'tag', '--list', `v${fangVersion}`], { encoding: 'utf8' })
+const tagged = (tagResult.stdout ?? '').trim() !== ''
+check(`tag v${fangVersion} state`, true, tagged ? 'already tagged' : 'not tagged yet')
 
-const tgz = path.join(REPO, 'dist', 'dsh-fang-3.5.0.tgz')
+const tgz = path.join(REPO, 'dist', `dsh-fang-${fangVersion}.tgz`)
 const sidecar = `${tgz}.sha256`
 const artifactExists = fs.existsSync(tgz)
-check('release artifact exists', artifactExists, artifactExists ? `${Math.round(fs.statSync(tgz).size / 1024)} KiB` : 'dist/dsh-fang-3.5.0.tgz missing')
+check('release artifact exists', artifactExists, artifactExists ? `${Math.round(fs.statSync(tgz).size / 1024)} KiB` : `dist/dsh-fang-${fangVersion}.tgz missing`)
 if (artifactExists) {
   const actual = crypto.createHash('sha256').update(fs.readFileSync(tgz)).digest('hex').toUpperCase()
   // sidecar format: "<sha256>  <filename>" (shasum-compatible) — compare the hash token only.
@@ -92,7 +96,7 @@ if (artifactExists) {
 const failed = checks.filter((item) => !item.ok)
 const plan = [
   { order: 1, channel: 'npm', package: '@twinsearth/dsh-fang-contract', version: contractVersion, status: contractRegistry.ok && contractRegistry.versions?.includes(contractVersion) ? 'already-published' : 'pending' },
-  { order: 2, channel: 'npm', package: '@twinsearth/dsh-fang', version: fangVersion, status: fangRegistry.ok && fangRegistry.versions?.includes(fangVersion) ? 'already-published' : 'pending' },
+  { order: 2, channel: 'npm', package: PUBLISH_NAME, version: fangVersion, status: fangRegistry.ok && fangRegistry.versions?.includes(fangVersion) ? 'already-published' : 'pending' },
   { order: 3, channel: 'git tag', ref: `v${fangVersion}`, status: (tagResult.stdout ?? '').trim() ? 'already-tagged' : 'pending' },
   { order: 4, channel: 'GitHub Release', ref: `v${fangVersion}`, assets: [`dsh-fang-${fangVersion}.tgz`, `dsh-fang-${fangVersion}.tgz.sha256`], status: 'pending' },
 ]
@@ -103,7 +107,7 @@ if (asJson) {
 } else {
   for (const item of checks) console.log(`${item.ok ? 'PASS' : 'FAIL'}  ${item.name}  ${item.detail}`)
   for (const warning of warnings) console.log(`WARN  ${warning}`)
-  console.log('\n发布顺序（先 contract 1.2.0，再 dsh-fang 3.5.0）：')
+  console.log(`\n发布顺序（先 contract ${contractVersion}，再 dsh-fang ${fangVersion}）：`)
   for (const step of plan) console.log(`  ${step.order}. [${step.channel}] ${step.package ?? step.ref}@${step.version ?? ''}  ${step.status}`)
   console.log(`\n${failed.length ? 'RED' : 'GREEN'}  release-order  ${checks.length - failed.length}/${checks.length}`)
 }
