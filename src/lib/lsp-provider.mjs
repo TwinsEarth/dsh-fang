@@ -114,20 +114,20 @@ function canonical(pathValue) {
  */
 export function checkWorkspaceRoot({ workspaceRoot = '', file = '', allowedRoots = [] } = {}) {
   if (!String(workspaceRoot ?? '').trim()) {
-    return { ok: false, code: DELEGATE_ERROR.INVALID, message: 'lsp delegation requires workspaceRoot (explicitly allowed root)' }
+    return { ok: false, code: DELEGATE_ERROR.INVALID, reason: 'workspace-root-missing', message: 'lsp delegation requires workspaceRoot (explicitly allowed root)' }
   }
   if (!Array.isArray(allowedRoots) || allowedRoots.length === 0) {
-    return { ok: false, code: DELEGATE_ERROR.UNAUTHORIZED, message: 'lsp delegation has no allowed workspace roots; configure contract.delegate.lsp.allowedRoots' }
+    return { ok: false, code: DELEGATE_ERROR.UNAUTHORIZED, reason: 'allowlist-empty', message: 'lsp delegation has no allowed workspace roots; configure contract.delegate.lsp.allowedRoots' }
   }
   const root = canonical(workspaceRoot)
   const inside = allowedRoots.some((allowed) => {
     const prefix = canonical(allowed)
     return root === prefix || root.startsWith(prefix.endsWith(path.sep) ? prefix : `${prefix}${path.sep}`)
   })
-  if (!inside) return { ok: false, code: DELEGATE_ERROR.UNAUTHORIZED, message: `workspaceRoot is not in contract.delegate.lsp.allowedRoots: ${root}` }
+  if (!inside) return { ok: false, code: DELEGATE_ERROR.UNAUTHORIZED, reason: 'root-not-allowed', message: `workspaceRoot is not in contract.delegate.lsp.allowedRoots: ${root}` }
   const source = canonical(path.isAbsolute(file) ? file : path.join(root, file))
   if (!(source === root || source.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`))) {
-    return { ok: false, code: DELEGATE_ERROR.INVALID, message: `lsp file escapes workspaceRoot: ${source}` }
+    return { ok: false, code: DELEGATE_ERROR.INVALID, reason: 'file-outside-root', message: `lsp file escapes workspaceRoot: ${source}` }
   }
   return { ok: true, workspaceRoot: root, file: source }
 }

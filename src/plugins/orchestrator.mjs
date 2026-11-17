@@ -2218,7 +2218,7 @@ export function apply(ctx, config) {
           if (rootCheck.ok !== true) {
             const error = new Error(rootCheck.message)
             error.code = rootCheck.code
-            error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', reason: 'workspace-root-denied', allowedRoots: allowedRoots.length }
+            error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', reason: rootCheck.reason ?? 'workspace-root-denied', allowedRoots: allowedRoots.length }
             auditLsp('denied', rootCheck.code, String(params?.workspaceRoot ?? ''))
             throw error
           }

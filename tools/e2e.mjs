@@ -135,8 +135,9 @@ function makeProfile(homeRoot) {
   const lspWorkspace = path.join(homeRoot, 'lsp-workspace')
   if (LSP_MODE) {
     fs.mkdirSync(lspWorkspace, { recursive: true })
-    fs.writeFileSync(path.join(lspWorkspace, 'a.ts'), 'export const base = 1\nexport function add(x: number) {\n  return x + base\n}\n')
-    fs.writeFileSync(path.join(lspWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, target: 'ES2022', module: 'ESNext' }, include: ['a.ts'] }, null, 2))
+    fs.writeFileSync(path.join(lspWorkspace, 'base.ts'), 'export const base = 1\nexport const unused = 0\n')
+    fs.writeFileSync(path.join(lspWorkspace, 'a.ts'), "import { base } from './base'\nexport function add(x: number) {\n  return x + base\n}\n")
+    fs.writeFileSync(path.join(lspWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, target: 'ES2022', module: 'ESNext' }, include: ['a.ts', 'base.ts'] }, null, 2))
     // Fork workspace fixture: the task registry entry below registers this root explicitly.
     const forkHome = path.join(homeRoot, 'lsp-fork-home')
     const forkWorkspace = path.join(homeRoot, 'lsp-fork-workspace')
@@ -427,11 +428,12 @@ async function main() {
     const lspReadOk = LSP_MODE
       ? (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'mother-lsp'
         && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations)
-        && lspRead.body.result.locations.length > 0)
+        && lspRead.body.result.locations.length > 0
+        && lspRead.body.result.locations.every((loc) => Number(loc?.range?.start?.line) === 0))
       : (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'test-hook'
         && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations))
     check(LSP_MODE ? 'delegated lsp definition via real mother provider (ctx.lsp) succeeds' : 'delegated lsp definition (official read action) succeeds', lspRead.status === 200 && lspReadOk,
-      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null, locations: lspRead.body?.result?.locations?.length ?? null, detail: lspRead.body?.error?.detail ?? null }).slice(0, 400))
+      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null, locations: lspRead.body?.result?.locations ?? null, detail: lspRead.body?.error?.detail ?? null }).slice(0, 500))
     const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs', line: 1, character: 1 })
     check('delegated lsp legacy write action rejected (official seam is read-only: contract-unsupported)', lspWrite.status === 200
       && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-unsupported'
@@ -458,17 +460,33 @@ async function main() {
       const lspForkRoot = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_FORK_WS })
       check('delegated lsp auto-registers fork workspace root (task registry explicit registration)', lspForkRoot.status === 200
         && lspForkRoot.body?.ok === true && lspForkRoot.body?.result?.provider === 'mother-lsp'
-        && lspForkRoot.body.result.kind === 'locations' && lspForkRoot.body.result.locations.length > 0,
+        && lspForkRoot.body.result.kind === 'locations' && lspForkRoot.body.result.locations.length > 0
+        && lspForkRoot.body.result.locations.some((loc) => /lsp-fork-workspace/i.test(String(loc?.uri ?? ''))),
         JSON.stringify({ status: lspForkRoot.status, code: lspForkRoot.body?.error?.code ?? null, detail: lspForkRoot.body?.error?.detail ?? null }).slice(0, 240))
       const lspHover = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'hover', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_WS })
       check('delegated lsp hover via real mother provider returns normalized hover', lspHover.status === 200
         && lspHover.body?.ok === true && lspHover.body?.result?.provider === 'mother-lsp'
-        && lspHover.body.result.kind === 'hover',
-        JSON.stringify({ status: lspHover.status, code: lspHover.body?.error?.code ?? null, provider: lspHover.body?.result?.provider ?? null, detail: lspHover.body?.error?.detail ?? null }).slice(0, 400))
+        && lspHover.body.result.kind === 'hover'
+        && typeof lspHover.body.result.hover?.contents === 'string'
+        && lspHover.body.result.hover.contents.length > 0
+        && /base/i.test(lspHover.body.result.hover.contents),
+        JSON.stringify({ status: lspHover.status, code: lspHover.body?.error?.code ?? null, provider: lspHover.body?.result?.provider ?? null, hover: String(lspHover.body?.result?.hover?.contents ?? '').slice(0, 120), detail: lspHover.body?.error?.detail ?? null }).slice(0, 420))
+      const lspRefs = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'references', file: 'base.ts', line: 1, character: 14, workspaceRoot: LSP_WS })
+      const refUris = Array.isArray(lspRefs.body?.result?.locations) ? lspRefs.body.result.locations.map((loc) => String(loc?.uri ?? '')) : []
+      check('delegated lsp references resolve across fixture files (real TS semantics)', lspRefs.status === 200
+        && lspRefs.body?.ok === true && lspRefs.body?.result?.provider === 'mother-lsp'
+        && lspRefs.body.result.kind === 'locations' && refUris.length >= 2
+        && refUris.some((uri) => /base\.ts$/i.test(uri)) && refUris.some((uri) => /a\.ts$/i.test(uri)),
+        JSON.stringify({ status: lspRefs.status, code: lspRefs.body?.error?.code ?? null, refs: refUris }).slice(0, 320))
+      const lspEscape = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: '../outside.ts', line: 1, character: 1, workspaceRoot: LSP_WS })
+      check('delegated lsp rejects file escaping the registered root (contract-invalid-request)', lspEscape.status === 200
+        && lspEscape.body?.ok === false && lspEscape.body?.error?.code === 'contract-invalid-request'
+        && lspEscape.body?.error?.detail?.reason === 'file-outside-root',
+        JSON.stringify({ status: lspEscape.status, code: lspEscape.body?.error?.code ?? null, detail: lspEscape.body?.error?.detail ?? null }).slice(0, 240))
       const lspDenied = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: path.join(os.tmpdir(), 'outside-lsp-root') })
       check('delegated lsp rejects workspaceRoot outside the registered allowlist (contract-unauthorized)', lspDenied.status === 200
         && lspDenied.body?.ok === false && lspDenied.body?.error?.code === 'contract-unauthorized'
-        && lspDenied.body?.error?.detail?.reason === 'workspace-root-denied',
+        && lspDenied.body?.error?.detail?.reason === 'root-not-allowed',
         JSON.stringify({ status: lspDenied.status, code: lspDenied.body?.error?.code ?? null, detail: lspDenied.body?.error?.detail ?? null }).slice(0, 240))
     }
     // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported

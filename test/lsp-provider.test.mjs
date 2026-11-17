@@ -76,14 +76,17 @@ test('B-6 root policy: empty allowlist denies; outside roots deny; file escaping
   const empty = checkWorkspaceRoot({ workspaceRoot: root, file, allowedRoots: [] })
   assert.equal(empty.ok, false)
   assert.equal(empty.code, DELEGATE_ERROR.UNAUTHORIZED)
+  assert.equal(empty.reason, 'allowlist-empty')
 
   const outside = checkWorkspaceRoot({ workspaceRoot: root, file, allowedRoots: [path.join(os.tmpdir(), 'other-root')] })
   assert.equal(outside.ok, false)
   assert.equal(outside.code, DELEGATE_ERROR.UNAUTHORIZED)
+  assert.equal(outside.reason, 'root-not-allowed')
 
   const escape = checkWorkspaceRoot({ workspaceRoot: root, file: path.join(os.tmpdir(), 'outside.ts'), allowedRoots: [root] })
   assert.equal(escape.ok, false)
   assert.equal(escape.code, DELEGATE_ERROR.INVALID)
+  assert.equal(escape.reason, 'file-outside-root')
 
   const ok = checkWorkspaceRoot({ workspaceRoot: root, file: 'src/index.ts', allowedRoots: [root] })
   assert.equal(ok.ok, true)
@@ -93,6 +96,7 @@ test('B-6 root policy: empty allowlist denies; outside roots deny; file escaping
   const missingRoot = checkWorkspaceRoot({ workspaceRoot: '', file, allowedRoots: [root] })
   assert.equal(missingRoot.ok, false)
   assert.equal(missingRoot.code, DELEGATE_ERROR.INVALID)
+  assert.equal(missingRoot.reason, 'workspace-root-missing')
 })
 
 test('B-6 query: maps contract action to seam operation and 1-based → 0-based position', async () => {
