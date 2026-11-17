@@ -304,6 +304,31 @@ async function main() {
       && ((sessionListEnv.body?.result && typeof sessionListEnv.body.result === 'object') || sessionListCode === 'fang-service-unavailable'),
       JSON.stringify({ status: sessionListEnv.status, error: sessionListCode }).slice(0, 160))
 
+    // ── B 委托（meta.delegate=true）：白名单默认拒绝 / 只读能力放行 ─────────
+    const delegatedInvoke = async (method, params = null) => api('/fang/api/contract/invoke', {
+      method: 'POST', headers: contractAuth,
+      body: JSON.stringify(createEnvelope({ method, params, source: 'fork-e2e', meta: { delegate: true } })),
+    })
+    const capList = await delegatedInvoke('fang.capability.list')
+    check('delegated fang.capability.list returns read-only catalog', capList.status === 200 && capList.body?.ok === true
+      && Array.isArray(capList.body?.result?.capabilities)
+      && capList.body.result.capabilities.some((c) => c.method === 'fang.session.list')
+      && !capList.body.result.capabilities.some((c) => c.kind === 'write'),
+      JSON.stringify({ status: capList.status, caps: (capList.body?.result?.capabilities ?? []).map((c) => c.method) }).slice(0, 200))
+    const rejectedCap = await delegatedInvoke('fang.fork.spawn', {})
+    check('delegated unlisted capability rejected (contract-unsupported)', rejectedCap.status === 200
+      && rejectedCap.body?.ok === false && rejectedCap.body?.error?.code === 'contract-unsupported',
+      JSON.stringify({ status: rejectedCap.status, code: rejectedCap.body?.error?.code ?? null }).slice(0, 160))
+    const delegatedStatus = await delegatedInvoke('fang.orchestrator.status')
+    check('delegated read capability succeeds (fang.orchestrator.status)', delegatedStatus.status === 200
+      && delegatedStatus.body?.ok === true && delegatedStatus.body?.result && typeof delegatedStatus.body.result === 'object',
+      JSON.stringify({ status: delegatedStatus.status, code: delegatedStatus.body?.error?.code ?? null }).slice(0, 160))
+    const delegatedSessionList = await delegatedInvoke('fang.session.list', { limit: 5 })
+    const delegatedSessionCode = delegatedSessionList.body?.error?.code ?? null
+    check('delegated capability maps missing mother service to contract-unavailable', delegatedSessionList.status === 200
+      && ((delegatedSessionList.body?.result && typeof delegatedSessionList.body.result === 'object') || delegatedSessionCode === 'contract-unavailable'),
+      JSON.stringify({ status: delegatedSessionList.status, code: delegatedSessionCode }).slice(0, 160))
+
 
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
     check('mother exposes 8 mother-side services', Object.values(status.body?.services ?? {}).filter(Boolean).length >= 5)

@@ -3,6 +3,24 @@
 > 阶段：D2 下一阶段（**不阻塞 v3.5.0 发布**）。本文给出契约委托的第一批候选能力、协议设计、安全门禁与验收标准；**实现前需用户确认所选范围**。
 > 现状依据：`src/contract/constants.js`（METHODS / METHOD_VERSION / ERROR_CODES）、`src/plugins/orchestrator.mjs`（契约 handler 组装，约 2069–2095 行）、`docs/D2-NEXT-PHASE.md`。
 
+## 0. 实现状态（2026-11-17 · P0 已落地）
+
+**已实现**（`src/lib/contract-delegation.mjs` + orchestrator invoke 路由委托守卫）：
+
+| 项 | 内容 |
+|---|---|
+| 委托声明 | `envelope.meta.delegate === true` 才进入委托校验；未声明 = 旧调用方语义不变（不回归） |
+| 白名单 | 默认只读 5 项：`fang.capability.list` / `fang.orchestrator.status` / `fang.session.list` / `fang.decision.list` / `fang.approvals.list`；未登记 → `contract-unsupported` |
+| 配置 | `contract.delegate = { enabled, allow[], maxPayloadBytes=64KiB, readTimeoutMs=5s, writeTimeoutMs=30s }`；`enabled:false` → `contract-unavailable` |
+| 错误码 | `contract-unavailable` / `contract-unsupported` / `contract-timeout` / `contract-invalid-request`（服务不可用统一映射为 contract-unavailable） |
+| 限额/超时 | 超 64KiB → `contract-invalid-request`；读超时（默认 5s）→ `contract-timeout` |
+| 审计 | 每次委托写 `contract-delegate`：`{capability, source, outcome, error, latencyMs}`（拒绝/成功/错误都记） |
+| 新增方法 | `fang.capability.list`、`fang.decision.list`、`fang.approvals.list`（服务缺失显式报错） |
+
+**e2e 真实断言**（`tools/e2e.mjs`，2026-11-17）：hello 200/`contractVersion=1.1.0`/**14 个方法**；`capability.list` 返回只读 5 项；`fang.fork.spawn` 委托被拒 `contract-unsupported`；`fang.orchestrator.status` 委托成功；`fang.session.list` 缺服务映射 `contract-unavailable`。
+
+**未实现（待确认后推进）**：P1 `fang.tool.invoke`（lsp）/ `fang.chat.import`；异步长任务模型；背压/并发上限；分侧调用方身份（目前记录 `meta.source` 审计，未做 per-fork 鉴权策略）；UI client half。
+
 ## 1. 现有契约能力（只读盘点）
 
 | 方法 | 版本 | 类型 | 现有实现 |

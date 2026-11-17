@@ -45,12 +45,16 @@ import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 // P0: the former "accelerated Web sidecar" (a second mother Web) was retired — the
 // accelerator serves fork Web UIs only. See /fang/api/fork-core.
 import { readForkCoreSettings, resolveForkCoreState, writeForkCoreSettings } from '../lib/fork-core-settings.mjs'
+import {
+  capabilityCatalog, checkDelegation, DELEGATE_ERROR, delegationAuditRecord,
+  DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
+} from '../lib/contract-delegation.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
 import {
-  createContractServer, startFileContractServer,
+  createContractServer, startFileContractServer, createResponse,
   createRelayStore, relayHandlers,               // v3.1.35：contract 1.1 回流接口
   METHODS as CONTRACT_METHODS, CONTRACT_VERSION,
 } from '../contract/index.js'
@@ -228,6 +232,14 @@ export const Config = z.object({
     token: z.string().default('').description('契约 HTTP Bearer token（留空 = HTTP 契约端点禁用；不写日志/状态）'),
     fileDir: z.string().default('').description('可选：文件 outbox 兜底目录（同机 fallback；留空 = 关闭）'),
     pathPrefix: z.string().default('/fang/api/contract').description('契约路由前缀'),
+    // B 契约委托：加速分身 → 母体 的无头能力委托（默认只读白名单）
+    delegate: z.object({
+      enabled: z.boolean().default(true).description('是否允许委托调用（默认开启；仍受 allow 白名单约束）'),
+      allow: z.array(z.string()).default([...DEFAULT_READ_ALLOW]).description('允许委托的能力方法名；默认只读白名单'),
+      maxPayloadBytes: z.number().min(1024).max(16 * 1024 * 1024).default(64 * 1024),
+      readTimeoutMs: z.number().min(100).max(120000).default(5000),
+      writeTimeoutMs: z.number().min(100).max(600000).default(30000),
+    }).default({}),
   }).default({}),
 })
 
@@ -2063,6 +2075,8 @@ export function apply(ctx, config) {
     role: gate.role,
     instanceId: `fang-${gate.role}-${process.pid}`,
   })
+  const delegationCfg = normalizeDelegationConfig(cfg.contract?.delegate ?? {})
+  const delegateUnavailable = (message, code = DELEGATE_ERROR.UNAVAILABLE) => { const error = new Error(message); error.code = code; throw error }
   const contractServer = createContractServer({
     role: gate.role,
     instanceId: `fang-${gate.role}-${process.pid}`,
@@ -2089,9 +2103,32 @@ export function apply(ctx, config) {
       [CONTRACT_METHODS.SESSION_LIST]: async (params) => {
         const catalog = contractService('sessionCatalog', 'list', false)
         if (catalog) return await catalog.list(params ?? {})
-        const error = new Error('fang session catalog is unavailable'); error.code = 'fang-service-unavailable'; throw error
+        return delegateUnavailable('fang session catalog is unavailable', 'fang-service-unavailable')
       },
       [CONTRACT_METHODS.ORCHESTRATOR_STATUS]: async () => service.status(),
+      // ── B 委托：只读能力（白名单在 invoke 路由统一校验；这里只做能力实现）──
+      'fang.capability.list': async () => ({
+        enabled: true,
+        contractVersion: CONTRACT_VERSION,
+        capabilities: capabilityCatalog(delegationCfg.allow),
+        allow: delegationCfg.allow,
+        limits: { maxPayloadBytes: delegationCfg.maxPayloadBytes, readTimeoutMs: delegationCfg.readTimeoutMs, writeTimeoutMs: delegationCfg.writeTimeoutMs },
+      }),
+      'fang.decision.list': async (params) => {
+        const center = contractService('decisionCenter', 'snapshot', false)
+        if (!center || typeof center.snapshot !== 'function') return delegateUnavailable('fang decision center is unavailable')
+        const snapshot = center.snapshot()
+        const items = Array.isArray(snapshot?.tickets) ? snapshot.tickets : (Array.isArray(snapshot?.items) ? snapshot.items : [])
+        const limit = Math.min(50, Math.max(1, Number(params?.limit) || 20))
+        return { items: items.slice(0, limit).map((t) => ({ id: t.id, level: t.level, status: t.status, title: t.title, priority: t.priority ?? null, risk: t.risk ?? null, at: t.createdAt ?? t.at ?? null })), total: items.length }
+      },
+      'fang.approvals.list': async (params) => {
+        const approver = contractService('approver', 'pending', false)
+        if (!approver) return delegateUnavailable('fang approver is unavailable')
+        const pending = typeof approver.pending === 'function' ? approver.pending() : []
+        const limit = Math.min(50, Math.max(1, Number(params?.limit) || 20))
+        return { items: (Array.isArray(pending) ? pending : []).slice(0, limit).map((a) => ({ id: a.id, kind: a.kind, risk: a.risk, state: a.state, title: a.title, at: a.createdAt ?? a.at ?? null })) }
+      },
     },
   })
   try { ctx.effect(() => ctx.provide(SERVICE.contract, contractServer)) } catch { /* fake ctx */ }
@@ -3194,6 +3231,32 @@ export function apply(ctx, config) {
           if (!contractAuthorized(req)) return json(res, 401, { ok: false, code: 'contract-unauthorized' })
           const body = await readBody(req)
           if (!body || typeof body !== 'object') return json(res, 400, { ok: false, code: 'invalid-envelope' })
+          // B 委托：调用方以 meta.delegate=true 声明「委托调用」，白名单默认拒绝；
+          // 未声明 delegate 的旧调用方保持既有语义（fork.spawn/decision.* 等不回归）。
+          const delegated = body?.meta?.delegate === true
+          const source = String(body?.meta?.source ?? body?.meta?.instanceId ?? '').slice(0, 120)
+          if (delegated) {
+            const decision = checkDelegation({ method: body?.method, allow: delegationCfg.allow, config: delegationCfg })
+            if (decision.ok !== true) {
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rejected', error: decision.error, latencyMs: 0 })) } catch { /* audit optional */ }
+              return json(res, 200, createResponse({ id: body?.id, error: { code: decision.error, message: decision.message ?? decision.error } }))
+            }
+            if (exceedPayloadLimit(body?.params, delegationCfg.maxPayloadBytes)) {
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rejected', error: DELEGATE_ERROR.INVALID, latencyMs: 0 })) } catch { /* audit optional */ }
+              return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.INVALID, message: 'delegated payload exceeds maxPayloadBytes' } }))
+            }
+            const run = await runDelegated(() => contractServer.invoke(body), { timeoutMs: delegationCfg.readTimeoutMs })
+            const errorCode = run.ok ? null : (run.error ?? DELEGATE_ERROR.UNAVAILABLE)
+            try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: run.ok ? 'ok' : 'error', error: errorCode, latencyMs: run.latencyMs })) } catch { /* audit optional */ }
+            if (run.ok !== true) {
+              return json(res, 200, createResponse({ id: body?.id, error: { code: errorCode, message: run.message ?? errorCode } }))
+            }
+            // 委托模式统一错误码：服务不可用 → contract-unavailable（不泄露内部 code）。
+            if (run.value?.ok === false && run.value?.error?.code === 'fang-service-unavailable') {
+              return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.UNAVAILABLE, message: 'capability service unavailable on mother' } }))
+            }
+            return json(res, 200, run.value)
+          }
           const out = await contractServer.invoke(body)
           return json(res, 200, out)
         })

@@ -33,7 +33,8 @@
 - 加速核真机安装：`@twinsearth/dsh 3.5.0`（651 包）；
 - `accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真派生通过（identity role=fork, version=3.5.0）；
 - 单测：accelerated-install 10、accelerated-fork 9、fork-core-settings 8；
-- `tools/e2e.mjs` **102/102**（新增 fork-core 契约断言：view shape、essence=stock、未安装切档 409+unchanged、设置不变；新增 B 契约委托基线：`contract.hello` 200/1.1.0/11 方法、`fang.orchestrator.status` 真实委托、`fang.session.list` 可读错误码）；allow-list 110 路由 findings=0；main-city source gate grade=A；`tools/ui-rich-smoke.mjs` 新增 FORK-CORE-00..04（按钮文案/切换 toast/回切/加速核徽标/端点）
+- **B 契约委托 P0**（`src/lib/contract-delegation.mjs` + orchestrator invoke 守卫）：`envelope.meta.delegate=true` 才走委托白名单（默认只读 5 项）、64KiB / 5s 限额超时、`contract-unavailable/unsupported/timeout/invalid-request` 错误码、每次委托审计 `{capability,source,outcome,latencyMs}`；未声明 delegate 的旧调用方语义不变；
+- `tools/e2e.mjs` **106/106**（新增 fork-core 契约断言：view shape、essence=stock、未安装切档 409+unchanged、设置不变；新增 B 契约基线：`contract.hello` 200/1.1.0/14 方法、`fang.orchestrator.status` 真实委托、`fang.session.list` 可读错误码；新增 B 委托：白名单只读目录、`contract-unsupported` 拒绝、只读委托成功、缺服务映射 `contract-unavailable`）；allow-list 110 路由 findings=0；main-city source gate grade=A；`tools/ui-rich-smoke.mjs` 新增 FORK-CORE-00..04（按钮文案/切换 toast/回切/加速核徽标/端点）
 
 ### 注意
 
