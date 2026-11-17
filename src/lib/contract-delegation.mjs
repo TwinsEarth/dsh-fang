@@ -5,6 +5,7 @@
 // 仅处理委托调用（envelope.meta.delegate === true）；未带该标记的旧调用方保持既有语义。
 // 设计：默认拒绝（fail-closed）；未登记能力返回 contract-unsupported；委托层关闭返回 contract-unavailable。
 
+// 这些错误码属于 fang 委托层（vendored contract SDK 保持 1.1.0 不改，避免破坏 vendored 契约逐字节校验）。
 export const DELEGATE_ERROR = Object.freeze({
   UNAVAILABLE: 'contract-unavailable',
   UNAUTHORIZED: 'contract-unauthorized',
@@ -20,11 +21,11 @@ export const DELEGATE_KIND = Object.freeze({ READ: 'read', WRITE: 'write' })
  * @typedef {{method:string, kind:'read'|'write', approval:'none'|'required', since:string, summary:string}} CapabilityDescriptor
  */
 export const CAPABILITY_CATALOG = Object.freeze([
-  { method: 'fang.capability.list', kind: 'read', approval: 'none', since: '1.2', summary: '列出已放行的委托能力（引导方法，总是可用）' },
+  { method: 'fang.capability.list', kind: 'read', approval: 'none', since: '1.1', summary: '列出已放行的委托能力（引导方法，总是可用）' },
   { method: 'fang.orchestrator.status', kind: 'read', approval: 'none', since: '1.0', summary: '母体 orchestrator 状态' },
   { method: 'fang.session.list', kind: 'read', approval: 'none', since: '1.0', summary: '母体会话目录（只读）' },
-  { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.2', summary: '母体决策中心快照（只读）' },
-  { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.2', summary: '母体审批队列（只读）' },
+  { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体决策中心快照（只读）' },
+  { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体审批队列（只读）' },
 ])
 
 export const DEFAULT_READ_ALLOW = Object.freeze([

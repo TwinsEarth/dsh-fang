@@ -21,6 +21,19 @@
 
 **未实现（待确认后推进）**：P1 `fang.tool.invoke`（lsp）/ `fang.chat.import`；异步长任务模型；背压/并发上限；分侧调用方身份（目前记录 `meta.source` 审计，未做 per-fork 鉴权策略）；UI client half。
 
+### 0.2 M1 验收（2026-11-17）
+
+| M1 要求 | 实现 | 单测 |
+|---|---|---|
+| 能力注册表 | `CAPABILITY_CATALOG`（fang 委托层，5 项只读）+ `DEFAULT_READ_ALLOW`；未登记默认拒绝 | `M1 registry: fang delegation catalog is append-only, read-only and whitelist-consistent` |
+| hello 广告 | `contract.hello` 广告 **实际注册的 handler**（新增 3 个委托方法随注册自动出现；vendored contract SDK 保持 1.1.0 逐字节不变） | `M1 hello advertises fang-layer handlers registered on the contract server` |
+| 白名单校验 | invoke 路由 `meta.delegate=true` + `checkDelegation()`；未登记 → `contract-unsupported`；`enabled:false` → `contract-unavailable` | `checkDelegation: disabled → contract-unavailable, not listed → contract-unsupported, listed → ok` |
+| 错误码 | fang 委托层稳定表：`contract-unavailable/unauthorized/unsupported/timeout/invalid-request`（唯一性 + 稳定性断言） | `M1 error codes: fang delegation codes are a unique, stable append-only table` |
+| 版本裁剪 | `negotiate()` 按 `METHOD_VERSION` 裁剪：1.0 对端拿不到 1.1 方法（relay），1.1 对端完整可见 | 2 个 `M1 version trimming` 用例 |
+| payload 上限 | `exceedPayloadLimit()`（默认 64KiB）→ `contract-invalid-request` | `exceedPayloadLimit: default 64KiB boundary` |
+
+> 设计取舍：为保持 vendored contract SDK（`@twinsearth/dsh-fang-contract@1.1.0`）**逐字节一致**（有 vendor-sync 门禁），委托方法名/错误码注册在 fang 层；hello 广告仍由实际注册 handler 驱动，对端看到的能力与白名单一致。
+
 ### 0.1 生产母体服务确认（2026-11-17，`npm run probe:mother`）
 
 工具：`node tools/release/mother-capability-probe.mjs --base <motherUrl> --token-file <dataDir>/fang-auth.json`

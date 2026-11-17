@@ -42,6 +42,7 @@
 - `docs/ACCEL-FORK-COMPAT.md`：核心/官方 bundle/第三方插件兼容矩阵（含未验证项）；
 - **D2 混合插件面（alias/shim）**：`accelerated-fork.mjs` 新增 `translateBundles` / `scanDeepseekSpecs` / `writeAliasStubs` / `buildSyncedAcceleratedProfile`；`writeAcceleratedForkProfile({sourceProfileDir, accelNodeModules})` 同步原身插件面并返回 `sync`（mapped / unsupportedBundles / copiedPlugins / alias）；`task.acceleratedSync` 暴露给任务视图；真机验证 0 导入失败（57 alias resolved / 8 unsupported / 5 pending 服务等待）；
 - `npm run probe:mother`（`tools/release/mother-capability-probe.mjs`）：生产母体能力探测（`sessionCatalog` READY 证据：`/fang/api/sessions` 200 + 真实会话项；生产 3.4.2 重启 3.5.0 后复测 delegation 方法）；
+- **M1 能力注册表**：`CAPABILITY_CATALOG`/`DEFAULT_READ_ALLOW` + hello 广告（按注册 handler）+ 白名单/错误码表/版本裁剪/payload 上限单测（`test/contract-registry.test.mjs`）；vendored contract SDK 未手改（vendor-sync 门禁保持绿色）；
 - `tools/release/accel-alias-spike.mjs`：可复现的 alias 覆盖率量化工具（baseline 2/4 失败 → 桩包后 4/4 激活）；
 - `tools/release/accel-plugin-smoke.mjs`（`npm run smoke:accel-plugins`）：逐插件功能冒烟——synced profile 真机启动、activated/pending-service/failed-import 分类、host 页面与 `/fang/adapter/identity` 探针；真机结果 3/3 激活 + identity `{role:'fork', version:'3.5.0'}`；
 - `docs/ACCELERATED-FORK.md`：P0+P1 全量说明、安装/验证/限制；
