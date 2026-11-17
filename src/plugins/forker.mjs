@@ -65,7 +65,7 @@ import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-confi
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
 import { normalizeCoreMode, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
-import { resolveAcceleratedCore, acceleratedCoreInfo } from '../lib/accelerated-install.mjs'
+import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 
 /** Repository root of this plugin (used as the @local/dsh-fang junction source). */
 const FANG_ROOT = (() => {
@@ -927,7 +927,7 @@ export function apply(ctx, config) {
       try {
         const resolvedAccel = resolveAcceleratedCore({ cliPath: cfg.acceleratedCliPath ?? '', env: process.env, fangHome: acceleratedHome })
         if (resolvedAccel.ok === true && resolvedAccel.cliPath) {
-          accelNodeModules = path.resolve(path.dirname(resolvedAccel.cliPath), '..', '..', '..', '..')
+          accelNodeModules = accelNodeModulesRoot(resolvedAccel.cliPath)
         }
       } catch { /* keep minimal profile */ }
       const written = writeAcceleratedForkProfile({

@@ -9,6 +9,7 @@ import path from 'node:path'
 
 import {
   ACCEL_PACKAGE,
+  accelNodeModulesRoot,
   acceleratedCoreInfo,
   acceleratedLayout,
   buildInstallCommand,
@@ -20,6 +21,17 @@ import {
   resolveAcceleratedCore,
   writeAcceleratedState,
 } from '../src/lib/accelerated-install.mjs'
+
+test('accelNodeModulesRoot: resolves <cli>/node_modules from the @twinsearth/dsh entry', () => {
+  const cli = path.resolve(os.tmpdir(), 'accel', 'cli')
+  const entry = path.join(cli, 'node_modules', '@twinsearth', 'dsh', 'lib', 'bin.js')
+  assert.equal(accelNodeModulesRoot(entry), path.join(cli, 'node_modules'))
+  assert.equal(accelNodeModulesRoot(''), '')
+  // arbitrary entry shape: falls back to walking up to a node_modules directory
+  const plain = path.join(cli, 'node_modules', 'some-pkg', 'bin.js')
+  assert.equal(accelNodeModulesRoot(plain), path.join(cli, 'node_modules'))
+  assert.equal(accelNodeModulesRoot(path.join(os.tmpdir(), 'nowhere', 'bin.js')), '')
+})
 
 function tmp(prefix = 'fang-accel-install-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))

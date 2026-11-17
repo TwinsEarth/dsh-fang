@@ -161,6 +161,27 @@ export function acceleratedInstallSize(fangHome) {
 }
 
 /**
+ * Node_modules root of the accelerated CLI: `<cli>/node_modules` (contains `@twinsearth/*`).
+ * The CLI entry is `<cli>/node_modules/@twinsearth/dsh/lib/bin.js`, so walk up 3 dirs.
+ */
+export function accelNodeModulesRoot(cliPath) {
+  const entry = String(cliPath ?? '').trim()
+  if (!entry) return ''
+  const resolved = path.resolve(entry)
+  const dirname = path.dirname(resolved)
+  if (!/\bnode_modules[\\/]@twinsearth[\\/]/.test(dirname)) {
+    // tolerate arbitrary entry shapes: fall back to walking up until a node_modules dir exists
+    let current = dirname
+    for (let depth = 0; depth < 6; depth += 1) {
+      if (path.basename(current) === 'node_modules') return current
+      current = path.dirname(current)
+    }
+    return ''
+  }
+  return path.resolve(dirname, '..', '..', '..')
+}
+
+/**
  * Enforce the 1 GiB budget. Above it the caller must obtain an explicit second
  * confirmation (`confirmOversize`) or answer the interactive prompt.
  * @returns {Promise<{ok:boolean, sizeBytes:number, limitBytes:number, requiresConfirmation?:boolean,

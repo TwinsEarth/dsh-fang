@@ -39,6 +39,8 @@
 
 ## 2. UI client half 浏览器映射
 
+> **进展（2026-11-17）**：spike 已完成（见 [`docs/UI-CLIENT-HALF-SPIKE.md`](UI-CLIENT-HALF-SPIKE.md)）：第三方 client half 已出现在加速分身启动清单、bundle 可正常提供；缺口是 `@deepseek-ai/*` 作用域行别名；首选方案 = fork-provision 生成 client alias shim 行（先做 `dsh-client-ui-primitives` 原型），再做真实浏览器渲染验收。
+
 ### 2.1 目标
 
 让官方/第三方插件的 **client half（侧栏/面板/设置页）** 在加速分身的 Web UI 中可用：在浏览器模块解析层把 `@deepseek-ai/dsh-client-*` 映射到 `@twinsearth/dsh-client-*`。
