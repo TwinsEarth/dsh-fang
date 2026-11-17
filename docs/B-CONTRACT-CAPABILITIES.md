@@ -101,6 +101,9 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 > **母体接入最小正确路径（2026-11-17 确认）**：无需伪造 Agent Session、也不经过 tools 服务，直接：
 > `const lsp = ctx.get('lsp'); const result = await lsp.query({ operation: 'goToDefinition', filePath, position: { line, character }, workspaceRoot }, signal)`。
 > 依据：能力缝本身不要求 Agent Session（E7：`workspaceRoot` 是调用者显式传入的必填字段）；`dsh-tool-lsp` 的 Agent Session 要求（E10）只约束**模型工具**，不约束委托。fang 的 handler 即走该 seam（`queryMotherLsp`），e2e 母体无 Agent Session 也能完成 definition/references/implementation/hover。
+> **路线 B 安装形态（默认关闭）**：复用方式是**同 patch 形状的 fork 变体** `lsp-provider-fork/`（依赖 `@twinsearth/dsh-lsp@3.5.0` 三件套，与加速核同版本），
+> 不是把 `@deepseek-ai@0.2.2-rc.3` 母体 bundle 直接装进加速 fork；fs-local/subprocess-local 由加速核自带；
+> fork-local 不经过契约委托，能力目录仍以 `provider:'fork-local'`（mode=local）区分，安装默认关闭、待后续增强启用。
 > **安全边界（2026-11-17，E5 事实）**：加速核有同版本 LSP trio 时，fork-local 让 LSP 跑在**分身自己的 workspace/worktree**，语义上优于“把分身文件路径交给母体进程”；而母体委托的 `workspaceRoot` 由调用方传入，`dsh-lsp-stdio` 明确 **trusts its configured server，无沙箱**，因此母体必须用允许根限制文件读取面（realpath 包含 + fail-closed，越界 `contract-invalid-request`），否则等于把母体进程的读取面扩大到调用方任意路径。两条路线**并存**：`provider: 'mother' | 'fork-local'` 在能力目录显式区分；fork-local 无法覆盖“LSP 服务器只装在母体/共享缓存”的场景，故母体 provider 仍是默认。
 >
 > **诚实的边界**：路线 A 的**代码路径已完整**并在隔离 staging 中用真实 provider 跑通（`setup:lsp-live` / `test:lsp-live`）；但**母体正式 profile 尚未安装**官方 LSP 栈，生产读类动作仍显式 `contract-unavailable`，默认 e2e 使用测试缝提供确定性结果。

@@ -218,6 +218,20 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 - **能力目录区分**：`lspProvider.providers` 显式列出 `mother`（mode=delegated / source=mother-process）与 `fork-local`（mode=local / source=fork-worktree），各自只 advertise 实提供能力；未安装时 `available:false / actions:[]`；测试缝只以 `nonProduction` 标记出现。
 - **当前状态**：母体真实 provider 已闭环（staging e2e）；fork-local 探测已就绪但加速 CLI 未安装 LSP trio（`forkLsp.available=false`），安装开关默认关闭。
 
+### 6.4 路线 B 安装形态：fork-local 变体（默认关闭，后续增强）
+
+- **可复用的是 patch 形状，不是依赖域**：`lsp-provider/`（母体）依赖 `@deepseek-ai/*@0.2.2-rc.3`；
+  加速分身是 `@twinsearth` 3.5.0 体系，必须使用 **`@twinsearth/dsh-lsp@3.5.0` 三件套**（E5）。
+  为此新增同形状变体 [`lsp-provider-fork/`](../lsp-provider-fork/README.md)（`@twinsearth/dsh-fang-lsp-fork`）。
+- **变体内容**：patch = seam（`@twinsearth/dsh-lsp`）+ stdio（同版本语言服务器配置模板）+ 可选 tool（`@twinsearth/dsh-tool-lsp`）；
+  fs-local / subprocess-local / working-directory 由加速核自带（本机实查三者存在），无需重复插入；
+  依赖锁定 `typescript-language-server@6.1.0` + `typescript@5.9.3`。
+- **语义**：fork-local 的 LSP 跑在分身自己的 workspace/worktree，**不经过契约委托**（不进白名单/审批/审计）；
+  能力目录以 `provider: 'fork-local'`（mode=local）区分。
+- **默认关闭**：当前不自动安装/不默认启用；`detectForkLspSupport()` 如实报 `available=false`（加速 CLI 未装 trio）。
+- **后续启用前提**：① 加速核安装同版本 trio；② 装进**分身 profile 模板**（fork profile 每次从模板重放，装单个 fork home 会被冲掉）；
+  ③ 显式开关；④ command 不在 PATH 时覆盖绝对路径；⑤ 分身侧验 `ctx.get('lsp')` + 本地 definition/hover，契约目录 `providers['fork-local'].mode=local`。
+
 ## 7. 原下一步（已由 §6 取代）
 
 1. ~~M3.2 母体 LSP 栈原型~~ → provider 适配代码已完成，安装待办；
