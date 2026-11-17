@@ -15,7 +15,7 @@
 
 ## 1. 为什么必须同窗口（硬约束）
 
-1. `dsh-fang` 的 `src/contract/VENDOR.json` 已钉死 `@twinsearth/dsh-fang-contract@1.2.0`（8 文件 sha256 + `sourceCommit=bcce47c`）；vendor-sync 门禁按该 pin 校验。
+1. `dsh-fang` 的 `src/contract/VENDOR.json` 已钉死 `@twinsearth/dsh-fang-contract@1.2.0`（8 文件 sha256 + `sourceCommit=f5b7b05`）；vendor-sync 门禁按该 pin 校验。
 2. 外部插件/宿主若从 npm 取 contract 版本，`1.2.0` 未发布时只能拿到 1.1.1 → 1.2 委托方法（`fang.capability.list` 等）与 7 个委托错误码在外部视角缺失，与 dsh-fang 3.5.0 的 `hello` 广告/能力目录**不一致**。
 3. 发布顺序**先 contract、后 dsh-fang**：dsh-fang 发布说明与本仓库 vendor pin 的引用在 contract 上线后才成立；反向顺序会产生“文档先行、依赖未就绪”的空窗。
 
@@ -42,7 +42,7 @@ npm run release:check                      # artifact fresh + sha256 与 sidecar
 
 ### 第 1 步：`@twinsearth/dsh-fang-contract@1.2.0`（先发）
 
-1. contract 仓库提交已就绪：`bcce47c feat(contract): 1.2.0 …`（+ README 1.2 文档）；
+1. contract 仓库提交已就绪：`f5b7b05 feat(contract): 1.2.0 …`（+ README 1.2 文档）；
 2. 推分支 → 合并（contract 仓库当前无 PR 流程记录；若走 GitHub 需写权限 PAT，见 §5）；
 3. 打 tag（语义标签，建议 `v1.2.0`）并推送；
 4. 发布 npm（二选一）：
