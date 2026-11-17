@@ -29,6 +29,7 @@ export const CAPABILITY_CATALOG = Object.freeze([
   { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体决策中心快照（只读）' },
   { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体审批队列（只读）' },
   { method: 'fang.tool.invoke', kind: 'write', approval: 'required', since: '1.1', summary: '工具委托（首批 lsp：只读子命令放行，写类需审批；默认不在白名单）' },
+  { method: 'fang.chat.import', kind: 'write', approval: 'required', since: '1.1', summary: '官方会话导入（默认 dryRun；真实导入需审批；默认不在白名单）' },
 ])
 
 export const DEFAULT_READ_ALLOW = Object.freeze([

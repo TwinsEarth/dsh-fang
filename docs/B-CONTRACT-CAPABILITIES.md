@@ -78,6 +78,15 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 
 > **诚实的边界**：LSP 的**执行提供方**尚未接入母体 DSH 工具运行时（当前仅 e2e 测试缝提供确定性 diagnostics；生产读类动作会返回 `contract-unavailable`）。委托通道、白名单、审批门禁与错误码已经完整；接入真实 LSP provider 属下一里程碑（需确认母体工具调用 API）。
 
+### 0.5 M4 验收（B-7 chat.import，2026-11-17）
+
+| 项 | 实现 | 单测 / e2e / 冒烟 |
+|---|---|---|
+| `fang.chat.import` | `validateChatImport()`（source 仅 `deepseek`、sessionId 白名单正则、`dryRun` 默认 true）；kind=`write`、approval=`required`、默认不在白名单 | 单测 `test/chat-import-delegation.test.mjs` 4 项 |
+| dryRun 一致性 | 纯函数 `buildChatImportDryRun()`（确定性 digest、found/wouldImport/skipped、approvalRequired）；同输入两次调用**逐字节一致** | e2e：两次 dryRun 结果 JSON 相等 |
+| 审批拒绝路径 | `dryRun:false` → 委托层拒绝执行、零副作用，返回 `contract-approval-required`（detail 含 dryRun 预览） | e2e：real import → contract-approval-required |
+| 冒烟脚本 | `npm run smoke:contract-delegation -- --base <motherUrl> --token-file <dataDir>/fang-auth.json`：capability.list / session.list / session.events / lsp 读+写 / chat.import dryRun 两次一致性 + 真实导入审批拒绝；写能力未放行时记 SKIP | 对生产 3.4.2 实跑：`PASS health` → `SKIP older build`（重启 3.5.0 后应转绿） |
+
 ## 1. 现有契约能力（只读盘点）
 
 | 方法 | 版本 | 类型 | 现有实现 |
@@ -119,7 +128,7 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | # | 提议方法 | 输入 | 输出 | 审批策略 | 备注 |
 |---|---|---|---|---|---|
 | B-6 | `fang.tool.invoke`（首批只放开 `tool:'lsp'`）**已实现通道+审批门禁；执行 provider 待接入（见 §0.4）** | `{tool:'lsp', action:'diagnostics'\|'hover'\|'definition'\|'references', file, line?, character?}` | 工具结果原样（大小上限 256KB） | 只读子命令自动放行；任何写类子命令需瓮城审批 | 加速核缺 `dsh-tool-lsp`（COMPAT §3.5 `string-reference`），这是最明确的能力缺口 |
-| B-7 | `fang.chat.import` | `{source:'deepseek', sessionId, dryRun?:true}` | `{imported, skipped, digest}` | 默认 `dryRun:true`；实际导入需审批 | 加速核无 chat-import bundle（COMPAT §2） |
+| B-7 | `fang.chat.import` **已实现通道+dryRun+审批门禁（§0.5）** | `{source:'deepseek', sessionId, dryRun?:true}` | `{imported, skipped, digest}` | 默认 `dryRun:true`；实际导入需审批 | 加速核无 chat-import bundle（COMPAT §2） |
 
 ### P2 · 暂缓（高风险/待定）
 

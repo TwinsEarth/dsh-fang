@@ -118,7 +118,7 @@ function makeProfile(homeRoot) {
     '- id: fang-queue-journal\n  disabled: false\n' +
     '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n' +
     '      delegate:\n        readTimeoutMs: 100\n        allow:\n' +
-    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.test.sleep\n")
+    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.chat.import\n          - fang.test.sleep\n")
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
@@ -354,6 +354,19 @@ async function main() {
     check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
       && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
       JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
+    // B-7：chat.import——dryRun 两次结果一致；真实导入必须审批（拒绝执行、无副作用）
+    const importParams = { source: 'deepseek', sessionId: E2E_SESSION_ID, dryRun: true }
+    const importDry1 = await delegatedInvoke('fang.chat.import', importParams)
+    const importDry2 = await delegatedInvoke('fang.chat.import', importParams)
+    const dry1 = importDry1.body?.result ?? null
+    const dry2 = importDry2.body?.result ?? null
+    check('delegated chat.import dryRun is deterministic across calls', importDry1.status === 200 && importDry1.body?.ok === true
+      && dry1 && dry2 && JSON.stringify(dry1) === JSON.stringify(dry2) && dry1.dryRun === true && dry1.approvalRequired === true,
+      JSON.stringify({ status: importDry1.status, digest: dry1?.digest ?? null, found: dry1?.found ?? null }).slice(0, 160))
+    const importReal = await delegatedInvoke('fang.chat.import', { source: 'deepseek', sessionId: E2E_SESSION_ID, dryRun: false })
+    check('delegated chat.import real import requires approval (contract-approval-required)', importReal.status === 200
+      && importReal.body?.ok === false && importReal.body?.error?.code === 'contract-approval-required',
+      JSON.stringify({ status: importReal.status, code: importReal.body?.error?.code ?? null }).slice(0, 160))
 
 
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')

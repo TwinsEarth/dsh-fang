@@ -50,6 +50,7 @@ import {
   DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
 } from '../lib/contract-delegation.mjs'
 import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
+import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
@@ -2161,6 +2162,31 @@ export function apply(ctx, config) {
           }
         }
         return delegateUnavailable('lsp tool provider is unavailable on mother')
+      },
+      // B-7：chat.import。dryRun（默认）确定性预览；真实导入必须审批——委托层拒绝执行、零副作用。
+      'fang.chat.import': async (params) => {
+        const validated = validateChatImport(params)
+        if (validated.ok !== true) {
+          const error = new Error(validated.message)
+          error.code = validated.error ?? DELEGATE_ERROR.INVALID
+          throw error
+        }
+        const catalog = contractService('sessionCatalog', 'getSession', false)
+        let found = false
+        let reason = null
+        if (catalog && typeof catalog.getSession === 'function') {
+          const result = catalog.getSession(validated.sessionId)
+          found = result?.ok === true
+          reason = found ? null : (result?.code ?? result?.error ?? 'session-not-found')
+        } else {
+          reason = 'session-catalog-unavailable'
+        }
+        const preview = buildChatImportDryRun({ source: validated.source, sessionId: validated.sessionId, found, reason })
+        if (validated.dryRun === true) return preview
+        const error = new Error('chat import requires fang approval; no side effect performed')
+        error.code = DELEGATE_ERROR.APPROVAL_REQUIRED
+        error.detail = { source: validated.source, sessionId: validated.sessionId, approval: 'required', dryRun: preview }
+        throw error
       },
       // e2e 专用测试缝（仅 FANG_CONTRACT_TEST_HOOKS=1 时注册；生产不出现；且必须 delegate=true）
       ...(process.env.FANG_CONTRACT_TEST_HOOKS === '1' ? {
