@@ -21,7 +21,7 @@ const PACKAGES = [
   '@deepseek-ai/dsh-lsp@0.2.2-rc.3',
   '@deepseek-ai/dsh-lsp-stdio@0.2.2-rc.3',
   '@deepseek-ai/dsh-tool-lsp@0.2.2-rc.3',
-  'typescript-language-server',
+  'typescript-language-server@6.1.0',
   'typescript@5.9.3', // tls needs TS 5.x layout (TS 7 native preview has no lib/typescript.js)
 ]
 fs.mkdirSync(STAGE, { recursive: true })

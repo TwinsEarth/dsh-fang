@@ -162,6 +162,24 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 **待决**：语言服务器来源与版本锁定策略；确定后再评估 fork-local provider 的启用开关与能力目录呈现（届时仍走分身本地，不进契约）。
 
+
+### 6.2 M3.5 决策落地：语言服务器来源/版本锁定 + 路线 B 再评估（2026-11-17）
+
+**来源/版本锁定（已落地）**：
+- 语言服务器来源 = **bundle 依赖 npm `typescript-language-server`**（用户决策 ①），随 bundle 版本化；
+- 精确锁定：`typescript-language-server@6.1.0` + `typescript@5.9.3`（TS 7 native preview 无 `lib/typescript.js`，语言服务器初始化会失败）；官方 LSP 三件套锁 `0.2.2-rc.3`；
+- 证据文件 [`lsp-provider/LOCKED-VERSIONS.json`](../lsp-provider/LOCKED-VERSIONS.json) 与 package.json 双向一致性由 `test/lsp-provider-bundle.test.mjs` 断言（4 项）；
+- 可复现安装：`npm run setup:lsp-live` 使用同一组精确版本（setup 脚本已钉死 tls 6.1.0）；
+- 升级纪律：任一项升级必须同时更新 package.json + LOCKED-VERSIONS.json，并重跑 `setup:lsp-live` → `test:lsp-live`（e2e --lsp 124/124）→ `test:lsp-bundle`（5/5）。
+
+**验证（锁版本后）**：e2e `--lsp` **124/124**；`test:lsp-bundle` **5/5**；默认 e2e 118/118；全量单测 1247 pass。
+
+**路线 B（fork-local）再评估（本次结论：暂缓，保留探测）**：
+- 现状：`detectForkLspSupport()` 已探测加速核 `@twinsearth/dsh-lsp*`；`forkLsp` 已进任务记录；`lsp-provider/` bundle 可直接复用于 fork profile；npm 已有 `@twinsearth/dsh-lsp@3.5.0`（但加速 CLI 当前未安装）；
+- 触发条件（满足任一再做）：① 母体 LSP 不可用/离线但仍需读类能力；② 需要 fork 独立工作区语义/性能隔离；③ 母体安装策略不允许装语言服务器；
+- 代价/风险：每个 fork 多一套语言服务器进程与索引内存；profile 包体增大；加速核 3.5.0 与官方 seam 0.2.2-rc.3 的 API 兼容需实测；fork-local 不走契约委托（审计范围仍在母体委托侧）；
+- 当前动作：**不安装、不默认启用**；fork-local 能力仅显示在任务记录 `accelerated.forkLsp`，契约目录不 advertise；等触发条件出现再做安装开关与 e2e。
+
 ## 7. 原下一步（已由 §6 取代）
 
 1. ~~M3.2 母体 LSP 栈原型~~ → provider 适配代码已完成，安装待办；

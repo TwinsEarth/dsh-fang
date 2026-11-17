@@ -7,7 +7,7 @@
 
 | 决策点 | 选择 |
 |---|---|
-| 语言服务器来源 | **bundle 依赖 npm `typescript-language-server`**（随 bundle 版本化；TypeScript 固定 `5.9.3`——TS 7 native preview 无 `lib/typescript.js`，语言服务器会初始化失败） |
+| 语言服务器来源 | **bundle 依赖 npm `typescript-language-server`**（随 bundle 版本化；**精确锁定 `typescript-language-server@6.1.0` + `typescript@5.9.3`**——TS 7 native preview 无 `lib/typescript.js`，语言服务器会初始化失败；精确版本清单见 `LOCKED-VERSIONS.json`） |
 | 安装位置 | **A + B 都装、能力目录区分**：A（母体正式 profile）本次先做；B（加速分身 profile）作为后续增强，安装默认关闭 |
 | workspaceRoot 允许范围 | **母体根 + 所有 fork 工作区根（显式登记）**；realpath 包含校验、审计（由 fang 委托层执行） |
 | 写类 LSP（rename/format） | **不提供**（跟随官方只读语义，不扩大攻击面） |

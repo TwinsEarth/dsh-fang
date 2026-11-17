@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const BUNDLE = path.resolve(HERE, '..', 'lsp-provider')
 const pkg = JSON.parse(fs.readFileSync(path.join(BUNDLE, 'package.json'), 'utf8'))
+const lock = JSON.parse(fs.readFileSync(path.join(BUNDLE, 'LOCKED-VERSIONS.json'), 'utf8'))
 const patch = fs.readFileSync(path.join(BUNDLE, 'cordis.patch.yml'), 'utf8')
 const readme = fs.readFileSync(path.join(BUNDLE, 'README.md'), 'utf8')
 
@@ -21,7 +22,19 @@ test('lsp bundle: config-only package with pinned official LSP stack + language 
   assert.equal(pkg.dependencies['@deepseek-ai/dsh-lsp-stdio'], '0.2.2-rc.3')
   assert.equal(pkg.dependencies['@deepseek-ai/dsh-tool-lsp'], '0.2.2-rc.3')
   assert.equal(pkg.dependencies.typescript, '5.9.3', 'TS must stay 5.x: TS 7 native preview has no lib/typescript.js')
-  assert.ok(pkg.dependencies['typescript-language-server'])
+  // 用户决策 ①：语言服务器来源/版本随 bundle 依赖锁定（精确版本，不用 ^ ~）。
+  assert.match(pkg.dependencies['typescript-language-server'], /^\d+\.\d+\.\d+$/, 'language server must be pinned exactly')
+  assert.equal(pkg.dependencies['typescript-language-server'], '6.1.0')
+})
+
+test('lsp bundle: LOCKED-VERSIONS.json matches package.json pins (reproducible install)', () => {
+  assert.equal(lock.schema, 1)
+  assert.equal(lock.bundle, pkg.name)
+  for (const [name, version] of Object.entries(lock.resolved)) {
+    assert.equal(pkg.dependencies[name], version, `${name} pin drifted from LOCKED-VERSIONS.json`)
+  }
+  assert.deepEqual(Object.keys(lock.resolved).sort(), Object.keys(pkg.dependencies).sort())
+  assert.ok(pkg.files.includes('LOCKED-VERSIONS.json'))
 })
 
 test('lsp bundle: patch inserts seam + stdio provider + model-facing tool (route A composition)', () => {
