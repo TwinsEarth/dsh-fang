@@ -96,9 +96,15 @@ test('routes and UI are wired (source guards)', () => {
   assert.match(orchestrator, /accelerated-new-session/)
   // 开关不是热更新：restore/autostart 在启动前按当前开关换核（重新 provision），并只用返回的 coreMode。
   assert.match(orchestrator, /const coreSync = await syncForkCoreMode\(task\)/)
+  assert.equal((orchestrator.match(/syncForkCoreMode\(task\)/g) ?? []).length, 2, 'restore + autostart are the only reopen paths that switch core')
   assert.match(orchestrator, /coreMode: coreSync\.coreMode/)
   assert.equal(/normalizeCoreMode\(task\.coreMode \?\? forkCoreSettings\(\)\.mode\)/.test(orchestrator), false)
   assert.match(orchestrator, /fang\/fork-core-switched/)
+  assert.match(orchestrator, /error: desired === 'accelerated' \? 'accelerated-provision-failed' : 'stock-provision-failed'/)
+  assert.match(orchestrator, /task\.prevCoreMode = current/)
+  // 运行中的分身不被开关改动：POST /fork-core 处理块内不出现换核/重启调用。
+  const forkCorePost = orchestrator.slice(orchestrator.indexOf("routeMethods(`${prefix}/api/fork-core`"), orchestrator.indexOf('// 重启守卫 / supervisor 契约'))
+  assert.equal(/spawn\(|provision\(|syncForkCoreMode|restartTask|stopTask/.test(forkCorePost), false)
   // 旧会话只以副本进入加速分身（绝不原地挂载）；`new` 时跳过导入。
   assert.match(orchestrator, /coreSettings\.sessionMode === 'copy'/)
   assert.match(orchestrator, /copied: true, source: 'copy'/)

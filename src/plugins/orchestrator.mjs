@@ -385,7 +385,7 @@ export function apply(ctx, config) {
     task.coreMode = desired
     task.updatedAt = nowMs()
     persist()
-    try { audit('fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* audit optional */ }
+    try { audit('fang/fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* audit optional */ }
     try { bus.emit('fang/fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* bus optional */ }
     return { ok: true, switched: true, coreMode: desired }
   }
