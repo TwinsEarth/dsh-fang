@@ -93,6 +93,20 @@ node tools/release/accel-alias-spike.mjs --accel-nm <accel>/node_modules --essen
 
 > 结论：**混合方案已落地到生产 provision 路径并在真机验证**；剩余 gap（8 个无加速等价模块）走 A（移植）/B（契约委托），UI client half 另行验证。
 
+### 3.4 逐插件功能冒烟（2026-11-17，可复现）
+
+脚本：`npm run smoke:accel-plugins -- --accel-nm <accel>/node_modules --essence-profile <merged profile>`
+（内部：真实 `writeAcceleratedForkProfile({sourceProfileDir, accelNodeModules})` → 真机启动 → 逐插件分类 + host/fang 功能探针）
+
+| 指标 | 结果 |
+|---|---|
+| 目标第三方插件 | `dsh-context` ✅ activated / `@openviking/dsh-memory-plugin` ✅ activated / `dshmarket` ✅ activated |
+| 激活率 | **3/3**（无 import 失败） |
+| alias | resolved 57 / unsupported 8（同上） |
+| host 功能探针 | Web 页面 ✅（303，manual redirect = 可服务） |
+| 瓮城功能探针 | `/fang/adapter/identity` ✅ `{role:'fork', version:'3.5.0'}` |
+| 结论 | 导入/激活/宿主可用已自动化验证；**插件内部 API 行为**（工具调用、MCP 往返等）仍需各插件自己的功能用例，本工具不越权宣称 |
+
 ## 4. 三条适配路线（可行性结论）
 
 | 路线 | 可行性 | 边界 | 建议 |
@@ -103,7 +117,7 @@ node tools/release/accel-alias-spike.mjs --accel-nm <accel>/node_modules --essen
 
 **推荐 D2 形态**：`C（alias 层）为主 + A（核心映射）自动完成 + B（契约委托）兜底 + 不支持清单显式展示`。
 
-## 5. 复现命令（升级加速核后必须重跑这三条）
+## 5. 复现命令（升级加速核后必须重跑这三条 + 插件面冒烟）
 
 ```powershell
 # 1) 真实加速分身 smoke（起真进程；断言身份 + client 半 + core 版本）
@@ -122,10 +136,16 @@ node -e "import('./src/lib/accelerated-fork.mjs').then(m=>{const fs=require('fs'
 - 元主同步面启动实验（把元主 profile 翻译到加速核，记录 dropped bundle 与激活失败插件）；
 - alias 桩包实验（`@deepseek-ai/dsh-session` / `dsh-mcp-client` → `@twinsearth/*`，逐插件冒烟）。
 
+第 4 条（插件面冒烟，D2 后必跑）：
+```powershell
+npm run smoke:accel-plugins -- --accel-nm <accel>/node_modules --essence-profile <merged profile>
+```
+输出逐插件 `PASS/WARN/FAIL`（activated / pending-service / failed-import）+ host 页面与 fang identity 探针；结果写入 `<out>/result.json`。
+
 ## 6. 维护约定
 
 1. **版本对三件套**必须同时更新：瓮城版本 / 加速核版本 / 原厂 DSH 版本；
-2. 每次升级 `@twinsearth/dsh`：重跑 §5 三条命令，更新本矩阵的“状态/证据/日期”；
+2. 每次升级 `@twinsearth/dsh`：重跑 §5 三条命令 + **第 4 条插件面冒烟** `npm run smoke:accel-plugins -- --accel-nm <accel>/node_modules --essence-profile <merged profile>`，更新本矩阵的“状态/证据/日期”；
 3. **无证据不得写 ✅**：新增第三方插件兼容性必须附“启动 + 激活 + 冒烟”证据；
 4. 任何“与元主同步”的宣称，必须附差异清单（dropped bundles / failed plugins）；
 5. 兼容矩阵与 `docs/ACCELERATED-FORK.md` 的边界描述必须一致。

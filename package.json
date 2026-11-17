@@ -101,7 +101,8 @@
     "typecheck": "node tools/release/typecheck.mjs",
     "gate": "node tools/gate/main-city.mjs",
     "test:accel-live": "node --test --test-concurrency=1 test/accelerated-fork-live.test.mjs",
-    "install:accel": "node tools/release/accelerated-install.mjs"
+    "install:accel": "node tools/release/accelerated-install.mjs",
+    "smoke:accel-plugins": "node tools/release/accel-plugin-smoke.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {

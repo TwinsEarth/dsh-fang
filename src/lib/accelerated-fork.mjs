@@ -16,6 +16,9 @@ import { pathToFileURL } from 'node:url'
 
 export const ACCEL_BUNDLES = Object.freeze(['@twinsearth/dsh-base', '@twinsearth/dsh-web-app'])
 export const FANG_BUNDLE = '@local/dsh-fang'
+/** npm-installed fang bundle name (aliases @local/dsh-fang in production profiles). */
+export const FANG_NPM_BUNDLE = '@twinsearth/dsh-fang'
+function isFangBundle(bundle) { return bundle === FANG_BUNDLE || bundle === FANG_NPM_BUNDLE }
 export const ACCEL_BUNDLES_WITH_FANG = Object.freeze([...ACCEL_BUNDLES, FANG_BUNDLE])
 export const FANG_CHILD_PACKAGES = Object.freeze([
   '@twinsearth/dsh-fang-web-entry',
@@ -92,7 +95,7 @@ export function translateBundles(bundles, { accelNodeModules = '' } = {}) {
   for (const raw of Array.isArray(bundles) ? bundles : []) {
     const bundle = String(raw ?? '').trim()
     if (!bundle || seen.has(bundle)) continue
-    if (bundle === FANG_BUNDLE) continue // handled by the fang junctions
+    if (isFangBundle(bundle)) continue // handled by the fang junctions
     if (bundle.startsWith(DEEPSEEK_SCOPE)) {
       const accel = `${ACCEL_SCOPE}${bundle.slice(DEEPSEEK_SCOPE.length)}`
       if (accelHasPackage(accelNodeModules, accel)) {
@@ -217,7 +220,7 @@ export function buildSyncedAcceleratedProfile({ sourceProfileDir = '', accelNode
   const deps = {}
   for (const [name, version] of Object.entries(sourcePkg.dependencies ?? {})) {
     if (name.startsWith(DEEPSEEK_SCOPE)) continue
-    if (name === FANG_BUNDLE) continue
+    if (isFangBundle(name)) continue
     deps[name] = version
   }
   if (fangRoot) deps[FANG_BUNDLE] = `link:${path.resolve(fangRoot).replace(/\\/g, '/')}`
@@ -239,7 +242,7 @@ export function buildSyncedAcceleratedProfile({ sourceProfileDir = '', accelNode
     patchText,
     source,
     bundles: { translated: translated.bundles, mapped: translated.mapped, unsupported: translated.unsupported },
-    pluginPackages: translated.bundles.filter((bundle) => !bundle.startsWith(ACCEL_SCOPE) && bundle !== FANG_BUNDLE),
+    pluginPackages: translated.bundles.filter((bundle) => !bundle.startsWith(ACCEL_SCOPE) && !isFangBundle(bundle)),
     deps,
   }
 }
