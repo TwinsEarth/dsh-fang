@@ -106,7 +106,8 @@
     "probe:mother": "node tools/release/mother-capability-probe.mjs",
     "smoke:contract-delegation": "node tools/release/contract-delegation-smoke.mjs",
     "spike:ui-client": "node tools/release/ui-client-half-spike.mjs",
-    "release:check": "node tools/release/release-order.mjs"
+    "release:check": "node tools/release/release-order.mjs",
+    "smoke:ui-client-render": "node tools/release/ui-client-render-smoke.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {

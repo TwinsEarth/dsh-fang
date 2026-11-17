@@ -1,6 +1,7 @@
 ## Unreleased（v3.5.0 发布后）
 
 - **B-8 专业版激活链**（`fang.code.run`，默认关闭）：① `contract.delegate.pro.enabled`（默认 false）→ ② `pro.allow` 逐项显式授权 → ③ 每次调用一次性审批票（`POST /fang/api/contract/pro/approval`，TTL + 能力/参数摘要绑定，重放显式拒绝）→ ④ 审计（stage/outcome/limits，ticket 仅存哈希）+ 资源限额（`maxConcurrent`/`timeoutMs`/`maxOutputBytes`）；四环缺一即显式拒绝（错误码 + `detail.stage`）。当前无 `code-runtime` provider，四环通过后仍 `contract-unavailable` + `stage='provider-missing'`（无副作用、不假成功）。新增 `src/lib/pro-delegation.mjs`、`test/pro-delegation.test.mjs`（10 项）、e2e 5 项（**121/121**）；文档 `docs/B-CONTRACT-CAPABILITIES.md` §0.7。
+- **UI client half 映射实现（非 spike）**：synced 加速分身对第三方 client half 做**浏览器作用域重写**——`dsh.client.inject` / `external` 与客户端 bundle 中的 `@deepseek-ai/*` 仅在加速核存在对应 client half（含 `dsh-client-ui-primitives` 等 web 静态 seed）时改写为 `@twinsearth/*`，未映射项原样保留并写入 `sync.unsupportedClientHalves`；同时具名纠正 web 组合必需的 `ui-theme` client 行（`CLIENT_ROW_ENABLE_OVERRIDES`，其余 disabled 行不动）。新增 `npm run smoke:ui-client-render` 真机 headless 验收（启动图 88 项含 dsh-context、inject 6/6 重写、app shell 挂载、零模块解析错误）；`dsh-context`「上下文」tab 需打开工作区会话（headless welcome 屏限制已记录）。文档 `docs/UI-CLIENT-HALF-IMPL.md`。
 
 ## v3.5.0（2026-11-17）
 
