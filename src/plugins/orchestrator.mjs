@@ -1147,7 +1147,8 @@ export function apply(ctx, config) {
           forkId: taskId,
           homeDir,
           profile,
-          cliPath: cliPath(),
+          // 加速档只解析加速核入口；stock 母体 CLI 绝不能传入（v3.5.2 起会误判/失败）。
+          ...(coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
           coreMode,
           env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir },
         })
@@ -1162,6 +1163,15 @@ export function apply(ctx, config) {
             error: started?.error === 'accelerated-cli-missing' ? 'accelerated-cli-missing' : 'spawn-failed',
             detail: started?.error ?? 'unknown',
             ...(Array.isArray(started?.searched) ? { searched: started.searched } : {}),
+            // 失败可见性：spawn 失败时把子进程退出码/信号/输出尾部带回任务接口，避免只剩 "exited"。
+            ...(started && started.error !== 'accelerated-cli-missing'
+              ? {
+                exit: started.exit ?? null,
+                signal: started.signal ?? null,
+                kind: started.kind ?? null,
+                log: Array.isArray(started.log) ? started.log : [],
+              }
+              : {}),
           }
         }
         task.status = TASK_STATUS.RUNNING
@@ -1794,7 +1804,7 @@ export function apply(ctx, config) {
         forkId: id,
         homeDir: task.homeDir,
         profile: task.profile,
-        cliPath: cliPath(),
+        ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
         coreMode: coreSync.coreMode,
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
       })
@@ -1880,7 +1890,7 @@ export function apply(ctx, config) {
             forkId: id,
             homeDir: task.homeDir,
             profile: task.profile,
-            cliPath: cliPath(),
+            ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
             coreMode: coreSync.coreMode,
             env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
           })
@@ -2133,7 +2143,9 @@ export function apply(ctx, config) {
    */
   const forkLspInfo = (() => {
     try {
-      const resolved = resolveAcceleratedCore({ cliPath: cfg.acceleratedCliPath ?? '', env: process.env })
+      const accelHome = String(layout?.fangHome ?? '').trim()
+        || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
+      const resolved = resolveAcceleratedCore({ cliPath: cfg.acceleratedCliPath ?? '', env: process.env, fangHome: accelHome })
       if (resolved?.ok !== true || !resolved.cliPath) return { available: false, error: 'accelerated-cli-missing' }
       const info = detectForkLspSupport(accelNodeModulesRoot(resolved.cliPath))
       return { ...info, cliPath: resolved.cliPath }
@@ -2158,7 +2170,14 @@ export function apply(ctx, config) {
       [CONTRACT_METHODS.FORK_SPAWN]: async (params) => {
         const forker = contractService('forker', 'spawn')
         const input = params && typeof params === 'object' ? params : {}
-        return await forker.spawn({ ...input, coreMode: normalizeCoreMode(input.coreMode ?? forkCoreSettings().mode), env: contractEnv(input.env) })
+        const coreMode = normalizeCoreMode(input.coreMode ?? forkCoreSettings().mode)
+        const { cliPath: requestedCliPath, ...rest } = input
+        return await forker.spawn({
+          ...rest,
+          ...(coreMode === 'accelerated' ? {} : { cliPath: String(requestedCliPath ?? '') }),
+          coreMode,
+          env: contractEnv(input.env),
+        })
       },
       [CONTRACT_METHODS.FORK_STOP]: async (params) => {
         const forker = contractService('forker', 'stop', false)

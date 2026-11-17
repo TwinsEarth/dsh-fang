@@ -54,6 +54,7 @@ import {
   parseWebUrl,
   readJson,
   removeTree,
+  resolveFangHome,
   resolveFangLayout,
   roleGate,
   writeFileAtomic,
@@ -557,16 +558,28 @@ export function apply(ctx, config) {
   let forksFile = ''
   let portsFile = ''
   let layout = null
-  if (cfg.dataRoot) {
-    try {
-      layout = resolveFangLayout({ dataRoot: cfg.dataRoot })
+  // v3.5.3 修复：layout 必须始终解析。加速核安装位置由 FANG_HOME / fang-home.txt 决定，
+  // 与 forker 是否配置 dataRoot 无关；此前只在 cfg.dataRoot 时解析，导致生产环境
+  // acceleratedHome='' → /fang/api/fork-core 报“未安装”（按钮点击无效）、派生加速分身
+  // 直接 409 accelerated-cli-missing（无法启动）。
+  try {
+    layout = resolveFangLayout({ dataRoot: cfg.dataRoot })
+    // 持久化文件仍只在显式 dataRoot（独立/测试部署）下启用，避免测试污染真实数据根。
+    if (cfg.dataRoot) {
       forksFile = layout.forksFile
       portsFile = path.join(layout.dataDir, 'ports.json')
-    } catch (e) {
-      logWarn(`[fang-forker] layout resolve failed: ${msgOf(e)}`)
-      forksFile = ''
-      portsFile = ''
     }
+  } catch (e) {
+    logWarn(`[fang-forker] layout resolve failed: ${msgOf(e)}`)
+    layout = null
+    forksFile = ''
+    portsFile = ''
+  }
+  /** 加速核所在的 FANG_HOME：layout → env/fang-home.txt（与 forker dataRoot 无关）。 */
+  const acceleratedHomeDir = () => {
+    const fromLayout = String(layout?.fangHome ?? '').trim()
+    if (fromLayout) return fromLayout
+    try { return String(resolveFangHome(process.env) ?? '').trim() } catch { return '' }
   }
   let registryLoaded = false
   let portsLoaded = false
@@ -925,7 +938,7 @@ export function apply(ctx, config) {
       const sourceProfileDir = String(opts.sourceProfileDir ?? '').trim()
       // 与 spawn() 相同的加速核 home 解析；此前误用了 spawn 作用域的变量（ReferenceError 被
       // try/catch 吞掉 → essence 派生的加速分身总是静默退回 minimal，插件面不生效）。
-      const accelHome = String(layout?.fangHome ?? '').trim()
+      const accelHome = acceleratedHomeDir()
         || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
       let accelNodeModules = ''
       try {
@@ -1068,13 +1081,15 @@ export function apply(ctx, config) {
     // plugin config. An accelerated fork NEVER falls back to the stock CLI — missing install is
     // a hard error so the fork cannot silently run unaccelerated.
     const coreMode = normalizeCoreMode(opts.coreMode ?? cfg.coreMode)
-    const acceleratedHome = String(layout?.fangHome ?? '').trim()
+    const acceleratedHome = acceleratedHomeDir()
       || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
     let cliPath = ''
     let acceleratedSource = null
     if (coreMode === 'accelerated') {
       const resolved = resolveAcceleratedCore({
-        cliPath: String(opts.cliPath ?? cfg.acceleratedCliPath ?? ''),
+        // opts.cliPath 是母体 stock CLI（orchestrator 传参），绝不能当加速核候选：
+        // JS 入口的 stock CLI 会被误判为“加速核”从而静默跑官方 core（无效）。
+        cliPath: String(opts.acceleratedCliPath ?? cfg.acceleratedCliPath ?? ''),
         env: process.env,
         fangHome: acceleratedHome,
       })
@@ -1288,6 +1303,10 @@ export function apply(ctx, config) {
         // v3：Adapter Bearer token（PROTOCOL-V3 §3）。放在 opts.env 之后，母体生成的 token 优先。
         DSH_ADAPTER_TOKEN: rec.adapterToken,
       })
+      // JS 入口（加速核 lib/bin.js）用 process.execPath 启动。桌面宿主里 execPath 是 Electron 壳，
+      // 子进程环境白名单会丢掉宿主的 ELECTRON_RUN_AS_NODE；不补回时壳把脚本当应用/URL，
+      // 立即 exit 0 且无输出 —— 真机表现为“加速核心分身无法启动”。对真 node 无害（会忽略）。
+      if (spec.nodeScript && env.ELECTRON_RUN_AS_NODE !== '1') env.ELECTRON_RUN_AS_NODE = '1'
       let child = null
       try {
         child = spawnProcess(spec.command, spec.args, {
@@ -1668,7 +1687,7 @@ export function apply(ctx, config) {
      * state, and how many forks currently run on each core.
      */
     coreStatus() {
-      const acceleratedHome = String(layout?.fangHome ?? '').trim()
+      const acceleratedHome = acceleratedHomeDir()
         || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
       const accelerated = acceleratedCoreInfo({ cliPath: cfg.acceleratedCliPath ?? '', fangHome: acceleratedHome })
       const counts = { stock: 0, accelerated: 0 }

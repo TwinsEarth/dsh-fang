@@ -13,6 +13,8 @@
 ## 1. 内容
 
 - 母体面板三块布局（左列决策中心/分身 + 水平分隔条；右列母体&元主）；
+- 修复 v3.5.2 真机「分身核心加速引擎」无法启动 & 按钮点击无效（4 层根因：forker layout 解析、
+  stock CLI 误传、`ELECTRON_RUN_AS_NODE` 丢失、面板 `toast()` 未定义）；
 - 修复原身派生加速分身插件面静默退回 minimal（`accelerated-sync-unavailable` 显式失败）；
 - 文档/回归测试。
 
