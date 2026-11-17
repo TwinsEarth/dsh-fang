@@ -52,6 +52,8 @@ npm run test:accel-live                                                   # fork
 ## 5. 已知限制
 
 1. 加速分身默认**不带第三方插件**与官方可选 bundle（见兼容矩阵 `docs/ACCEL-FORK-COMPAT.md`）；
+   但**原身派生**（`sourceProfileDir`）时会同步原身插件面（第三方包复制 + `@deepseek-ai/*` 别名桩 + client half 重写）；
+   若解析不到加速核模块树，v3.5.2 修复后**显式失败 `accelerated-sync-unavailable`**，不再静默退回 minimal；
 2. 真实模型对话未做端到端验证（仅配置层 `mismatch=0`）；
 3. 旧会话继承（`sessionMode:'inherit'`）未经格式兼容验证，默认 `new`；
 4. 开关只影响新派生/重启；运行中分身不热切换；
