@@ -18,7 +18,7 @@
 | 文件 | 作用 |
 |---|---|
 | `src/lib/accelerated-install.mjs` | 安装/发现加速核：`<FANG_HOME>/accel/cli` + `state.json`；只接受 `lib/bin.js`（Windows `.cmd` shim 不能 spawn）；解析链 config → `FANG_ACCEL_CLI` → state → 标准位置；缺失即 `accelerated-cli-missing` |
-| `src/lib/accelerated-fork.mjs` | 极简分身 profile（**只有** `@twinsearth/dsh-base` + `@twinsearth/dsh-web-app` + `@local/dsh-fang`，加两个子插件 junction）+ 模型 overlay（`@deepseek-ai/dsh-` → `@twinsearth/dsh-`） |
+| `src/lib/accelerated-fork.mjs` | 极简分身 profile（**无源时**：`@twinsearth/dsh-base` + `@twinsearth/dsh-web-app` + `@local/dsh-fang`）+ **D2 混合模式**（有 `sourceProfileDir` 时）：官方 bundle 映射、第三方插件包复制、`@deepseek-ai/*` → `@twinsearth/*` **alias 桩包**、模型 overlay（`@deepseek-ai/dsh-` → `@twinsearth/dsh-`），并把 `mapped/unsupportedBundles/copiedPlugins/alias` 写入 `task.acceleratedSync` |
 | `src/lib/fork-core-settings.mjs` | `<dataDir>/fork-core.json`（`mode` / `sessionMode`），原子写、损坏降级 stock+new |
 | `src/plugins/forker.mjs` | 加速分支 provision；`spawn` 按 coreMode 解析 CLI，缺失即失败；跳过 fork-seed / 官方 node_modules 镜像 / 官方 headless overlay；`publicFork.coreMode` |
 | `src/plugins/orchestrator.mjs` | `GET/POST /fang/api/fork-core`；createTask / 归档还原 / autostart 按开关换核；元主 spawn 固定 stock |
@@ -102,7 +102,7 @@ npm run test:accel-live                                                   # fork
 | # | 决策 | 选择 | 确认日期 |
 |---|---|---|---|
 | D1 | 开关生效范围 | **a) 只影响新派生/重启**（运行中不热切换） | 2026-11-17 |
-| D2 | 加速分身插件面 | **a) 极简（当前发布）**；用户要求“与元主同步一致”后完成 alias 桩包 spike：58/66 导入规格可映射、4/4 目标第三方插件激活（见 COMPAT §3.2），推荐 **C(桩包)+A(核心)+B(兜底)** 形态，最终口径待定 | 2026-11-17 |
+| D2 | 加速分身插件面 | **混合方案（已确认并实现）**：官方 bundle 自动映射 + 第三方插件复制 + `@deepseek-ai/*` alias 桩包 + 不支持清单显式展示；契约委托(B)/UI client half 为后续项 | 2026-11-17 |
 | D3 | 加速分身旧会话 | **只新会话 + 旧会话仅“复制导入”（新副本，不在旧会话上继续）**；`sessionMode:'new'` 默认，`copy` 开启复制导入 | 2026-11-17 |
 | D4 | 安装位置/体积 | `<FANG_HOME>/accel/cli`；**上限 1 GiB，超过必须二次确认**（交互提示 / `--confirm-oversize`） | 2026-11-17 |
 | D5 | 版本号 | **v3.5.0** | 2026-11-17 |

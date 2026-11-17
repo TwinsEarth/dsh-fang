@@ -40,6 +40,8 @@
 ### P2 兼容与文档
 
 - `docs/ACCEL-FORK-COMPAT.md`：核心/官方 bundle/第三方插件兼容矩阵（含未验证项）；
+- **D2 混合插件面（alias/shim）**：`accelerated-fork.mjs` 新增 `translateBundles` / `scanDeepseekSpecs` / `writeAliasStubs` / `buildSyncedAcceleratedProfile`；`writeAcceleratedForkProfile({sourceProfileDir, accelNodeModules})` 同步原身插件面并返回 `sync`（mapped / unsupportedBundles / copiedPlugins / alias）；`task.acceleratedSync` 暴露给任务视图；真机验证 0 导入失败（57 alias resolved / 8 unsupported / 5 pending 服务等待）；
+- `tools/release/accel-alias-spike.mjs`：可复现的 alias 覆盖率量化工具（baseline 2/4 失败 → 桩包后 4/4 激活）；
 - `docs/ACCELERATED-FORK.md`：P0+P1 全量说明、安装/验证/限制；
 - `docs/CHANGELOG.md`：v3.5.0 段；
 - 本审计；

@@ -27,24 +27,16 @@
 
 ## 2. 官方 bundle
 
-| # | bundle | 加速分身 | 说明 |
-|---|---|---|---|
-| 1 | `@deepseek-ai/dsh-base` | ✅ | 映射为 `@twinsearth/dsh-base` |
-| 2 | `@deepseek-ai/dsh-web-app` | ✅ | 映射为 `@twinsearth/dsh-web-app` |
-| 3 | `dsh-experimental-agent-team-profile` | ❌ | 加速核无对应 bundle |
-| 4 | `dsh-experimental-voice-input-bundle` | ❌ | 同上 |
-| 5 | `dsh-experimental-plugin-market-bundle` | ❌ | 同上 |
-| 6 | `dsh-experimental-auto-review` | ❌ | 同上 |
-| 7 | `dsh-experimental-forge-bundle` | ❌ | 同上 |
-| 8 | `dsh-experimental-inspector-profile` | ❌ | 同上 |
-| 9 | `dsh-personalized-recommendations` | ❌ | 同上 |
-| 10 | `dsh-experimental-cot-translation-bundle` | ❌ | 同上 |
-| 11 | `dsh-experimental-session-titles-bundle` | ❌ | 同上 |
-| 12 | `dsh-experimental-badge-skill-bundle` | ❌ | 同上 |
-| 13 | `dsh-deepseek-chat-import` | ❌ | 同上 |
-| 14 | `ralph` / `terminal` / `liveshare` / `session-search` | ❌ | 同上（无加速版实现） |
+2026-11-17 复核（本机 `D:\ToFuture\accel\cli\node_modules\@twinsearth` 实测）：加速核**同时提供官方实验 bundle 的加速版**（`dsh-experimental-agent-team-profile`、`voice-input`、`plugin-market`、`auto-review`、`forge`、`inspector`、`personalized-recommendations`、`cot-translation`、`session-titles`、`badge-skill`、`ralph`、`terminal`、`session-search`、`liveshare` 等均在树内）。因此官方 bundle 列表**可以整体映射**（`translateBundles` 实测 unsupported=0）。
 
-> 结论：官方**核心** bundle 可映射；官方**实验** bundle 无加速版，需从官方源码移植（涉及许可证与 API 适配）。
+| 官方 bundle | 加速分身 | 说明 |
+|---|---|---|
+| `@deepseek-ai/dsh-base` / `dsh-web-app` | ✅ | 映射为 `@twinsearth/*` 同名包 |
+| 官方实验 bundle（agent-team-profile / voice-input / plugin-market / auto-review / forge / inspector / personalized-recommendations / cot-translation / session-titles / badge-skill） | ✅（映射） | `@twinsearth/dsh-experimental-*` 存在；真机 boot 无 import 失败 |
+| `ralph` / `terminal` / `liveshare` / `session-search` | ✅（映射） | `@twinsearth/dsh-experimental-*` / `dsh-tool-*` 存在 |
+| `dsh-deepseek-chat-import` | ⚠️ | 未在加速树中发现同名 bundle；需要时按“移植/委托”处理 |
+
+> 复核结论：官方 bundle 映射在 `translateBundles()` 中**按包存在性判定**，不存在对应包时进入 `unsupportedBundles` 清单（不静默丢弃）。
 
 ## 3. 第三方插件
 
@@ -55,23 +47,16 @@
 | 1 | `@twinsearth/w2m-dsh-plugin` | ❌ 不带 | 未做激活实验 |
 | 2 | `@twinsearth/dsh-2xray` | ❌ 不带 | 未做激活实验 |
 | 3 | `@twinsearth/dsh-im2a-plugin` | ❌ 不带 | 未做激活实验 |
-| 4 | `dsh-context` | ❌ 导入失败 | 元主同步实验：`Cannot find package '@deepseek-ai/dsh-session'` |
-| 5 | `@openviking/dsh-memory-plugin` | ❌ 导入失败 | 元主同步实验：`Cannot find package '@deepseek-ai/dsh-mcp-client'` |
-| 6 | `dshmarket` / `dsh-vault` / `dsh-recovery` / `dsh-backup` / `dsh-ops` / `dsh-better-sidebar` | ⚠️ 未验证 | 未做激活实验 |
+| 4 | `dsh-context` | ✅ 已实现（alias 桩包） | baseline 缺 `@deepseek-ai/dsh-session` → 加桩后导入成功、激活 ✅ |
+| 5 | `@openviking/dsh-memory-plugin` | ✅ 已实现（alias 桩包） | baseline 缺 `@deepseek-ai/dsh-mcp-client` → 加桩后导入成功、激活 ✅ |
+| 6 | `dshmarket` / `dsh-vault` / `dsh-recovery` / `dsh-backup` / `dsh-ops` / `dsh-better-sidebar` | ⚠️ 未验证 | dshmarket 在 spike 中可激活；其余未做激活实验 |
 | 7 | `@michengai/dsh-agency-agents` / `@nanmicoder/dsh-agent-teams` / `@liustack/modlens,modsearch` / `@perrylink/dsh-plugin-doctor` / `ds-bot` / `dsh-qq-onebot` / `dsh-wechat` | ⚠️ 未验证 | 未做激活实验 |
 
-### 3.1 “与元主同步”实验（2026-11-17）
+> **生产集成**：加速分身 provision 现在支持 `sourceProfileDir`（原身 merged profile）→ 自动完成「官方 bundle 映射 + 第三方插件复制 + `@deepseek-ai/*` 桩包」，并把 `mapped / unsupportedBundles / copiedPlugins / alias.resolved / alias.unsupported` 写入 `task.acceleratedSync` 显式展示。**无证据前仍不得在矩阵写“支持”**。
 
-把元主 merged profile 加速化（bundle 映射 base/web-app、保留第三方依赖、patch 作用域改写并转数组）后启动加速核：
+### 3.1 “与元主同步”早期实验（2026-11-17，已被 3.2/3.3 取代）
 
-| 结果 | 详情 |
-|---|---|
-| 启动 | ✅ 成功打印 `dsh web: ...`（可提供页面服务） |
-| 丢弃项 | ❌ 10 个官方实验 bundle 无加速版 |
-| 第三方激活 | ❌ `dsh-context`、`@openviking/dsh-memory-plugin` 导入即失败（缺 `@deepseek-ai/*` 包） |
-| 其他 | ⚠️ `subagent-*-in-process` pending（服务缺失） |
-
-> 因此“与元主插件面 100% 同步”当前不可达；差异必须显式列出，不能静默宣称一致。
+早期手工翻译元主 profile（bundle 只映射 base/web-app）后启动加速核：启动 ✅，但 `dsh-context`、`@openviking/dsh-memory-plugin` 因缺 `@deepseek-ai/*` 包导入失败。该实验暴露了 alias 缺口，**不是最终结论**。
 
 ### 3.2 alias 桩包 spike（2026-11-17，可复现）
 
@@ -92,14 +77,27 @@ node tools/release/accel-alias-spike.mjs --accel-nm <accel>/node_modules --essen
 | 导入失败 | 2（`dsh-context`、`openviking-memory-runtime`） | **0** |
 | 结果 | dsh-context / openviking ❌ | **4/4 目标第三方插件全部激活** ✅ |
 
-> 结论：**C（alias 桩包）在 Host 侧可行且收益最大**；剩余 gap 集中在 client/desktop/lsp/invariants 这类“无加速对应”的模块，需要 A（移植）或 B（契约委托）补齐。
-> 推荐 D2 形态：**C 为主（自动桩包 + 不支持清单）+ A 补核心 + B 兜底**。
+### 3.3 生产代码集成验证（2026-11-17）
+
+用真实元主 merged profile + 真实加速核，调用生产函数 `writeAcceleratedForkProfile({sourceProfileDir, accelNodeModules})` 生成 profile 并真机启动：
+
+| 指标 | 结果 |
+|---|---|
+| 生成 | ✅ `/profiles/web-accel`；bundle 列表 = 官方 bundle 全部映射 + dsh-context / openviking / w2m / fang / dshmarket |
+| 官方 bundle 映射 | ✅ `unsupportedBundles = 0` |
+| 第三方插件复制 | dsh-context、@openviking/dsh-memory-plugin、dshmarket（w2m 以 junction 方式复用源模块树） |
+| alias 桩包 | ✅ resolved 57；unsupported 8（client/desktop/lsp/invariants 类） |
+| 真机启动 | ✅ `dsh web: http://127.0.0.1:18093/...` |
+| 导入失败 | **0** |
+| `entries did not activate` | 5，全部是 `pending (waiting for service: subagents/agentTeams)`，**无 import 失败** |
+
+> 结论：**混合方案已落地到生产 provision 路径并在真机验证**；剩余 gap（8 个无加速等价模块）走 A（移植）/B（契约委托），UI client half 另行验证。
 
 ## 4. 三条适配路线（可行性结论）
 
 | 路线 | 可行性 | 边界 | 建议 |
 |---|---|---|---|
-| **A. 移植（源码/包改名）** | 核心插件：可行；官方实验 bundle：无加速版，需源码移植 | API 漂移（0.2.2-rc.3 → 3.5.0）与许可证 | 只对**核心**插件做自动映射；实验 bundle 单独立项 |
+| **A. 移植（源码/包改名）** | 官方 bundle：加速核已有同名加速版（映射即可，实测 unsupported=0）；个别包（chat-import 等）需移植/委托 | API 漂移（0.2.2-rc.3 → 3.5.0）与许可证 | 映射自动完成；个例单独立项 |
 | **B. 契约委托（调母体）** | 无头能力：可行（`src/contract` + `/fang/api/contract` + adapter 命令）；UI：不可行 | 母体须在线；延迟/一致性/鉴权 | 用于“无法移植的重量级插件”的能力调用，不用于界面 |
 | **C. alias 桩包（伪装适配）** | Host 侧：**已验证**（66 个导入规格中 58 个可映射；4/4 目标第三方插件激活）；Web client half：未验证 | 仅覆盖 API 兼容子集；必须逐插件激活冒烟 | **优先做**：先给 `dsh-session`/`dsh-mcp-client`/常用 `dsh-tool-*` 建桩，量化可激活率 |
 

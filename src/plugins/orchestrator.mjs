@@ -359,12 +359,18 @@ export function apply(ctx, config) {
     if (!f || typeof f.provision !== 'function') return { ok: false, switched: false, coreMode: current, error: 'forker-unavailable' }
     let provisioned
     if (desired === 'accelerated') {
+      // 原身派生的分身：重新打开换加速核时同步原身插件面（与 createTask 一致）。
+      let sourceProfileDir = ''
+      if (task.sourceEssence?.id) {
+        try { sourceProfileDir = essenceManager.mergedProfileDir(task.sourceEssence.id) } catch { sourceProfileDir = '' }
+      }
       provisioned = await f.provision({
         forkId: task.taskId,
         taskTitle: task.title,
         homeDir: task.homeDir,
         profile: task.profile,
         coreMode: 'accelerated',
+        ...(sourceProfileDir ? { sourceProfileDir } : {}),
       })
     } else {
       provisioned = await f.provision({
@@ -383,6 +389,7 @@ export function apply(ctx, config) {
     }
     task.prevCoreMode = current
     task.coreMode = desired
+    if (provisioned?.accelerated?.sync) task.acceleratedSync = provisioned.accelerated.sync
     task.updatedAt = nowMs()
     persist()
     try { audit('fang/fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* audit optional */ }
@@ -615,6 +622,8 @@ export function apply(ctx, config) {
       taskId: t.taskId,
       forkId: t.taskId,
       coreMode: t.coreMode === 'accelerated' ? 'accelerated' : 'stock',
+      // D2：加速分身的插件面同步报告（映射成功/不支持清单/被复制插件），无则不出现。
+      acceleratedSync: t.acceleratedSync ?? null,
       title: t.title,
       taskTitle: t.title,
       status,
@@ -991,7 +1000,8 @@ export function apply(ctx, config) {
           profile,
           profileTemplate,
           coreMode,
-          // 从原身派生：配置必须真的来自原身 merged（不能被 clean template 覆盖）。
+          // 加速档 + 原身派生：同步原身插件面（第三方包复制 + @deepseek-ai/* 别名桩包）。
+          ...(coreMode === 'accelerated' && sourceEssence ? { sourceProfileDir: profileTemplate } : {}),
           // node_modules：优先元主自己的模块树；默认元宝/新建原身可能尚未物化 node_modules，
           // 此时回退母体模块树，保证分身仍能解析 @local/dsh-fang（否则是僵尸分身）。
           ...(sourceEssence ? {
@@ -1007,6 +1017,11 @@ export function apply(ctx, config) {
           task.status = TASK_STATUS.FAILED
           persist()
           return { ok: false, error: 'provision-failed', detail: provisioned.error }
+        }
+        // D2：记录加速分身的插件面同步结果（哪些映射成功、哪些不支持、哪些插件被复制）。
+        if (provisioned?.accelerated?.sync) {
+          task.acceleratedSync = provisioned.accelerated.sync
+          persist()
         }
         audit(AUDIT.FORK_CREATED, { taskId, forkId: taskId, title, homeDir, profile, templateFallback })
 

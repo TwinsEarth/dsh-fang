@@ -919,19 +919,32 @@ export function apply(ctx, config) {
     let accelerated = null
 
     if (coreMode === 'accelerated') {
+      // D2 hybrid: when a source profile is given (essence-derived fork), sync its
+      // plugin surface (third-party packages + @deepseek-ai/* alias stubs); otherwise
+      // fall back to the minimal accelerated profile.
+      const sourceProfileDir = String(opts.sourceProfileDir ?? '').trim()
+      let accelNodeModules = ''
+      try {
+        const resolvedAccel = resolveAcceleratedCore({ cliPath: cfg.acceleratedCliPath ?? '', env: process.env, fangHome: acceleratedHome })
+        if (resolvedAccel.ok === true && resolvedAccel.cliPath) {
+          accelNodeModules = path.resolve(path.dirname(resolvedAccel.cliPath), '..', '..', '..', '..')
+        }
+      } catch { /* keep minimal profile */ }
       const written = writeAcceleratedForkProfile({
         profileDir,
         fangRoot: FANG_ROOT,
         homeDir,
         motherHome: String(process.env.DSH_HOME ?? '').trim(),
         profileName: profile,
+        sourceProfileDir,
+        accelNodeModules,
       })
       if (written.ok !== true) {
         return { ok: false, error: written.error ?? 'accelerated-profile-failed', detail: JSON.stringify(written) }
       }
       warnings.push(...(Array.isArray(written.warning) ? written.warning : []))
       if (written.overlay?.ok !== true) warnings.push(`accelerated-model-overlay:${written.overlay?.error ?? 'unknown'}`)
-      accelerated = { bundles: written.bundles, overlay: written.overlay, junctions: written.junctions }
+      accelerated = { bundles: written.bundles, overlay: written.overlay, junctions: written.junctions, sync: written.sync ?? null }
     } else if (useCleanTemplate) {
       // Forker-owned clean template: never written into the mother profile directory.
       const cleanDir = path.join(homeDir, 'templates', forkProfileTag)
