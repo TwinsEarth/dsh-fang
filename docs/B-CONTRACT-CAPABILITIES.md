@@ -172,9 +172,19 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | M4 | B-7 dryRun/审批导入 + 冒烟脚本 + 文档 | 冒烟：dryRun 结果一致；审批拒绝路径明确 |
 | M5 | 审计与限流压测 | 审计记录完整；超时/并发上限生效 |
 
-## 6. 待用户确认
+## 6. 首批范围（已确认 · 2026-11-17）
 
-1. **首批范围**：建议 `B-1..B-4 + B-5（复用）` 先做（纯只读、零审批），`B-6 lsp` 紧随；`B-7 chat.import` 是否入首批？
-2. **写操作审批策略**：tool.invoke 的只读/写子命令划分是否按上表？
-3. **契约版本**：是否同意 `CONTRACT_VERSION` 升到 1.2（仅追加）？
-4. **P2 的 `fang.code.run`**：是否后续立项（高风险需单独评审）？
+用户确认口径：**B-1..B-4 + B-5（复用）先做（纯只读、零审批）→ B-6 lsp 紧随 → B-7 chat.import 纳入**。执行结果：
+
+| 范围 | 能力 | 状态 |
+|---|---|---|
+| 先行（只读） | B-1 `capability.list`、B-2 `session.events`、B-3 `decision.list`、B-4 `approvals.list`、B-5 `session.list`（复用） | ✅ M2 完成 |
+| 紧随 | B-6 `fang.tool.invoke`（lsp：只读子命令放行；写类 `contract-approval-required`） | ✅ M3 完成（真实 LSP provider 待接入） |
+| 纳入 | B-7 `fang.chat.import`（dryRun 默认、确定性预览；真实导入审批拒绝） | ✅ M4 完成 |
+| 加强 | 审计完整性 + 并发/超时上限（`contract-rate-limited` / `contract-timeout`） | ✅ M5 完成 |
+
+**范围外（保持待定/后续）**：
+1. `fang.code.run`（P2，高风险，需单独评审）；
+2. LSP **真实执行 provider** 接入母体 DSH 工具运行时（需确认工具调用 API）；
+3. UI client half 浏览器映射（独立阶段，先做单个 spike）；
+4. 契约 SDK 版本：保持 vendored `1.1.0` 逐字节不变（委托方法/错误码为 fang 层 append-only，不升契约包）。

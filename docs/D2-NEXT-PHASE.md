@@ -6,7 +6,7 @@
 
 ## 1. 契约委托（B：无头能力调母体）
 
-> **进展（2026-11-17）**：P0 只读委托已落地（白名单/超时/审计/错误码 + e2e 断言）；P1（lsp / chat.import）待确认后推进。详见 [`docs/B-CONTRACT-CAPABILITIES.md`](B-CONTRACT-CAPABILITIES.md)。
+> **进展（2026-11-17）**：P0 只读委托已落地（白名单/超时/审计/错误码 + e2e 断言）；P1 通道（lsp 读/写门禁、chat.import dryRun+审批拒绝）已落地，**LSP 真实执行 provider 待接入**；UI client half 仍后置。详见 [`docs/B-CONTRACT-CAPABILITIES.md`](B-CONTRACT-CAPABILITIES.md)。
 
 ### 1.1 目标
 
