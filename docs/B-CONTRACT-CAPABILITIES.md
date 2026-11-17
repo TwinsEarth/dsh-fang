@@ -21,6 +21,24 @@
 
 **未实现（待确认后推进）**：P1 `fang.tool.invoke`（lsp）/ `fang.chat.import`；异步长任务模型；背压/并发上限；分侧调用方身份（目前记录 `meta.source` 审计，未做 per-fork 鉴权策略）；UI client half。
 
+### 0.1 生产母体服务确认（2026-11-17，`npm run probe:mother`）
+
+工具：`node tools/release/mother-capability-probe.mjs --base <motherUrl> --token-file <dataDir>/fang-auth.json`
+
+本机生产母体实测：
+
+```
+mother http://127.0.0.1:50895 role=mother version=3.4.2 status=200 auth=true
+contract version=1.1.0 methods=11 delegation=false   ← 生产仍在 3.4.2，重启 3.5.0 后才有委托方法
+readiness: fang.orchestrator.status=READY | fang.session.list=READY | fang.capability.list=MISSING(旧版本)
+evidence: /fang/api/sessions -> 200 (5 item(s))
+```
+
+结论：
+- **`session-catalog` 插件在生产母体已挂载并服务**（`/fang/api/sessions` 200 + 真实会话项；该路由由 `src/plugins/session-catalog.mjs` 注册），因此 `fang.session.list` 可以保留在首批；
+- e2e 环境是**精简 profile**，未挂载 session-catalog，故 e2e 中委托返回 `contract-unavailable` 属于已覆盖的“服务缺失”分支；
+- `fang.capability.list` 在生产缺失仅因为运行版本为 3.4.2（委托功能在 3.5.0 才引入）——**重启到 3.5.0 后需用同一 probe 复测**，作为发布后验收项。
+
 ## 1. 现有契约能力（只读盘点）
 
 | 方法 | 版本 | 类型 | 现有实现 |
@@ -42,7 +60,7 @@
 |---|---|---|
 | `POST /fang/api/contract/hello`（Bearer） | ✅ 200，`contractVersion=1.1.0`，advertise **11 个方法** | HTTP 契约要求 `contract.token` Bearer；e2e profile 已注入测试 token |
 | `POST /fang/api/contract/invoke` → `fang.orchestrator.status` | ✅ 200 + result | 委托只读能力**已真实可用** |
-| `POST .../invoke` → `fang.session.list` | ⚠️ 200 + `fang-service-unavailable` | 该能力依赖母体 `sessionCatalog` 服务；e2e 精简 profile 未挂载。生产母体需确认服务存在后才能列入首批 |
+| `POST .../invoke` → `fang.session.list` | ⚠️ 200 + `fang-service-unavailable`（e2e 精简 profile 未挂载 session-catalog） | **生产母体已确认具备**（§0.1：`/fang/api/sessions` 200 + 真实会话项），保留首批；e2e 覆盖“服务缺失→contract-unavailable”分支 |
 | 无 Bearer / 未配 token | 401 / 503（`contract-unauthorized` / `contract-token-required`） | fail-closed 已生效 |
 
 ## 2. 第一批候选能力

@@ -102,7 +102,8 @@
     "gate": "node tools/gate/main-city.mjs",
     "test:accel-live": "node --test --test-concurrency=1 test/accelerated-fork-live.test.mjs",
     "install:accel": "node tools/release/accelerated-install.mjs",
-    "smoke:accel-plugins": "node tools/release/accel-plugin-smoke.mjs"
+    "smoke:accel-plugins": "node tools/release/accel-plugin-smoke.mjs",
+    "probe:mother": "node tools/release/mother-capability-probe.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {
