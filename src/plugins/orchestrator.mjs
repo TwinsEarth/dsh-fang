@@ -42,7 +42,8 @@ import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { openDecisionEventStream } from '../lib/decision-events.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
-import { acceleratedWebStatus, startAcceleratedWeb, stopAcceleratedWeb } from '../lib/accelerated-web.mjs'
+// P0: the former "accelerated Web sidecar" (a second mother Web) was retired — the
+// accelerator serves fork Web UIs only. See /fang/api/fork-core.
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
@@ -2530,6 +2531,8 @@ export function apply(ctx, config) {
         // 否则官方/用户元主打开后看不到本机插件列表（v3.0.10 实测）。
         cleanTemplate: false,
         nodeModulesSource: essenceModules,
+        // P0 硬约束：加速核只服务分身 Web；元主运行态始终原厂 core。
+        coreMode: 'stock',
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
       // 历史版本把生产盘锁写进了 essence-runtime；配置实例必须能管理插件，升级后清掉。
@@ -2564,6 +2567,8 @@ export function apply(ctx, config) {
         homeDir,
         profile: 'essence-runtime',
         cliPath: cliPath(),
+        // P0 硬约束：即使 forker 默认切到 accelerated，元主运行态也只跑原厂 core。
+        coreMode: 'stock',
         // v3.1.16：原身运行态同样需要母体 dataDir，房主 Router 才能零配置推导
         // 契约 file 桥（contract-outbox）；普通分身在 846/1461/1534 行已有同名注入。
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir },
@@ -3093,26 +3098,14 @@ export function apply(ctx, config) {
         })(),
         }))
       }
-      // 加速版 Web sidecar：原厂进程不动；启动/停止/查看第二个 @twinsearth DSH Web。
-      const acceleratedHome = String(cfg.accelerated?.home ?? '').trim() || String(process.env.DSH_HOME ?? '').trim()
-      route('GET', `${prefix}/api/accelerated/status`, async (req, res) => {
-        if (cfg.accelerated?.enabled !== true) return json(res, 200, { ok: true, enabled: false, running: false, state: null })
-        return json(res, 200, await acceleratedWebStatus({ dataDir: layout.dataDir }))
-      })
-      route('POST', `${prefix}/api/accelerated/start`, async (req, res) => {
-        if (cfg.accelerated?.enabled !== true) return json(res, 403, { ok: false, error: 'accelerated-disabled' })
-        const result = await startAcceleratedWeb({
-          dataDir: layout.dataDir,
-          cliPath: cfg.accelerated?.cliPath ?? '',
-          profile: cfg.accelerated?.profile ?? 'fang-accelerated',
-          port: cfg.accelerated?.port ?? 18080,
-          home: acceleratedHome,
-        })
-        return json(res, result.ok ? 200 : 502, result)
-      })
-      route('POST', `${prefix}/api/accelerated/stop`, async (req, res) => {
-        if (cfg.accelerated?.enabled !== true) return json(res, 403, { ok: false, error: 'accelerated-disabled' })
-        return json(res, 200, await stopAcceleratedWeb({ dataDir: layout.dataDir }))
+      // 分身核心（P0，只读）：加速引擎只服务分身 Web，母体/元主始终原厂。
+      // 旧的 /accelerated/start|stop（第二个母体 Web）已下线；启动/切换在后续版本开放。
+      route('GET', `${prefix}/api/fork-core`, (req, res) => {
+        const f = safeGet(SERVICE.forker)
+        const status = typeof f?.coreStatus === 'function'
+          ? f.coreStatus()
+          : { mode: 'stock', installable: true, accelerated: { installed: false, version: null, error: 'forker-unavailable' }, forks: {} }
+        return json(res, 200, { ok: true, ...status, essence: 'stock' })
       })
       // 重启守卫 / supervisor 契约（只读）。不触发重启；写操作仍只走审批 + 外部 supervisor。
       route('GET', `${prefix}/api/restart`, (req, res) => {

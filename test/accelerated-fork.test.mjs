@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
+// P0: accelerated fork profile (minimal composition + scope-rewritten model overlay).
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import {
+  ACCEL_BUNDLES_WITH_FANG,
+  OVERLAY_MARKER,
+  buildAcceleratedForkProfile,
+  buildModelOverlay,
+  normalizeCoreMode,
+  rewriteScope,
+  writeAcceleratedForkProfile,
+} from '../src/lib/accelerated-fork.mjs'
+import { DEFAULT_EXPECTED_ROUTE_COUNT, REQUIRED_ROUTE_PATHS } from '../src/lib/compat.mjs'
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+function tmp(prefix = 'fang-accel-fork-') {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+}
+
+function fakeFangRoot() {
+  const root = tmp('fang-accel-fangroot-')
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: '@local/dsh-fang', version: '0.0.0-test' }))
+  fs.writeFileSync(path.join(root, 'client.js'), '// client\n')
+  for (const child of ['dsh-fang-web-entry', 'dsh-fang-queue-journal']) {
+    const dir = path.join(root, 'node_modules', '@twinsearth', child)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: `@twinsearth/${child}` }))
+  }
+  return root
+}
+
+test('composition is exactly base + web-app + fang', () => {
+  const profile = buildAcceleratedForkProfile({ profileName: 'fang-accel-x', fangRoot: 'E:/GPT/dsh-fang' })
+  assert.deepEqual(profile.dsh.profile.bundles, ['@twinsearth/dsh-base', '@twinsearth/dsh-web-app', '@local/dsh-fang'])
+  assert.deepEqual(profile.dsh.profile.bundles, [...ACCEL_BUNDLES_WITH_FANG])
+  assert.equal(profile.dependencies['@local/dsh-fang'], 'link:E:/GPT/dsh-fang')
+  assert.equal(profile.name, 'dsh-profile-fang-accel-x')
+})
+
+test('rewriteScope only rewrites the dsh package scope', () => {
+  const text = 'name: "@deepseek-ai/dsh-base"\nother: "@deepseek-ai/not-dsh"\nkeep: "@twinsearth/dsh-web-app"'
+  const out = rewriteScope(text)
+  assert.match(out, /@twinsearth\/dsh-base/)
+  assert.match(out, /@deepseek-ai\/not-dsh/)
+  assert.match(out, /@twinsearth\/dsh-web-app/)
+})
+
+test('buildModelOverlay: missing mother patch is an explicit error', () => {
+  const built = buildModelOverlay({ motherHome: tmp() })
+  assert.equal(built.ok, false)
+  assert.equal(built.error, 'mother-home-patch-missing')
+})
+
+test('buildModelOverlay: rewrites scope and marks the generated file', () => {
+  const home = tmp()
+  fs.writeFileSync(path.join(home, 'cordis.patch.yml'), '- id: llm-pi-ai\n  name: "@deepseek-ai/dsh-llm-pi-ai"\n')
+  const built = buildModelOverlay({ motherHome: home })
+  assert.equal(built.ok, true)
+  assert.ok(built.text.startsWith(OVERLAY_MARKER))
+  assert.match(built.text, /@twinsearth\/dsh-llm-pi-ai/)
+})
+
+test('writeAcceleratedForkProfile: minimal profile + junctions + overlay', () => {
+  const root = tmp()
+  const fangRoot = fakeFangRoot()
+  const motherHome = tmp()
+  fs.writeFileSync(path.join(motherHome, 'cordis.patch.yml'), '- id: agent-default-model\n  name: "@deepseek-ai/dsh-agent-default-model"\n')
+  const profileDir = path.join(root, 'home', 'profiles', 'fang-accel')
+  const homeDir = path.join(root, 'home')
+
+  const written = writeAcceleratedForkProfile({ profileDir, fangRoot, homeDir, motherHome, profileName: 'fang-accel' })
+  assert.equal(written.ok, true)
+  const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dsh.profile.bundles, [...ACCEL_BUNDLES_WITH_FANG])
+  assert.equal(fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8').trim(), '[]')
+  assert.equal(written.overlay.ok, true)
+  const overlay = fs.readFileSync(path.join(homeDir, 'cordis.patch.yml'), 'utf8')
+  assert.ok(overlay.includes(OVERLAY_MARKER))
+  assert.match(overlay, /@twinsearth\/dsh-agent-default-model/)
+  assert.equal(written.junctions.length, 3)
+  for (const junction of written.junctions) assert.equal(junction.ok, true, JSON.stringify(junction))
+})
+
+test('writeAcceleratedForkProfile: never overwrites an unmanaged home patch', () => {
+  const root = tmp()
+  const fangRoot = fakeFangRoot()
+  const motherHome = tmp()
+  fs.writeFileSync(path.join(motherHome, 'cordis.patch.yml'), '- id: x\n  name: "@deepseek-ai/dsh-x"\n')
+  const homeDir = path.join(root, 'home')
+  fs.mkdirSync(homeDir, { recursive: true })
+  fs.writeFileSync(path.join(homeDir, 'cordis.patch.yml'), '# user own patch\n- id: keep\n')
+  const written = writeAcceleratedForkProfile({ profileDir: path.join(homeDir, 'profiles', 'p'), fangRoot, homeDir, motherHome })
+  assert.equal(written.ok, true)
+  assert.equal(written.overlay.ok, false)
+  assert.equal(written.overlay.error, 'home-patch-exists-unmanaged')
+  assert.match(fs.readFileSync(path.join(homeDir, 'cordis.patch.yml'), 'utf8'), /user own patch/)
+})
+
+test('writeAcceleratedForkProfile: missing fang root and profile dir are explicit errors', () => {
+  assert.equal(writeAcceleratedForkProfile({ profileDir: '', fangRoot: 'x' }).error, 'no-profile-dir')
+  assert.equal(writeAcceleratedForkProfile({ profileDir: tmp(), fangRoot: '' }).error, 'no-fang-root')
+  assert.equal(writeAcceleratedForkProfile({ profileDir: tmp(), fangRoot: tmp() }).error, 'fang-package-missing')
+})
+
+test('normalizeCoreMode: unknown values fall back to stock', () => {
+  assert.equal(normalizeCoreMode('accelerated'), 'accelerated')
+  assert.equal(normalizeCoreMode('ACCELERATED'), 'stock')
+  assert.equal(normalizeCoreMode(''), 'stock')
+  assert.equal(normalizeCoreMode(undefined), 'stock')
+})
+
+test('route contract: fork-core is required and the sidecar routes retired (86 total)', () => {
+  assert.equal(DEFAULT_EXPECTED_ROUTE_COUNT, 86)
+  assert.ok(REQUIRED_ROUTE_PATHS.includes('/fang/api/fork-core'))
+  for (const retired of ['/fang/api/accelerated/status', '/fang/api/accelerated/start', '/fang/api/accelerated/stop']) {
+    assert.equal(REQUIRED_ROUTE_PATHS.includes(retired), false)
+  }
+})
+
+test('source guards: essence is pinned to stock and forker has no silent stock fallback', () => {
+  const orchestrator = fs.readFileSync(path.join(REPO, 'src', 'plugins', 'orchestrator.mjs'), 'utf8')
+  assert.ok((orchestrator.match(/coreMode: 'stock'/g) ?? []).length >= 2, 'essence provision + spawn pin stock')
+  const forkerSource = fs.readFileSync(path.join(REPO, 'src', 'plugins', 'forker.mjs'), 'utf8')
+  assert.equal(/cfg\.coreMode === 'accelerated' && cfg\.acceleratedCliPath \?/.test(forkerSource), false, 'old silent fallback removed')
+  assert.match(forkerSource, /error: 'accelerated-cli-missing'/)
+})

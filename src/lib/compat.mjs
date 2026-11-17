@@ -34,8 +34,11 @@ export const REQUIRED_ROUTE_PATHS = Object.freeze([
   '/fang/api/tasks/branches',
   '/fang/api/reflow/policy',
   '/fang/api/composer/journal',
+  '/fang/api/fork-core',
 ])
-export const DEFAULT_EXPECTED_ROUTE_COUNT = 88
+// v3.4.3 (P0): the accelerated Web sidecar retired 3 routes (/accelerated/status|start|stop)
+// and added /fang/api/fork-core → 88 - 3 + 1 = 86.
+export const DEFAULT_EXPECTED_ROUTE_COUNT = 86
 
 /**
  * 列出需要做导入检查的插件模块文件（排序稳定）。

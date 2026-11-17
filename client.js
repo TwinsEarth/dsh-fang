@@ -3341,25 +3341,6 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               fk: 'overlay-toggle', dataBtnId: 'M-07',
             })
           })(),
-          (() => {
-            const accel = S.accelerated ?? null
-            const running = accel?.running === true
-            return button(running ? '加速模式已开' : '加速模式', {
-              variant: running ? 'primary' : 'quiet', size: 'sm', icon: icon('power', 14),
-              title: running
-                ? '加速版 Web 已在独立进程运行；点击打开加速窗口'
-                : '启动加速版 @twinsearth DSH Web sidecar（同一 DSH_HOME，独立 profile/端口）',
-              onClick: async () => {
-                try {
-                  if (running) { if (accel?.state?.url) window.open(accel.state.url, '_blank'); return }
-                  const res = await api('/fang/api/accelerated/start', { method: 'POST' })
-                  if (res?.ok && res.url) { S.accelerated = { running: true, state: res }; window.open(res.url, '_blank') }
-                  else toast({ tone: 'warn', title: '加速模式', message: res?.error ?? '启动失败' })
-                } catch (error) { toast({ tone: 'warn', title: '加速模式', message: String(error?.message ?? error) }) }
-              },
-              fk: 'accelerated', dataBtnId: 'M-09',
-            })
-          })(),
           restart?.available
             ? button('重启母体', {
               variant: 'danger-quiet', size: 'sm', icon: icon('power', 14),

@@ -96,6 +96,7 @@
     "healthz": "node tools/release/healthz.mjs",
     "compat": "node tools/release/compat.mjs",
     "mcp": "node tools/mcp/server.mjs",
+    "smoke:accel": "node tools/release/accelerated-fork-smoke.mjs",
     "publish:npm": "node tools/release/publish-npm.mjs",
     "typecheck": "node tools/release/typecheck.mjs",
     "gate": "node tools/gate/main-city.mjs"
