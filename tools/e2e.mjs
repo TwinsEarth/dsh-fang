@@ -365,6 +365,13 @@ async function main() {
       && Array.isArray(hello.methods) && hello.methods.includes('fang.session.list')
       && Array.isArray(hello.capabilities),
       JSON.stringify({ status: helloRes.status, version: hello.contractVersion, methods: (hello.methods ?? []).length }).slice(0, 180))
+    // M5：health 无 Bearer，返回 { ok, role, version, peer, accepted }（房主回流对端约定字段）。
+    const contractHealth = await api('/fang/api/contract/health')
+    check('contract health is public and reports {ok,role,version,peer,accepted}', contractHealth.status === 200
+      && contractHealth.body?.ok === true && contractHealth.body?.role === 'mother'
+      && contractHealth.body?.version === '1.2.0' && contractHealth.body?.peer === 'dsh-fang-bundle'
+      && typeof contractHealth.body?.accepted === 'number',
+      JSON.stringify({ status: contractHealth.status, peer: contractHealth.body?.peer ?? null, accepted: contractHealth.body?.accepted ?? null }).slice(0, 200))
     const contractInvoke = async (method, params) => api('/fang/api/contract/invoke', {
       method: 'POST', headers: contractAuth, body: JSON.stringify(createEnvelope({ method, params, source: 'e2e' })),
     })

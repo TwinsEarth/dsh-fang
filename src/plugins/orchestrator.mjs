@@ -2085,6 +2085,9 @@ export function apply(ctx, config) {
     peerLabel: 'dsh-fang-bundle',
     role: gate.role,
     instanceId: `fang-${gate.role}-${process.pid}`,
+    // M5 回流批次约定（房主合同口径：maxBatch=32、maxPayloadBytes=512000）。
+    // vendored contract 1.2.0 库默认 maxBatch=128；运行时在此按 M5 约定收敛，不改 vendor 实现。
+    limits: { maxBatch: 32, maxPayloadBytes: 512000 },
   })
   const delegationCfg = normalizeDelegationConfig(cfg.contract?.delegate ?? {})
   const delegationGate = createDelegationGate({ maxConcurrent: delegationCfg.maxConcurrent })
@@ -3481,16 +3484,25 @@ export function apply(ctx, config) {
           const out = await contractServer.invoke(body)
           return json(res, 200, out)
         })
-        route('GET', `${contractPath}/health`, (req, res) => json(res, 200, {
-          ok: true, contractVersion: CONTRACT_VERSION, role: gate.role, methods: contractServer.hello().methods,
-        // v3.1.35：回流计数（排障用；只读状态，不暴露可写 store）
-        relay: (() => {
-          try {
-            const s = relayStore.status()
-            return { peer: s?.peer ?? null, cursor: s?.cursor ?? 0, accepted: s?.accepted ?? 0, duplicates: s?.duplicates ?? 0, rejected: s?.rejected ?? 0, lastAt: s?.lastAt ?? null }
-          } catch { return null }
-        })(),
-        }))
+        route('GET', `${contractPath}/health`, (req, res) => {
+          // M5 回流端点：无 Bearer 的只读健康信息（{ ok, role, version, peer, accepted } 为房主约定字段）。
+          let relayStatus = null
+          try { relayStatus = relayStore.status() } catch { relayStatus = null }
+          return json(res, 200, {
+            ok: true,
+            role: gate.role,
+            version: CONTRACT_VERSION,
+            contractVersion: CONTRACT_VERSION,
+            peer: relayStatus?.peer ?? null,
+            accepted: Number(relayStatus?.accepted ?? 0),
+            methods: contractServer.hello().methods,
+            // v3.1.35：回流计数（排障用；只读状态，不暴露可写 store）
+            relay: relayStatus ? {
+              peer: relayStatus.peer ?? null, cursor: relayStatus.cursor ?? 0, accepted: relayStatus.accepted ?? 0,
+              duplicates: relayStatus.duplicates ?? 0, rejected: relayStatus.rejected ?? 0, batches: relayStatus.batches ?? 0, lastAt: relayStatus.lastAt ?? null,
+            } : null,
+          })
+        })
       }
       // 分身核心开关（P1）：加速引擎只服务分身 Web；母体/元主始终原厂。
       // 持久化在 <dataDir>/fork-core.json，只影响新派生/重启的分身。
