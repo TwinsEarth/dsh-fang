@@ -1734,13 +1734,14 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const seq = ++refreshSeq
         if (options.manual) { S.refreshing = true; schedule() }
         try {
-          const [statusRes, tasksRes, sessionsRes, essenceRes, approvalsRes, supervisionRes] = await Promise.all([
+          const [statusRes, tasksRes, sessionsRes, essenceRes, approvalsRes, supervisionRes, forkCoreRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? 1000 : S.sessionWindow}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/essence/list').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/approvals').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/forks/supervision').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api('/fang/api/fork-core').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
           ])
           if (!alive || seq !== refreshSeq) return
           if (supervisionRes.status === 200 && supervisionRes.body?.ok) {
@@ -1789,6 +1790,12 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           } else {
             const code = tasksRes.body?.error || (tasksRes.status ? 'http-' + tasksRes.status : 'network')
             S.tasks = { ...S.tasks, state: 'error', error: code, diagnostic: tasksRes.diagnostic || null }
+          }
+
+          if (forkCoreRes.status === 200 && forkCoreRes.body && forkCoreRes.body.ok !== false) {
+            S.forkCore = { state: 'ready', data: forkCoreRes.body, error: '', at: Date.now() }
+          } else {
+            S.forkCore = { ...S.forkCore, state: 'error', error: forkCoreRes.body?.error || (forkCoreRes.status ? 'http-' + forkCoreRes.status : 'network') }
           }
 
           if (sessionsRes.status === 200 && sessionsRes.body && sessionsRes.body.ok !== false) {
@@ -3341,6 +3348,35 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               fk: 'overlay-toggle', dataBtnId: 'M-07',
             })
           })(),
+          (() => {
+            const fc = S.forkCore?.data ?? null
+            const mode = fc?.mode === 'accelerated' ? 'accelerated' : 'stock'
+            const next = mode === 'accelerated' ? 'stock' : 'accelerated'
+            const installed = fc?.accelerated?.installed === true
+            return button(mode === 'accelerated' ? '分身核心：加速版' : '分身核心：原版', {
+              variant: mode === 'accelerated' ? 'primary' : 'quiet', size: 'sm', icon: icon('power', 14),
+              title: installed
+                ? '切换新派生/重启分身的 core；当前生效：' + mode + '（母体与元主始终原版）'
+                : '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing'),
+              onClick: async () => {
+                if (next === 'accelerated' && !installed) {
+                  toast({ tone: 'warn', title: '分身核心', message: '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing') })
+                  return
+                }
+                try {
+                  const res = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: next }) })
+                  if (res.status === 200 && res.body?.ok !== false) {
+                    S.forkCore = { state: 'ready', data: res.body, error: '', at: Date.now() }
+                    toast({ tone: 'ok', title: '分身核心', message: '已切换为' + (next === 'accelerated' ? '加速版' : '原版') + '（新派生/重启生效）' })
+                    app.render(true)
+                  } else {
+                    toast({ tone: 'warn', title: '分身核心', message: res.body?.error ?? '切换失败' })
+                  }
+                } catch (error) { toast({ tone: 'warn', title: '分身核心', message: String(error?.message ?? error) }) }
+              },
+              fk: 'fork-core', dataBtnId: 'M-09',
+            })
+          })(),
           restart?.available
             ? button('重启母体', {
               variant: 'danger-quiet', size: 'sm', icon: icon('power', 14),
@@ -4207,6 +4243,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const meta = h('div', { class: 'fork-meta' },
         h('code', { title: '任务 ID：' + taskId }, short(taskId, 12)),
         h('span', null, '端口 ' + (task.port ? String(task.port) : '—')),
+        task.coreMode === 'accelerated'
+          ? h('span', { 'data-core': 'accelerated', title: '该分身运行在加速核（@twinsearth/dsh）上', style: { color: 'var(--f-blue, #2563eb)', fontWeight: '600' } }, '加速核')
+          : null,
         task.pid ? h('span', null, 'PID ' + String(task.pid)) : null,
         h('span', null, '创建 ' + fmtShortClock(task.createdAt)),
         health.adapter === 'error' ? h('span', { style: { color: 'var(--f-red)' }, 'data-danger': '1' }, '适配器失联') : null)

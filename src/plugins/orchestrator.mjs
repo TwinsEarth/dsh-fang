@@ -44,6 +44,8 @@ import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 // P0: the former "accelerated Web sidecar" (a second mother Web) was retired — the
 // accelerator serves fork Web UIs only. See /fang/api/fork-core.
+import { readForkCoreSettings, writeForkCoreSettings } from '../lib/fork-core-settings.mjs'
+import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
@@ -339,6 +341,8 @@ export function apply(ctx, config) {
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
+  // P1：分身核心开关（只影响新派生/重启的分身；母体与元主不读它）。
+  const forkCoreSettings = () => readForkCoreSettings(layout.dataDir)
   const branchStore = new BranchStore(layout.dataDir)
   const composerJournal = new ComposerJournal(layout.dataDir)
   // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
@@ -564,6 +568,7 @@ export function apply(ctx, config) {
     return {
       taskId: t.taskId,
       forkId: t.taskId,
+      coreMode: t.coreMode === 'accelerated' ? 'accelerated' : 'stock',
       title: t.title,
       taskTitle: t.title,
       status,
@@ -924,6 +929,14 @@ export function apply(ctx, config) {
       tasks.set(taskId, task)
       persist()
 
+      // P1：核心选择只作用于分身。显式 input.coreMode 优先，否则读面板开关。
+      const coreSettings = forkCoreSettings()
+      const coreMode = normalizeCoreMode(input.coreMode ?? coreSettings.mode)
+      // 会话策略：加速核默认新会话（旧会话是原厂 core 写的，格式兼容未验证）。
+      const inheritSessions = coreMode !== 'accelerated' || coreSettings.sessionMode === 'inherit'
+      task.coreMode = coreMode
+      task.sessionMode = coreSettings.sessionMode
+
       try {
         const provisioned = await f.provision({
           forkId: taskId,
@@ -931,6 +944,7 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           profileTemplate,
+          coreMode,
           // 从原身派生：配置必须真的来自原身 merged（不能被 clean template 覆盖）。
           // node_modules：优先元主自己的模块树；默认元宝/新建原身可能尚未物化 node_modules，
           // 此时回退母体模块树，保证分身仍能解析 @local/dsh-fang（否则是僵尸分身）。
@@ -989,7 +1003,11 @@ export function apply(ctx, config) {
           }
         }
 
-        if (input.importSession && typeof input.importSession === 'object') {
+        if (!inheritSessions) {
+          task.importedSession = { ok: false, reason: 'accelerated-new-session' }
+          audit(AUDIT.FORK_CREATED + '-import-skipped', { taskId, reason: 'accelerated-new-session', coreMode })
+          persist()
+        } else if (input.importSession && typeof input.importSession === 'object') {
           const importSpec = input.importSession
           // 新入口：只给 sessionId（元主栏“派生”按钮）→ 由会话目录整目录复制进分身。
           if (importSpec.sessionId && !importSpec.sourceFile) {
@@ -1032,14 +1050,21 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           cliPath: cliPath(),
+          coreMode,
           env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir },
         })
         if (!started || started.ok === false) {
           task.status = TASK_STATUS.FAILED
+          task.lastError = started?.error ?? 'spawn-failed'
           persist()
-          audit(AUDIT.FORK_CRASHED, { taskId, error: started?.error ?? 'spawn-failed' })
+          audit(AUDIT.FORK_CRASHED, { taskId, error: started?.error ?? 'spawn-failed', coreMode })
           bus.emit('fang/task-failed', { taskId, error: started?.error ?? 'spawn-failed' })
-          return { ok: false, error: 'spawn-failed', detail: started?.error ?? 'unknown' }
+          return {
+            ok: false,
+            error: started?.error === 'accelerated-cli-missing' ? 'accelerated-cli-missing' : 'spawn-failed',
+            detail: started?.error ?? 'unknown',
+            ...(Array.isArray(started?.searched) ? { searched: started.searched } : {}),
+          }
         }
         task.status = TASK_STATUS.RUNNING
         task.pid = started.pid ?? null
@@ -1664,11 +1689,18 @@ export function apply(ctx, config) {
         homeDir: task.homeDir,
         profile: task.profile,
         cliPath: cliPath(),
+        coreMode: normalizeCoreMode(task.coreMode ?? forkCoreSettings().mode),
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
       })
       if (!started || started.ok === false) {
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
-        return { ok: false, error: 'spawn-failed', detail: started?.error ?? 'unknown', taskId: id }
+        return {
+          ok: false,
+          error: started?.error === 'accelerated-cli-missing' ? 'accelerated-cli-missing' : 'spawn-failed',
+          detail: started?.error ?? 'unknown',
+          taskId: id,
+          ...(Array.isArray(started?.searched) ? { searched: started.searched } : {}),
+        }
       }
       task.status = TASK_STATUS.RUNNING
       task.archivedAt = null
@@ -1737,6 +1769,7 @@ export function apply(ctx, config) {
             homeDir: task.homeDir,
             profile: task.profile,
             cliPath: cliPath(),
+            coreMode: normalizeCoreMode(task.coreMode ?? forkCoreSettings().mode),
             env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
           })
         } catch (error) {
@@ -3098,14 +3131,47 @@ export function apply(ctx, config) {
         })(),
         }))
       }
-      // 分身核心（P0，只读）：加速引擎只服务分身 Web，母体/元主始终原厂。
-      // 旧的 /accelerated/start|stop（第二个母体 Web）已下线；启动/切换在后续版本开放。
-      route('GET', `${prefix}/api/fork-core`, (req, res) => {
+      // 分身核心开关（P1）：加速引擎只服务分身 Web；母体/元主始终原厂。
+      // 持久化在 <dataDir>/fork-core.json，只影响新派生/重启的分身。
+      const forkCoreView = () => {
         const f = safeGet(SERVICE.forker)
-        const status = typeof f?.coreStatus === 'function'
+        const base = typeof f?.coreStatus === 'function'
           ? f.coreStatus()
-          : { mode: 'stock', installable: true, accelerated: { installed: false, version: null, error: 'forker-unavailable' }, forks: {} }
-        return json(res, 200, { ok: true, ...status, essence: 'stock' })
+          : { installable: true, accelerated: { installed: false, version: null, error: 'forker-unavailable' }, forks: {} }
+        const settings = forkCoreSettings()
+        const installed = base?.accelerated?.installed === true
+        return {
+          ok: true,
+          mode: settings.mode,
+          sessionMode: settings.sessionMode,
+          effectiveMode: settings.mode === 'accelerated' && !installed ? 'stock' : settings.mode,
+          blocked: settings.mode === 'accelerated' && !installed ? 'accelerated-cli-missing' : null,
+          accelerated: base?.accelerated ?? { installed: false, version: null },
+          forks: base?.forks ?? {},
+          essence: 'stock',
+          updatedAt: settings.updatedAt,
+          updatedBy: settings.updatedBy,
+        }
+      }
+      // 同一路径不能 register 两次（webServer 以 path 为键，第二次会抛错并让后续路由静默丢失）。
+      routeMethods(`${prefix}/api/fork-core`, {
+        GET: (req, res) => json(res, 200, forkCoreView()),
+        POST: async (req, res) => {
+        const body = await readBody(req)
+        if (body?.mode !== undefined && !['stock', 'accelerated'].includes(String(body.mode))) {
+          return json(res, 400, { ok: false, error: 'invalid-fork-core-mode' })
+        }
+        if (body?.sessionMode !== undefined && !['new', 'inherit'].includes(String(body.sessionMode))) {
+          return json(res, 400, { ok: false, error: 'invalid-fork-session-mode' })
+        }
+        const written = writeForkCoreSettings(layout.dataDir, {
+          ...(body?.mode !== undefined ? { mode: String(body.mode) } : {}),
+          ...(body?.sessionMode !== undefined ? { sessionMode: String(body.sessionMode) } : {}),
+        }, { by: String(body?.by ?? 'panel').slice(0, 120) })
+        if (written.ok !== true) return json(res, 500, { ok: false, error: written.error ?? 'write-failed' })
+        try { audit('fork-core-settings', { mode: written.settings.mode, sessionMode: written.settings.sessionMode }) } catch { /* audit optional */ }
+        return json(res, 200, { ...forkCoreView(), changed: true })
+        },
       })
       // 重启守卫 / supervisor 契约（只读）。不触发重启；写操作仍只走审批 + 外部 supervisor。
       route('GET', `${prefix}/api/restart`, (req, res) => {

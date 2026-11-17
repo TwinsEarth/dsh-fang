@@ -27,15 +27,15 @@
 # 安装到 <FANG_HOME>/accel/cli（约 651 包 / 738MB / 数分钟；实测 8 分钟）
 node -e "import('E:/GPT/dsh-fang/src/lib/accelerated-install.mjs').then(async m=>console.log(await m.installAcceleratedCore({fangHome:'D:/ToFuture'})))"
 # 或复用已安装版本
-node tools/release/accelerated-fork-smoke.mjs --fang-home D:\ToFuture
+node tools/release/accelerated-fork-smoke.mjs --fang-home <FANG_HOME>
 ```
 
 ## 4. 验证
 
 ```powershell
-$env:DSH_HOME='C:\Users\fangw\.dsh'
+$env:DSH_HOME='%DSH_HOME%'
 node tools/release/accelerated-fork-smoke.mjs        # 期望 exit 0：7 项检查全绿
-$env:FANG_ACCEL_LIVE='1'; $env:FANG_HOME='D:\ToFuture'
+$env:FANG_ACCEL_LIVE='1'; $env:FANG_HOME='<FANG_HOME>'
 node --test --test-concurrency=1 test/accelerated-fork-live.test.mjs   # 经 forker 真派生的加速分身
 ```
 
@@ -47,3 +47,40 @@ node --test --test-concurrency=1 test/accelerated-fork-live.test.mjs   # 经 for
 - 加速分身**不继承**桌面 profile 的第三方插件（极简插件面）；
 - 加速分身的会话策略（新会话 vs 继承旧会话）待 P1 决定；
 - `GET /fang/api/fork-core` 目前只读；`/accelerated/*` 已移除。
+
+## 6. P1 · 开关与运行（已实现）
+
+### 6.1 持久化
+
+`<dataDir>/fork-core.json`：
+
+```json
+{ "mode": "stock" | "accelerated",
+  "sessionMode": "new" | "inherit",
+  "updatedAt": "ISO", "updatedBy": "panel" }
+```
+
+缺文件/损坏 → 安全默认 `stock` + `new`（原子写，别名 `writeForkCoreSettings`）。
+
+### 6.2 API
+
+`GET/POST /fang/api/fork-core`（同一路径，经 `routeMethods` 注册，避免二次 register 抛错）：
+
+- GET → `{ ok, mode, sessionMode, effectiveMode, blocked, accelerated:{installed,version,cliPath,error}, forks:{stock,accelerated}, essence:'stock' }`
+- POST `{ mode?, sessionMode?, by? }` → 校验非法值 400/409；持久化后返回同 GET 形状 + `changed:true`
+- 开关只影响**新派生/重启**的分身；母体与元主永远原厂。
+
+### 6.3 行为
+
+| 项 | 行为 |
+|---|---|
+| 生效范围 | 新派生、归档还原、autostart 重启；运行中的分身不重启不切换 |
+| 分身卡徽标 | `taskView.coreMode` → 卡片 meta 显示「加速核」；`forks.json` 的 `publicFork.coreMode` 同步 |
+| 启动失败 | 加速核缺失 → 任务错误 `accelerated-cli-missing`（附 `searched` 轨迹），**绝不静默回退 stock**；端口仍走池预分配 + 冲突拒绝 |
+| 会话策略 | `sessionMode:'new'`（默认）：加速分身跳过旧会话导入，记录 `accelerated-new-session`；`inherit` 才允许导入（旧会话由原厂 core 写入，兼容性未验证） |
+
+### 6.4 测试
+
+- `test/fork-core-settings.test.mjs`：默认值/归一化/原子读写/损坏降级/路由与 UI 源码守卫
+- `test/accelerated-fork.test.mjs` 更新：fork-core 必须经 `routeMethods` 注册（同路径不可 register 两次）
+- 真机：`tools/e2e.mjs` 95/95；`accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真实派生加速分身通过

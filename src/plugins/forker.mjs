@@ -596,6 +596,7 @@ export function apply(ctx, config) {
     url: stripUrlToken(rec.url),
     homeDir: rec.homeDir ?? '',
     profile: rec.profile ?? '',
+    coreMode: rec.coreMode === 'accelerated' ? 'accelerated' : 'stock',
     profileDir: rec.profileDir ?? '',
     template: rec.template ?? '',
     bufferDir: rec.bufferDir ?? '',
