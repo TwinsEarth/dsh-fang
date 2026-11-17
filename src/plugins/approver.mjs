@@ -237,7 +237,10 @@ function checkBridgeAcl(dir) {
       return { ok: true, platform: 'posix', mode: st.mode & 0o777 }
     }
     const output = execFileSync('icacls', [dir], { encoding: 'utf8', timeout: 5000, windowsHide: true })
-    const dangerous = /(everyone|builtin\\users|authenticated users|interactive|iusr|iis_iusrs)/i
+    const broadPrincipal = /(everyone|builtin\\users|authenticated users|interactive|iusr|iis_iusrs)/i
+    // Only a write-capable grant from a broad principal is dangerous; inherited read-only
+    // entries (e.g. `(I)(OI)(CI)(RX)` on a temp dir) must not disable the bridge.
+    const writeGrant = /\((?:F|M|W|WD|AD|WO|GA)\)/i
     const resolved = path.resolve(dir).toLowerCase()
     let checked = 0
     for (const rawLine of String(output).split(/\r?\n/)) {
@@ -246,7 +249,7 @@ function checkBridgeAcl(dir) {
       if (line.toLowerCase().startsWith(resolved)) line = line.slice(path.resolve(dir).length).trim()
       if (!line.includes(':')) continue
       checked += 1
-      if (dangerous.test(line)) return { ok: false, reason: 'bridge-dir-world-accessible', detail: line }
+      if (broadPrincipal.test(line) && writeGrant.test(line)) return { ok: false, reason: 'bridge-dir-world-writable', detail: line }
     }
     if (checked === 0) return { ok: false, reason: 'bridge-acl-unreadable' }
     return { ok: true, platform: 'win32' }

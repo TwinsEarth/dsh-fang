@@ -578,7 +578,7 @@ test('decide 边界：未知 id / 非法结论 / 重复决策', async () => {
 
 test('文件桥：command / pending / status / answer json 供 CLI 驱动', async () => {
   const root = tempRoot()
-  const ctx = makeBridgeCtx(root, { fileBridgePollMs: 20 })
+  const ctx = makeBridgeCtx(root, { fileBridgePollMs: 20, bridgeAclCheck: false })
   const service = ctx.get(SERVICE.approver)
   const dataDir = path.join(root, 'data')
   try {
@@ -926,7 +926,7 @@ test('v2 hardening: safeTag collisions, invalid answers, summary.complete, mothe
 
 test('v2 hardening: invalid/unknown answer files are consumed instead of polled forever', async () => {
   const root = tempRoot()
-  const ctx = makeBridgeCtx(root, { fileBridgePollMs: 20 })
+  const ctx = makeBridgeCtx(root, { fileBridgePollMs: 20, bridgeAclCheck: false })
   const dataDir = path.join(root, 'data')
   try {
     fs.mkdirSync(dataDir, { recursive: true })

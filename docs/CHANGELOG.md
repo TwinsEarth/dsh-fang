@@ -1,3 +1,37 @@
+## v3.4.3（2026-11-17）
+
+**加速分身：P0 地基 + P1 开关与运行 + P2 兼容与文档。**
+
+### 新增
+
+- `src/lib/accelerated-install.mjs`：加速核安装/发现（`<FANG_HOME>/accel/cli` + `state.json`；只接受 `lib/bin.js`，拒绝 `.cmd` shim；解析链 config → `FANG_ACCEL_CLI` → state → 标准位置；缺失即 `accelerated-cli-missing`）；
+- `src/lib/accelerated-fork.mjs`：加速分身极简 profile（`@twinsearth/dsh-base` + `@twinsearth/dsh-web-app` + `@local/dsh-fang`，恒定三项）+ fang/子插件 junction + 模型 overlay（`@deepseek-ai/dsh-` → `@twinsearth/dsh-`，避免 name mismatch）；
+- `src/lib/fork-core-settings.mjs`：`<dataDir>/fork-core.json`（mode/sessionMode），原子写、损坏降级 stock+new；
+- `tools/release/accelerated-fork-smoke.mjs` 与 `npm run test:accel-live`；
+- 文档：`docs/ACCELERATED-FORK.md`、`docs/ACCEL-FORK-COMPAT.md`、`docs/AUDIT-v3.4.3.md`。
+
+### 变更
+
+- **加速边界**：加速引擎只服务分身 Web；桌面/母体与元主运行态始终原厂 core（essence 的 provision/spawn 显式 `coreMode:'stock'`，源码守卫测试）；
+- 旧「加速模式」侧车下线：`/fang/api/accelerated/status|start|stop` 移除，新增 `GET/POST /fang/api/fork-core`（同路径经 `routeMethods` 注册）；路由契约 88 → 86；
+- forker：`provision({coreMode:'accelerated'})` 生成极简 profile；`spawn` 按 coreMode 解析 CLI，缺失即失败（**删除静默回退 stock**）；加速模式跳过 fork-seed、官方 node_modules 镜像与官方 headless overlay；`publicFork.coreMode`；
+- orchestrator：新派生/归档还原/autostart 读取开关；`taskView.coreMode`；加速缺失错误透传 `accelerated-cli-missing` + `searched`；会话策略默认 `new`（加速分身跳过旧会话导入，记 `accelerated-new-session`）；
+- client.js：母体头部「分身核心：原版/加速版」开关（M-09）+ 分身卡「加速核」徽标 + 刷新轮询 `/fang/api/fork-core`；
+- approver：Windows ACL 检查改为「仅宽泛主体 + 写权限」才禁用文件桥（继承只读条目不再误判）。
+
+### 验证
+
+- 加速核真机安装：`@twinsearth/dsh 3.5.0`（651 包）；
+- `accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真派生通过（identity role=fork, version=3.4.3）；
+- 单测：accelerated-install 10、accelerated-fork 9、fork-core-settings 8；
+- `tools/e2e.mjs` 95/95；allow-list 110 路由 findings=0；main-city source gate grade=A。
+
+### 注意
+
+- 加速分身默认不带第三方插件与官方可选 bundle（见兼容矩阵）；
+- 真实模型对话与旧会话继承未做端到端验证；
+- 本版**未发布**（无 tag/Release/npm）。
+
 ## v3.4.2（2026-11-16）
 
 **加速 Web sidecar + 母体面板加速模式。**
