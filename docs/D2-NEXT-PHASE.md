@@ -6,7 +6,7 @@
 
 ## 1. 契约委托（B：无头能力调母体）
 
-> **进展（2026-11-17）**：P0 只读委托已落地（白名单/超时/审计/错误码 + e2e 断言）；P1 通道（lsp 读/写门禁、chat.import dryRun+审批拒绝）已落地，**LSP 真实执行 provider 待接入**；UI client half 仍后置。详见 [`docs/B-CONTRACT-CAPABILITIES.md`](B-CONTRACT-CAPABILITIES.md)。
+> **进展（2026-11-17）**：P0 只读委托已落地（白名单/超时/审计/错误码 + e2e 断言）；P1 通道（lsp 读/写门禁、chat.import dryRun+审批拒绝）已落地，**LSP 真实执行 provider 待接入**；UI client half 仍后置。详见 [`docs/B-CONTRACT-CAPABILITIES.md`](B-CONTRACT-CAPABILITIES.md)。**LSP 调研（2026-11-17）已完成**：官方可选包族（`dsh-lsp`/`dsh-lsp-stdio`/`dsh-tool-lsp`）有与运行版本一致的 `0.2.2-rc.3`，能力缝 `ctx.lsp.query(...)` 无需 Agent Session、工作区根由调用方显式传入；官方仅 4 个只读操作（definition/references/implementation/hover，无 diagnostics/format/rename）；实现方案与开放决策见 [`docs/LSP-PROVIDER-RESEARCH.md`](LSP-PROVIDER-RESEARCH.md)。
 
 ### 1.1 目标
 

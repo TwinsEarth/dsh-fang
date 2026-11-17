@@ -77,6 +77,8 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 错误码 | 新增 `contract-approval-required`（fang 层表，唯一性断言） | 单测 |
 
 > **诚实的边界**：LSP 的**执行提供方**尚未接入母体 DSH 工具运行时（当前仅 e2e 测试缝提供确定性 diagnostics；生产读类动作会返回 `contract-unavailable`）。委托通道、白名单、审批门禁与错误码已经完整；接入真实 LSP provider 属下一里程碑（需确认母体工具调用 API）。
+>
+> **调研已更新（2026-11-17）**：官方 LSP 是可选安装包族（`dsh-lsp` 能力缝 + `dsh-lsp-stdio` provider + `dsh-tool-lsp` 工具），npm 有与运行版本一致的 `0.2.2-rc.3`；能力缝 `ctx.lsp.query({operation,filePath,position,workspaceRoot})` **不需要 Agent Session**，可由母体 fang 插件直接调用。官方能力缝**只支持 4 个只读操作**（definition/references/implementation/hover），**不支持 diagnostics/format/rename** → B-6 动作口径需按 provider 实提供能力修订。详见 [`docs/LSP-PROVIDER-RESEARCH.md`](LSP-PROVIDER-RESEARCH.md)。
 
 ### 0.5 M4 验收（B-7 chat.import，2026-11-17）
 
