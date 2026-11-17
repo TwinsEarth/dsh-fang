@@ -49,8 +49,8 @@ import {
   capabilityCatalog, checkDelegation, createDelegationGate, DELEGATE_ERROR, delegationAuditRecord,
   DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
 } from '../lib/contract-delegation.mjs'
-import { LSP_READ_ACTIONS, validateToolInvoke } from '../lib/lsp-delegation.mjs'
-import { LSP_PROVIDER_TEST, checkWorkspaceRoot, describeLspProvider, queryMotherLsp } from '../lib/lsp-provider.mjs'
+import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
+import { LSP_PROVIDER_TEST, advertisedActionsFromSeam, checkWorkspaceRoot, describeLspProvider, queryMotherLsp } from '../lib/lsp-provider.mjs'
 import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
@@ -2088,7 +2088,7 @@ export function apply(ctx, config) {
   const lspService = (() => { try { return typeof ctx.get === 'function' ? ctx.get('lsp') : null } catch { return null } })()
   const lspCfg = { allowedRoots: Array.isArray(cfg.contract?.delegate?.lsp?.allowedRoots) ? cfg.contract.delegate.lsp.allowedRoots.map((root) => String(root)) : [] }
   const lspHooksEnabled = process.env.FANG_CONTRACT_TEST_HOOKS === '1'
-  const lspProviderInfo = describeLspProvider({ lspService, hooksEnabled: lspHooksEnabled })
+  const lspProviderInfo = describeLspProvider({ lspService, hooksEnabled: lspHooksEnabled, supportedActions: advertisedActionsFromSeam(lspService) })
   const delegateUnavailable = (message, code = DELEGATE_ERROR.UNAVAILABLE) => { const error = new Error(message); error.code = code; throw error }
   const contractServer = createContractServer({
     role: gate.role,
@@ -2125,7 +2125,7 @@ export function apply(ctx, config) {
         contractVersion: CONTRACT_VERSION,
         capabilities: capabilityCatalog(delegationCfg.allow).map((item) => (
           item.method === 'fang.tool.invoke'
-            ? { ...item, actions: [...LSP_READ_ACTIONS], provider: lspProviderInfo }
+            ? { ...item, actions: [...lspProviderInfo.actions], provider: lspProviderInfo }
             : item
         )),
         lspProvider: lspProviderInfo,
@@ -2168,7 +2168,32 @@ export function apply(ctx, config) {
           error.detail = { tool: 'lsp', action: validated.action, approval: 'required' }
           throw error
         }
+        if (validated.kind === 'test-only') {
+          // diagnostics 仅 e2e 测试缝可用：不进入能力目录、真实 provider 下不可用。
+          if (!lspService && lspHooksEnabled) {
+            return {
+              tool: 'lsp',
+              action: validated.action,
+              file: validated.file,
+              line: validated.line,
+              character: validated.character,
+              ok: true,
+              provider: LSP_PROVIDER_TEST,
+              diagnostics: [{ file: validated.file, line: validated.line, character: validated.character, severity: 'info', message: 'stub diagnostics (test hook only)' }],
+            }
+          }
+          const error = new Error(`lsp action '${validated.action}' is test-seam only and not provided by the official LSP seam`)
+          error.code = DELEGATE_ERROR.UNSUPPORTED
+          error.detail = { tool: 'lsp', action: validated.action, reason: 'test-seam-only' }
+          throw error
+        }
         if (lspService) {
+          if (!lspProviderInfo.actions.includes(validated.action)) {
+            const error = new Error(`lsp provider does not provide action '${validated.action}' (advertised: ${lspProviderInfo.actions.join(',') || 'none'})`)
+            error.code = DELEGATE_ERROR.UNSUPPORTED
+            error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', reason: 'provider-capability-missing', advertised: lspProviderInfo.actions }
+            throw error
+          }
           const rootCheck = checkWorkspaceRoot({ workspaceRoot: params?.workspaceRoot, file: validated.file, allowedRoots: lspCfg.allowedRoots })
           if (rootCheck.ok !== true) {
             const error = new Error(rootCheck.message)

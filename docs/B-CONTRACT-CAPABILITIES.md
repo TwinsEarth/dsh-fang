@@ -71,8 +71,10 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 项 | 实现 | 单测 / e2e |
 |---|---|---|
 | `fang.tool.invoke`（首批仅 `tool:'lsp'`） | `validateToolInvoke()` 校验 tool/action/file/line/character；目录登记 kind=`write`、approval=`required`，**默认不在白名单**，需操作者显式放行 | 单测 `test/lsp-delegation.test.mjs` 5 项 |
-| 只读动作（官方口径） | `definition` / `references` / `implementation` / `hover` → 映射官方 seam `goToDefinition/findReferences/goToImplementation/hover`；位置 1-based→0-based；自动放行 | 单测 `test/lsp-provider.test.mjs` 6 项；e2e：definition 成功（provider=test-hook） |
-| 写类/legacy 动作 | 官方能力缝明确只读；`diagnostics` / `format` / `rename` / `codeAction` / `apply` → **可读拒绝** `contract-unsupported`（消息含 “official LSP seam is read-only”），无副作用；写类审批门禁保留给未来自定义 provider | e2e：format → contract-unsupported |
+| 只读动作（官方口径） | `definition` / `references` / `implementation` / `hover` → 映射官方 seam `goToDefinition/findReferences/goToImplementation/hover`；位置 1-based→0-based；自动放行 | 单测 `test/lsp-provider.test.mjs` 7 项；e2e：definition 成功（provider=test-hook） |
+| 写类/legacy 动作 | 官方能力缝明确只读；`format` / `rename` / `codeAction` / `apply` → **可读拒绝** `contract-unsupported`（消息含 “official LSP seam is read-only”），无副作用；写类审批门禁保留给未来自定义 provider | e2e：format → contract-unsupported |
+| `diagnostics`（仅测试缝） | 不属于官方 provider 能力：**不进入能力目录、不对外 advertise**；仅 `FANG_CONTRACT_TEST_HOOKS=1` 且无真实 provider 时返回确定性 stub；真实 provider/生产 → `contract-unsupported`（detail.reason=test-seam-only） | e2e：diagnostics 测试缝可用且未 advertise |
+| 按“实提供能力”advertise | `advertisedActionsFromSeam(lspService)`：真实 provider 若声明 `supportedOperations`/`capabilities`，只 advertise 与官方 4 操作的**交集**；无 provider 时 `actions: []`（不虚假宣称） | 单测交集/空集 |
 | **路线 A（母体 provider，优先）** | 母体 fang 插件从 host ctx 取 `ctx.lsp`，直接 `query({operation,filePath,position,workspaceRoot})`；**workspaceRoot 显式传入 + `contract.delegate.lsp.allowedRoots` realpath 包含校验**（空 = 拒绝，fail-closed）；结果归一化 locations/hover；seam 错误码映射（`LSP_UNAVAILABLE`→contract-unavailable 等） | `src/lib/lsp-provider.mjs`；单测覆盖映射/根策略/错误映射 |
 | **路线 B（fork-local，增强）** | 加速核检测 `@twinsearth/dsh-lsp` / `dsh-lsp-stdio` / `dsh-tool-lsp`（`detectForkLspSupport`），安装后 LSP 跑在分身自己工作区；未安装时保持路线 A/显式不可用 | `writeAcceleratedForkProfile(...).forkLsp`；单测 |
 | 能力目录按 provider 区分 | `fang.capability.list` 的 `fang.tool.invoke` 附带 `provider: {available, default, services, actions}`，顶层另有 `lspProvider`；生产未装 LSP 栈时 `available=false` 显式可读 | e2e：catalog provider-tagged 断言 |

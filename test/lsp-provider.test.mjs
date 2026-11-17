@@ -10,6 +10,7 @@ import path from 'node:path'
 import { DELEGATE_ERROR } from '../src/lib/contract-delegation.mjs'
 import {
   LSP_PROVIDER_MOTHER,
+  advertisedActionsFromSeam,
   checkWorkspaceRoot,
   describeLspProvider,
   mapLspError,
@@ -32,22 +33,35 @@ function fakeSeam(handler) {
   }
 }
 
-test('B-6 provider: descriptor distinguishes mother / test-hook / fork-local and defaults to mother', () => {
+test('B-6 provider: descriptor distinguishes mother / test-hook / fork-local and advertises only real capabilities', () => {
   const mother = describeLspProvider({ lspService: { query: async () => ({}) } })
   assert.equal(mother.available, true)
   assert.equal(mother.default, LSP_PROVIDER_MOTHER)
   assert.deepEqual(mother.actions, ['definition', 'references', 'implementation', 'hover'])
   assert.deepEqual(mother.services, { 'mother-lsp': true, 'fork-local': false, 'test-hook': false })
 
+  const partial = describeLspProvider({ lspService: { query: async () => ({}) }, supportedActions: ['definition', 'hover'] })
+  assert.deepEqual(partial.actions, ['definition', 'hover'], 'advertise the intersection only')
+
   const none = describeLspProvider({})
   assert.equal(none.available, false)
   assert.equal(none.default, null)
+  assert.deepEqual(none.actions, [], 'no provider → nothing advertised')
 
   const hook = describeLspProvider({ hooksEnabled: true })
   assert.equal(hook.default, 'test-hook')
+  assert.deepEqual(hook.actions, [], 'test seam is not a real provider capability')
 
   const fork = describeLspProvider({ forkLocal: true })
   assert.equal(fork.default, 'fork-local')
+  assert.deepEqual(fork.actions, [], 'fork-local advertises only once installed')
+})
+
+test('B-6 provider: advertisedActionsFromSeam intersects declared capabilities with the four seam ops', () => {
+  assert.deepEqual(advertisedActionsFromSeam(null), [])
+  assert.deepEqual(advertisedActionsFromSeam({ query: async () => ({}) }), ['definition', 'references', 'implementation', 'hover'])
+  assert.deepEqual(advertisedActionsFromSeam({ query: async () => ({}), supportedOperations: ['goToDefinition', 'hover'] }), ['definition', 'hover'])
+  assert.deepEqual(advertisedActionsFromSeam({ query: async () => ({}), capabilities: ['findReferences'] }), ['references'])
 })
 
 test('B-6 root policy: empty allowlist denies; outside roots deny; file escaping denies; inside accepts', () => {

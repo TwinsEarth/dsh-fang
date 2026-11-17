@@ -132,7 +132,7 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 | 项 | 实现 | 验证 |
 |---|---|---|
 | 路线 A 真实 provider 适配 | `src/lib/lsp-provider.mjs`：契约动作 `definition/references/implementation/hover` → `ctx.lsp.query` 四操作；1-based→0-based；locations/hover 归一化；seam 错误码映射（`LSP_UNAVAILABLE`→contract-unavailable 等）；**workspaceRoot 显式传入 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝，fail-closed）** | `test/lsp-provider.test.mjs` 6 项 |
-| 契约口径对齐 | `src/lib/lsp-delegation.mjs` 只读四动作；legacy `diagnostics/format/rename/codeAction/apply` → `contract-unsupported`（消息 “official LSP seam is read-only”）；位置必填校验 | `test/lsp-delegation.test.mjs` 5 项；e2e 更新 |
+| 契约口径对齐 | `src/lib/lsp-delegation.mjs` 只读四动作；legacy `format/rename/codeAction/apply` → `contract-unsupported`；**`diagnostics` 仅测试缝可用且不 advertise**；位置必填校验 | `test/lsp-delegation.test.mjs` 5 项；e2e 更新 |
 | 能力目录按 provider 区分 | `fang.capability.list` 的 `fang.tool.invoke` 带 `provider:{available,default,services,actions}`，顶层 `lspProvider`；未安装时为 `available:false`（显式，不假成功） | e2e provider-tagged 断言 |
 | 路线 B（增强）探测 | `detectForkLspSupport(accelNodeModules)`：检测 `@twinsearth/dsh-lsp`/`dsh-lsp-stdio`/`dsh-tool-lsp`；结果暴露在 `writeAcceleratedForkProfile(...).forkLsp`，默认不启用 | `test/accelerated-alias.test.mjs` |
 | 诚实边界 | 母体尚未安装官方 LSP 栈（npm 有匹配 0.2.2-rc.3）；未安装时读类动作显式 `contract-unavailable`；e2e 仍用测试缝提供确定性结果 | preflight GREEN |

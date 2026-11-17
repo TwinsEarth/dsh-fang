@@ -314,12 +314,13 @@ async function main() {
     const capList = await delegatedInvoke('fang.capability.list')
     const capItems = Array.isArray(capList.body?.result?.capabilities) ? capList.body.result.capabilities : []
     const lspCap = capItems.find((c) => c.method === 'fang.tool.invoke')
-    check('delegated fang.capability.list returns catalog + provider-tagged lsp capability', capList.status === 200 && capList.body?.ok === true
+    check('delegated fang.capability.list returns catalog + provider-tagged lsp capability (advertises only real provider capabilities)', capList.status === 200 && capList.body?.ok === true
       && capItems.some((c) => c.method === 'fang.session.list')
       && capItems.filter((c) => c.kind === 'write').every((c) => c.approval === 'required')
-      && Boolean(lspCap) && Array.isArray(lspCap.actions) && lspCap.actions.includes('definition')
+      && Boolean(lspCap) && Array.isArray(lspCap.actions) && lspCap.actions.length === 0
+      && !lspCap.actions.includes('diagnostics')
       && lspCap.provider?.services?.['test-hook'] === true,
-      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`), provider: lspCap?.provider?.default ?? null }).slice(0, 240))
+      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`), provider: lspCap?.provider?.default ?? null, actions: lspCap?.actions ?? null }).slice(0, 900))
     const rejectedCap = await delegatedInvoke('fang.fork.spawn', {})
     check('delegated unlisted capability rejected (contract-unsupported)', rejectedCap.status === 200
       && rejectedCap.body?.ok === false && rejectedCap.body?.error?.code === 'contract-unsupported',
@@ -358,6 +359,12 @@ async function main() {
     check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
       && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
       JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
+    // diagnostics 仅 e2e 测试缝可用（不对外 advertise）；测试缝返回确定性 stub。
+    const lspDiagnostics = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: 'example.mjs', line: 1, character: 1 })
+    check('delegated lsp diagnostics works only through the test seam (not advertised)', lspDiagnostics.status === 200
+      && lspDiagnostics.body?.ok === true && lspDiagnostics.body?.result?.provider === 'test-hook'
+      && Array.isArray(lspDiagnostics.body.result.diagnostics),
+      JSON.stringify({ status: lspDiagnostics.status, code: lspDiagnostics.body?.error?.code ?? null, provider: lspDiagnostics.body?.result?.provider ?? null }).slice(0, 180))
     // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported
     const codeRun = await delegatedInvoke('fang.code.run', { code: 'console.log(1)' })
     check('P2 pro capability fang.code.run rejected by default (contract-unsupported)', codeRun.status === 200

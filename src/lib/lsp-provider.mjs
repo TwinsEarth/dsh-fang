@@ -15,19 +15,38 @@ export const LSP_PROVIDER_MOTHER = 'mother-lsp'
 export const LSP_PROVIDER_FORK = 'fork-local'
 export const LSP_PROVIDER_TEST = 'test-hook'
 
+/**
+ * Derive the *actually provided* actions from a live seam. The official seam provides the four
+ * read operations; a custom provider may expose `supportedOperations`/`capabilities`, in which
+ * case we advertise only the intersection (never claim an action the provider cannot serve).
+ */
+export function advertisedActionsFromSeam(lspService) {
+  if (!lspService || typeof lspService.query !== 'function') return []
+  const declared = Array.isArray(lspService.supportedOperations)
+    ? lspService.supportedOperations
+    : (Array.isArray(lspService.capabilities) ? lspService.capabilities : null)
+  if (!declared) return [...LSP_READ_ACTIONS]
+  const operations = new Set(declared.map((item) => String(item)))
+  const actions = LSP_READ_ACTIONS.filter((action) => operations.has(LSP_ACTION_TO_OPERATION[action]))
+  return actions
+}
+
 /** Resolve a provider descriptor from the live host context (no side effects). */
-export function describeLspProvider({ lspService = null, hooksEnabled = false, forkLocal = false } = {}) {
+export function describeLspProvider({ lspService = null, hooksEnabled = false, forkLocal = false, supportedActions = null } = {}) {
   const services = {
     [LSP_PROVIDER_MOTHER]: Boolean(lspService && typeof lspService.query === 'function'),
     [LSP_PROVIDER_FORK]: Boolean(forkLocal),
     [LSP_PROVIDER_TEST]: Boolean(hooksEnabled),
   }
   const available = Object.entries(services).filter(([, value]) => value).map(([name]) => name)
+  const declared = Array.isArray(supportedActions) ? supportedActions.filter((action) => LSP_READ_ACTIONS.includes(action)) : null
+  // Advertise real capabilities only: a missing provider (or a test-only hook) advertises no actions.
+  const actions = services[LSP_PROVIDER_MOTHER] ? [...(declared ?? LSP_READ_ACTIONS)] : []
   return {
     available: available.length > 0,
     default: services[LSP_PROVIDER_MOTHER] ? LSP_PROVIDER_MOTHER : (services[LSP_PROVIDER_TEST] ? LSP_PROVIDER_TEST : (services[LSP_PROVIDER_FORK] ? LSP_PROVIDER_FORK : null)),
     services,
-    actions: [...LSP_READ_ACTIONS],
+    actions,
   }
 }
 

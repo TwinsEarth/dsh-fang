@@ -58,7 +58,7 @@
 - `src/lib/lsp-delegation.mjs`：对齐官方只读口径（4 动作）；legacy diagnostics/format/rename → `contract-unsupported`；位置必填；
 - Orchestrator：母体 `ctx.lsp` 优先（`provider:'mother-lsp'`），测试缝保留，未安装时 `contract-unavailable`；`fang.capability.list` 增加 `provider`/`lspProvider`（按 provider 区分、available=false 显式）；
 - 路线 B（增强）：`detectForkLspSupport(accelNodeModules)` 探测 `@twinsearth/dsh-lsp*`，暴露 `forkLsp`，默认关闭；
-- 测试：`test/lsp-provider.test.mjs` 6 项 + `test/lsp-delegation.test.mjs` 5 项；e2e 117/117（provider-tagged catalog / definition 成功 / legacy 写类可读拒绝）。
+- 测试：`test/lsp-provider.test.mjs` 7 项 + `test/lsp-delegation.test.mjs` 5 项；e2e **118/118**（provider-tagged catalog / definition 成功 / legacy 写类可读拒绝 / diagnostics 仅测试缝且不 advertise / 按实提供能力 advertise）。
 
 ## 3. 验证证据（本机实测）
 

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
-// B-6：LSP 委托——已对齐官方能力缝口径（4 个只读操作；官方无 diagnostics/format/rename）。
+// B-6：LSP 委托——已对齐官方能力缝口径（4 个只读操作；diagnostics 仅测试缝；官方无 format/rename）。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   LSP_ACTION_TO_OPERATION,
   LSP_READ_ACTIONS,
+  LSP_TEST_ACTIONS,
   LSP_UNSUPPORTED_LEGACY_ACTIONS,
   LSP_WRITE_ACTIONS,
   classifyLspAction,
@@ -31,12 +32,17 @@ test('B-6: read actions are exactly the official seam operations (read/approval-
   }
 })
 
-test('B-6: official seam is read-only (no write actions in the contract)', () => {
+test('B-6: official seam is read-only; diagnostics is test-seam only; legacy mutations stay unsupported', () => {
   assert.deepEqual([...LSP_WRITE_ACTIONS], [])
-  assert.deepEqual([...LSP_UNSUPPORTED_LEGACY_ACTIONS], ['diagnostics', 'format', 'rename', 'codeAction', 'apply'])
+  assert.deepEqual([...LSP_TEST_ACTIONS], ['diagnostics'])
+  assert.deepEqual([...LSP_UNSUPPORTED_LEGACY_ACTIONS], ['format', 'rename', 'codeAction', 'apply'])
+  const diagnostics = classifyLspAction('diagnostics')
+  assert.equal(diagnostics.ok, true)
+  assert.equal(diagnostics.kind, 'test-only')
+  assert.equal(diagnostics.approval, 'none')
 })
 
-test('B-6: legacy actions not provided by the official seam are rejected readably', () => {
+test('B-6: legacy mutation actions not provided by the official seam are rejected readably', () => {
   for (const action of LSP_UNSUPPORTED_LEGACY_ACTIONS) {
     const out = classifyLspAction(action)
     assert.equal(out.ok, false, action)
@@ -68,4 +74,7 @@ test('B-6: valid lsp params carry action/operation/kind/1-based position', () =>
   assert.equal(read.file, 'src/index.mjs')
   assert.equal(read.line, 12)
   assert.equal(read.character, 3)
+  const diagnostics = validateToolInvoke({ tool: 'lsp', action: 'diagnostics', file: 'x.ts', line: 1, character: 1 })
+  assert.equal(diagnostics.ok, true)
+  assert.equal(diagnostics.kind, 'test-only')
 })
