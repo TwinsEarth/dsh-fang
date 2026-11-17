@@ -16,6 +16,8 @@
 | 决策/审批 | decisions/approvals API | 已有（母体侧） |
 | 查询/统计 | status/supervision 等只读接口 | 已有 |
 
+**首批候选能力**：LSP 工具（`dsh-tool-lsp`，加速核无对应实现；见 COMPAT §3.5 的 `string-reference` 归类）可优先走委托验证；以及 dsh-context 等插件在 host 侧需要但加速核缺失的只读能力。
+
 ### 1.2 设计要点
 
 1. **能力白名单**：只有显式登记的能力可被加速分身调用；默认拒绝（fail-closed）。
@@ -37,6 +39,10 @@
 ### 2.1 目标
 
 让官方/第三方插件的 **client half（侧栏/面板/设置页）** 在加速分身的 Web UI 中可用：在浏览器模块解析层把 `@deepseek-ai/dsh-client-*` 映射到 `@twinsearth/dsh-client-*`。
+
+**范围（COMPAT §3.5 归因）**：真正需要映射的是 3 个 client 侧 spec：
+`@deepseek-ai/dsh-client-runtime`、`dsh-client-store`、`dsh-client-ui-primitives`
+（其余 5 个为 desktop-only / dev-metadata / optional-metadata / string-reference，不需要 UI 映射）。
 
 ### 2.2 设计要点
 

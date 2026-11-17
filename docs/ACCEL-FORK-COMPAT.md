@@ -107,6 +107,23 @@ node tools/release/accel-alias-spike.mjs --accel-nm <accel>/node_modules --essen
 | 瓮城功能探针 | `/fang/adapter/identity` ✅ `{role:'fork', version:'3.5.0'}` |
 | 结论 | 导入/激活/宿主可用已自动化验证；**插件内部 API 行为**（工具调用、MCP 往返等）仍需各插件自己的功能用例，本工具不越权宣称 |
 
+### 3.5 8 个无加速等价模块的处置（2026-11-17 源码归因）
+
+对 4 个目标插件（dsh-context / openviking memory / dshmarket / w2m）逐一扫描这些 spec 的**出现位置**，结论：**全部不是 host 运行时 import**，因此不为激活补齐 P0 阻塞。
+
+| spec | 源码证据 | 类别 | 处置 |
+|---|---|---|---|
+| `dsh-client-runtime` | dshmarket `package.json`（devDependencies） | client-half | UI client half 映射（下一阶段）；不影响 host 激活 |
+| `dsh-client-store` | dsh-context `package.json`（devDependencies） | client-half | 同上 |
+| `dsh-client-ui-primitives` | dsh-context/client.js、dshmarket/client.js、w2m/lib/client.js | client-half | 同上 |
+| `dsh-desktop` | dshmarket `lib/check.js`、`lib/dsh-install.js`：**字符串常量** `DESKTOP_PACKAGE = '@deepseek-ai/dsh-desktop'` | desktop-only | N/A（加速分身是 Web；不管理桌面安装） |
+| `dsh-desktop-runtime` | dshmarket `lib/check.js` 注释/字符串 | desktop-only | N/A |
+| `dsh-invariants` | dshmarket / openviking `package.json`（devDependencies） | dev-metadata | N/A |
+| `dsh-code-runtime` | openviking `package.json` 元数据（无运行时 import） | optional-metadata | N/A（如未来实际调用再评估 A/B） |
+| `dsh-tool-lsp` | dsh-context `lib/index.js` 的 tool→package **字符串映射表**（`lsp: '@deepseek-ai/dsh-tool-lsp'`），非 import | string-reference | 若要 LSP 工具，走 B（契约委托母体）或 A（移植）；**当前不影响激活** |
+
+> 生产代码已把该分类写入 `task.acceleratedSync.alias.unsupported[].category`（`client-half` / `desktop-only` / `dev-metadata` / `optional-metadata` / `string-reference` / `unknown`），UI/审计可直接展示“为什么缺、该怎么补”，不再是一串裸模块名。
+
 ## 4. 三条适配路线（可行性结论）
 
 | 路线 | 可行性 | 边界 | 建议 |

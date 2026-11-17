@@ -10,6 +10,7 @@ import path from 'node:path'
 import {
   ACCEL_BUNDLES_WITH_FANG,
   buildSyncedAcceleratedProfile,
+  classifyAliasSpec,
   scanDeepseekSpecs,
   translateBundles,
   writeAcceleratedForkProfile,
@@ -126,6 +127,31 @@ test('buildSyncedAcceleratedProfile: translated bundles + wrapped patch + plugin
   assert.match(built.patchText, /@twinsearth\/dsh-llm/)
   assert.equal(built.deps['@deepseek-ai/dsh-subagent-codex'], undefined)
   assert.ok(built.deps['@local/dsh-fang'])
+})
+
+test('classifyAliasSpec: the 8 known gaps carry an actionable disposition', () => {
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-client-runtime'), 'client-half')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-client-store'), 'client-half')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-client-ui-primitives'), 'client-half')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-desktop'), 'desktop-only')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-desktop-runtime'), 'desktop-only')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-invariants'), 'dev-metadata')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-code-runtime'), 'optional-metadata')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-tool-lsp'), 'string-reference')
+  assert.equal(classifyAliasSpec('@deepseek-ai/dsh-unknown-thing'), 'unknown')
+})
+
+test('writeAliasStubs: unsupported entries carry the disposition category', () => {
+  const accel = makeAccelTree()
+  const profileNm = path.join(temp('fang-profile-cat-'), 'node_modules')
+  const out = writeAliasStubs({
+    profileNodeModules: profileNm,
+    accelNodeModules: accel,
+    specs: ['@deepseek-ai/dsh-desktop', '@deepseek-ai/dsh-tool-lsp'],
+  })
+  const bySpec = Object.fromEntries(out.unsupported.map((u) => [u.spec, u.category]))
+  assert.equal(bySpec['@deepseek-ai/dsh-desktop'], 'desktop-only')
+  assert.equal(bySpec['@deepseek-ai/dsh-tool-lsp'], 'string-reference')
 })
 
 test('writeAcceleratedForkProfile(synced): copies plugins, writes stubs, reports sync', () => {

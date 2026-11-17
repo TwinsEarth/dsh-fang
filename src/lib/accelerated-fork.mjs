@@ -73,6 +73,28 @@ export const DEEPSEEK_SCOPE = '@deepseek-ai/'
 export const ACCEL_SCOPE = '@twinsearth/'
 export const ALIAS_STUB_VERSION = '0.0.0-fang-alias'
 
+/**
+ * Disposition of known `@deepseek-ai/*` specs that have no accelerated equivalent.
+ * Established by source attribution (2026-11-17): these are client-half/devDependency
+ * declarations, desktop-app string references, or metadata-only peer declarations —
+ * NOT host-side runtime imports. See docs/ACCEL-FORK-COMPAT.md §3.5.
+ */
+export const ALIAS_DISPOSITIONS = Object.freeze({
+  '@deepseek-ai/dsh-client-runtime': 'client-half',
+  '@deepseek-ai/dsh-client-store': 'client-half',
+  '@deepseek-ai/dsh-client-ui-primitives': 'client-half',
+  '@deepseek-ai/dsh-desktop': 'desktop-only',
+  '@deepseek-ai/dsh-desktop-runtime': 'desktop-only',
+  '@deepseek-ai/dsh-invariants': 'dev-metadata',
+  '@deepseek-ai/dsh-code-runtime': 'optional-metadata',
+  '@deepseek-ai/dsh-tool-lsp': 'string-reference',
+})
+
+/** Category for a spec without an accelerated equivalent. */
+export function classifyAliasSpec(spec) {
+  return ALIAS_DISPOSITIONS[String(spec ?? '')] ?? 'unknown'
+}
+
 function readJsonFile(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null }
 }
@@ -158,7 +180,7 @@ export function writeAliasStubs({ profileNodeModules = '', accelNodeModules = ''
     const sub = parts.slice(2).join('/')
     const accelFile = accelExportFile(accelNodeModules, spec)
     if (!accelFile) {
-      unsupported.push({ spec, reason: accelHasPackage(accelNodeModules, name) ? 'no-export-mapping' : 'no-accelerated-equivalent' })
+      unsupported.push({ spec, reason: accelHasPackage(accelNodeModules, name) ? 'no-export-mapping' : 'no-accelerated-equivalent', category: classifyAliasSpec(spec) })
       continue
     }
     if (!byPackage.has(name)) byPackage.set(name, [])
