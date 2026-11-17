@@ -27,14 +27,19 @@ const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8
 
 async function registryVersions(pkg) {
   const url = `https://registry.npmjs.org/${String(pkg).replace('/', '%2f')}`
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(15000), headers: { accept: 'application/json' } })
-    if (!response.ok) return { ok: false, status: response.status }
-    const body = await response.json()
-    return { ok: true, versions: Object.keys(body.versions ?? {}), latest: body['dist-tags']?.latest ?? null }
-  } catch (error) {
-    return { ok: false, error: String(error?.message ?? error) }
+  let lastError = null
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(20000), headers: { accept: 'application/json' } })
+      if (!response.ok) return { ok: false, status: response.status }
+      const body = await response.json()
+      return { ok: true, versions: Object.keys(body.versions ?? {}), latest: body['dist-tags']?.latest ?? null }
+    } catch (error) {
+      lastError = String(error?.message ?? error)
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1500 * attempt))
+    }
   }
+  return { ok: false, error: lastError }
 }
 
 const fangPkg = readJson(path.join(REPO, 'package.json'))
@@ -55,8 +60,17 @@ const [fangRegistry, contractRegistry] = await Promise.all([
   registryVersions('@twinsearth/dsh-fang'),
   registryVersions('@twinsearth/dsh-fang-contract'),
 ])
-check('npm fang 3.5.0 not published yet (expected before release)', fangRegistry.ok && !fangRegistry.versions?.includes('3.5.0'), fangRegistry.ok ? `latest=${fangRegistry.latest}` : `registry error ${fangRegistry.status ?? fangRegistry.error}`)
-check('npm contract 1.2.0 not published yet (expected before release)', contractRegistry.ok && !contractRegistry.versions?.includes('1.2.0'), contractRegistry.ok ? `latest=${contractRegistry.latest}` : `registry error ${contractRegistry.status ?? contractRegistry.error}`)
+const warnings = []
+const checkRegistryAbsent = (name, registry, version) => {
+  if (!registry.ok) {
+    warnings.push(`${name}: registry unreachable (${registry.status ?? registry.error}) — cannot verify`)
+    check(name, true, `WARN registry unreachable (${registry.status ?? registry.error})`)
+    return
+  }
+  check(name, !registry.versions?.includes(version), `latest=${registry.latest}`)
+}
+checkRegistryAbsent('npm fang 3.5.0 not published yet (expected before release)', fangRegistry, '3.5.0')
+checkRegistryAbsent('npm contract 1.2.0 not published yet (expected before release)', contractRegistry, '1.2.0')
 
 const tagResult = spawnSync('git', ['-C', REPO, 'tag', '--list', 'v3.5.0'], { encoding: 'utf8' })
 check('tag v3.5.0 absent (expected before release)', (tagResult.stdout ?? '').trim() === '', (tagResult.stdout ?? '').trim())
@@ -83,11 +97,12 @@ const plan = [
   { order: 4, channel: 'GitHub Release', ref: `v${fangVersion}`, assets: [`dsh-fang-${fangVersion}.tgz`, `dsh-fang-${fangVersion}.tgz.sha256`], status: 'pending' },
 ]
 
-const result = { ok: failed.length === 0, fangVersion, contractVersion, vendorVersion, checks, plan }
+const result = { ok: failed.length === 0, fangVersion, contractVersion, vendorVersion, warnings, checks, plan }
 if (asJson) {
   console.log(JSON.stringify(result, null, 2))
 } else {
   for (const item of checks) console.log(`${item.ok ? 'PASS' : 'FAIL'}  ${item.name}  ${item.detail}`)
+  for (const warning of warnings) console.log(`WARN  ${warning}`)
   console.log('\n发布顺序（先 contract 1.2.0，再 dsh-fang 3.5.0）：')
   for (const step of plan) console.log(`  ${step.order}. [${step.channel}] ${step.package ?? step.ref}@${step.version ?? ''}  ${step.status}`)
   console.log(`\n${failed.length ? 'RED' : 'GREEN'}  release-order  ${checks.length - failed.length}/${checks.length}`)

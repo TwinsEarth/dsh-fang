@@ -103,7 +103,7 @@ npm run smoke:accel                                   # 加速核/分身冒烟
 | B2 | main 合并需审核 | 不能打 tag（tag 必须 main 尖端） | 用户合并 PR |
 | B3 | npm 发布需面板批准（DSH 危险命令守卫） | npm 渠道不可发 | 面板批准（或 CI secret token 可用） |
 | B4 | contract 仓库远端推送权限未验证 | contract 1.2.0 不能上线 | 同 B1 |
-| B5 | 产物当前为旧 HEAD 构建（13:35 vs HEAD 16:47） | 直接发会发错字节 | 发布前按 §2-C 重建（build.mjs 内部跑 preflight） |
+| B5 | 产物当前为旧 HEAD 构建（13:35 vs HEAD 16:47） | 直接发会发错字节 | ✅ **已解决（2026-11-17 16:52）**：`build.mjs` 重建，新 sha256 `3f5f73ce0c34fc6fc42109bcc516da516faae0c73d42c86d3e60dd6489da937e`（665,945 bytes / 183 entries）；发布前仍需在最终 main 尖端**再重建一次** |
 
 ## 6. 发布说明草稿（v3.5.0）
 
