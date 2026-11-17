@@ -1,6 +1,6 @@
-# 加速分身（Accelerated Fork）· v3.4.3
+# 加速分身（Accelerated Fork）· v3.5.0
 
-> 适用：dsh-Fang **v3.4.3**（P0 地基 + P1 开关与运行 + P2 兼容与文档）。
+> 适用：dsh-Fang **v3.5.0**（P0 地基 + P1 开关与运行 + P2 兼容与文档）。
 > 一句话：**只有分身 Web 可以跑加速核（`@twinsearth/dsh 3.5.0`）**；桌面/母体宿主与元主运行态永远原厂 core。开关在**母体面板**，且**不是热更新**——重新打开分身 Web 才生效。
 
 ## 1. 边界（硬约束）
@@ -47,7 +47,7 @@ $env:FANG_ACCEL_LIVE='1'; $env:FANG_HOME='<FANG_HOME>'
 npm run test:accel-live                                                   # forker 真派生加速分身
 ```
 
-已实测（2026-11-17）：加速核 `lib/bin.js` 启动分身成功；页面含 `dsh-fang/client.js`；`/fang/adapter/identity` 返回 `{role:'fork', version:'3.4.3', protocol:3}`。
+已实测（2026-11-17）：加速核 `lib/bin.js` 启动分身成功；页面含 `dsh-fang/client.js`；`/fang/adapter/identity` 返回 `{role:'fork', version:'3.5.0', protocol:3}`。
 
 ## 5. 已知限制
 
@@ -101,7 +101,7 @@ npm run test:accel-live                                                   # fork
 | # | 决策 | 选择 | 确认日期 |
 |---|---|---|---|
 | D1 | 开关生效范围 | **a) 只影响新派生/重启**（运行中不热切换） | 2026-11-17 |
-| D2 | 加速分身插件面 | **a) 极简**（base + web-app + fang） | 2026-11-17 |
+| D2 | 加速分身插件面 | **a) 极简（当前发布）**；用户后续要求“与元主同步一致”，实验证明无法 100% 一致（第三方插件依赖原厂包、官方实验 bundle 无加速版），A/B/C 待定 | 2026-11-17 |
 | D3 | 加速分身旧会话 | **只新会话 + 旧会话仅“复制导入”（新副本，不在旧会话上继续）**；`sessionMode:'new'` 默认，`copy` 开启复制导入 | 2026-11-17 |
 | D4 | 安装位置/体积 | `<FANG_HOME>/accel/cli`；**上限 1 GiB，超过必须二次确认**（交互提示 / `--confirm-oversize`） | 2026-11-17 |
-| D5 | 版本号 | **v3.4.3** | 2026-11-17 |
+| D5 | 版本号 | **v3.5.0** | 2026-11-17 |

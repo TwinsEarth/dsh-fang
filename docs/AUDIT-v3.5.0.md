@@ -1,4 +1,4 @@
-# AUDIT v3.4.3
+# AUDIT v3.5.0
 
 范围：**加速分身（Accelerated Fork）P0 地基 + P1 开关与运行 + P2 兼容与文档**。
 基线：v3.4.2（`708ad4a`）。分支：`feat/accel-p0`。**未打 tag、未推送、未发布。**
@@ -40,7 +40,7 @@
 
 - `docs/ACCEL-FORK-COMPAT.md`：核心/官方 bundle/第三方插件兼容矩阵（含未验证项）；
 - `docs/ACCELERATED-FORK.md`：P0+P1 全量说明、安装/验证/限制；
-- `docs/CHANGELOG.md`：v3.4.3 段；
+- `docs/CHANGELOG.md`：v3.5.0 段；
 - 本审计；
 - `package.json` `test:accel-live` 脚本。
 
@@ -50,7 +50,7 @@
 accelerated-install 单测             10/10
 accelerated-fork 单测                9/9
 fork-core-settings 单测              8/8
-accelerated-fork-live（FANG_ACCEL_LIVE=1）  pass（forker 真派生：identity role=fork, version=3.4.3）
+accelerated-fork-live（FANG_ACCEL_LIVE=1）  pass（forker 真派生：identity role=fork, version=3.5.0）
 accelerated-fork-smoke               7/7（banner/identity/client.js/core 版本/非 stock CLI）
 tools/e2e.mjs                       95/95
 allow-list self-check               110 路由 findings=0
@@ -69,6 +69,6 @@ main-city source gate               grade=A blockers=0
 
 ## 5. 发布状态
 
-- 版本：3.4.3（开发完成，未发布）；
+- 版本：3.5.0（开发完成，未发布）；
 - 路由契约：86；
 - 未执行：push / tag / GitHub Release / npm publish。发布需用户明确指令并走主城门禁。

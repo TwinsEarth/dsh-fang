@@ -36,7 +36,7 @@ export const REQUIRED_ROUTE_PATHS = Object.freeze([
   '/fang/api/composer/journal',
   '/fang/api/fork-core',
 ])
-// v3.4.3 (P0): the accelerated Web sidecar retired 3 routes (/accelerated/status|start|stop)
+// v3.5.0 (P0): the accelerated Web sidecar retired 3 routes (/accelerated/status|start|stop)
 // and added /fang/api/fork-core → 88 - 3 + 1 = 86.
 export const DEFAULT_EXPECTED_ROUTE_COUNT = 86
 

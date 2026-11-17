@@ -1,4 +1,4 @@
-## v3.4.3（2026-11-17）
+## v3.5.0（2026-11-17）
 
 **加速分身：P0 地基 + P1 开关与运行 + P2 兼容与文档。**
 
@@ -9,7 +9,7 @@
 - `src/lib/fork-core-settings.mjs`：`<dataDir>/fork-core.json`（mode/sessionMode），原子写、损坏降级 stock+new；
 - `tools/release/accelerated-fork-smoke.mjs` 与 `npm run test:accel-live`；
 - `tools/release/accelerated-install.mjs`（`npm run install:accel`）：安装加速核到 `<FANG_HOME>/accel/cli`；**体积上限 1 GiB，超过需二次确认**（交互提示；CI 用 `--confirm-oversize`），未确认不登记安装；
-- 文档：`docs/ACCELERATED-FORK.md`、`docs/ACCEL-FORK-COMPAT.md`、`docs/AUDIT-v3.4.3.md`。
+- 文档：`docs/ACCELERATED-FORK.md`、`docs/ACCEL-FORK-COMPAT.md`、`docs/AUDIT-v3.5.0.md`。
 
 ### 变更
 
@@ -25,7 +25,7 @@
 ### 验证
 
 - 加速核真机安装：`@twinsearth/dsh 3.5.0`（651 包）；
-- `accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真派生通过（identity role=fork, version=3.4.3）；
+- `accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真派生通过（identity role=fork, version=3.5.0）；
 - 单测：accelerated-install 10、accelerated-fork 9、fork-core-settings 8；
 - `tools/e2e.mjs` 95/95；allow-list 110 路由 findings=0；main-city source gate grade=A。
 

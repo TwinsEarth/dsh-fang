@@ -1,4 +1,4 @@
-# 加速分身兼容矩阵（v3.4.3）
+# 加速分身兼容矩阵（v3.5.0）
 
 > 口径：加速分身 = 由 forker 派生、运行在 `@twinsearth/dsh`（加速核）上的**分身 Web**。
 > 母体/桌面宿主与元主运行态不在本矩阵内（它们永远原厂 core）。
@@ -11,7 +11,7 @@
 | DSH 核心 | `dsh 0.2.2-rc.3`（安装目录） | `@twinsearth/dsh 3.5.0` | ✅ | 真机启动打印 `dsh web: http://127.0.0.1:<port>/?token=...`，页面 200 |
 | base bundle | `@deepseek-ai/dsh-base` | `@twinsearth/dsh-base` | ✅ | `--dump-config` 组合成功 |
 | Web app bundle | `@deepseek-ai/dsh-web-app` | `@twinsearth/dsh-web-app` | ✅ | 同上；页面含 client 清单元数据 |
-| 瓮城插件 | `@local/dsh-fang` 3.4.3 | 同版本（junction 到工作树） | ✅ | `/fang/adapter/identity` → `{role:'fork', version:'3.4.3', protocol:3}`；启动页含 `dsh-fang/client.js` |
+| 瓮城插件 | `@local/dsh-fang` 3.5.0 | 同版本（junction 到工作树） | ✅ | `/fang/adapter/identity` → `{role:'fork', version:'3.5.0', protocol:3}`；启动页含 `dsh-fang/client.js` |
 | 瓮城子插件 | `web-entry` / `queue-journal` | 同版本 junction；`queue-journal` 默认 disabled | ✅ / 按设计关闭 | 行 active 状态与 P0 测试 |
 | 模型 provider（home patch） | `@deepseek-ai/*` 行 | overlay 改写为 `@twinsearth/*` | ✅ 配置层 | `--dump-config`：`name mismatch=0`、`volcengine` 命中 7、`ark-code-latest` 命中 3 |
 | 真实对话（模型调用） | 生产可用 | 未做端到端对话验证 | ⚠️ 未验证 | 本轮只验证启动/路由/身份，未发真实模型请求 |
