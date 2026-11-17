@@ -1,3 +1,56 @@
+## v3.5.0（2026-11-17）
+
+**加速分身：P0 地基 + P1 开关与运行 + P2 兼容与文档。**
+
+### 新增
+
+- `src/lib/accelerated-install.mjs`：加速核安装/发现（`<FANG_HOME>/accel/cli` + `state.json`；只接受 `lib/bin.js`，拒绝 `.cmd` shim；解析链 config → `FANG_ACCEL_CLI` → state → 标准位置；缺失即 `accelerated-cli-missing`）；
+- `src/lib/accelerated-fork.mjs`：加速分身极简 profile（`@twinsearth/dsh-base` + `@twinsearth/dsh-web-app` + `@local/dsh-fang`，恒定三项）+ fang/子插件 junction + 模型 overlay（`@deepseek-ai/dsh-` → `@twinsearth/dsh-`，避免 name mismatch）；
+- `src/lib/fork-core-settings.mjs`：`<dataDir>/fork-core.json`（mode/sessionMode），原子写、损坏降级 stock+new；
+- `tools/release/accelerated-fork-smoke.mjs` 与 `npm run test:accel-live`；
+### 新增
+
+- **D2 混合插件面（加速分身）**：`writeAcceleratedForkProfile({sourceProfileDir, accelNodeModules})` 同步原身插件面——官方 bundle 映射、第三方插件包复制、`@deepseek-ai/*` → `@twinsearth/*` alias 桩包（`export * from` 加速实现），不支持项写入 `task.acceleratedSync`（mapped / unsupportedBundles / copiedPlugins / alias）；真机验证 0 导入失败；
+- `tools/release/accel-alias-spike.mjs`（`--accel-nm` + `--essence-profile`）：量化 alias 覆盖率（baseline vs 桩包）；
+- `npm run smoke:accel-plugins`（`tools/release/accel-plugin-smoke.mjs`）：逐插件功能冒烟——真实 synced profile 启动、逐插件 activated/pending/failed 分类、host 页面 + fang identity 探针（3/3 目标插件激活、identity role=fork）；
+- `tools/release/accelerated-install.mjs`（`npm run install:accel`）：安装加速核到 `<FANG_HOME>/accel/cli`；**体积上限 1 GiB，超过需二次确认**（交互提示；CI 用 `--confirm-oversize`），未确认不登记安装；
+- 文档：`docs/ACCELERATED-FORK.md`、`docs/ACCEL-FORK-COMPAT.md`、`docs/AUDIT-v3.5.0.md`。
+
+### 变更
+
+- **加速边界**：加速引擎只服务分身 Web；桌面/母体与元主运行态始终原厂 core（essence 的 provision/spawn 显式 `coreMode:'stock'`，源码守卫测试）；
+- 旧「加速模式」侧车下线：`/fang/api/accelerated/status|start|stop` 移除，新增 `GET/POST /fang/api/fork-core`（同路径经 `routeMethods` 注册）；路由契约 88 → 86；
+- forker：`provision({coreMode:'accelerated'})` 生成极简 profile；`spawn` 按 coreMode 解析 CLI，缺失即失败（**删除静默回退 stock**）；加速模式跳过 fork-seed、官方 node_modules 镜像与官方 headless overlay；`publicFork.coreMode`；
+- 开关**不是热更新**：只决定「下一次打开分身」用哪个 core；新派生 / 归档还原 / autostart 会在启动前按开关**重新 provision** 该分身 profile（会话目录不动），运行中的分身保持原 core 直到重新打开；
+- 面板按钮文案：**「分身Core核心加速引擎：官方 / 一键加速」**；切换后提示「重新打开分身 Web 生效」；
+- **未安装加速核 fail-closed**：点「一键加速」→ 明确提示 `accelerated-cli-missing`（设置未改变）；服务端 POST 同样返回 409 + `unchanged:true` 且不写设置；GET 视图 `effectiveMode:null` + `blocked`（不做静默 stock 降级）；
+- orchestrator：新派生/归档还原/autostart 读取开关；`taskView.coreMode`；加速缺失错误透传 `accelerated-cli-missing` + `searched`；会话策略：**默认只新会话**（`new`），`copy` 允许把旧会话**复制成新副本**导入（绝不原地挂载），`inherit` 归一为 `copy`；
+- client.js：母体头部「分身核心：原版/加速版」开关（M-09）+ 分身卡「加速核」徽标 + 刷新轮询 `/fang/api/fork-core`；
+- approver：Windows ACL 检查改为「仅宽泛主体 + 写权限」才禁用文件桥（继承只读条目不再误判）。
+
+### 验证
+
+- 加速核真机安装：`@twinsearth/dsh 3.5.0`（651 包）；
+- `accelerated-fork-smoke` 7/7；`FANG_ACCEL_LIVE=1` forker 真派生通过（identity role=fork, version=3.5.0）；
+- 单测：accelerated-install 10、accelerated-fork 9、fork-core-settings 8；
+- **M1 能力注册表**：`CAPABILITY_CATALOG` + `DEFAULT_READ_ALLOW`；hello 广告按实际注册 handler（新增 3 个委托方法）；白名单校验/错误码表/版本裁剪（1.1 对端裁剪 1.2 方法）/payload 64KiB 上限均有单测（`test/contract-registry.test.mjs`）；**contract SDK 升到 1.2.0（仅追加）**：METHODS/METHOD_VERSION/ERROR_CODES 追加委托方法与 7 个委托错误码；vendored `src/contract` 从 contract 仓库重新同步（8 文件 sha256 钉死）；
+- `npm run probe:mother`（`tools/release/mother-capability-probe.mjs`）：只读探测生产母体服务/契约就绪（实测 `sessionCatalog` READY、`/fang/api/sessions` 200）；
+- **B 契约委托 P0**（`src/lib/contract-delegation.mjs` + orchestrator invoke 守卫）：`envelope.meta.delegate=true` 才走委托白名单（默认只读 5 项）、64KiB / 5s 限额超时、`contract-unavailable/unsupported/timeout/invalid-request` 错误码、每次委托审计 `{capability,source,outcome,latencyMs}`；未声明 delegate 的旧调用方语义不变；
+- **LSP 真实 provider 调研**（`docs/LSP-PROVIDER-RESEARCH.md`）：官方 LSP 为可选包族（`dsh-lsp` 能力缝 + `dsh-lsp-stdio` + `dsh-tool-lsp`），npm 有与运行版本一致的 `0.2.2-rc.3`；`ctx.lsp.query({operation,filePath,position,workspaceRoot})` 无需 Agent Session，可由母体 fang 插件直接调用；官方仅 4 个只读操作（definition/references/implementation/hover，明确排除 diagnostics/format/rename/JSON-RPC escape）；本机无语言服务器，需先定来源；B-6 动作口径按 provider 实提供能力修订；
+- **UI client half spike**（`npm run spike:ui-client`）：真实 synced 加速分身启动页清单 87 项；第三方 client half（dsh-context / dshmarket / fang）bundle 均 200 可提供；缺口为 `@deepseek-ai/*` 作用域行别名（client module system 无 alias 表，加速核已有 `@twinsearth/*` 目标行）；修复 `accelNodeModulesRoot` 路径推导（forker 同步插件面 alias 依赖它）；报告见 `docs/UI-CLIENT-HALF-SPIKE.md`；
+- **P2 决议**：`fang.code.run` 定为**单独专业版能力**（默认关闭、不进目录/默认白名单、需手动单独每项授权激活 + 每次调用审批 + 独立安全评审；当前请求显式 `contract-unsupported`）；B-9 UI client half 走浏览器模块映射（不进契约）；B-10 任意工具透传**明确不做**；
+- **M5 审计与限流**：委托并发上限 `contract.delegate.maxConcurrent`（默认 4，超限立即 `contract-rate-limited`，fail-closed 不排队）；委托审计覆盖成功/拒绝/超时/限流（`{capability,source,outcome,error,latencyMs}`）；e2e 审计账本完整性 + 并发压测（`maxConcurrent=2` → ok=2/limited=6）；
+- **M4 chat.import 委托**：`fang.chat.import`（source=deepseek；`dryRun` 默认 true，确定性预览；真实导入返回 `contract-approval-required` 且零副作用）；新增 `npm run smoke:contract-delegation`（对运行中母体的 B 委托冒烟：能力目录/会话只读/lsp 读+写/chat.import dryRun 一致性+审批拒绝）；
+- **M3 lsp 委托**：`fang.tool.invoke`（首批 `tool:'lsp'`）——只读子命令（diagnostics/hover/definition/references）自动放行；写类子命令（format/rename/codeAction/apply）返回 `contract-approval-required` 且不执行；未知 action → `contract-invalid-request`；能力默认不在白名单（需显式放行）；执行 provider 当前仅 e2e 测试缝（真实母体 LSP provider 待接入）；
+- **M2 P0 只读能力**：`fang.session.events`（母体 sessionCatalog.readHead 有界头读，≤200 行/≤256KB）；capability.list 目录扩至 6 项只读；白名单为权威放行表、目录仅自述；e2e 新增 `session.events` 与 `contract-timeout`（测试缝 `fang.test.sleep`，仅 `FANG_CONTRACT_TEST_HOOKS=1`）；
+- `tools/e2e.mjs` **117/117**（新增 fork-core 契约断言：view shape、essence=stock、未安装切档 409+unchanged、设置不变；新增 B 契约基线：`contract.hello` 200/1.1.0/17 方法、`fang.orchestrator.status` 真实委托、`fang.session.list` 可读错误码；新增 B 委托：白名单目录、`contract-unsupported` 拒绝、只读委托成功、缺服务映射 `contract-unavailable`、`session.events` 有界读、超时 `contract-timeout`、lsp diagnostics 成功 / 写类 `contract-approval-required` / 非法 action `contract-invalid-request`、chat.import dryRun 两次一致 / 真实导入 `contract-approval-required`、并发 `contract-rate-limited`、审计 `contract-delegate` 完整性）；allow-list 110 路由 findings=0；main-city source gate grade=A；`tools/ui-rich-smoke.mjs` 新增 FORK-CORE-00..04（按钮文案/切换 toast/回切/加速核徽标/端点）
+
+### 注意
+
+- 加速分身默认不带第三方插件与官方可选 bundle（见兼容矩阵）；
+- 真实模型对话与旧会话继承未做端到端验证；
+- 本版**未发布**（无 tag/Release/npm）。
+
 ## v3.4.2（2026-11-16）
 
 **加速 Web sidecar + 母体面板加速模式。**

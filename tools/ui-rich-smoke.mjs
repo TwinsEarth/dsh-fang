@@ -18,9 +18,15 @@ const EDGE = [
   path.join(r, 'Google', 'Chrome', 'Application', 'chrome.exe'),
 ]).find((p) => fs.existsSync(p))
 if (!EDGE) { console.error('SKIP ui-rich-smoke: no Edge/Chrome'); process.exit(2) }
+if (!fs.existsSync(path.join(DESKTOP, 'panel', 'index.html'))) {
+  console.error(`SKIP ui-rich-smoke: desktop panel missing at ${path.join(DESKTOP, 'panel', 'index.html')}`)
+  process.exit(2)
+}
 
 const requests = []
 let renameMode = 'ok'
+// 分身核心开关（P1/D2）：mock「官方 / 一键加速」两档状态。
+let forkCoreMode = 'stock'
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')
   if (url.pathname === '/favicon.ico') { res.writeHead(204); res.end(); return }
@@ -34,10 +40,16 @@ const server = http.createServer(async (req, res) => {
       ? path.join(DESKTOP, 'panel', 'index.html')
       : null
   if (file) {
+    let content
     try {
-      res.writeHead(200, { 'content-type': file.endsWith('.js') ? 'text/javascript' : 'text/html; charset=utf-8' })
-      res.end(fs.readFileSync(file))
-    } catch { res.writeHead(404); res.end('not found') }
+      content = fs.readFileSync(file)
+    } catch {
+      res.writeHead(404)
+      res.end('not found')
+      return
+    }
+    res.writeHead(200, { 'content-type': file.endsWith('.js') ? 'text/javascript' : 'text/html; charset=utf-8' })
+    res.end(content)
     return
   }
   if (url.pathname === '/fang/api/tasks/rename') {
@@ -53,9 +65,27 @@ const server = http.createServer(async (req, res) => {
     }
     return json({ ok: true })
   }
+  if (url.pathname === '/fang/api/fork-core') {
+    let wanted = {}
+    if (req.method === 'POST') { try { wanted = JSON.parse(body || '{}') } catch { wanted = {} } }
+    if (req.method === 'POST' && wanted?.mode) forkCoreMode = wanted.mode === 'accelerated' ? 'accelerated' : 'stock'
+    return json({
+      ok: true,
+      mode: forkCoreMode,
+      sessionMode: 'new',
+      effectiveMode: forkCoreMode,
+      blocked: null,
+      accelerated: { installed: true, version: '3.5.0', sizeBytes: 773619712, limitBytes: 1073741824, requiresConfirmation: false },
+      forks: { stock: forkCoreMode === 'stock' ? 1 : 0, accelerated: forkCoreMode === 'accelerated' ? 1 : 0 },
+      essence: 'stock',
+      changed: req.method === 'POST',
+      updatedAt: null,
+      updatedBy: 'ui-smoke',
+    })
+  }
   if (url.pathname === '/fang/api/status') return json({ ok: true, version: '3.0.7', role: 'mother', profileTag: 'smoke', tasks: { ready: 1, total: 1, max: 5, list: [], capacity: { slots: 7, limit: 5, used: 1 } } })
   if (url.pathname === '/fang/api/tasks') return json({ ok: true, tasks: [{
-    taskId: 'task_smoke', title: 'UI 冒烟分身', status: 'running', phase: 'paused',
+    taskId: 'task_smoke', title: 'UI 冒烟分身', status: 'running', phase: 'paused', coreMode: 'accelerated',
     health: { adapter: 'ok' }, adapter: { ok: true, version: '3.0.7' }, port: 18000, pid: 1,
     url: 'http://127.0.0.1:18000/?token=t', sessionTitle: '冒烟会话',
     startedAt: Date.now() - 60000, updatedAt: Date.now(), projectBytes: 1024,
@@ -270,6 +300,21 @@ const logUI = JSON.parse(await evalr(`(async () => {
   const warnEmpty = String(document.getElementById('fang-diag-panel')?.textContent || '').includes('暂无警告');
   return JSON.stringify({ first, moreVisible, second, warnEmpty });
 })()`))
+// ── 分身核心开关（P1/D2）：按钮文案 = 当前档位；点击切换 + toast；分身卡 core 徽标 ──
+const coreUI = JSON.parse(await evalr(`(async () => {
+  const btn = () => document.querySelector('[data-btn-id="M-09"]');
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const before = btn()?.textContent || '';
+  btn()?.click();
+  await wait(500);
+  const after = btn()?.textContent || '';
+  const toastApplied = (document.body.textContent || '').includes('重新打开分身 Web 生效');
+  btn()?.click();
+  await wait(500);
+  const restored = btn()?.textContent || '';
+  const badges = document.querySelectorAll('[data-core="accelerated"]').length;
+  return JSON.stringify({ before, after, restored, toastApplied, badges, hasBtn: Boolean(btn()) });
+})()`))
 const cases = [
   { id: 'UI-11', ok: s.buttons.length > 0 && s.buttons.every((b) => b.id), evidence: `${s.buttons.length} buttons` },
   { id: 'UI-06', ok: s.buttons.some((b) => b.state) || s.zones.includes('derived'), evidence: `zones=${s.zones.join(',')}` },
@@ -292,6 +337,11 @@ const cases = [
   { id: 'UI-12-hover', ok: hoverState.length > 0 && hoverState.every((s) => s.display !== 'none' && s.h >= 34 && s.w >= 34), evidence: JSON.stringify(hoverState.slice(0, 4)) },
   { id: 'UI-13-conn', ok: /127\.0\.0\.1:3081/.test(connInfo.before) && connInfo.before.includes('••') && !connInfo.before.includes('smoke-token') && connInfo.after.includes('smoke-token'), evidence: JSON.stringify(connInfo) },
   { id: 'UI-14-log', ok: logUI.first === 100 && logUI.moreVisible === true && logUI.second === 350 && logUI.warnEmpty === true, evidence: JSON.stringify(logUI) },
+  { id: 'FORK-CORE-00', ok: coreUI.hasBtn && /分身Core核心加速引擎：官方/.test(coreUI.before), evidence: coreUI.before },
+  { id: 'FORK-CORE-01', ok: /分身Core核心加速引擎：一键加速/.test(coreUI.after) && coreUI.toastApplied === true, evidence: `${coreUI.after} toast=${coreUI.toastApplied}` },
+  { id: 'FORK-CORE-02', ok: /分身Core核心加速引擎：官方/.test(coreUI.restored), evidence: coreUI.restored },
+  { id: 'FORK-CORE-03', ok: coreUI.badges >= 1, evidence: `badges=${coreUI.badges}` },
+  { id: 'FORK-CORE-04', ok: requests.some((r) => r.method === 'GET' && r.path === '/fang/api/fork-core') && requests.some((r) => r.method === 'POST' && r.path === '/fang/api/fork-core'), evidence: endpoints.join(',') },
 ]
 const failures = cases.filter((c) => !c.ok)
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })

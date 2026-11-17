@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
-// v3.1.35：vendored 契约副本必须是 @twinsearth/dsh-fang-contract@1.1.0 的逐字节副本。
+// v3.1.35：vendored 契约副本必须是 @twinsearth/dsh-fang-contract@1.2.0 的逐字节副本。
 // 接口包升级了而内嵌副本没跟上，会让房主探测到旧方法表——用 hash 钉死。
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -15,10 +15,10 @@ const vendor = JSON.parse(fs.readFileSync(path.join(contractDir, 'VENDOR.json'),
 
 const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 
-test('vendored contract: pinned to @twinsearth/dsh-fang-contract@1.1.0', () => {
+test('vendored contract: pinned to @twinsearth/dsh-fang-contract@1.2.0', () => {
   assert.equal(vendor.package, '@twinsearth/dsh-fang-contract')
-  assert.equal(vendor.version, '1.1.0')
-  assert.equal(vendor.fileCount, 8, '1.1.0 ships 8 source files (1.0.0 had 7)')
+  assert.equal(vendor.version, '1.2.0')
+  assert.equal(vendor.fileCount, 8, '1.2.0 ships 8 source files (same fixed set)')
 })
 
 test('vendored contract: every file matches the pinned sha256 byte-for-byte', () => {

@@ -32,6 +32,7 @@
 import { spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import net from 'node:net'
 import path from 'node:path'
@@ -63,6 +64,17 @@ import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttp
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
+import { normalizeCoreMode, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
+import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
+
+/** Repository root of this plugin (used as the @local/dsh-fang junction source). */
+const FANG_ROOT = (() => {
+  try {
+    return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  } catch {
+    return ''
+  }
+})()
 
 export const name = 'fang-forker'
 export const inject = []
@@ -584,6 +596,7 @@ export function apply(ctx, config) {
     url: stripUrlToken(rec.url),
     homeDir: rec.homeDir ?? '',
     profile: rec.profile ?? '',
+    coreMode: rec.coreMode === 'accelerated' ? 'accelerated' : 'stock',
     profileDir: rec.profileDir ?? '',
     template: rec.template ?? '',
     bufferDir: rec.bufferDir ?? '',
@@ -858,17 +871,26 @@ export function apply(ctx, config) {
     ensureRegistry()
     const homeRaw = String(opts.homeDir ?? '').trim()
     if (!homeRaw) return { ok: false, error: 'no-home-dir' }
+    // Accelerated forks never clone the mother profile: its bundles are @deepseek-ai/*
+    // and its third-party plugins target the stock core. They get a minimal profile.
+    const coreMode = normalizeCoreMode(opts.coreMode ?? cfg.coreMode)
     const templateRaw = String(opts.profileTemplate ?? cfg.profileTemplate ?? '').trim()
-    if (!templateRaw) return { ok: false, error: 'no-profile-template' }
-    const sourceTemplateDir = path.resolve(templateRaw)
-    if (!exists(sourceTemplateDir)) return { ok: false, error: 'profile-template-missing', profileTemplate: sourceTemplateDir }
+    let sourceTemplateDir = ''
+    if (coreMode !== 'accelerated') {
+      if (!templateRaw) return { ok: false, error: 'no-profile-template' }
+      sourceTemplateDir = path.resolve(templateRaw)
+      if (!exists(sourceTemplateDir)) return { ok: false, error: 'profile-template-missing', profileTemplate: sourceTemplateDir }
+    }
 
     const forkId = String(opts.forkId ?? '').trim() || newId('fork')
     const existing = records.get(forkId)
     if (existing && (existing.running || existing.starting)) return { ok: false, error: 'already-running', forkId }
 
     const homeDir = path.resolve(homeRaw)
-    const profile = safeProfile(opts.profile ?? (cleanTemplate ? forkProfileTag : path.basename(sourceTemplateDir)))
+    const defaultProfileName = coreMode === 'accelerated'
+      ? `${forkProfileTag}-accel`
+      : (cleanTemplate ? forkProfileTag : path.basename(sourceTemplateDir))
+    const profile = safeProfile(opts.profile ?? defaultProfileName)
     const profileDir = path.join(homeDir, 'profiles', profile)
     // v3.3.0 主城门禁（新建 profile）：分身/元主运行态首次落盘前必须过路径/磁盘/门禁。
     // 已存在的 profile 走 restart 路径，不重复新建检查。
@@ -892,10 +914,38 @@ export function apply(ctx, config) {
     // 显式 profileTemplate（例如原身 merged/profile）优先：此时不再用 clean template。
     const useCleanTemplate = typeof opts.cleanTemplate === 'boolean' ? opts.cleanTemplate : cleanTemplate
     const nodeModulesSource = String(opts.nodeModulesSource ?? '').trim() || path.join(sourceTemplateDir, 'node_modules')
-    let template = sourceTemplateDir
+    let template = coreMode === 'accelerated' ? '' : sourceTemplateDir
     let cloned = []
+    let accelerated = null
 
-    if (useCleanTemplate) {
+    if (coreMode === 'accelerated') {
+      // D2 hybrid: when a source profile is given (essence-derived fork), sync its
+      // plugin surface (third-party packages + @deepseek-ai/* alias stubs); otherwise
+      // fall back to the minimal accelerated profile.
+      const sourceProfileDir = String(opts.sourceProfileDir ?? '').trim()
+      let accelNodeModules = ''
+      try {
+        const resolvedAccel = resolveAcceleratedCore({ cliPath: cfg.acceleratedCliPath ?? '', env: process.env, fangHome: acceleratedHome })
+        if (resolvedAccel.ok === true && resolvedAccel.cliPath) {
+          accelNodeModules = accelNodeModulesRoot(resolvedAccel.cliPath)
+        }
+      } catch { /* keep minimal profile */ }
+      const written = writeAcceleratedForkProfile({
+        profileDir,
+        fangRoot: FANG_ROOT,
+        homeDir,
+        motherHome: String(process.env.DSH_HOME ?? '').trim(),
+        profileName: profile,
+        sourceProfileDir,
+        accelNodeModules,
+      })
+      if (written.ok !== true) {
+        return { ok: false, error: written.error ?? 'accelerated-profile-failed', detail: JSON.stringify(written) }
+      }
+      warnings.push(...(Array.isArray(written.warning) ? written.warning : []))
+      if (written.overlay?.ok !== true) warnings.push(`accelerated-model-overlay:${written.overlay?.error ?? 'unknown'}`)
+      accelerated = { bundles: written.bundles, overlay: written.overlay, junctions: written.junctions, sync: written.sync ?? null }
+    } else if (useCleanTemplate) {
       // Forker-owned clean template: never written into the mother profile directory.
       const cleanDir = path.join(homeDir, 'templates', forkProfileTag)
       const ensured = ensureTemplate({
@@ -932,7 +982,7 @@ export function apply(ctx, config) {
     // (w2m's shim emits `required: false` in a property schema → the provider rejects
     // every request: "Invalid schema for function 'w2m_report'", v3.1.7 report).
     let nodeModules = null
-    if (exists(nodeModulesSource)) {
+    if (coreMode !== 'accelerated' && exists(nodeModulesSource)) {
       try {
         const mirrored = mirrorModuleTree(nodeModulesSource, path.join(profileDir, 'node_modules'))
         if (mirrored.ok === true) nodeModules = nodeModulesSource
@@ -958,6 +1008,8 @@ export function apply(ctx, config) {
       bufferDir,
       template,
       nodeModules,
+      coreMode,
+      accelerated,
       pid: rec.pid ?? null,
       port: rec.port ?? null,
       url: rec.url ?? null,
@@ -970,8 +1022,8 @@ export function apply(ctx, config) {
     })
     records.set(forkId, rec)
     persist()
-    audit(AUDIT.FORK_CREATED, { forkId, homeDir, profile, taskTitle: rec.taskTitle, cloned, warnings, template })
-    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, warnings, configLock, profileReadonly }
+    audit(AUDIT.FORK_CREATED, { forkId, homeDir, profile, taskTitle: rec.taskTitle, cloned, warnings, template, coreMode })
+    return { ok: true, forkId, homeDir, profileDir, bufferDir, profile, template, cloned, node_modules: nodeModules, coreMode, accelerated, warnings, configLock, profileReadonly }
   }
 
   // ───────────────────────────── spawn ─────────────────────────────
@@ -999,7 +1051,28 @@ export function apply(ctx, config) {
     const forkId = String(opts.forkId ?? '').trim() || newId('fork')
     const homeDir = String(opts.homeDir ?? '').trim()
     const profile = safeProfile(opts.profile ?? 'default')
-    const cliPath = String(opts.cliPath ?? (cfg.coreMode === 'accelerated' && cfg.acceleratedCliPath ? cfg.acceleratedCliPath : cfg.cliPath) ?? '').trim()
+    // Core selection is explicit: opts.coreMode (essence runtime passes 'stock') wins over the
+    // plugin config. An accelerated fork NEVER falls back to the stock CLI — missing install is
+    // a hard error so the fork cannot silently run unaccelerated.
+    const coreMode = normalizeCoreMode(opts.coreMode ?? cfg.coreMode)
+    const acceleratedHome = String(layout?.fangHome ?? '').trim()
+      || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
+    let cliPath = ''
+    let acceleratedSource = null
+    if (coreMode === 'accelerated') {
+      const resolved = resolveAcceleratedCore({
+        cliPath: String(opts.cliPath ?? cfg.acceleratedCliPath ?? ''),
+        env: process.env,
+        fangHome: acceleratedHome,
+      })
+      if (resolved.ok !== true) {
+        return { forkId, ok: false, error: 'accelerated-cli-missing', coreMode, searched: resolved.searched }
+      }
+      cliPath = resolved.cliPath
+      acceleratedSource = resolved.source
+    } else {
+      cliPath = String(opts.cliPath ?? cfg.cliPath ?? '').trim()
+    }
     const timeoutMs = Math.max(1, Math.floor(Number(opts.timeoutMs ?? cfg.startTimeoutMs) || DEFAULTS.startTimeoutMs))
     const maxLogLines = Math.max(1, Math.floor(Number(cfg.maxLogLines) || DEFAULTS.maxLogLines))
 
@@ -1032,6 +1105,8 @@ export function apply(ctx, config) {
       startedAt: nowMs(),
       ready: false,
       cliPath,
+      coreMode,
+      acceleratedSource,
       crashCount: rec.crashCount ?? 0,
       restartCount: rec.restartCount ?? 0,
       restartScheduledAt: null,
@@ -1069,23 +1144,29 @@ export function apply(ctx, config) {
     // the per-entry mirror. This is what makes the fork host resolve the installation's
     // `@deepseek-ai/*` packages for profile plugins again; without it every agent request in
     // the fork is rejected by the provider (w2m offline shim → invalid tool schema).
-    try {
-      const repaired = ensureModuleMirror(path.join(rec.profileDir, 'node_modules'))
-      rec.nodeModulesMirror = {
-        changed: repaired.changed === true,
-        ok: repaired.ok !== false,
-        source: repaired.source ?? null,
-        links: Array.isArray(repaired.links) ? repaired.links.length : 0,
-        error: repaired.error ?? null,
+    // Accelerated forks own a hand-built node_modules (fang + child junctions); the stock
+    // mirror repair would point them back at the official installation, so skip it.
+    if (rec.coreMode === 'accelerated') {
+      rec.nodeModulesMirror = { ok: true, skipped: 'accelerated-core', changed: false, source: null, links: 0, error: null }
+    } else {
+      try {
+        const repaired = ensureModuleMirror(path.join(rec.profileDir, 'node_modules'))
+        rec.nodeModulesMirror = {
+          changed: repaired.changed === true,
+          ok: repaired.ok !== false,
+          source: repaired.source ?? null,
+          links: Array.isArray(repaired.links) ? repaired.links.length : 0,
+          error: repaired.error ?? null,
+        }
+      } catch (e) {
+        rec.nodeModulesMirror = { ok: false, changed: false, error: msgOf(e) }
       }
-    } catch (e) {
-      rec.nodeModulesMirror = { ok: false, changed: false, error: msgOf(e) }
     }
     // v3.1.12：默认第三方插件种子。install=只安装；activate=安装并激活（写入 bundles）。
     // 种子安装在独立 seed home（dsh 自带 pnpm），模块以 hardlink 合并进分身 node_modules；
     // 同一指纹只装一次。失败不阻塞分身启动，但结果保留在 rec.forkSeed 供 UI 诊断。
     rec.forkSeed = null
-    if (cfg.forkSeed?.enabled !== false && !String(profile).startsWith('essence-') && process.env.DSH_FANG_FORK_SEED !== '0') {
+    if (cfg.forkSeed?.enabled !== false && rec.coreMode !== 'accelerated' && !String(profile).startsWith('essence-') && process.env.DSH_FANG_FORK_SEED !== '0') {
       const seedRoot = path.join(path.dirname(path.resolve(homeDir)), '.plugin-seed')
       try { setProfileConfigReadonly(rec.profileDir, false) } catch { /* ignore */ }
       try {
@@ -1179,7 +1260,9 @@ export function apply(ctx, config) {
       // window for the native directory chooser; pin the browse interaction through a
       // launcher overlay so "select workspace" works inside every fork Web UI.
       const patchPaths = []
-      const headlessOverlay = writeHeadlessPickerOverlay(rec.profileDir, { cliPath })
+      // The stock headless-picker overlay mounts @deepseek-ai/* rows; the accelerated
+      // core has no such packages, so it is never applied there.
+      const headlessOverlay = coreMode === 'accelerated' ? null : writeHeadlessPickerOverlay(rec.profileDir, { cliPath })
       if (headlessOverlay) patchPaths.push(headlessOverlay)
       const spec = buildLaunchSpec({ cliPath, profile, port: expectedPort, patchPaths })
       const env = buildForkChildEnv(process.env, {
@@ -1187,6 +1270,7 @@ export function apply(ctx, config) {
         // Fork identity is injected by the forker (a fork must never be able to call itself mother).
         DSH_FANG_ROLE: 'fork',
         DSH_FANG_TASK_ID: forkId,
+        DSH_FANG_CORE: coreMode,
         ...(opts.env ?? {}),
         // v3：Adapter Bearer token（PROTOCOL-V3 §3）。放在 opts.env 之后，母体生成的 token 优先。
         DSH_ADAPTER_TOKEN: rec.adapterToken,
@@ -1564,6 +1648,39 @@ export function apply(ctx, config) {
       runtimeSupervise = enabled === true
       try { audit(AUDIT.FORK_SUPERVISION, { enabled: runtimeSupervise }) } catch { /* audit optional */ }
       return { ok: true, enabled: runtimeSupervise }
+    },
+    /**
+     * Read-only accelerated-core view for the mother panel route (P0).
+     * It never starts anything: only reports the configured default, the install
+     * state, and how many forks currently run on each core.
+     */
+    coreStatus() {
+      const acceleratedHome = String(layout?.fangHome ?? '').trim()
+        || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
+      const accelerated = acceleratedCoreInfo({ cliPath: cfg.acceleratedCliPath ?? '', fangHome: acceleratedHome })
+      const counts = { stock: 0, accelerated: 0 }
+      for (const rec of records.values()) {
+        const mode = normalizeCoreMode(rec.coreMode)
+        counts[mode] = (counts[mode] ?? 0) + 1
+      }
+      return {
+        mode: normalizeCoreMode(cfg.coreMode),
+        installable: true,
+        accelerated: {
+          installed: accelerated.installed,
+          version: accelerated.version,
+          cliPath: accelerated.cliPath,
+          source: accelerated.source,
+          error: accelerated.error,
+          searched: accelerated.searched,
+          installedAt: accelerated.installedAt,
+          sizeBytes: accelerated.sizeBytes ?? 0,
+          limitBytes: accelerated.limitBytes ?? null,
+          requiresConfirmation: accelerated.requiresConfirmation === true,
+          root: accelerated.layout?.root ?? null,
+        },
+        forks: counts,
+      }
     },
   }
 

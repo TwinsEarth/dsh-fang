@@ -42,12 +42,21 @@ import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { openDecisionEventStream } from '../lib/decision-events.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
-import { acceleratedWebStatus, startAcceleratedWeb, stopAcceleratedWeb } from '../lib/accelerated-web.mjs'
+// P0: the former "accelerated Web sidecar" (a second mother Web) was retired — the
+// accelerator serves fork Web UIs only. See /fang/api/fork-core.
+import { readForkCoreSettings, resolveForkCoreState, writeForkCoreSettings } from '../lib/fork-core-settings.mjs'
+import {
+  capabilityCatalog, checkDelegation, createDelegationGate, DELEGATE_ERROR, delegationAuditRecord,
+  DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
+} from '../lib/contract-delegation.mjs'
+import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
+import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
+import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
 import { fileURLToPath } from 'node:url'
 import {
-  createContractServer, startFileContractServer,
+  createContractServer, startFileContractServer, createResponse,
   createRelayStore, relayHandlers,               // v3.1.35：contract 1.1 回流接口
   METHODS as CONTRACT_METHODS, CONTRACT_VERSION,
 } from '../contract/index.js'
@@ -225,6 +234,15 @@ export const Config = z.object({
     token: z.string().default('').description('契约 HTTP Bearer token（留空 = HTTP 契约端点禁用；不写日志/状态）'),
     fileDir: z.string().default('').description('可选：文件 outbox 兜底目录（同机 fallback；留空 = 关闭）'),
     pathPrefix: z.string().default('/fang/api/contract').description('契约路由前缀'),
+    // B 契约委托：加速分身 → 母体 的无头能力委托（默认只读白名单）
+    delegate: z.object({
+      enabled: z.boolean().default(true).description('是否允许委托调用（默认开启；仍受 allow 白名单约束）'),
+      allow: z.array(z.string()).default([...DEFAULT_READ_ALLOW]).description('允许委托的能力方法名；默认只读白名单'),
+      maxPayloadBytes: z.number().min(1024).max(16 * 1024 * 1024).default(64 * 1024),
+      readTimeoutMs: z.number().min(100).max(120000).default(5000),
+      writeTimeoutMs: z.number().min(100).max(600000).default(30000),
+      maxConcurrent: z.number().min(1).max(64).default(4).description('委托并发上限；超过立即 contract-rate-limited（fail-closed，不排队）'),
+    }).default({}),
   }).default({}),
 })
 
@@ -338,6 +356,61 @@ export function apply(ctx, config) {
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
+  // P1：分身核心开关（只影响新派生/重启的分身；母体与元主不读它）。
+  const forkCoreSettings = () => readForkCoreSettings(layout.dataDir)
+  /** 当前开关期望的分身核心。 */
+  const desiredForkCoreMode = () => normalizeCoreMode(forkCoreSettings().mode)
+  /**
+   * 开关不是热更新：重新打开（restore/autostart）分身时才应用。
+   * 分身是生产盘——每次打开本来就会从模板重放 profile 配置，因此换核等价于重放一次：
+   *   official ←→ accelerated 需要重新 provision（profile 形状不同），会话目录不动。
+   * @returns {{ok:boolean, switched:boolean, coreMode:string, error?:string, detail?:string}}
+   */
+  const syncForkCoreMode = async (task) => {
+    const desired = desiredForkCoreMode()
+    const current = normalizeCoreMode(task?.coreMode)
+    if (!task || desired === current) return { ok: true, switched: false, coreMode: current || desired }
+    const f = forker()
+    if (!f || typeof f.provision !== 'function') return { ok: false, switched: false, coreMode: current, error: 'forker-unavailable' }
+    let provisioned
+    if (desired === 'accelerated') {
+      // 原身派生的分身：重新打开换加速核时同步原身插件面（与 createTask 一致）。
+      let sourceProfileDir = ''
+      if (task.sourceEssence?.id) {
+        try { sourceProfileDir = essenceManager.mergedProfileDir(task.sourceEssence.id) } catch { sourceProfileDir = '' }
+      }
+      provisioned = await f.provision({
+        forkId: task.taskId,
+        taskTitle: task.title,
+        homeDir: task.homeDir,
+        profile: task.profile,
+        coreMode: 'accelerated',
+        ...(sourceProfileDir ? { sourceProfileDir } : {}),
+      })
+    } else {
+      provisioned = await f.provision({
+        forkId: task.taskId,
+        taskTitle: task.title,
+        homeDir: task.homeDir,
+        profile: task.profile,
+        profileTemplate: templateDir(),
+        cleanTemplate: true,
+        coreMode: 'stock',
+        nodeModulesSource: path.join(templateDir(), 'node_modules'),
+      })
+    }
+    if (!provisioned || provisioned.ok === false) {
+      return { ok: false, switched: false, coreMode: current, error: desired === 'accelerated' ? 'accelerated-provision-failed' : 'stock-provision-failed', detail: provisioned?.error }
+    }
+    task.prevCoreMode = current
+    task.coreMode = desired
+    if (provisioned?.accelerated?.sync) task.acceleratedSync = provisioned.accelerated.sync
+    task.updatedAt = nowMs()
+    persist()
+    try { audit('fang/fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* audit optional */ }
+    try { bus.emit('fang/fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* bus optional */ }
+    return { ok: true, switched: true, coreMode: desired }
+  }
   const branchStore = new BranchStore(layout.dataDir)
   const composerJournal = new ComposerJournal(layout.dataDir)
   // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
@@ -563,6 +636,9 @@ export function apply(ctx, config) {
     return {
       taskId: t.taskId,
       forkId: t.taskId,
+      coreMode: t.coreMode === 'accelerated' ? 'accelerated' : 'stock',
+      // D2：加速分身的插件面同步报告（映射成功/不支持清单/被复制插件），无则不出现。
+      acceleratedSync: t.acceleratedSync ?? null,
       title: t.title,
       taskTitle: t.title,
       status,
@@ -923,6 +999,14 @@ export function apply(ctx, config) {
       tasks.set(taskId, task)
       persist()
 
+      // P1：核心选择只作用于分身。显式 input.coreMode 优先，否则读面板开关。
+      const coreSettings = forkCoreSettings()
+      const coreMode = normalizeCoreMode(input.coreMode ?? coreSettings.mode)
+      // 会话策略：加速核默认只新会话；`copy` 允许把旧会话复制进分身（新副本，绝不原地挂载）。
+      const allowSessionImport = coreMode !== 'accelerated' || coreSettings.sessionMode === 'copy'
+      task.coreMode = coreMode
+      task.sessionMode = coreSettings.sessionMode
+
       try {
         const provisioned = await f.provision({
           forkId: taskId,
@@ -930,7 +1014,9 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           profileTemplate,
-          // 从原身派生：配置必须真的来自原身 merged（不能被 clean template 覆盖）。
+          coreMode,
+          // 加速档 + 原身派生：同步原身插件面（第三方包复制 + @deepseek-ai/* 别名桩包）。
+          ...(coreMode === 'accelerated' && sourceEssence ? { sourceProfileDir: profileTemplate } : {}),
           // node_modules：优先元主自己的模块树；默认元宝/新建原身可能尚未物化 node_modules，
           // 此时回退母体模块树，保证分身仍能解析 @local/dsh-fang（否则是僵尸分身）。
           ...(sourceEssence ? {
@@ -946,6 +1032,11 @@ export function apply(ctx, config) {
           task.status = TASK_STATUS.FAILED
           persist()
           return { ok: false, error: 'provision-failed', detail: provisioned.error }
+        }
+        // D2：记录加速分身的插件面同步结果（哪些映射成功、哪些不支持、哪些插件被复制）。
+        if (provisioned?.accelerated?.sync) {
+          task.acceleratedSync = provisioned.accelerated.sync
+          persist()
         }
         audit(AUDIT.FORK_CREATED, { taskId, forkId: taskId, title, homeDir, profile, templateFallback })
 
@@ -988,13 +1079,19 @@ export function apply(ctx, config) {
           }
         }
 
-        if (input.importSession && typeof input.importSession === 'object') {
+        if (!allowSessionImport) {
+          task.importedSession = { ok: false, reason: 'accelerated-new-session' }
+          audit(AUDIT.FORK_CREATED + '-import-skipped', { taskId, reason: 'accelerated-new-session', coreMode })
+          persist()
+        } else if (input.importSession && typeof input.importSession === 'object') {
           const importSpec = input.importSession
+          // 加速分身（sessionMode:'copy'）：旧会话只以**复制副本**进入分身 home，绝不原地读原会话。
+          const copyMode = coreMode === 'accelerated'
           // 新入口：只给 sessionId（元主栏“派生”按钮）→ 由会话目录整目录复制进分身。
           if (importSpec.sessionId && !importSpec.sourceFile) {
             try {
               const imported = importSessionsInto(homeDir, [importSpec.sessionId])
-              task.importedSession = imported[0] ? { ok: true, ...imported[0] } : { ok: false, reason: 'not-imported' }
+              task.importedSession = imported[0] ? { ok: true, ...imported[0], copied: true, source: 'copy' } : { ok: false, reason: 'not-imported' }
               audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
             } catch (e) {
               task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
@@ -1031,14 +1128,21 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           cliPath: cliPath(),
+          coreMode,
           env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir },
         })
         if (!started || started.ok === false) {
           task.status = TASK_STATUS.FAILED
+          task.lastError = started?.error ?? 'spawn-failed'
           persist()
-          audit(AUDIT.FORK_CRASHED, { taskId, error: started?.error ?? 'spawn-failed' })
+          audit(AUDIT.FORK_CRASHED, { taskId, error: started?.error ?? 'spawn-failed', coreMode })
           bus.emit('fang/task-failed', { taskId, error: started?.error ?? 'spawn-failed' })
-          return { ok: false, error: 'spawn-failed', detail: started?.error ?? 'unknown' }
+          return {
+            ok: false,
+            error: started?.error === 'accelerated-cli-missing' ? 'accelerated-cli-missing' : 'spawn-failed',
+            detail: started?.error ?? 'unknown',
+            ...(Array.isArray(started?.searched) ? { searched: started.searched } : {}),
+          }
         }
         task.status = TASK_STATUS.RUNNING
         task.pid = started.pid ?? null
@@ -1658,16 +1762,31 @@ export function apply(ctx, config) {
       // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
       let sessionGuard = null
       try { sessionGuard = applyForkSessionGuard(task) } catch { sessionGuard = { ok: false } }
+      // 开关不是热更新：重新打开分身时按当前开关换核（重新 provision profile；会话目录不动）。
+      const coreSync = await syncForkCoreMode(task)
+      if (coreSync.ok !== true) {
+        task.status = TASK_STATUS.FAILED
+        persist()
+        audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: coreSync.error })
+        return { ok: false, error: coreSync.error, detail: coreSync.detail ?? null, taskId: id }
+      }
       const started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
         profile: task.profile,
         cliPath: cliPath(),
+        coreMode: coreSync.coreMode,
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
       })
       if (!started || started.ok === false) {
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
-        return { ok: false, error: 'spawn-failed', detail: started?.error ?? 'unknown', taskId: id }
+        return {
+          ok: false,
+          error: started?.error === 'accelerated-cli-missing' ? 'accelerated-cli-missing' : 'spawn-failed',
+          detail: started?.error ?? 'unknown',
+          taskId: id,
+          ...(Array.isArray(started?.searched) ? { searched: started.searched } : {}),
+        }
       }
       task.status = TASK_STATUS.RUNNING
       task.archivedAt = null
@@ -1731,11 +1850,18 @@ export function apply(ctx, config) {
         persist()
         let started
         try {
+          const coreSync = await syncForkCoreMode(task)
+          if (coreSync.ok !== true) {
+            report.failed.push({ taskId: id, error: coreSync.error })
+            audit(AUDIT.FORK_CRASHED, { taskId: id, error: coreSync.error, reason: 'autostart-core-switch' })
+            continue
+          }
           started = await f.spawn({
             forkId: id,
             homeDir: task.homeDir,
             profile: task.profile,
             cliPath: cliPath(),
+            coreMode: coreSync.coreMode,
             env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
           })
         } catch (error) {
@@ -1952,6 +2078,9 @@ export function apply(ctx, config) {
     role: gate.role,
     instanceId: `fang-${gate.role}-${process.pid}`,
   })
+  const delegationCfg = normalizeDelegationConfig(cfg.contract?.delegate ?? {})
+  const delegationGate = createDelegationGate({ maxConcurrent: delegationCfg.maxConcurrent })
+  const delegateUnavailable = (message, code = DELEGATE_ERROR.UNAVAILABLE) => { const error = new Error(message); error.code = code; throw error }
   const contractServer = createContractServer({
     role: gate.role,
     instanceId: `fang-${gate.role}-${process.pid}`,
@@ -1961,7 +2090,7 @@ export function apply(ctx, config) {
       [CONTRACT_METHODS.FORK_SPAWN]: async (params) => {
         const forker = contractService('forker', 'spawn')
         const input = params && typeof params === 'object' ? params : {}
-        return await forker.spawn({ ...input, env: contractEnv(input.env) })
+        return await forker.spawn({ ...input, coreMode: normalizeCoreMode(input.coreMode ?? forkCoreSettings().mode), env: contractEnv(input.env) })
       },
       [CONTRACT_METHODS.FORK_STOP]: async (params) => {
         const forker = contractService('forker', 'stop', false)
@@ -1978,9 +2107,117 @@ export function apply(ctx, config) {
       [CONTRACT_METHODS.SESSION_LIST]: async (params) => {
         const catalog = contractService('sessionCatalog', 'list', false)
         if (catalog) return await catalog.list(params ?? {})
-        const error = new Error('fang session catalog is unavailable'); error.code = 'fang-service-unavailable'; throw error
+        return delegateUnavailable('fang session catalog is unavailable', 'fang-service-unavailable')
       },
       [CONTRACT_METHODS.ORCHESTRATOR_STATUS]: async () => service.status(),
+      // ── B 委托：只读能力（白名单在 invoke 路由统一校验；这里只做能力实现）──
+      [CONTRACT_METHODS.CAPABILITY_LIST]: async () => ({
+        enabled: true,
+        contractVersion: CONTRACT_VERSION,
+        capabilities: capabilityCatalog(delegationCfg.allow),
+        allow: delegationCfg.allow,
+        limits: { maxPayloadBytes: delegationCfg.maxPayloadBytes, readTimeoutMs: delegationCfg.readTimeoutMs, writeTimeoutMs: delegationCfg.writeTimeoutMs },
+      }),
+      'fang.session.events': async (params) => {
+        const catalog = contractService('sessionCatalog', 'readHead', false)
+        if (!catalog) return delegateUnavailable('fang session catalog is unavailable', 'fang-service-unavailable')
+        const sessionId = String(params?.sessionId ?? '').trim()
+        if (!sessionId) {
+          const error = new Error('sessionId is required')
+          error.code = DELEGATE_ERROR.INVALID
+          throw error
+        }
+        const limit = Math.min(200, Math.max(1, Number(params?.limit) || 50))
+        const maxChars = Math.min(256 * 1024, Math.max(0, Number(params?.maxChars) || 64 * 1024))
+        const head = await catalog.readHead(sessionId, { maxLines: limit, maxChars })
+        if (!head || head.ok === false) return head ?? delegateUnavailable('session read failed', 'fang-service-unavailable')
+        return {
+          sessionId: head.sessionId ?? sessionId,
+          events: (Array.isArray(head.lines) ? head.lines : []).slice(0, limit).map((line, index) => ({ index, line })),
+          redactions: head.redactions ?? 0,
+          bytesRead: head.bytesRead ?? 0,
+          degraded: Array.isArray(head.degraded) ? head.degraded : [],
+        }
+      },
+      // B-6：LSP 工具委托（首批）。只读子命令放行；写类子命令必须审批——委托层直接拒绝，不产生副作用。
+      'fang.tool.invoke': async (params) => {
+        const validated = validateToolInvoke(params)
+        if (validated.ok !== true) {
+          const error = new Error(validated.message)
+          error.code = validated.error ?? DELEGATE_ERROR.INVALID
+          throw error
+        }
+        if (validated.kind === 'write') {
+          const error = new Error('lsp write actions require fang approval; no side effect performed')
+          error.code = DELEGATE_ERROR.APPROVAL_REQUIRED
+          error.detail = { tool: 'lsp', action: validated.action, approval: 'required' }
+          throw error
+        }
+        if (process.env.FANG_CONTRACT_TEST_HOOKS === '1') {
+          return {
+            tool: 'lsp',
+            action: validated.action,
+            file: validated.file,
+            ok: true,
+            provider: 'test-hook',
+            diagnostics: [{ file: validated.file, line: validated.line ?? 1, character: validated.character ?? 1, severity: 'info', message: 'stub diagnostics (test hook)' }],
+          }
+        }
+        return delegateUnavailable('lsp tool provider is unavailable on mother')
+      },
+      // B-7：chat.import。dryRun（默认）确定性预览；真实导入必须审批——委托层拒绝执行、零副作用。
+      'fang.chat.import': async (params) => {
+        const validated = validateChatImport(params)
+        if (validated.ok !== true) {
+          const error = new Error(validated.message)
+          error.code = validated.error ?? DELEGATE_ERROR.INVALID
+          throw error
+        }
+        const catalog = contractService('sessionCatalog', 'getSession', false)
+        let found = false
+        let reason = null
+        if (catalog && typeof catalog.getSession === 'function') {
+          const result = catalog.getSession(validated.sessionId)
+          found = result?.ok === true
+          reason = found ? null : (result?.code ?? result?.error ?? 'session-not-found')
+        } else {
+          reason = 'session-catalog-unavailable'
+        }
+        const preview = buildChatImportDryRun({ source: validated.source, sessionId: validated.sessionId, found, reason })
+        if (validated.dryRun === true) return preview
+        const error = new Error('chat import requires fang approval; no side effect performed')
+        error.code = DELEGATE_ERROR.APPROVAL_REQUIRED
+        error.detail = { source: validated.source, sessionId: validated.sessionId, approval: 'required', dryRun: preview }
+        throw error
+      },
+      // e2e 专用测试缝（仅 FANG_CONTRACT_TEST_HOOKS=1 时注册；生产不出现；且必须 delegate=true）
+      ...(process.env.FANG_CONTRACT_TEST_HOOKS === '1' ? {
+        'fang.test.sleep': async (params, envelope) => {
+          if (envelope?.meta?.delegate !== true) {
+            const error = new Error('test hook requires delegated invocation')
+            error.code = DELEGATE_ERROR.UNSUPPORTED
+            throw error
+          }
+          const ms = Math.min(10000, Math.max(0, Number(params?.ms) || 100))
+          await sleep(ms)
+          return { sleptMs: ms }
+        },
+      } : {}),
+      [CONTRACT_METHODS.DECISION_LIST]: async (params) => {
+        const center = contractService('decisionCenter', 'snapshot', false)
+        if (!center || typeof center.snapshot !== 'function') return delegateUnavailable('fang decision center is unavailable')
+        const snapshot = center.snapshot()
+        const items = Array.isArray(snapshot?.tickets) ? snapshot.tickets : (Array.isArray(snapshot?.items) ? snapshot.items : [])
+        const limit = Math.min(50, Math.max(1, Number(params?.limit) || 20))
+        return { items: items.slice(0, limit).map((t) => ({ id: t.id, level: t.level, status: t.status, title: t.title, priority: t.priority ?? null, risk: t.risk ?? null, at: t.createdAt ?? t.at ?? null })), total: items.length }
+      },
+      [CONTRACT_METHODS.APPROVALS_LIST]: async (params) => {
+        const approver = contractService('approver', 'pending', false)
+        if (!approver) return delegateUnavailable('fang approver is unavailable')
+        const pending = typeof approver.pending === 'function' ? approver.pending() : []
+        const limit = Math.min(50, Math.max(1, Number(params?.limit) || 20))
+        return { items: (Array.isArray(pending) ? pending : []).slice(0, limit).map((a) => ({ id: a.id, kind: a.kind, risk: a.risk, state: a.state, title: a.title, at: a.createdAt ?? a.at ?? null })) }
+      },
     },
   })
   try { ctx.effect(() => ctx.provide(SERVICE.contract, contractServer)) } catch { /* fake ctx */ }
@@ -2530,6 +2767,8 @@ export function apply(ctx, config) {
         // 否则官方/用户元主打开后看不到本机插件列表（v3.0.10 实测）。
         cleanTemplate: false,
         nodeModulesSource: essenceModules,
+        // P0 硬约束：加速核只服务分身 Web；元主运行态始终原厂 core。
+        coreMode: 'stock',
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
       // 历史版本把生产盘锁写进了 essence-runtime；配置实例必须能管理插件，升级后清掉。
@@ -2564,6 +2803,8 @@ export function apply(ctx, config) {
         homeDir,
         profile: 'essence-runtime',
         cliPath: cliPath(),
+        // P0 硬约束：即使 forker 默认切到 accelerated，元主运行态也只跑原厂 core。
+        coreMode: 'stock',
         // v3.1.16：原身运行态同样需要母体 dataDir，房主 Router 才能零配置推导
         // 契约 file 桥（contract-outbox）；普通分身在 846/1461/1534 行已有同名注入。
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir },
@@ -3079,6 +3320,41 @@ export function apply(ctx, config) {
           if (!contractAuthorized(req)) return json(res, 401, { ok: false, code: 'contract-unauthorized' })
           const body = await readBody(req)
           if (!body || typeof body !== 'object') return json(res, 400, { ok: false, code: 'invalid-envelope' })
+          // B 委托：调用方以 meta.delegate=true 声明「委托调用」，白名单默认拒绝；
+          // 未声明 delegate 的旧调用方保持既有语义（fork.spawn/decision.* 等不回归）。
+          const delegated = body?.meta?.delegate === true
+          const source = String(body?.meta?.source ?? body?.meta?.instanceId ?? '').slice(0, 120)
+          if (delegated) {
+            const decision = checkDelegation({ method: body?.method, allow: delegationCfg.allow, config: delegationCfg })
+            if (decision.ok !== true) {
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rejected', error: decision.error, latencyMs: 0 })) } catch { /* audit optional */ }
+              return json(res, 200, createResponse({ id: body?.id, error: { code: decision.error, message: decision.message ?? decision.error } }))
+            }
+            if (exceedPayloadLimit(body?.params, delegationCfg.maxPayloadBytes)) {
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rejected', error: DELEGATE_ERROR.INVALID, latencyMs: 0 })) } catch { /* audit optional */ }
+              return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.INVALID, message: 'delegated payload exceeds maxPayloadBytes' } }))
+            }
+            const slot = delegationGate.tryAcquire()
+            if (slot.ok !== true) {
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rate-limited', error: DELEGATE_ERROR.RATE_LIMITED, latencyMs: 0 })) } catch { /* audit optional */ }
+              return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.RATE_LIMITED, message: `delegation concurrency limit reached (max ${delegationCfg.maxConcurrent})` } }))
+            }
+            try {
+              const run = await runDelegated(() => contractServer.invoke(body), { timeoutMs: delegationCfg.readTimeoutMs })
+              const errorCode = run.ok ? null : (run.error ?? DELEGATE_ERROR.UNAVAILABLE)
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: run.ok ? 'ok' : 'error', error: errorCode, latencyMs: run.latencyMs })) } catch { /* audit optional */ }
+              if (run.ok !== true) {
+                return json(res, 200, createResponse({ id: body?.id, error: { code: errorCode, message: run.message ?? errorCode } }))
+              }
+              // 委托模式统一错误码：服务不可用 → contract-unavailable（不泄露内部 code）。
+              if (run.value?.ok === false && run.value?.error?.code === 'fang-service-unavailable') {
+                return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.UNAVAILABLE, message: 'capability service unavailable on mother' } }))
+              }
+              return json(res, 200, run.value)
+            } finally {
+              delegationGate.release()
+            }
+          }
           const out = await contractServer.invoke(body)
           return json(res, 200, out)
         })
@@ -3093,26 +3369,62 @@ export function apply(ctx, config) {
         })(),
         }))
       }
-      // 加速版 Web sidecar：原厂进程不动；启动/停止/查看第二个 @twinsearth DSH Web。
-      const acceleratedHome = String(cfg.accelerated?.home ?? '').trim() || String(process.env.DSH_HOME ?? '').trim()
-      route('GET', `${prefix}/api/accelerated/status`, async (req, res) => {
-        if (cfg.accelerated?.enabled !== true) return json(res, 200, { ok: true, enabled: false, running: false, state: null })
-        return json(res, 200, await acceleratedWebStatus({ dataDir: layout.dataDir }))
-      })
-      route('POST', `${prefix}/api/accelerated/start`, async (req, res) => {
-        if (cfg.accelerated?.enabled !== true) return json(res, 403, { ok: false, error: 'accelerated-disabled' })
-        const result = await startAcceleratedWeb({
-          dataDir: layout.dataDir,
-          cliPath: cfg.accelerated?.cliPath ?? '',
-          profile: cfg.accelerated?.profile ?? 'fang-accelerated',
-          port: cfg.accelerated?.port ?? 18080,
-          home: acceleratedHome,
-        })
-        return json(res, result.ok ? 200 : 502, result)
-      })
-      route('POST', `${prefix}/api/accelerated/stop`, async (req, res) => {
-        if (cfg.accelerated?.enabled !== true) return json(res, 403, { ok: false, error: 'accelerated-disabled' })
-        return json(res, 200, await stopAcceleratedWeb({ dataDir: layout.dataDir }))
+      // 分身核心开关（P1）：加速引擎只服务分身 Web；母体/元主始终原厂。
+      // 持久化在 <dataDir>/fork-core.json，只影响新派生/重启的分身。
+      const forkCoreView = () => {
+        const f = safeGet(SERVICE.forker)
+        const base = typeof f?.coreStatus === 'function'
+          ? f.coreStatus()
+          : { installable: true, accelerated: { installed: false, version: null, error: 'forker-unavailable' }, forks: {} }
+        const settings = forkCoreSettings()
+        const installed = base?.accelerated?.installed === true
+        const state = resolveForkCoreState(settings, { installed })
+        return {
+          ok: true,
+          mode: state.mode,
+          sessionMode: state.sessionMode,
+          effectiveMode: state.effectiveMode,
+          blocked: state.blocked,
+          accelerated: base?.accelerated ?? { installed: false, version: null },
+          forks: base?.forks ?? {},
+          essence: 'stock',
+          updatedAt: settings.updatedAt,
+          updatedBy: settings.updatedBy,
+        }
+      }
+      // 同一路径不能 register 两次（webServer 以 path 为键，第二次会抛错并让后续路由静默丢失）。
+      routeMethods(`${prefix}/api/fork-core`, {
+        GET: (req, res) => json(res, 200, forkCoreView()),
+        POST: async (req, res) => {
+        const body = await readBody(req)
+        if (body?.mode !== undefined && !['stock', 'accelerated'].includes(String(body.mode))) {
+          return json(res, 400, { ok: false, error: 'invalid-fork-core-mode' })
+        }
+        if (body?.sessionMode !== undefined && !['new', 'copy', 'inherit'].includes(String(body.sessionMode))) {
+          return json(res, 400, { ok: false, error: 'invalid-fork-session-mode' })
+        }
+        // 服务端同样 fail-closed：未安装加速核时拒绝切到加速档，且绝不写设置（不改档、不静默降级）。
+        if (String(body?.mode ?? '') === 'accelerated') {
+          const view = forkCoreView()
+          if (view.accelerated?.installed !== true) {
+            return json(res, 409, {
+              ok: false,
+              error: 'accelerated-cli-missing',
+              unchanged: true,
+              detail: '加速核未安装：设置未修改',
+              accelerated: view.accelerated,
+              searched: view.accelerated?.searched ?? [],
+            })
+          }
+        }
+        const written = writeForkCoreSettings(layout.dataDir, {
+          ...(body?.mode !== undefined ? { mode: String(body.mode) } : {}),
+          ...(body?.sessionMode !== undefined ? { sessionMode: String(body.sessionMode) } : {}),
+        }, { by: String(body?.by ?? 'panel').slice(0, 120) })
+        if (written.ok !== true) return json(res, 500, { ok: false, error: written.error ?? 'write-failed' })
+        try { audit('fork-core-settings', { mode: written.settings.mode, sessionMode: written.settings.sessionMode }) } catch { /* audit optional */ }
+        return json(res, 200, { ...forkCoreView(), changed: true })
+        },
       })
       // 重启守卫 / supervisor 契约（只读）。不触发重启；写操作仍只走审批 + 外部 supervisor。
       route('GET', `${prefix}/api/restart`, (req, res) => {

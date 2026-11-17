@@ -22,6 +22,7 @@ import vm from 'node:vm'
 import zlib from 'node:zlib'
 
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
+import { CONTRACT_VERSION as E2E_CONTRACT_VERSION, createEnvelope } from '../src/contract/index.js'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const KEEP = process.argv.includes('--keep')
@@ -114,7 +115,10 @@ function makeProfile(homeRoot) {
   // explicitly enables it so the journal/queue recovery API is exercised; the
   // default-off + 503 path is covered by unit tests.
   fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'),
-    '- id: fang-queue-journal\n  disabled: false\n')
+    '- id: fang-queue-journal\n  disabled: false\n' +
+    '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n' +
+    '      delegate:\n        readTimeoutMs: 100\n        maxConcurrent: 2\n        allow:\n' +
+    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.chat.import\n          - fang.test.sleep\n")
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
@@ -145,7 +149,7 @@ async function main() {
   let child = null
   let stdout = ''
   let stderr = ''
-  const env = { ...process.env, DSH_HOME: homeRoot, DSH_PROFILE: 'e2e', DSH_PROFILE_DIR: profileDir }
+  const env = { ...process.env, DSH_HOME: homeRoot, DSH_PROFILE: 'e2e', DSH_PROFILE_DIR: profileDir, FANG_CONTRACT_TEST_HOOKS: '1' }
   delete env.DSH_FANG_ROLE
   delete env.DSH_FANG_TASK_ID
 
@@ -247,6 +251,135 @@ async function main() {
     check('GET /fang/api/sync/status 200', syncStatus.status === 200 && syncStatus.body?.ok === true, JSON.stringify(syncStatus.body ?? null).slice(0, 160))
     const bridgeStatus = await api('/fang/api/bridge/status')
     check('GET /fang/api/bridge/status fail-closed', bridgeStatus.status === 200 && bridgeStatus.body?.ok === false && bridgeStatus.body?.code === 'bridge-unavailable', JSON.stringify(bridgeStatus.body ?? null).slice(0, 160))
+
+    // ── P1/D2：分身核心开关（面板「官方 / 一键加速」）契约 ──────────────────
+    const forkCore = await api('/fang/api/fork-core')
+    const fc = forkCore.body ?? {}
+    check('GET /fang/api/fork-core 200 + shape', forkCore.status === 200 && fc.ok === true
+      && ['stock', 'accelerated'].includes(fc.mode)
+      && ['new', 'copy'].includes(fc.sessionMode)
+      && (fc.effectiveMode === null || ['stock', 'accelerated'].includes(fc.effectiveMode))
+      && typeof fc.accelerated === 'object' && fc.accelerated !== null
+      && typeof fc.accelerated.installed === 'boolean'
+      && fc.accelerated.limitBytes === 1024 * 1024 * 1024
+      && typeof fc.accelerated.requiresConfirmation === 'boolean'
+      && typeof fc.forks?.stock === 'number' && typeof fc.forks?.accelerated === 'number',
+      JSON.stringify({ status: forkCore.status, mode: fc.mode, sessionMode: fc.sessionMode, accel: fc.accelerated ?? null }).slice(0, 200))
+    check('fork-core essence is pinned to stock', fc.essence === 'stock')
+    const modeBefore = fc.mode
+    if (fc.accelerated?.installed !== true) {
+      // 未安装加速核：服务端必须 fail-closed（409 + unchanged），且设置不被修改。
+      const rejected = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: 'accelerated' }) })
+      check('fork-core rejects accelerated without install (409 unchanged)', rejected.status === 409
+        && rejected.body?.error === 'accelerated-cli-missing' && rejected.body?.unchanged === true,
+        JSON.stringify({ status: rejected.status, error: rejected.body?.error, unchanged: rejected.body?.unchanged }))
+      const after = await api('/fang/api/fork-core')
+      check('fork-core setting unchanged after rejection', after.body?.mode === modeBefore && after.body?.blocked === null,
+        JSON.stringify({ before: modeBefore, after: after.body?.mode }))
+    } else {
+      const toAccel = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: 'accelerated' }) })
+      check('fork-core switch to accelerated persisted', toAccel.status === 200 && toAccel.body?.mode === 'accelerated' && toAccel.body?.effectiveMode === 'accelerated',
+        JSON.stringify({ status: toAccel.status, mode: toAccel.body?.mode, effective: toAccel.body?.effectiveMode }))
+      const backToStock = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: 'stock' }) })
+      check('fork-core switch back to stock persisted', backToStock.status === 200 && backToStock.body?.mode === 'stock',
+        JSON.stringify({ status: backToStock.status, mode: backToStock.body?.mode }))
+    }
+
+    // ── B 契约委托基线：hello 协商 + 只读能力真实调用（Bearer token 走契约端点）──
+    const contractAuth = { authorization: 'Bearer e2e-contract-token' }
+    const helloRes = await api('/fang/api/contract/hello', { method: 'POST', headers: contractAuth, body: '{}' })
+    const hello = helloRes.body?.result ?? helloRes.body ?? {}
+    check('contract.hello advertises version + methods', helloRes.status === 200
+      && hello.contractVersion === E2E_CONTRACT_VERSION && hello.contractVersion === '1.2.0'
+      && Array.isArray(hello.methods) && hello.methods.includes('fang.session.list')
+      && Array.isArray(hello.capabilities),
+      JSON.stringify({ status: helloRes.status, version: hello.contractVersion, methods: (hello.methods ?? []).length }).slice(0, 180))
+    const contractInvoke = async (method, params) => api('/fang/api/contract/invoke', {
+      method: 'POST', headers: contractAuth, body: JSON.stringify(createEnvelope({ method, params, source: 'e2e' })),
+    })
+    const statusEnv = await contractInvoke('fang.orchestrator.status')
+    check('contract fang.orchestrator.status delegated call 200', statusEnv.status === 200 && statusEnv.body?.result && typeof statusEnv.body.result === 'object',
+      JSON.stringify({ status: statusEnv.status, error: statusEnv.body?.error?.code ?? null }).slice(0, 160))
+    const sessionListEnv = await contractInvoke('fang.session.list', { limit: 5 })
+    const sessionListCode = sessionListEnv.body?.error?.code ?? null
+    check('contract fang.session.list delegated call answered (result or known-unavailable)', sessionListEnv.status === 200
+      && ((sessionListEnv.body?.result && typeof sessionListEnv.body.result === 'object') || sessionListCode === 'fang-service-unavailable'),
+      JSON.stringify({ status: sessionListEnv.status, error: sessionListCode }).slice(0, 160))
+
+    // ── B 委托（meta.delegate=true）：白名单默认拒绝 / 只读能力放行 ─────────
+    const delegatedInvoke = async (method, params = null) => api('/fang/api/contract/invoke', {
+      method: 'POST', headers: contractAuth,
+      body: JSON.stringify(createEnvelope({ method, params, source: 'fork-e2e', meta: { delegate: true } })),
+    })
+    const capList = await delegatedInvoke('fang.capability.list')
+    const capItems = Array.isArray(capList.body?.result?.capabilities) ? capList.body.result.capabilities : []
+    check('delegated fang.capability.list returns catalog (write caps approval-gated)', capList.status === 200 && capList.body?.ok === true
+      && capItems.some((c) => c.method === 'fang.session.list')
+      && capItems.filter((c) => c.kind === 'write').every((c) => c.approval === 'required')
+      && capItems.some((c) => c.method === 'fang.tool.invoke'),
+      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`) }).slice(0, 220))
+    const rejectedCap = await delegatedInvoke('fang.fork.spawn', {})
+    check('delegated unlisted capability rejected (contract-unsupported)', rejectedCap.status === 200
+      && rejectedCap.body?.ok === false && rejectedCap.body?.error?.code === 'contract-unsupported',
+      JSON.stringify({ status: rejectedCap.status, code: rejectedCap.body?.error?.code ?? null }).slice(0, 160))
+    const delegatedStatus = await delegatedInvoke('fang.orchestrator.status')
+    check('delegated read capability succeeds (fang.orchestrator.status)', delegatedStatus.status === 200
+      && delegatedStatus.body?.ok === true && delegatedStatus.body?.result && typeof delegatedStatus.body.result === 'object',
+      JSON.stringify({ status: delegatedStatus.status, code: delegatedStatus.body?.error?.code ?? null }).slice(0, 160))
+    const delegatedSessionList = await delegatedInvoke('fang.session.list', { limit: 5 })
+    const delegatedSessionCode = delegatedSessionList.body?.error?.code ?? null
+    check('delegated capability maps missing mother service to contract-unavailable', delegatedSessionList.status === 200
+      && ((delegatedSessionList.body?.result && typeof delegatedSessionList.body.result === 'object') || delegatedSessionCode === 'contract-unavailable'),
+      JSON.stringify({ status: delegatedSessionList.status, code: delegatedSessionCode }).slice(0, 160))
+    const delegatedEvents = await delegatedInvoke('fang.session.events', { sessionId: E2E_SESSION_ID, limit: 5 })
+    const delegatedEventsCode = delegatedEvents.body?.error?.code ?? null
+    check('delegated fang.session.events bounded read answered (result or contract-unavailable)', delegatedEvents.status === 200
+      && ((delegatedEvents.body?.result && Array.isArray(delegatedEvents.body.result.events)) || delegatedEventsCode === 'contract-unavailable'),
+      JSON.stringify({ status: delegatedEvents.status, code: delegatedEventsCode }).slice(0, 160))
+    // 超时错误：e2e 母体 readTimeoutMs=100ms + 测试缝 sleep(500ms) → contract-timeout
+    const delegatedSlow = await delegatedInvoke('fang.test.sleep', { ms: 500 })
+    check('delegated capability timeout maps to contract-timeout', delegatedSlow.status === 200
+      && delegatedSlow.body?.ok === false && delegatedSlow.body?.error?.code === 'contract-timeout',
+      JSON.stringify({ status: delegatedSlow.status, code: delegatedSlow.body?.error?.code ?? null }).slice(0, 160))
+    // B-6：LSP 委托——只读子命令成功；写类子命令必须审批（拒绝执行、无副作用）
+    const lspRead = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: 'example.mjs', line: 1 })
+    check('delegated lsp diagnostics (read action) succeeds', lspRead.status === 200
+      && lspRead.body?.ok === true && lspRead.body?.result?.ok === true && Array.isArray(lspRead.body.result.diagnostics),
+      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null }).slice(0, 160))
+    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs' })
+    check('delegated lsp write action requires approval (contract-approval-required)', lspWrite.status === 200
+      && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-approval-required',
+      JSON.stringify({ status: lspWrite.status, code: lspWrite.body?.error?.code ?? null }).slice(0, 160))
+    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs' })
+    check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
+      && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
+      JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
+    // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported
+    const codeRun = await delegatedInvoke('fang.code.run', { code: 'console.log(1)' })
+    check('P2 pro capability fang.code.run rejected by default (contract-unsupported)', codeRun.status === 200
+      && codeRun.body?.ok === false && codeRun.body?.error?.code === 'contract-unsupported',
+      JSON.stringify({ status: codeRun.status, code: codeRun.body?.error?.code ?? null }).slice(0, 160))
+    // B-7：chat.import——dryRun 两次结果一致；真实导入必须审批（拒绝执行、无副作用）
+    const importParams = { source: 'deepseek', sessionId: E2E_SESSION_ID, dryRun: true }
+    const importDry1 = await delegatedInvoke('fang.chat.import', importParams)
+    const importDry2 = await delegatedInvoke('fang.chat.import', importParams)
+    const dry1 = importDry1.body?.result ?? null
+    const dry2 = importDry2.body?.result ?? null
+    check('delegated chat.import dryRun is deterministic across calls', importDry1.status === 200 && importDry1.body?.ok === true
+      && dry1 && dry2 && JSON.stringify(dry1) === JSON.stringify(dry2) && dry1.dryRun === true && dry1.approvalRequired === true,
+      JSON.stringify({ status: importDry1.status, digest: dry1?.digest ?? null, found: dry1?.found ?? null }).slice(0, 160))
+    const importReal = await delegatedInvoke('fang.chat.import', { source: 'deepseek', sessionId: E2E_SESSION_ID, dryRun: false })
+    check('delegated chat.import real import requires approval (contract-approval-required)', importReal.status === 200
+      && importReal.body?.ok === false && importReal.body?.error?.code === 'contract-approval-required',
+      JSON.stringify({ status: importReal.status, code: importReal.body?.error?.code ?? null }).slice(0, 160))
+    // M5：并发上限压测——母体 maxConcurrent=2，同时 8 个 80ms 委托：必须有被限流、也必须有成功的
+    const concurrent = await Promise.all(Array.from({ length: 8 }, () => delegatedInvoke('fang.test.sleep', { ms: 80 })))
+    const concurrentOk = concurrent.filter((r) => r.body?.ok === true).length
+    const concurrentLimited = concurrent.filter((r) => r.body?.error?.code === 'contract-rate-limited').length
+    check('delegated concurrency cap enforced (contract-rate-limited)', concurrentLimited >= 1 && concurrentOk >= 1,
+      JSON.stringify({ ok: concurrentOk, rateLimited: concurrentLimited, total: concurrent.length }).slice(0, 160))
+
+
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
     check('mother exposes 8 mother-side services', Object.values(status.body?.services ?? {}).filter(Boolean).length >= 5)
 
@@ -444,6 +577,16 @@ check('POST /fang/api/derive accepted with exactly one session',
       const kinds = new Set(lines.map(r => r.kind))
       check('audit records task-created', lines.some(r => String(r.kind).includes('fork-created')))
       check('audit records adapter handshake', kinds.has('adapter-handshake'))
+      // M5：委托审计完整性——每次委托（成功/拒绝/限流/超时）都要有 capability/source/outcome/latencyMs
+      const delegateRecords = lines.filter((r) => r.kind === 'contract-delegate')
+      check('audit records delegated capability calls', delegateRecords.length > 0
+        && delegateRecords.every((r) => typeof r.capability === 'string' && r.capability.length > 0
+          && typeof r.outcome === 'string' && Number.isFinite(Number(r.latencyMs))),
+        `records=${delegateRecords.length}`)
+      check('audit records rejection + rate-limit + timeout outcomes', delegateRecords.some((r) => r.outcome === 'rejected')
+        && delegateRecords.some((r) => r.outcome === 'rate-limited')
+        && delegateRecords.some((r) => r.outcome === 'error' && r.error === 'contract-timeout'),
+        JSON.stringify({ outcomes: [...new Set(delegateRecords.map((r) => r.outcome))] }).slice(0, 160))
     }
 
     // ── decision center: real submit → list → resolve → 落库断言 ──────────
