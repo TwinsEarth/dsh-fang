@@ -2,6 +2,7 @@
 
 > 状态：**下一阶段（不计入 v3.5.0 发布阻塞）**。v3.5.0 已交付：官方 bundle 映射 + 第三方插件复制 + `@deepseek-ai/*` alias 桩包 + 不支持清单 + 逐插件冒烟。
 > 本文定义 B（无头能力契约委托）与 UI client half 浏览器映射两项后续工作的范围、设计、验收与风险。
+> **B 首批能力清单已单独成文：[`docs/B-CONTRACT-CAPABILITIES.md`](B-CONTRACT-CAPABILITIES.md)（待用户确认范围后实施）。**
 
 ## 1. 契约委托（B：无头能力调母体）
 

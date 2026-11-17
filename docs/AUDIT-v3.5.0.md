@@ -56,7 +56,7 @@ accelerated-fork 单测                9/9
 fork-core-settings 单测              8/8
 accelerated-fork-live（FANG_ACCEL_LIVE=1）  pass（forker 真派生：identity role=fork, version=3.5.0）
 accelerated-fork-smoke               7/7（banner/identity/client.js/core 版本/非 stock CLI）
-tools/e2e.mjs                       99/99（含 4 项 fork-core 契约断言：shape / essence=stock / 未安装 409+unchanged / 设置不变）
+tools/e2e.mjs                       102/102（含 4 项 fork-core 契约断言 + 3 项 B 契约委托基线：contract.hello 200/1.1.0/11 方法、fang.orchestrator.status 真实委托、fang.session.list 可读错误码）
 allow-list self-check               110 路由 findings=0
 main-city source gate               grade=A blockers=0
 ```

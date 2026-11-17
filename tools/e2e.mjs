@@ -22,6 +22,7 @@ import vm from 'node:vm'
 import zlib from 'node:zlib'
 
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
+import { createEnvelope } from '../src/contract/index.js'
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const KEEP = process.argv.includes('--keep')
@@ -114,7 +115,8 @@ function makeProfile(homeRoot) {
   // explicitly enables it so the journal/queue recovery API is exercised; the
   // default-off + 503 path is covered by unit tests.
   fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'),
-    '- id: fang-queue-journal\n  disabled: false\n')
+    '- id: fang-queue-journal\n  disabled: false\n' +
+    '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n')
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
@@ -280,6 +282,28 @@ async function main() {
       check('fork-core switch back to stock persisted', backToStock.status === 200 && backToStock.body?.mode === 'stock',
         JSON.stringify({ status: backToStock.status, mode: backToStock.body?.mode }))
     }
+
+    // ── B 契约委托基线：hello 协商 + 只读能力真实调用（Bearer token 走契约端点）──
+    const contractAuth = { authorization: 'Bearer e2e-contract-token' }
+    const helloRes = await api('/fang/api/contract/hello', { method: 'POST', headers: contractAuth, body: '{}' })
+    const hello = helloRes.body?.result ?? helloRes.body ?? {}
+    check('contract.hello advertises version + methods', helloRes.status === 200
+      && String(hello.contractVersion ?? '').startsWith('1.')
+      && Array.isArray(hello.methods) && hello.methods.includes('fang.session.list')
+      && Array.isArray(hello.capabilities),
+      JSON.stringify({ status: helloRes.status, version: hello.contractVersion, methods: (hello.methods ?? []).length }).slice(0, 180))
+    const contractInvoke = async (method, params) => api('/fang/api/contract/invoke', {
+      method: 'POST', headers: contractAuth, body: JSON.stringify(createEnvelope({ method, params, source: 'e2e' })),
+    })
+    const statusEnv = await contractInvoke('fang.orchestrator.status')
+    check('contract fang.orchestrator.status delegated call 200', statusEnv.status === 200 && statusEnv.body?.result && typeof statusEnv.body.result === 'object',
+      JSON.stringify({ status: statusEnv.status, error: statusEnv.body?.error?.code ?? null }).slice(0, 160))
+    const sessionListEnv = await contractInvoke('fang.session.list', { limit: 5 })
+    const sessionListCode = sessionListEnv.body?.error?.code ?? null
+    check('contract fang.session.list delegated call answered (result or known-unavailable)', sessionListEnv.status === 200
+      && ((sessionListEnv.body?.result && typeof sessionListEnv.body.result === 'object') || sessionListCode === 'fang-service-unavailable'),
+      JSON.stringify({ status: sessionListEnv.status, error: sessionListCode }).slice(0, 160))
+
 
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
     check('mother exposes 8 mother-side services', Object.values(status.body?.services ?? {}).filter(Boolean).length >= 5)
