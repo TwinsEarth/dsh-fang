@@ -73,13 +73,35 @@
 
 > 因此“与元主插件面 100% 同步”当前不可达；差异必须显式列出，不能静默宣称一致。
 
+### 3.2 alias 桩包 spike（2026-11-17，可复现）
+
+脚本：`tools/release/accel-alias-spike.mjs`（启动两次加速核：baseline vs `@deepseek-ai/*` → `@twinsearth/*` 桩包）。
+
+```powershell
+node tools/release/accel-alias-spike.mjs --accel-nm <accel>/node_modules --essence-profile <merged profile>
+```
+
+| 指标 | baseline（无桩） | 桩包后 |
+|---|---|---|
+| 加速核启动 | ✅ UP | ✅ UP |
+| 载入的第三方 bundle | dsh-context / openviking-memory / dshmarket / w2m | 同左 |
+| 第三方插件扫描到的 `@deepseek-ai/*` 规格 | 66 | 66 |
+| 可解析为加速等价实现 | 0 | **58 / 66** |
+| 无加速等价实现 | — | 8：`dsh-client-runtime` / `dsh-client-store` / `dsh-client-ui-primitives` / `dsh-code-runtime` / `dsh-desktop` / `dsh-desktop-runtime` / `dsh-invariants` / `dsh-tool-lsp` |
+| `entries did not activate` | **4**（2 导入失败 + 2 subagent pending） | **2**（仅 subagent pending，与第三方无关） |
+| 导入失败 | 2（`dsh-context`、`openviking-memory-runtime`） | **0** |
+| 结果 | dsh-context / openviking ❌ | **4/4 目标第三方插件全部激活** ✅ |
+
+> 结论：**C（alias 桩包）在 Host 侧可行且收益最大**；剩余 gap 集中在 client/desktop/lsp/invariants 这类“无加速对应”的模块，需要 A（移植）或 B（契约委托）补齐。
+> 推荐 D2 形态：**C 为主（自动桩包 + 不支持清单）+ A 补核心 + B 兜底**。
+
 ## 4. 三条适配路线（可行性结论）
 
 | 路线 | 可行性 | 边界 | 建议 |
 |---|---|---|---|
 | **A. 移植（源码/包改名）** | 核心插件：可行；官方实验 bundle：无加速版，需源码移植 | API 漂移（0.2.2-rc.3 → 3.5.0）与许可证 | 只对**核心**插件做自动映射；实验 bundle 单独立项 |
 | **B. 契约委托（调母体）** | 无头能力：可行（`src/contract` + `/fang/api/contract` + adapter 命令）；UI：不可行 | 母体须在线；延迟/一致性/鉴权 | 用于“无法移植的重量级插件”的能力调用，不用于界面 |
-| **C. alias 桩包（伪装适配）** | Host 侧：可行（生成 `@deepseek-ai/dsh-*` 桩包 `export * from` 加速实现）；Web client half：未验证 | 仅覆盖 API 兼容子集；必须逐插件激活冒烟 | **优先做**：先给 `dsh-session`/`dsh-mcp-client`/常用 `dsh-tool-*` 建桩，量化可激活率 |
+| **C. alias 桩包（伪装适配）** | Host 侧：**已验证**（66 个导入规格中 58 个可映射；4/4 目标第三方插件激活）；Web client half：未验证 | 仅覆盖 API 兼容子集；必须逐插件激活冒烟 | **优先做**：先给 `dsh-session`/`dsh-mcp-client`/常用 `dsh-tool-*` 建桩，量化可激活率 |
 
 **推荐 D2 形态**：`C（alias 层）为主 + A（核心映射）自动完成 + B（契约委托）兜底 + 不支持清单显式展示`。
 
