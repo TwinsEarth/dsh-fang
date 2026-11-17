@@ -78,12 +78,12 @@ test('B-6 root policy: empty allowlist denies; outside roots deny; file escaping
 
   const empty = checkWorkspaceRoot({ workspaceRoot: root, file, allowedRoots: [] })
   assert.equal(empty.ok, false)
-  assert.equal(empty.code, DELEGATE_ERROR.UNAUTHORIZED)
+  assert.equal(empty.code, DELEGATE_ERROR.INVALID)
   assert.equal(empty.reason, 'allowlist-empty')
 
   const outside = checkWorkspaceRoot({ workspaceRoot: root, file, allowedRoots: [path.join(os.tmpdir(), 'other-root')] })
   assert.equal(outside.ok, false)
-  assert.equal(outside.code, DELEGATE_ERROR.UNAUTHORIZED)
+  assert.equal(outside.code, DELEGATE_ERROR.INVALID)
   assert.equal(outside.reason, 'root-not-allowed')
 
   const escape = checkWorkspaceRoot({ workspaceRoot: root, file: path.join(os.tmpdir(), 'outside.ts'), allowedRoots: [root] })
@@ -102,7 +102,7 @@ test('B-6 root policy: empty allowlist denies; outside roots deny; file escaping
   assert.equal(missingRoot.reason, 'workspace-root-missing')
 })
 
-test('B-6 query: maps contract action to seam operation and 1-based → 0-based position', async () => {
+test('B-6 query: maps contract action to seam operation; 0-based position passes through; locations normalize to 1-based {path,line,character}', async () => {
   const seam = fakeSeam(async () => ({ kind: 'locations', locations: [{ uri: 'file:///x.ts', range: { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } } }], resolvedWorkspaceUri: 'file:///ws/' }))
   const result = await queryMotherLsp({
     lspService: seam,
@@ -113,22 +113,39 @@ test('B-6 query: maps contract action to seam operation and 1-based → 0-based 
   assert.deepEqual(seam.calls[0], {
     operation: 'goToDefinition',
     filePath: 'src/index.ts',
-    position: { line: 11, character: 2 },
+    position: { line: 12, character: 3 },
     workspaceRoot: '/tmp/ws',
   })
   assert.equal(result.result.provider, LSP_PROVIDER_MOTHER)
   assert.equal(result.result.kind, 'locations')
-  assert.equal(result.result.locations[0].uri, 'file:///x.ts')
+  assert.match(result.result.locations[0].path, /x\.ts$/)
+  assert.equal(result.result.locations[0].line, 2, '1-based display')
+  assert.equal(result.result.locations[0].character, 3, '1-based display')
+  assert.equal(result.result.truncated, false)
   assert.equal(result.result.resolvedWorkspaceUri, 'file:///ws/')
 })
 
-test('B-6 query: hover normalizes to content (or null) and references maps correctly', async () => {
+test('B-6 query: hover normalizes to {contents}; references maps correctly', async () => {
   const seam = fakeSeam(async () => ({ kind: 'hover', hover: { contents: 'const x: number', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } } }))
   const result = await queryMotherLsp({ lspService: seam, invoke: { action: 'references', file: 'x.ts', line: 1, character: 1 }, workspaceRoot: '/w' })
   assert.equal(result.ok, true)
   assert.equal(result.result.kind, 'hover')
-  assert.equal(result.result.hover.contents, 'const x: number')
+  assert.equal(result.result.contents, 'const x: number')
   assert.equal(seam.calls[0].operation, 'findReferences')
+})
+
+test('B-6 result limits: locations/hover are trimmed by maxLocations/maxResultChars and marked truncated', async () => {
+  const locations = Array.from({ length: 5 }, (_, index) => ({ uri: `file:///f${index}.ts`, range: { start: { line: index, character: 0 }, end: { line: index, character: 1 } } }))
+  const seam = fakeSeam(async () => ({ kind: 'locations', locations }))
+  const trimmed = await queryMotherLsp({ lspService: seam, invoke: { action: 'references', file: 'x.ts', line: 0, character: 0 }, workspaceRoot: '/w', limits: { maxLocations: 2, maxResultChars: 8 } })
+  assert.equal(trimmed.result.locations.length, 2)
+  assert.equal(trimmed.result.totalLocations, 5)
+  assert.equal(trimmed.result.truncated, true)
+
+  const hoverSeam = fakeSeam(async () => ({ kind: 'hover', hover: { contents: '0123456789' } }))
+  const hover = await queryMotherLsp({ lspService: hoverSeam, invoke: { action: 'hover', file: 'x.ts', line: 0, character: 0 }, workspaceRoot: '/w', limits: { maxLocations: 2, maxResultChars: 8 } })
+  assert.equal(hover.result.contents, '01234567')
+  assert.equal(hover.result.truncated, true)
 })
 
 test('B-6 query: seam failures map to contract error codes; missing service / bad action are explicit', async () => {

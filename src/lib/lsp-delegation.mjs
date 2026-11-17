@@ -40,7 +40,9 @@ export function classifyLspAction(action) {
   return { ok: false, error: 'contract-invalid-request', message: `unknown lsp action: ${text || '(empty)'}` }
 }
 
-/** Pure: validate the delegated tool.invoke params for the first batch (tool=lsp only). */
+/** Pure: validate the delegated tool.invoke params for the first batch (tool=lsp only).
+ *  Position口径：line/character 是 **0-based 非负整数**（官方 seam 原生坐标，直接透传）；
+ *  结果归一化时再转成 1-based 展示（locations: {path,line,character}）。 */
 export function validateToolInvoke(params) {
   const input = params && typeof params === 'object' ? params : {}
   const tool = String(input.tool ?? '').trim()
@@ -51,8 +53,8 @@ export function validateToolInvoke(params) {
   if (!file) return { ok: false, error: 'contract-invalid-request', message: 'lsp action requires a file' }
   const line = Number(input.line)
   const character = Number(input.character)
-  if (!Number.isInteger(line) || line < 1 || !Number.isInteger(character) || character < 1) {
-    return { ok: false, error: 'contract-invalid-request', message: 'lsp action requires positive 1-based line and character' }
+  if (!Number.isInteger(line) || line < 0 || !Number.isInteger(character) || character < 0) {
+    return { ok: false, error: 'contract-invalid-request', message: 'lsp action requires non-negative 0-based line and character' }
   }
   return {
     ok: true,

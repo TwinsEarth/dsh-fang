@@ -7,6 +7,7 @@
 // 路线 B（fork-local）作为增强：同一契约动作可在加速分身本地 provider 上执行，能力目录按 provider 区分。
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { DELEGATE_ERROR } from './contract-delegation.mjs'
 import { LSP_ACTION_TO_OPERATION, LSP_READ_ACTIONS } from './lsp-delegation.mjs'
@@ -119,14 +120,14 @@ export function checkWorkspaceRoot({ workspaceRoot = '', file = '', allowedRoots
     return { ok: false, code: DELEGATE_ERROR.INVALID, reason: 'workspace-root-missing', message: 'lsp delegation requires workspaceRoot (explicitly allowed root)' }
   }
   if (!Array.isArray(allowedRoots) || allowedRoots.length === 0) {
-    return { ok: false, code: DELEGATE_ERROR.UNAUTHORIZED, reason: 'allowlist-empty', message: 'lsp delegation has no allowed workspace roots; configure contract.delegate.lsp.allowedRoots' }
+    return { ok: false, code: DELEGATE_ERROR.INVALID, reason: 'allowlist-empty', message: 'lsp delegation has no allowed workspace roots; configure contract.delegate.lsp.allowedRoots' }
   }
   const root = canonical(workspaceRoot)
   const inside = allowedRoots.some((allowed) => {
     const prefix = canonical(allowed)
     return root === prefix || root.startsWith(prefix.endsWith(path.sep) ? prefix : `${prefix}${path.sep}`)
   })
-  if (!inside) return { ok: false, code: DELEGATE_ERROR.UNAUTHORIZED, reason: 'root-not-allowed', message: `workspaceRoot is not in contract.delegate.lsp.allowedRoots: ${root}` }
+  if (!inside) return { ok: false, code: DELEGATE_ERROR.INVALID, reason: 'root-not-allowed', message: `workspaceRoot is not in contract.delegate.lsp.allowedRoots: ${root}` }
   const source = canonical(path.isAbsolute(file) ? file : path.join(root, file))
   if (!(source === root || source.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`))) {
     return { ok: false, code: DELEGATE_ERROR.INVALID, reason: 'file-outside-root', message: `lsp file escapes workspaceRoot: ${source}` }
@@ -158,32 +159,53 @@ export function mapLspError(error) {
 }
 
 /** Normalise the seam's closed-union result into the contract payload (JSON-safe). */
-export function normalizeLspResult(result, { action, operation, provider = LSP_PROVIDER_MOTHER } = {}) {
+/** 结果裁剪默认值（沿用 tool 的 maxLocations / maxResultChars 思路）。 */
+export const LSP_DEFAULT_LIMITS = Object.freeze({ maxLocations: 200, maxResultChars: 20000 })
+
+/** file:// URI → 本地路径（契约结果里的 path 字段）。 */
+export function pathFromLspUri(uri) {
+  const text = String(uri ?? '')
+  if (!text) return ''
+  if (text.startsWith('file://')) {
+    try { return fileURLToPath(text) } catch { return decodeURIComponent(text.replace(/^file:\/\//, '')) }
+  }
+  return text
+}
+
+/**
+ * 结果归一化（契约口径）：
+ * - locations → [{ path, line, character }]，line/character 转 1-based 展示；
+ * - hover → { contents }；
+ * - 超限裁剪：maxLocations / maxResultChars，并标记 truncated（不静默截断）。
+ */
+export function normalizeLspResult(result, { action, operation, provider = LSP_PROVIDER_MOTHER, limits = {} } = {}) {
   const base = { provider, action: action ?? null, operation: operation ?? null }
+  const maxLocations = Number.isInteger(limits?.maxLocations) && limits.maxLocations > 0 ? limits.maxLocations : LSP_DEFAULT_LIMITS.maxLocations
+  const maxResultChars = Number.isInteger(limits?.maxResultChars) && limits.maxResultChars > 0 ? limits.maxResultChars : LSP_DEFAULT_LIMITS.maxResultChars
   if (!result || typeof result !== 'object') return { ...base, kind: 'unknown', value: null }
   if (result.kind === 'locations') {
+    const raw = Array.isArray(result.locations) ? result.locations : []
+    const kept = raw.slice(0, maxLocations)
     return {
       ...base,
       kind: 'locations',
       resolvedWorkspaceUri: String(result.resolvedWorkspaceUri ?? ''),
-      locations: (Array.isArray(result.locations) ? result.locations : []).map((location) => ({
-        uri: String(location?.uri ?? ''),
-        range: {
-          start: { line: Number(location?.range?.start?.line ?? 0), character: Number(location?.range?.start?.character ?? 0) },
-          end: { line: Number(location?.range?.end?.line ?? 0), character: Number(location?.range?.end?.character ?? 0) },
-        },
+      totalLocations: raw.length,
+      truncated: raw.length > kept.length,
+      locations: kept.map((location) => ({
+        path: pathFromLspUri(location?.uri),
+        line: Number(location?.range?.start?.line ?? 0) + 1,
+        character: Number(location?.range?.start?.character ?? 0) + 1,
       })),
     }
   }
   if (result.kind === 'hover') {
-    const hover = result.hover
+    const full = String(result.hover?.contents ?? '')
     return {
       ...base,
       kind: 'hover',
-      hover: hover ? {
-        contents: String(hover.contents ?? ''),
-        ...(hover.range ? { range: hover.range } : {}),
-      } : null,
+      contents: full.length > maxResultChars ? full.slice(0, maxResultChars) : full,
+      truncated: full.length > maxResultChars,
     }
   }
   return { ...base, kind: String(result.kind ?? 'unknown'), value: null }
@@ -193,7 +215,7 @@ export function normalizeLspResult(result, { action, operation, provider = LSP_P
  * Run one contract LSP action through a live `ctx.lsp` seam.
  * @returns {Promise<{ok:true, result:object} | {ok:false, code:string, message:string, detail?:object}>}
  */
-export async function queryMotherLsp({ lspService, invoke, workspaceRoot, signal } = {}) {
+export async function queryMotherLsp({ lspService, invoke, workspaceRoot, limits, signal } = {}) {
   if (!lspService || typeof lspService.query !== 'function') {
     return { ok: false, code: DELEGATE_ERROR.UNAVAILABLE, message: 'lsp provider unavailable on mother (ctx.lsp seam not installed)', detail: { provider: LSP_PROVIDER_MOTHER } }
   }
@@ -202,12 +224,13 @@ export async function queryMotherLsp({ lspService, invoke, workspaceRoot, signal
   const request = {
     operation,
     filePath: String(invoke.file ?? ''),
-    position: { line: Math.max(0, Number(invoke.line) - 1), character: Math.max(0, Number(invoke.character) - 1) },
+    // 契约参数为 0-based 非负整数（官方 seam 原生坐标），直接透传。
+    position: { line: Number(invoke.line), character: Number(invoke.character) },
     workspaceRoot: String(workspaceRoot ?? ''),
   }
   try {
     const value = await lspService.query(request, signal)
-    return { ok: true, result: normalizeLspResult(value, { action: invoke.action, operation, provider: LSP_PROVIDER_MOTHER }) }
+    return { ok: true, result: normalizeLspResult(value, { action: invoke.action, operation, provider: LSP_PROVIDER_MOTHER, limits }) }
   } catch (error) {
     return { ok: false, ...mapLspError(error) }
   }

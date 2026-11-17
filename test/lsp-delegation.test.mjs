@@ -63,10 +63,14 @@ test('B-6: unknown action / unsupported tool / missing file / bad position are r
   assert.equal(noFile.error, DELEGATE_ERROR.INVALID)
   const noPosition = validateToolInvoke({ tool: 'lsp', action: 'hover', file: 'x.ts' })
   assert.equal(noPosition.ok, false)
-  assert.match(noPosition.message, /positive 1-based line and character/)
+  assert.match(noPosition.message, /non-negative 0-based line and character/)
+  const negative = validateToolInvoke({ tool: 'lsp', action: 'hover', file: 'x.ts', line: -1, character: 0 })
+  assert.equal(negative.ok, false)
+  const fractional = validateToolInvoke({ tool: 'lsp', action: 'hover', file: 'x.ts', line: 1.5, character: 0 })
+  assert.equal(fractional.ok, false)
 })
 
-test('B-6: valid lsp params carry action/operation/kind/1-based position', () => {
+test('B-6: valid lsp params carry action/operation/kind and 0-based non-negative position (seam coordinates)', () => {
   const read = validateToolInvoke({ tool: 'lsp', action: 'definition', file: 'src/index.mjs', line: 12, character: 3 })
   assert.equal(read.ok, true)
   assert.equal(read.kind, 'read')
@@ -74,7 +78,9 @@ test('B-6: valid lsp params carry action/operation/kind/1-based position', () =>
   assert.equal(read.file, 'src/index.mjs')
   assert.equal(read.line, 12)
   assert.equal(read.character, 3)
-  const diagnostics = validateToolInvoke({ tool: 'lsp', action: 'diagnostics', file: 'x.ts', line: 1, character: 1 })
+  const origin = validateToolInvoke({ tool: 'lsp', action: 'hover', file: 'x.ts', line: 0, character: 0 })
+  assert.equal(origin.ok, true, '0-based (0,0) is valid seam position')
+  const diagnostics = validateToolInvoke({ tool: 'lsp', action: 'diagnostics', file: 'x.ts', line: 0, character: 0 })
   assert.equal(diagnostics.ok, true)
   assert.equal(diagnostics.kind, 'test-only')
 })

@@ -424,29 +424,29 @@ async function main() {
     // B-6：LSP 委托——路线 A 真实 provider（--lsp）或测试缝（默认）；写类子命令可读拒绝。
     if (LSP_MODE) seedLspForkTask(homeRoot, LSP_FORK_HOME)
     const lspReadParams = LSP_MODE
-      ? { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_WS }
-      : { tool: 'lsp', action: 'definition', file: 'example.mjs', line: 1, character: 1 }
+      ? { tool: 'lsp', action: 'definition', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_WS }
+      : { tool: 'lsp', action: 'definition', file: 'example.mjs', line: 0, character: 0 }
     const lspRead = await delegatedInvoke('fang.tool.invoke', lspReadParams)
     const lspReadOk = LSP_MODE
       ? (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'mother-lsp'
         && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations)
         && lspRead.body.result.locations.length > 0
-        && lspRead.body.result.locations.every((loc) => Number(loc?.range?.start?.line) === 0))
+        && lspRead.body.result.locations.every((loc) => typeof loc?.path === 'string' && loc.path.length > 0 && Number(loc?.line) === 1))
       : (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'test-hook'
         && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations))
     check(LSP_MODE ? 'delegated lsp definition via real mother provider (ctx.lsp) succeeds' : 'delegated lsp definition (official read action) succeeds', lspRead.status === 200 && lspReadOk,
       JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null, locations: lspRead.body?.result?.locations ?? null, detail: lspRead.body?.error?.detail ?? null }).slice(0, 500))
-    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs', line: 1, character: 1 })
+    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs', line: 0, character: 0 })
     check('delegated lsp legacy write action rejected (official seam is read-only: contract-unsupported)', lspWrite.status === 200
       && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-unsupported'
       && /official LSP seam is read-only/i.test(String(lspWrite.body?.error?.message ?? '')),
       JSON.stringify({ status: lspWrite.status, code: lspWrite.body?.error?.code ?? null }).slice(0, 180))
-    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs', line: 1, character: 1 })
+    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs', line: 0, character: 0 })
     check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
       && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
       JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
     // diagnostics 仅 e2e 测试缝可用（不对外 advertise）：测试缝返回 stub；真实 provider 下显式拒绝。
-    const lspDiagnostics = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: LSP_MODE ? 'a.ts' : 'example.mjs', line: 1, character: 1, ...(LSP_MODE ? { workspaceRoot: LSP_WS } : {}) })
+    const lspDiagnostics = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: LSP_MODE ? 'a.ts' : 'example.mjs', line: 0, character: 0, ...(LSP_MODE ? { workspaceRoot: LSP_WS } : {}) })
     if (LSP_MODE) {
       check('delegated lsp diagnostics rejected with real provider (test-seam-only)', lspDiagnostics.status === 200
         && lspDiagnostics.body?.ok === false && lspDiagnostics.body?.error?.code === 'contract-unsupported'
@@ -460,35 +460,35 @@ async function main() {
         JSON.stringify({ status: lspDiagnostics.status, code: lspDiagnostics.body?.error?.code ?? null, provider: lspDiagnostics.body?.result?.provider ?? null }).slice(0, 180))
     }
     if (LSP_MODE) {
-      const lspForkRoot = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_FORK_WS })
+      const lspForkRoot = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_FORK_WS })
       check('delegated lsp auto-registers fork workspace root (task registry explicit registration)', lspForkRoot.status === 200
         && lspForkRoot.body?.ok === true && lspForkRoot.body?.result?.provider === 'mother-lsp'
         && lspForkRoot.body.result.kind === 'locations' && lspForkRoot.body.result.locations.length > 0
-        && lspForkRoot.body.result.locations.some((loc) => /lsp-fork-workspace/i.test(String(loc?.uri ?? ''))),
+        && lspForkRoot.body.result.locations.some((loc) => /lsp-fork-workspace/i.test(String(loc?.path ?? ''))),
         JSON.stringify({ status: lspForkRoot.status, code: lspForkRoot.body?.error?.code ?? null, detail: lspForkRoot.body?.error?.detail ?? null }).slice(0, 240))
-      const lspHover = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'hover', file: 'a.ts', line: 3, character: 14, workspaceRoot: LSP_WS })
-      check('delegated lsp hover via real mother provider returns normalized hover', lspHover.status === 200
+      const lspHover = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'hover', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_WS })
+      check('delegated lsp hover via real mother provider returns normalized {contents}', lspHover.status === 200
         && lspHover.body?.ok === true && lspHover.body?.result?.provider === 'mother-lsp'
         && lspHover.body.result.kind === 'hover'
-        && typeof lspHover.body.result.hover?.contents === 'string'
-        && lspHover.body.result.hover.contents.length > 0
-        && /base/i.test(lspHover.body.result.hover.contents),
-        JSON.stringify({ status: lspHover.status, code: lspHover.body?.error?.code ?? null, provider: lspHover.body?.result?.provider ?? null, hover: String(lspHover.body?.result?.hover?.contents ?? '').slice(0, 120), detail: lspHover.body?.error?.detail ?? null }).slice(0, 420))
-      const lspRefs = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'references', file: 'base.ts', line: 1, character: 14, workspaceRoot: LSP_WS })
-      const refUris = Array.isArray(lspRefs.body?.result?.locations) ? lspRefs.body.result.locations.map((loc) => String(loc?.uri ?? '')) : []
+        && typeof lspHover.body.result.contents === 'string'
+        && lspHover.body.result.contents.length > 0
+        && /base/i.test(lspHover.body.result.contents),
+        JSON.stringify({ status: lspHover.status, code: lspHover.body?.error?.code ?? null, provider: lspHover.body?.result?.provider ?? null, contents: String(lspHover.body?.result?.contents ?? '').slice(0, 120), detail: lspHover.body?.error?.detail ?? null }).slice(0, 420))
+      const lspRefs = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'references', file: 'base.ts', line: 0, character: 13, workspaceRoot: LSP_WS })
+      const refPaths = Array.isArray(lspRefs.body?.result?.locations) ? lspRefs.body.result.locations.map((loc) => String(loc?.path ?? '')) : []
       check('delegated lsp references resolve across fixture files (real TS semantics)', lspRefs.status === 200
         && lspRefs.body?.ok === true && lspRefs.body?.result?.provider === 'mother-lsp'
-        && lspRefs.body.result.kind === 'locations' && refUris.length >= 2
-        && refUris.some((uri) => /base\.ts$/i.test(uri)) && refUris.some((uri) => /a\.ts$/i.test(uri)),
-        JSON.stringify({ status: lspRefs.status, code: lspRefs.body?.error?.code ?? null, refs: refUris }).slice(0, 320))
-      const lspEscape = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: '../outside.ts', line: 1, character: 1, workspaceRoot: LSP_WS })
+        && lspRefs.body.result.kind === 'locations' && refPaths.length >= 2
+        && refPaths.some((item) => /base\.ts$/i.test(item)) && refPaths.some((item) => /a\.ts$/i.test(item)),
+        JSON.stringify({ status: lspRefs.status, code: lspRefs.body?.error?.code ?? null, refs: refPaths }).slice(0, 320))
+      const lspEscape = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: '../outside.ts', line: 0, character: 0, workspaceRoot: LSP_WS })
       check('delegated lsp rejects file escaping the registered root (contract-invalid-request)', lspEscape.status === 200
         && lspEscape.body?.ok === false && lspEscape.body?.error?.code === 'contract-invalid-request'
         && lspEscape.body?.error?.detail?.reason === 'file-outside-root',
         JSON.stringify({ status: lspEscape.status, code: lspEscape.body?.error?.code ?? null, detail: lspEscape.body?.error?.detail ?? null }).slice(0, 240))
-      const lspDenied = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: path.join(os.tmpdir(), 'outside-lsp-root') })
-      check('delegated lsp rejects workspaceRoot outside the registered allowlist (contract-unauthorized)', lspDenied.status === 200
-        && lspDenied.body?.ok === false && lspDenied.body?.error?.code === 'contract-unauthorized'
+      const lspDenied = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 2, character: 13, workspaceRoot: path.join(os.tmpdir(), 'outside-lsp-root') })
+      check('delegated lsp rejects workspaceRoot outside the registered allowlist (contract-invalid-request)', lspDenied.status === 200
+        && lspDenied.body?.ok === false && lspDenied.body?.error?.code === 'contract-invalid-request'
         && lspDenied.body?.error?.detail?.reason === 'root-not-allowed',
         JSON.stringify({ status: lspDenied.status, code: lspDenied.body?.error?.code ?? null, detail: lspDenied.body?.error?.detail ?? null }).slice(0, 240))
     }

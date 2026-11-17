@@ -246,6 +246,8 @@ export const Config = z.object({
       lsp: z.object({
         allowedRoots: z.array(z.string()).default([]).description('LSP 委托允许的 workspaceRoot 前缀（空 = 拒绝，fail-closed；realpath 包含校验）'),
         includeForkWorktrees: z.boolean().default(true).description('自动登记所有 fork 任务的工作区根（母体根 + fork 工作区根，显式登记）'),
+        maxLocations: z.number().min(1).max(1000).default(200).description('locations 结果上限（超出裁剪并标记 truncated）'),
+        maxResultChars: z.number().min(256).max(200000).default(20000).description('hover 等文本结果上限（超出裁剪并标记 truncated）'),
       }).default({}),
     }).default({}),
   }).default({}),
@@ -2090,6 +2092,8 @@ export function apply(ctx, config) {
   const lspCfg = {
     allowedRoots: Array.isArray(cfg.contract?.delegate?.lsp?.allowedRoots) ? cfg.contract.delegate.lsp.allowedRoots.map((root) => String(root)) : [],
     includeForkWorktrees: cfg.contract?.delegate?.lsp?.includeForkWorktrees !== false,
+    maxLocations: Number.isInteger(cfg.contract?.delegate?.lsp?.maxLocations) ? cfg.contract.delegate.lsp.maxLocations : 200,
+    maxResultChars: Number.isInteger(cfg.contract?.delegate?.lsp?.maxResultChars) ? cfg.contract.delegate.lsp.maxResultChars : 20000,
   }
   /** 显式登记：母体配置根 + 所有 fork 任务工作区根（任务 registry 即登记来源）。 */
   const resolveLspRootsForTask = () => {
@@ -2224,7 +2228,7 @@ export function apply(ctx, config) {
             auditLsp('denied', rootCheck.code, String(params?.workspaceRoot ?? ''))
             throw error
           }
-          const query = await queryMotherLsp({ lspService, invoke: validated, workspaceRoot: rootCheck.workspaceRoot })
+          const query = await queryMotherLsp({ lspService, invoke: validated, workspaceRoot: rootCheck.workspaceRoot, limits: { maxLocations: lspCfg.maxLocations, maxResultChars: lspCfg.maxResultChars } })
           if (query.ok !== true) {
             const error = new Error(query.message)
             error.code = query.code
