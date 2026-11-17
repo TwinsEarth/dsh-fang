@@ -37,7 +37,9 @@ preflight --e2e              GREEN 3.5.2
 
 - **母体正式 profile 仍是 3.4.2 且未安装 `lsp-provider/`**：生产 LSP 委托仍 `contract-unavailable`；安装步骤见 `docs/INSTALL-LSP-MOTHER.md`（需要用户面板操作 + 重启，本会话审批自动化关闭，无法代装）。
 - **fork-local（路线 B）默认关闭**：仅提供变体 bundle + 探测（`forkLsp.available=false`）。
-- **M5 自测**：本会话 `npm pack` 受打包守卫限制，使用内容等价解包目录；发布后建议对 npm tarball 复跑 `fang-relay-probe`。
+- **M5 自测（已升级到发布版本）**：发布前受打包守卫限制使用内容等价解包目录；**2026-11-18 已用 v3.5.2 GitHub Release 资产复跑房主探针**：
+  `fangVersion=3.5.2`、`peer=dsh-fang-bundle`、5 条回执、非自环、幂等通过、`VENDOR.json` 8/8、peerLabel 取自 orchestrator、`relayHandlersRegistered=true`（exit 0）。
+  资产校验：680,053 B，sha256 `9d5d3518…`（= manifest）、sha1 `08024e94…`（= npm shasum）；证据 `docs/M5-fang-relay-evidence-3.5.2.json`。
 - **v3.5.1 未发布**：当前版本号由用户当次指令指定为 3.5.2（跳号已由用户明确指定，符合发布纪律）。
 
 ## 5. 发布渠道
