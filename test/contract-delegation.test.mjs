@@ -9,6 +9,7 @@ import {
   DELEGATE_ERROR,
   capabilityCatalog,
   checkDelegation,
+  createDelegationGate,
   delegationAuditRecord,
   exceedPayloadLimit,
   normalizeDelegationConfig,
@@ -85,4 +86,38 @@ test('delegationAuditRecord: capability/source/outcome/latency shape', () => {
     capability: 'fang.session.list', source: 'fork-1', outcome: 'ok', error: null, latencyMs: 12,
   })
   assert.equal(delegationAuditRecord({ method: 'x', outcome: 'rejected', error: 'contract-unsupported' }).error, 'contract-unsupported')
+})
+
+test('M5 concurrency gate: over-limit is rejected immediately (fail-closed), release restores capacity', () => {
+  const gate = createDelegationGate({ maxConcurrent: 2 })
+  const first = gate.tryAcquire()
+  const second = gate.tryAcquire()
+  const third = gate.tryAcquire()
+  assert.equal(first.ok, true)
+  assert.equal(second.ok, true)
+  assert.equal(third.ok, false)
+  assert.equal(third.error, DELEGATE_ERROR.RATE_LIMITED)
+  assert.deepEqual(gate.snapshot(), { active: 2, maxConcurrent: 2 })
+  gate.release()
+  const fourth = gate.tryAcquire()
+  assert.equal(fourth.ok, true)
+  assert.equal(gate.snapshot().active, 2)
+  gate.release()
+  gate.release()
+  assert.equal(gate.snapshot().active, 0)
+  assert.equal(gate.tryAcquire().ok, true)
+})
+
+test('M5 gate: maxConcurrent config defaults/clamps are explicit', () => {
+  assert.equal(normalizeDelegationConfig().maxConcurrent, 4)
+  assert.equal(normalizeDelegationConfig({ maxConcurrent: 2 }).maxConcurrent, 2)
+  assert.equal(normalizeDelegationConfig({ maxConcurrent: 0 }).maxConcurrent, 4)
+  assert.equal(normalizeDelegationConfig({ maxConcurrent: 999 }).maxConcurrent, 64)
+})
+
+test('M5 audit: rate-limited outcome is recorded with the rate-limit code', () => {
+  const record = delegationAuditRecord({ method: 'fang.test.sleep', source: 'fork-1', outcome: 'rate-limited', error: DELEGATE_ERROR.RATE_LIMITED, latencyMs: 0 })
+  assert.equal(record.outcome, 'rate-limited')
+  assert.equal(record.error, 'contract-rate-limited')
+  assert.ok(record.capability && record.source)
 })

@@ -46,7 +46,7 @@ import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 // accelerator serves fork Web UIs only. See /fang/api/fork-core.
 import { readForkCoreSettings, resolveForkCoreState, writeForkCoreSettings } from '../lib/fork-core-settings.mjs'
 import {
-  capabilityCatalog, checkDelegation, DELEGATE_ERROR, delegationAuditRecord,
+  capabilityCatalog, checkDelegation, createDelegationGate, DELEGATE_ERROR, delegationAuditRecord,
   DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
 } from '../lib/contract-delegation.mjs'
 import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
@@ -241,6 +241,7 @@ export const Config = z.object({
       maxPayloadBytes: z.number().min(1024).max(16 * 1024 * 1024).default(64 * 1024),
       readTimeoutMs: z.number().min(100).max(120000).default(5000),
       writeTimeoutMs: z.number().min(100).max(600000).default(30000),
+      maxConcurrent: z.number().min(1).max(64).default(4).description('委托并发上限；超过立即 contract-rate-limited（fail-closed，不排队）'),
     }).default({}),
   }).default({}),
 })
@@ -2078,6 +2079,7 @@ export function apply(ctx, config) {
     instanceId: `fang-${gate.role}-${process.pid}`,
   })
   const delegationCfg = normalizeDelegationConfig(cfg.contract?.delegate ?? {})
+  const delegationGate = createDelegationGate({ maxConcurrent: delegationCfg.maxConcurrent })
   const delegateUnavailable = (message, code = DELEGATE_ERROR.UNAVAILABLE) => { const error = new Error(message); error.code = code; throw error }
   const contractServer = createContractServer({
     role: gate.role,
@@ -3332,17 +3334,26 @@ export function apply(ctx, config) {
               try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rejected', error: DELEGATE_ERROR.INVALID, latencyMs: 0 })) } catch { /* audit optional */ }
               return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.INVALID, message: 'delegated payload exceeds maxPayloadBytes' } }))
             }
-            const run = await runDelegated(() => contractServer.invoke(body), { timeoutMs: delegationCfg.readTimeoutMs })
-            const errorCode = run.ok ? null : (run.error ?? DELEGATE_ERROR.UNAVAILABLE)
-            try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: run.ok ? 'ok' : 'error', error: errorCode, latencyMs: run.latencyMs })) } catch { /* audit optional */ }
-            if (run.ok !== true) {
-              return json(res, 200, createResponse({ id: body?.id, error: { code: errorCode, message: run.message ?? errorCode } }))
+            const slot = delegationGate.tryAcquire()
+            if (slot.ok !== true) {
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: 'rate-limited', error: DELEGATE_ERROR.RATE_LIMITED, latencyMs: 0 })) } catch { /* audit optional */ }
+              return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.RATE_LIMITED, message: `delegation concurrency limit reached (max ${delegationCfg.maxConcurrent})` } }))
             }
-            // 委托模式统一错误码：服务不可用 → contract-unavailable（不泄露内部 code）。
-            if (run.value?.ok === false && run.value?.error?.code === 'fang-service-unavailable') {
-              return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.UNAVAILABLE, message: 'capability service unavailable on mother' } }))
+            try {
+              const run = await runDelegated(() => contractServer.invoke(body), { timeoutMs: delegationCfg.readTimeoutMs })
+              const errorCode = run.ok ? null : (run.error ?? DELEGATE_ERROR.UNAVAILABLE)
+              try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: run.ok ? 'ok' : 'error', error: errorCode, latencyMs: run.latencyMs })) } catch { /* audit optional */ }
+              if (run.ok !== true) {
+                return json(res, 200, createResponse({ id: body?.id, error: { code: errorCode, message: run.message ?? errorCode } }))
+              }
+              // 委托模式统一错误码：服务不可用 → contract-unavailable（不泄露内部 code）。
+              if (run.value?.ok === false && run.value?.error?.code === 'fang-service-unavailable') {
+                return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.UNAVAILABLE, message: 'capability service unavailable on mother' } }))
+              }
+              return json(res, 200, run.value)
+            } finally {
+              delegationGate.release()
             }
-            return json(res, 200, run.value)
           }
           const out = await contractServer.invoke(body)
           return json(res, 200, out)

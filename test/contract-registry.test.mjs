@@ -48,6 +48,7 @@ test('M1 error codes: fang delegation codes are a unique, stable append-only tab
   assert.deepEqual(codes.sort(), [
     'contract-approval-required',
     'contract-invalid-request',
+    'contract-rate-limited',
     'contract-timeout',
     'contract-unauthorized',
     'contract-unavailable',

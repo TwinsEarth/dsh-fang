@@ -87,6 +87,15 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 审批拒绝路径 | `dryRun:false` → 委托层拒绝执行、零副作用，返回 `contract-approval-required`（detail 含 dryRun 预览） | e2e：real import → contract-approval-required |
 | 冒烟脚本 | `npm run smoke:contract-delegation -- --base <motherUrl> --token-file <dataDir>/fang-auth.json`：capability.list / session.list / session.events / lsp 读+写 / chat.import dryRun 两次一致性 + 真实导入审批拒绝；写能力未放行时记 SKIP | 对生产 3.4.2 实跑：`PASS health` → `SKIP older build`（重启 3.5.0 后应转绿） |
 
+### 0.6 M5 验收（审计与限流压测，2026-11-17）
+
+| 项 | 实现 | 单测 / e2e |
+|---|---|---|
+| 审计完整性 | 每次委托（成功 / 白名单拒绝 / 超时 / 限流 / 服务不可用）都写 `contract-delegate`：`{capability, source, outcome, error, latencyMs}` | 单测 audit 形状；e2e 审计账本断言 `records=20`，outcome 覆盖 `ok/rejected/error/rate-limited`，且记录 `contract-timeout` |
+| 并发上限 | `contract.delegate.maxConcurrent`（默认 4，1–64）；`createDelegationGate()` 超限**立即**返回 `contract-rate-limited`（fail-closed，不排队） | 单测 gate 获取/释放/超限；e2e：母体 `maxConcurrent=2` + 8 并发 80ms 委托 → `ok=2, rateLimited=6` |
+| 超时上限 | `readTimeoutMs`（默认 5s）→ `contract-timeout`（已覆盖） | e2e 断言 |
+| 错误码 | 新增 `contract-rate-limited`（fang 层表，唯一性断言） | 单测 |
+
 ## 1. 现有契约能力（只读盘点）
 
 | 方法 | 版本 | 类型 | 现有实现 |
@@ -143,7 +152,7 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 1. **白名单**：母体 config 显式声明 `contract.delegate.allow = ['fang.session.events', 'fang.tool.invoke:lsp', …]`；未登记 → `unsupported-method`，**不静默降级**。
 2. **鉴权**：复用安装级 token + 契约 transport 鉴权；仅接受 `role:'fork'` 的调用方身份。
 3. **审批**：`kind:'write'` 能力必须经母体审批队列（复用 decisionCenter/approver）；拒绝/超时 → 明确错误码。
-4. **限额**：单次 payload ≤ 256KB、输出 ≤ 256KB；每能力超时（读 5s / 写 30s）；每分身并发上限。
+4. **限额**：单次 payload ≤ 256KB、输出 ≤ 256KB；每能力超时（读 5s / 写 30s）；**委托并发上限 `maxConcurrent`（默认 4，超过立即 `contract-rate-limited`，不排队）**。
 5. **审计**：每次委托记录 `capability / callerForkId / outcome / latencyMs / approvalId?`，写母体审计账本。
 6. **隔离**：只读能力不触碰母体写路径；写能力走既有审批与门禁（主城门禁不绕过）。
 

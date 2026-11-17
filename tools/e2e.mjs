@@ -117,7 +117,7 @@ function makeProfile(homeRoot) {
   fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'),
     '- id: fang-queue-journal\n  disabled: false\n' +
     '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n' +
-    '      delegate:\n        readTimeoutMs: 100\n        allow:\n' +
+    '      delegate:\n        readTimeoutMs: 100\n        maxConcurrent: 2\n        allow:\n' +
     "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.chat.import\n          - fang.test.sleep\n")
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
@@ -367,6 +367,12 @@ async function main() {
     check('delegated chat.import real import requires approval (contract-approval-required)', importReal.status === 200
       && importReal.body?.ok === false && importReal.body?.error?.code === 'contract-approval-required',
       JSON.stringify({ status: importReal.status, code: importReal.body?.error?.code ?? null }).slice(0, 160))
+    // M5：并发上限压测——母体 maxConcurrent=2，同时 8 个 80ms 委托：必须有被限流、也必须有成功的
+    const concurrent = await Promise.all(Array.from({ length: 8 }, () => delegatedInvoke('fang.test.sleep', { ms: 80 })))
+    const concurrentOk = concurrent.filter((r) => r.body?.ok === true).length
+    const concurrentLimited = concurrent.filter((r) => r.body?.error?.code === 'contract-rate-limited').length
+    check('delegated concurrency cap enforced (contract-rate-limited)', concurrentLimited >= 1 && concurrentOk >= 1,
+      JSON.stringify({ ok: concurrentOk, rateLimited: concurrentLimited, total: concurrent.length }).slice(0, 160))
 
 
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')
@@ -566,6 +572,16 @@ check('POST /fang/api/derive accepted with exactly one session',
       const kinds = new Set(lines.map(r => r.kind))
       check('audit records task-created', lines.some(r => String(r.kind).includes('fork-created')))
       check('audit records adapter handshake', kinds.has('adapter-handshake'))
+      // M5：委托审计完整性——每次委托（成功/拒绝/限流/超时）都要有 capability/source/outcome/latencyMs
+      const delegateRecords = lines.filter((r) => r.kind === 'contract-delegate')
+      check('audit records delegated capability calls', delegateRecords.length > 0
+        && delegateRecords.every((r) => typeof r.capability === 'string' && r.capability.length > 0
+          && typeof r.outcome === 'string' && Number.isFinite(Number(r.latencyMs))),
+        `records=${delegateRecords.length}`)
+      check('audit records rejection + rate-limit + timeout outcomes', delegateRecords.some((r) => r.outcome === 'rejected')
+        && delegateRecords.some((r) => r.outcome === 'rate-limited')
+        && delegateRecords.some((r) => r.outcome === 'error' && r.error === 'contract-timeout'),
+        JSON.stringify({ outcomes: [...new Set(delegateRecords.map((r) => r.outcome))] }).slice(0, 160))
     }
 
     // ── decision center: real submit → list → resolve → 落库断言 ──────────

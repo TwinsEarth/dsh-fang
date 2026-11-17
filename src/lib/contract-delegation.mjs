@@ -13,6 +13,7 @@ export const DELEGATE_ERROR = Object.freeze({
   TIMEOUT: 'contract-timeout',
   INVALID: 'contract-invalid-request',
   APPROVAL_REQUIRED: 'contract-approval-required',
+  RATE_LIMITED: 'contract-rate-limited',
 })
 
 export const DELEGATE_KIND = Object.freeze({ READ: 'read', WRITE: 'write' })
@@ -47,6 +48,7 @@ export const DELEGATE_DEFAULTS = Object.freeze({
   maxPayloadBytes: 64 * 1024,
   readTimeoutMs: 5000,
   writeTimeoutMs: 30000,
+  maxConcurrent: 4,
 })
 
 /** Pure: normalise the `contract.delegate` config block. */
@@ -64,6 +66,26 @@ export function normalizeDelegationConfig(raw = {}) {
       ? Math.round(Number(input.readTimeoutMs)) : DELEGATE_DEFAULTS.readTimeoutMs,
     writeTimeoutMs: Number.isFinite(Number(input.writeTimeoutMs)) && Number(input.writeTimeoutMs) >= 100
       ? Math.round(Number(input.writeTimeoutMs)) : DELEGATE_DEFAULTS.writeTimeoutMs,
+    maxConcurrent: Number.isFinite(Number(input.maxConcurrent)) && Number(input.maxConcurrent) >= 1
+      ? Math.min(64, Math.round(Number(input.maxConcurrent))) : DELEGATE_DEFAULTS.maxConcurrent,
+  }
+}
+
+/**
+ * 并发闸门：超过上限立即拒绝（fail-closed），不排队、不静默降级。
+ * @returns {{tryAcquire:()=>({ok:true,active:number}|{ok:false,error:string,active:number}), release:()=>void, snapshot:()=>({active:number,maxConcurrent:number})}}
+ */
+export function createDelegationGate({ maxConcurrent = DELEGATE_DEFAULTS.maxConcurrent } = {}) {
+  const limit = Math.max(1, Math.round(Number(maxConcurrent) || DELEGATE_DEFAULTS.maxConcurrent))
+  let active = 0
+  return {
+    tryAcquire() {
+      if (active >= limit) return { ok: false, error: DELEGATE_ERROR.RATE_LIMITED, active }
+      active += 1
+      return { ok: true, active }
+    },
+    release() { active = Math.max(0, active - 1) },
+    snapshot() { return { active, maxConcurrent: limit } },
   }
 }
 
