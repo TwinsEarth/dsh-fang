@@ -2230,6 +2230,8 @@ export function apply(ctx, config) {
           throw error
         }
         if (lspService) {
+          // 母体委托最小正确路径（E7）：直接走官方能力缝 ctx.get('lsp').query({operation,filePath,position,workspaceRoot})；
+          // 不需要 Agent Session（E10 只约束模型工具 dsh-tool-lsp），也不经过 tools 服务。
           const startedAt = Date.now()
           const auditLsp = (outcome, error, workspaceRoot = null) => {
             try { audit('contract-delegate', lspAuditRecord({ action: validated.action, provider: 'mother', workspaceRoot, outcome, error, latencyMs: Date.now() - startedAt })) } catch { /* audit optional */ }

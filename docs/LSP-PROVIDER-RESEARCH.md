@@ -172,6 +172,8 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 - 可复现安装：`npm run setup:lsp-live` 使用同一组精确版本（setup 脚本已钉死 tls 6.1.0）；
 - 升级纪律：任一项升级必须同时更新 package.json + LOCKED-VERSIONS.json，并重跑 `setup:lsp-live` → `test:lsp-live`（e2e --lsp 125/125）→ `test:lsp-bundle`（5/5）。
 
+- **母体委托可行（2026-11-17 确认）**：`ctx.get('lsp').query({operation,filePath,position,workspaceRoot})` 即可，无需 Agent Session、不走 tools 服务；`dsh-tool-lsp` 的 Agent Session 要求（E10）只影响模型工具，不影响委托（E7 能力缝）。
+
 **验证（锁版本后）**：e2e `--lsp` **125/125**；`test:lsp-bundle` **5/5**；默认 e2e 118/118；全量单测 1247 pass。
 
 **路线 B（fork-local）再评估（本次结论：暂缓，保留探测）**：
