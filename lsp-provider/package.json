@@ -1,0 +1,31 @@
+{
+  "name": "@twinsearth/dsh-fang-lsp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "dsh-Fang LSP provider bundle (route A/B): official DSH LSP seam + stdio provider + model-facing lsp tool, with a pinned TypeScript language server. Config-only bundle — no host code.",
+  "license": "AGPL-3.0-or-later",
+  "author": {
+    "name": "dsh-Fang contributors"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "README.md",
+    "LOCKED-VERSIONS.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-lsp": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-lsp-stdio": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-tool-lsp": "0.2.2-rc.3",
+    "typescript-language-server": "6.1.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

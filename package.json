@@ -106,7 +106,13 @@
     "probe:mother": "node tools/release/mother-capability-probe.mjs",
     "smoke:contract-delegation": "node tools/release/contract-delegation-smoke.mjs",
     "spike:ui-client": "node tools/release/ui-client-half-spike.mjs",
-    "release:check": "node tools/release/release-order.mjs"
+    "release:check": "node tools/release/release-order.mjs",
+    "smoke:ui-client-render": "node tools/release/ui-client-render-smoke.mjs",
+    "setup:lsp-live": "node tools/release/lsp-live-setup.mjs",
+    "test:lsp-live": "node tools/e2e.mjs --lsp",
+    "test:lsp-bundle": "node tools/release/lsp-bundle-install.mjs",
+    "verify:lsp-evidence": "node tools/release/lsp-evidence.mjs",
+    "check:lsp-mother": "node tools/release/lsp-mother-check.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "bundle": "@twinsearth/dsh-fang-lsp",
+  "bundleVersion": "0.1.0",
+  "lockedAt": "2026-11-17",
+  "source": "bundle dependencies (installed into an isolated staging profile; `npm run setup:lsp-live` uses the same pins)",
+  "packageManager": "npm 11",
+  "node": ">=22",
+  "resolved": {
+    "@deepseek-ai/dsh-lsp": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-lsp-stdio": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-tool-lsp": "0.2.2-rc.3",
+    "typescript-language-server": "6.1.0",
+    "typescript": "5.9.3"
+  },
+  "notes": [
+    "语言服务器来源 = bundle 依赖 npm typescript-language-server（随 bundle 版本化，用户决策 ①）。",
+    "TypeScript 固定 5.9.3：TS 7 native preview 没有 lib/typescript.js，typescript-language-server 初始化会报 ‘Could not find a valid TypeScript installation’。",
+    "tsl 6.1.0 在 Node 26 + tsc 5.9.3 下已由 e2e --lsp（124/124）与 test:lsp-bundle（5/5）验证。",
+    "升级任何一项都必须同时更新 package.json、本文件，并重跑 setup:lsp-live + test:lsp-live + test:lsp-bundle。"
+  ]
+}

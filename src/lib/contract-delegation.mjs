@@ -31,7 +31,7 @@ export const CAPABILITY_CATALOG = Object.freeze([
   { method: 'fang.session.events', kind: 'read', approval: 'none', since: '1.2', summary: '母体会话有界头读（只读；<200 行）' },
   { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.2', summary: '母体决策中心快照（只读）' },
   { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.2', summary: '母体审批队列（只读）' },
-  { method: 'fang.tool.invoke', kind: 'write', approval: 'required', since: '1.2', summary: '工具委托（首批 lsp：只读子命令放行，写类需审批；默认不在白名单）' },
+  { method: 'fang.tool.invoke', kind: 'write', approval: 'required', since: '1.2', summary: '工具委托（官方 LSP 只读：definition/references/implementation/hover；母体 ctx.lsp provider 优先，fork-local 增强；默认不在白名单）' },
   { method: 'fang.chat.import', kind: 'write', approval: 'required', since: '1.2', summary: '官方会话导入（默认 dryRun；真实导入需审批；默认不在白名单）' },
 ])
 

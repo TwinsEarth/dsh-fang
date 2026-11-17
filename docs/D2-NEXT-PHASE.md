@@ -40,6 +40,7 @@
 ## 2. UI client half 浏览器映射
 
 > **进展（2026-11-17）**：spike 已完成（见 [`docs/UI-CLIENT-HALF-SPIKE.md`](UI-CLIENT-HALF-SPIKE.md)）：第三方 client half 已出现在加速分身启动清单、bundle 可正常提供；缺口是 `@deepseek-ai/*` 作用域行别名；首选方案 = fork-provision 生成 client alias shim 行（先做 `dsh-client-ui-primitives` 原型），再做真实浏览器渲染验收。
+> **实现进展（2026-11-17）**：已完成 **浏览器作用域重写**（第三方 client half 的 `dsh.client.inject/external` + 客户端 bundle `@deepseek-ai/*` → `@twinsearth/*`，`dsh-client-ui-primitives` 走加速 web 静态 seed），并纠正 web 组合必需的 `ui-theme` client 行（具名 override）；`npm run smoke:ui-client-render` 真机 headless 验证：启动图 88 项含 dsh-context、inject 6/6 重写、app shell 挂载、**零模块解析错误**；「上下文」侧栏入口需打开工作区会话（headless welcome 屏的限制已记录）。详见 [`docs/UI-CLIENT-HALF-IMPL.md`](UI-CLIENT-HALF-IMPL.md)。
 
 ### 2.1 目标
 
