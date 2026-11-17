@@ -135,9 +135,14 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 | 契约口径对齐 | `src/lib/lsp-delegation.mjs` 只读四动作；legacy `format/rename/codeAction/apply` → `contract-unsupported`；**`diagnostics` 仅测试缝可用且不 advertise**；位置必填校验 | `test/lsp-delegation.test.mjs` 5 项；e2e 更新 |
 | 能力目录按 provider 区分 | `fang.capability.list` 的 `fang.tool.invoke` 带 `provider:{available,default,services,actions}`，顶层 `lspProvider`；未安装时为 `available:false`（显式，不假成功） | e2e provider-tagged 断言 |
 | 路线 B（增强）探测 | `detectForkLspSupport(accelNodeModules)`：检测 `@twinsearth/dsh-lsp`/`dsh-lsp-stdio`/`dsh-tool-lsp`；结果暴露在 `writeAcceleratedForkProfile(...).forkLsp`，默认不启用 | `test/accelerated-alias.test.mjs` |
-| 诚实边界 | 母体尚未安装官方 LSP 栈（npm 有匹配 0.2.2-rc.3）；未安装时读类动作显式 `contract-unavailable`；e2e 仍用测试缝提供确定性结果 | preflight GREEN |
+| 诚实边界 | 母体正式 profile 尚未安装 LSP 栈；未安装时读类动作显式 `contract-unavailable`。**但路线 A 真实 provider 已在隔离 staging 中跑通**：`npm run setup:lsp-live` → `npm run test:lsp-live`（e2e `--lsp` 模式，真实官方 LSP 栈 + typescript-language-server）| e2e `--lsp`：**119/119**，`definition` 返回 `provider='mother-lsp'` + 1 个 location，`hover` 返回归一化 hover；`diagnostics` 真实 provider 下被 `contract-unsupported`（test-seam-only） |
 
-**剩余（需安装/决策）**：① 把官方 LSP 栈（0.2.2-rc.3）以 config-only bundle 装进母体 profile 并配置语言服务器（本机当前无任何 LSP 服务器）；② 真实 LSP e2e（TS fixture definition/hover + 越界拒绝）；③ 路线 B 的安装方式与能力目录开关。
+**真实 provider e2e（路线 A 首个真实闭环，2026-11-17 实测）**：
+- 准备：`npm run setup:lsp-live`（隔离 staging 安装 `@deepseek-ai/dsh-lsp@0.2.2-rc.3` 三件套 + `typescript-language-server` + `typescript@5.9.3`；不写用户 profile）；
+- 运行：`npm run test:lsp-live`（`tools/e2e.mjs --lsp`：profile 内挂载 dsh-lsp/dsh-lsp-stdio，`ctx.lsp` 就绪，fang 委托走真实 provider）；
+- 断言：catalog provider=`mother-lsp`、actions 4 项；definition → `mother-lsp` + 真实 location；hover → 归一化；diagnostics → `contract-unsupported`（test-seam-only）；legacy 写类仍可读拒绝。
+
+**剩余（安装到正式 profile）**：① 把同一组合以 config-only bundle 装进母体正式 profile（含语言服务器来源/版本锁定）；② 生产母体重启后跑 `probe:mother` + `test:lsp-live` 的等价探测。
 
 ## 7. 原下一步（已由 §6 取代）
 

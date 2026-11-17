@@ -3408,7 +3408,9 @@ export function apply(ctx, config) {
               return json(res, 200, createResponse({ id: body?.id, error: { code: DELEGATE_ERROR.RATE_LIMITED, message: `delegation concurrency limit reached (max ${delegationCfg.maxConcurrent})` } }))
             }
             try {
-              const run = await runDelegated(() => contractServer.invoke(body), { timeoutMs: delegationCfg.readTimeoutMs })
+              // LSP 委托需要拉起/索引语言服务器，用 writeTimeoutMs 预算；其余只读能力用 readTimeoutMs。
+              const budgetMs = String(body?.method ?? '') === 'fang.tool.invoke' ? delegationCfg.writeTimeoutMs : delegationCfg.readTimeoutMs
+              const run = await runDelegated(() => contractServer.invoke(body), { timeoutMs: budgetMs })
               const errorCode = run.ok ? null : (run.error ?? DELEGATE_ERROR.UNAVAILABLE)
               try { audit('contract-delegate', delegationAuditRecord({ method: body?.method, source, outcome: run.ok ? 'ok' : 'error', error: errorCode, latencyMs: run.latencyMs })) } catch { /* audit optional */ }
               if (run.ok !== true) {

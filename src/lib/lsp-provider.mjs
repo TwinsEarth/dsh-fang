@@ -100,7 +100,7 @@ export function mapLspError(error) {
   const name = String(error?.code ?? error?.name ?? '')
   const code = CODE_MAP[name] ?? DELEGATE_ERROR.UNAVAILABLE
   const message = `lsp provider error: ${name || String(error?.message ?? 'unknown')}${error?.message ? ` — ${String(error.message).slice(0, 300)}` : ''}`
-  return { code, message, detail: { lspCode: name || null } }
+  return { code, message, detail: { lspCode: name || null, serverMessage: String(error?.message ?? '').slice(0, 500) || null } }
 }
 
 /** Normalise the seam's closed-union result into the contract payload (JSON-safe). */
