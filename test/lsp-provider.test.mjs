@@ -41,7 +41,11 @@ test('B-6 provider: descriptor distinguishes mother / test-hook / fork-local and
   assert.equal(mother.available, true)
   assert.equal(mother.default, LSP_PROVIDER_MOTHER)
   assert.deepEqual(mother.actions, ['definition', 'references', 'implementation', 'hover'])
-  assert.deepEqual(mother.services, { 'mother-lsp': true, 'fork-local': false, 'test-hook': false })
+  assert.deepEqual(mother.services, { mother: true, 'fork-local': false, 'test-hook': false })
+  assert.equal(mother.providers.mother.mode, 'delegated')
+  assert.equal(mother.providers.mother.source, 'mother-process')
+  assert.equal(mother.providers.mother.available, true)
+  assert.deepEqual(mother.providers['fork-local'].actions, [], 'fork-local advertises nothing while not installed')
 
   const partial = describeLspProvider({ lspService: { query: async () => ({}) }, supportedActions: ['definition', 'hover'] })
   assert.deepEqual(partial.actions, ['definition', 'hover'], 'advertise the intersection only')
@@ -57,10 +61,14 @@ test('B-6 provider: descriptor distinguishes mother / test-hook / fork-local and
   assert.deepEqual(hook.actions, [], 'test seam is not a real provider capability')
   assert.deepEqual(hook.nonProduction, ['test-hook'], 'test seam must be marked non-production')
 
-  const fork = describeLspProvider({ forkLocal: true })
+  const fork = describeLspProvider({ forkLocal: true, forkLspInfo: { available: true, packages: ['@twinsearth/dsh-lsp'] } })
   assert.equal(fork.default, 'fork-local')
   assert.deepEqual(fork.actions, [], 'fork-local advertises only once installed')
   assert.deepEqual(fork.nonProduction, [], 'fork-local is a real provider, not a test seam')
+  assert.equal(fork.providers['fork-local'].mode, 'local')
+  assert.equal(fork.providers['fork-local'].source, 'fork-worktree')
+  assert.deepEqual(fork.providers['fork-local'].actions, ['definition', 'references', 'implementation', 'hover'], 'installed fork-local provides the four read ops locally')
+  assert.equal(fork.providers['fork-local'].detail.available, true)
 })
 
 test('B-6 provider: advertisedActionsFromSeam intersects declared capabilities with the four seam ops', () => {

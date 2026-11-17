@@ -90,11 +90,13 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 非法子命令 | 未知 action → `contract-invalid-request`；缺 file/位置 → `contract-invalid-request` | e2e：nope → contract-invalid-request |
 | 错误码 | 复用 contract 1.2 的委托错误码（approval-required/timeout/unauthorized 等） | 单测 |
 
-> **路线 B（fork-local）契约口径（2026-11-17 定，安装待语言服务器来源决策）**：
-> 1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A）；fork-local 的 LSP 在加速分身本地 `ctx.lsp` 执行，**不经过契约委托**，因此不在 `fang.capability.list` 里 advertise，也不产生 `provider:'fork-local'` 的虚假条目；
-> 2. **能力目录按 provider 区分**只描述母体真实 provider（`mother-lsp`）与是否存在测试缝；`actions` 取真实交集（无 provider 时为空）；
-> 3. **fork-local 的可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）+ 任务记录 `accelerated.forkLsp` 呈现，属于任务视图能力，不是契约能力；
-> 4. **安装默认关闭**：语言服务器来源（npm 依赖随 profile / 系统安装 / 复用宿主服务器）未决前，不自动安装、不默认启用路线 B。
+> **路线 B（fork-local）契约口径（2026-11-17 定；语言服务器来源已定 ①，B 安装仍默认关闭）**：
+> 1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A，provider=`mother`）；fork-local 的 LSP 在加速分身本地 `ctx.lsp` 执行，**不经过契约委托**；
+> 2. **能力目录按 provider 显式区分**：`lspProvider.providers` 含 `mother`（mode=`delegated`，source=`mother-process`）与 `fork-local`（mode=`local`，source=`fork-worktree`），各自只 advertise **实提供**的只读操作；未安装 fork-local 时 `available:false`、`actions:[]`（不产生虚假条目）；测试缝只出现在 `nonProduction` 标记里；
+> 3. **fork-local 的可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）+ 任务记录 `accelerated.forkLsp` 呈现，母体目录里只作就绪探测（不改变执行路径）；
+> 4. **安装默认关闭**：bundle 依赖已锁定；路线 B 安装作为后续增强，需显式安装/启用，不自动装载到 fork profile。
+
+> **安全边界（2026-11-17，E5 事实）**：加速核有同版本 LSP trio 时，fork-local 让 LSP 跑在**分身自己的 workspace/worktree**，语义上优于“把分身文件路径交给母体进程”；而母体委托的 `workspaceRoot` 由调用方传入，`dsh-lsp-stdio` 明确 **trusts its configured server，无沙箱**，因此母体必须用允许根限制文件读取面（realpath 包含 + fail-closed，越界 `contract-invalid-request`），否则等于把母体进程的读取面扩大到调用方任意路径。两条路线**并存**：`provider: 'mother' | 'fork-local'` 在能力目录显式区分；fork-local 无法覆盖“LSP 服务器只装在母体/共享缓存”的场景，故母体 provider 仍是默认。
 >
 > **诚实的边界**：路线 A 的**代码路径已完整**并在隔离 staging 中用真实 provider 跑通（`setup:lsp-live` / `test:lsp-live`）；但**母体正式 profile 尚未安装**官方 LSP 栈，生产读类动作仍显式 `contract-unavailable`，默认 e2e 使用测试缝提供确定性结果。
 >

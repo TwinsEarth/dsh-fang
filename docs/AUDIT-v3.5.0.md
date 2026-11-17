@@ -58,6 +58,7 @@
 - **`lsp-provider/` 配置型 bundle**（`@twinsearth/dsh-fang-lsp`）：依赖官方三件套 0.2.2-rc.3 + 语言服务器；patch insert 挂 seam/provider/tool；`test/lsp-provider-bundle.test.mjs` 3 项完整性断言；
 - **fang 委托层**：`collectForkWorkspaceRoots` / `resolveLspAllowedRoots` / `lspAuditRecord`（workspaceRoot/outcome 审计 trail）；配置 `contract.delegate.lsp.allowedRoots` + `includeForkWorktrees`；
 - e2e `--lsp` **124/124**：TS 双文件 fixture 真实 definition/hover/**references 跨文件解析**、fork 工作区根自动登记后可查询、越界根 `contract-unauthorized`（root-not-allowed）、文件逃逸 `contract-invalid-request`（file-outside-root）、审计 ok/denied trail。
+- **provider 显式区分与安全边界**：目录 `lspProvider.providers` 区分 `mother`(delegated/mother-process) 与 `fork-local`(local/fork-worktree)，各只 advertise 实提供能力；fork-local 就绪探测进目录但不改执行路径；母体委托 workspaceRoot 允许根 realpath fail-closed + 审计（dsh-lsp-stdio 无沙箱）；e2e --lsp 124/124、默认 118/118。
 - **3.1 母体侧实现口径落地**：参数 0-based 非负整数（seam 原生坐标透传）、workspaceRoot 必填+realpath 校验（越界→contract-invalid-request）、结果归一化 `{path,line,character}`(1-based)/`{contents}` + maxLocations/maxResultChars 裁剪（truncated）、审计/并发/超时复用 M5；e2e --lsp 124/124、默认 118/118。
 - **B-6 契约口径修订**：目录只 advertise provider 实提供的 4 个只读操作（无 provider → 空 actions）；diagnostics 对外零宣称（测试缝结果 `testSeam/nonProduction` 标记，目录 `provider.nonProduction`）；写类从官方语义移除但保留通用审批门禁路径；错误码映射固定（LSP_UNAVAILABLE→contract-unavailable；LSP_FILE_OUTSIDE_WORKSPACE/LSP_INVALID_PROVIDER→contract-invalid-request；LSP_MALFORMED_RESPONSE/LSP_SERVER_ERROR→contract-unavailable，附 detail）；单测 5 组映射断言。
 - **M3.5 语言服务器锁定（已落地）**：`typescript-language-server@6.1.0` + `typescript@5.9.3` + 官方三件套 `0.2.2-rc.3` 精确锁定；`LOCKED-VERSIONS.json` ↔ package.json 一致性测试（bundle 测试 4 项）；setup 脚本钉死 tls 6.1.0；锁版本后 e2e --lsp 124/124、test:lsp-bundle 5/5。**路线 B 再评估：暂缓**（保留 forkLsp 探测；不安装、不默认启用；触发条件/风险见 RESEARCH §6.2）。
@@ -65,9 +66,9 @@
 
 - `src/lib/lsp-provider.mjs`：契约四动作 → 官方 `ctx.lsp.query`；1-based→0-based；locations/hover 归一化；seam 错误码映射；`workspaceRoot` 显式 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝）；
 - `src/lib/lsp-delegation.mjs`：对齐官方只读口径（4 动作）；legacy diagnostics/format/rename → `contract-unsupported`；位置必填；
-- Orchestrator：母体 `ctx.lsp` 优先（`provider:'mother-lsp'`），测试缝保留，未安装时 `contract-unavailable`；`fang.capability.list` 增加 `provider`/`lspProvider`（按 provider 区分、available=false 显式）；
+- Orchestrator：母体 `ctx.lsp` 优先（`provider:'mother'`），测试缝保留，未安装时 `contract-unavailable`；`fang.capability.list` 增加 `provider`/`lspProvider`（按 provider 区分、available=false 显式）；
 - 路线 B（增强，口径已定）：`detectForkLspSupport(accelNodeModules)` 探测 `@twinsearth/dsh-lsp*`，暴露 `forkLsp` 并传播进任务记录 `accelerated.forkLsp`；**fork-local 不走契约委托**（契约不新增方法/错误码，能力目录不 advertise fork-local，避免虚假宣称）；安装默认关闭，待语言服务器来源决策；
-- 测试：`test/lsp-provider.test.mjs` 7 项 + `test/lsp-delegation.test.mjs` 5 项；e2e 测试缝 **118/118**；**真实 provider 闭环** `npm run test:lsp-live`（**e2e --lsp 119/119**：definition/hover 走真实 `ctx.lsp`、provider=mother-lsp；diagnostics 真实 provider 下只在测试缝可用并被可读拒绝；staging 安装走 `npm run setup:lsp-live`，不写用户 profile）。
+- 测试：`test/lsp-provider.test.mjs` 7 项 + `test/lsp-delegation.test.mjs` 5 项；e2e 测试缝 **118/118**；**真实 provider 闭环** `npm run test:lsp-live`（**e2e --lsp 119/119**：definition/hover 走真实 `ctx.lsp`、provider=mother；diagnostics 真实 provider 下只在测试缝可用并被可读拒绝；staging 安装走 `npm run setup:lsp-live`，不写用户 profile）。
 
 ## 3. 验证证据（本机实测）
 

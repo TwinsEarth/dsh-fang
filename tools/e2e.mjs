@@ -386,12 +386,16 @@ async function main() {
     const capItems = Array.isArray(capList.body?.result?.capabilities) ? capList.body.result.capabilities : []
     const lspCap = capItems.find((c) => c.method === 'fang.tool.invoke')
     const lspCapOk = LSP_MODE
-      ? (lspCap?.provider?.default === 'mother-lsp' && lspCap.provider?.available === true
+      ? (lspCap?.provider?.default === 'mother' && lspCap.provider?.available === true
         && Array.isArray(lspCap.actions) && lspCap.actions.includes('definition') && lspCap.actions.includes('hover')
         && !lspCap.actions.includes('diagnostics')
+        && lspCap.provider?.providers?.mother?.mode === 'delegated'
+        && lspCap.provider?.providers?.['fork-local']?.mode === 'local'
         && Array.isArray(lspCap.provider?.nonProduction) && lspCap.provider.nonProduction.includes('test-hook'))
       : (Boolean(lspCap) && Array.isArray(lspCap.actions) && lspCap.actions.length === 0
         && !lspCap.actions.includes('diagnostics') && lspCap.provider?.services?.['test-hook'] === true
+        && lspCap.provider?.providers?.mother?.mode === 'delegated'
+        && lspCap.provider?.providers?.['fork-local']?.mode === 'local'
         && Array.isArray(lspCap.provider?.nonProduction) && lspCap.provider.nonProduction.includes('test-hook'))
     check('delegated fang.capability.list returns catalog + provider-tagged lsp capability (advertises only real provider capabilities)', capList.status === 200 && capList.body?.ok === true
       && capItems.some((c) => c.method === 'fang.session.list')
@@ -428,7 +432,7 @@ async function main() {
       : { tool: 'lsp', action: 'definition', file: 'example.mjs', line: 0, character: 0 }
     const lspRead = await delegatedInvoke('fang.tool.invoke', lspReadParams)
     const lspReadOk = LSP_MODE
-      ? (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'mother-lsp'
+      ? (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'mother'
         && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations)
         && lspRead.body.result.locations.length > 0
         && lspRead.body.result.locations.every((loc) => typeof loc?.path === 'string' && loc.path.length > 0 && Number(loc?.line) === 1))
@@ -462,13 +466,13 @@ async function main() {
     if (LSP_MODE) {
       const lspForkRoot = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_FORK_WS })
       check('delegated lsp auto-registers fork workspace root (task registry explicit registration)', lspForkRoot.status === 200
-        && lspForkRoot.body?.ok === true && lspForkRoot.body?.result?.provider === 'mother-lsp'
+        && lspForkRoot.body?.ok === true && lspForkRoot.body?.result?.provider === 'mother'
         && lspForkRoot.body.result.kind === 'locations' && lspForkRoot.body.result.locations.length > 0
         && lspForkRoot.body.result.locations.some((loc) => /lsp-fork-workspace/i.test(String(loc?.path ?? ''))),
         JSON.stringify({ status: lspForkRoot.status, code: lspForkRoot.body?.error?.code ?? null, detail: lspForkRoot.body?.error?.detail ?? null }).slice(0, 240))
       const lspHover = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'hover', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_WS })
       check('delegated lsp hover via real mother provider returns normalized {contents}', lspHover.status === 200
-        && lspHover.body?.ok === true && lspHover.body?.result?.provider === 'mother-lsp'
+        && lspHover.body?.ok === true && lspHover.body?.result?.provider === 'mother'
         && lspHover.body.result.kind === 'hover'
         && typeof lspHover.body.result.contents === 'string'
         && lspHover.body.result.contents.length > 0
@@ -477,7 +481,7 @@ async function main() {
       const lspRefs = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'references', file: 'base.ts', line: 0, character: 13, workspaceRoot: LSP_WS })
       const refPaths = Array.isArray(lspRefs.body?.result?.locations) ? lspRefs.body.result.locations.map((loc) => String(loc?.path ?? '')) : []
       check('delegated lsp references resolve across fixture files (real TS semantics)', lspRefs.status === 200
-        && lspRefs.body?.ok === true && lspRefs.body?.result?.provider === 'mother-lsp'
+        && lspRefs.body?.ok === true && lspRefs.body?.result?.provider === 'mother'
         && lspRefs.body.result.kind === 'locations' && refPaths.length >= 2
         && refPaths.some((item) => /base\.ts$/i.test(item)) && refPaths.some((item) => /a\.ts$/i.test(item)),
         JSON.stringify({ status: lspRefs.status, code: lspRefs.body?.error?.code ?? null, refs: refPaths }).slice(0, 320))

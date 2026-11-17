@@ -109,7 +109,7 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 ### 3.3 验收（实现阶段）
 
-- [ ] 母体安装 LSP 栈后，`/fang/api/contract/invoke` 的 `fang.capability.list` 中出现 `fang.tool.invoke` 且 **provider='mother-lsp'**（不是 test-hook）；
+- [ ] 母体安装 LSP 栈后，`/fang/api/contract/invoke` 的 `fang.capability.list` 中出现 `fang.tool.invoke` 且 **provider='mother'**（不是 test-hook）；
 - [ ] 真实语言服务器（先 TS）对 fixture 文件返回 definition/hover；
 - [ ] 越界 `workspaceRoot` 被拒（`contract-invalid-request`），审计可见；
 - [ ] 无 provider 时仍显式 `contract-unavailable`（不虚假成功）；
@@ -135,12 +135,12 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 | 契约口径对齐 | `src/lib/lsp-delegation.mjs` 只读四动作；legacy `format/rename/codeAction/apply` → `contract-unsupported`；**`diagnostics` 仅测试缝可用且不 advertise**；位置必填校验 | `test/lsp-delegation.test.mjs` 5 项；e2e 更新 |
 | 能力目录按 provider 区分 | `fang.capability.list` 的 `fang.tool.invoke` 带 `provider:{available,default,services,actions}`，顶层 `lspProvider`；未安装时为 `available:false`（显式，不假成功） | e2e provider-tagged 断言 |
 | 路线 B（增强）探测 | `detectForkLspSupport(accelNodeModules)`：检测 `@twinsearth/dsh-lsp`/`dsh-lsp-stdio`/`dsh-tool-lsp`；结果暴露在 `writeAcceleratedForkProfile(...).forkLsp`，默认不启用 | `test/accelerated-alias.test.mjs` |
-| 诚实边界 | 母体正式 profile 尚未安装 LSP 栈；未安装时读类动作显式 `contract-unavailable`。**但路线 A 真实 provider 已在隔离 staging 中跑通**：`npm run setup:lsp-live` → `npm run test:lsp-live`（e2e `--lsp` 模式，真实官方 LSP 栈 + typescript-language-server）| e2e `--lsp`：**119/119**，`definition` 返回 `provider='mother-lsp'` + 1 个 location，`hover` 返回归一化 hover；`diagnostics` 真实 provider 下被 `contract-unsupported`（test-seam-only） |
+| 诚实边界 | 母体正式 profile 尚未安装 LSP 栈；未安装时读类动作显式 `contract-unavailable`。**但路线 A 真实 provider 已在隔离 staging 中跑通**：`npm run setup:lsp-live` → `npm run test:lsp-live`（e2e `--lsp` 模式，真实官方 LSP 栈 + typescript-language-server）| e2e `--lsp`：**119/119**，`definition` 返回 `provider='mother'` + 1 个 location，`hover` 返回归一化 hover；`diagnostics` 真实 provider 下被 `contract-unsupported`（test-seam-only） |
 
 **真实 provider e2e（路线 A 真实闭环，2026-11-17 实测）**：
 - 准备：`npm run setup:lsp-live`（隔离 staging 安装 `@deepseek-ai/dsh-lsp@0.2.2-rc.3` 三件套 + `typescript-language-server` + `typescript@5.9.3`；不写用户 profile）；
 - 运行：`npm run test:lsp-live`（`tools/e2e.mjs --lsp`：profile 内挂载 dsh-lsp/dsh-lsp-stdio，`ctx.lsp` 就绪，fang 委托走真实 provider）；
-- 断言（**124/124**）：catalog provider=`mother-lsp`、actions 4 项；definition → `mother-lsp` + 真实 location；hover → 归一化；**越界 workspaceRoot → `contract-unauthorized`（root policy）**；**fork 工作区根自动登记后可查询（任务 registry 显式登记）**；**references 跨文件解析**（base.ts + a.ts）；**文件逃逸根 → contract-invalid-request（file-outside-root）**；**审计含 `tool:'lsp'` 的 workspaceRoot/outcome trail（ok/denied）**；diagnostics → `contract-unsupported`（test-seam-only）；legacy 写类仍可读拒绝。
+- 断言（**124/124**）：catalog provider=`mother`、actions 4 项；definition → `mother` + 真实 location；hover → 归一化；**越界 workspaceRoot → `contract-unauthorized`（root policy）**；**fork 工作区根自动登记后可查询（任务 registry 显式登记）**；**references 跨文件解析**（base.ts + a.ts）；**文件逃逸根 → contract-invalid-request（file-outside-root）**；**审计含 `tool:'lsp'` 的 workspaceRoot/outcome trail（ok/denied）**；diagnostics → `contract-unsupported`（test-seam-only）；legacy 写类仍可读拒绝。
 
 **安装形态（已按决策实现）**：`lsp-provider/` 配置型 bundle（`@twinsearth/dsh-fang-lsp`）：
 - 依赖：官方三件套 `0.2.2-rc.3` + npm `typescript-language-server` + `typescript@5.9.3`；
@@ -155,7 +155,7 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 用户方向：**路线 B fork-local；先只做契约口径修订，等语言服务器来源确定**。已定口径：
 
 1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A）；fork-local LSP 在加速分身本地 `ctx.lsp` 执行，**不走契约委托**；
-2. **能力目录按 provider 区分**只描述母体真实 provider（`mother-lsp`）与是否存在测试缝；不 advertise `fork-local`（无虚假条目）；`actions` 取真实交集；
+2. **能力目录按 provider 区分**只描述母体真实 provider（`mother`）与是否存在测试缝；不 advertise `fork-local`（无虚假条目）；`actions` 取真实交集；
 3. **fork-local 可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）与任务记录 `accelerated.forkLsp` 呈现——属于任务视图能力，不是契约能力；
 4. **安装默认关闭**：语言服务器来源已定为 ①（bundle 依赖 npm `typescript-language-server`，随 bundle 版本化）；路线 B 的安装作为后续增强，**不自动装载到 fork profile**，需显式安装/启用；
 5. 本次仅做上述口径修订 + 探测字段传播（`forkLsp` 进任务记录），**不改 profile 组合、不装包**。
@@ -179,6 +179,15 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 - 触发条件（满足任一再做）：① 母体 LSP 不可用/离线但仍需读类能力；② 需要 fork 独立工作区语义/性能隔离；③ 母体安装策略不允许装语言服务器；
 - 代价/风险：每个 fork 多一套语言服务器进程与索引内存；profile 包体增大；加速核 3.5.0 与官方 seam 0.2.2-rc.3 的 API 兼容需实测；fork-local 不走契约委托（审计范围仍在母体委托侧）；
 - 当前动作：**不安装、不默认启用**；fork-local 能力仅显示在任务记录 `accelerated.forkLsp`，契约目录不 advertise；等触发条件出现再做安装开关与 e2e。
+
+
+### 6.3 两条路线并存与安全边界（E5 事实，2026-11-17）
+
+- **E5 事实**：加速核已有同版本 LSP trio（`@twinsearth/dsh-lsp*`），安装后 LSP 可跑在**分身自己的 workspace/worktree**；fork-local 语义优于把分身文件路径交给母体进程。
+- **母体委托的边界**：`workspaceRoot` 由委托方传入，`dsh-lsp-stdio` 明确 “trusts its configured server, 无沙箱”；若母体不限制允许根，等于把母体进程的文件读取面扩大到调用方任意路径。因此母体执行**允许根 realpath 包含校验（fail-closed）+ 审计**，越界返回 `contract-invalid-request`。
+- **并存的理由**：fork-local 无法覆盖“LSP 服务器只装在母体/共享缓存”的场景；母体 provider 保持默认，fork-local 作为增强。
+- **能力目录区分**：`lspProvider.providers` 显式列出 `mother`（mode=delegated / source=mother-process）与 `fork-local`（mode=local / source=fork-worktree），各自只 advertise 实提供能力；未安装时 `available:false / actions:[]`；测试缝只以 `nonProduction` 标记出现。
+- **当前状态**：母体真实 provider 已闭环（staging e2e）；fork-local 探测已就绪但加速 CLI 未安装 LSP trio（`forkLsp.available=false`），安装开关默认关闭。
 
 ## 7. 原下一步（已由 §6 取代）
 

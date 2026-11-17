@@ -28,7 +28,7 @@
          includeForkWorktrees: true
    ```
 4. 重启 DSH 后：`fang.capability.list` 的 `fang.tool.invoke.provider` 应显示
-   `available:true / default:'mother-lsp' / actions:[definition,references,implementation,hover]`。
+   `available:true / default:'mother' / actions:[definition,references,implementation,hover]`。
 
 ## 契约口径（摘要）
 
@@ -40,5 +40,5 @@
 ## 验证
 
 - 本机隔离 staging 原型（不写 profile）：
-  `npm run setup:lsp-live` → `npm run test:lsp-live`（e2e `--lsp`：真实 `ctx.lsp`，definition/hover `provider='mother-lsp'`）；
+  `npm run setup:lsp-live` → `npm run test:lsp-live`（e2e `--lsp`：真实 `ctx.lsp`，definition/hover `provider='mother'`）；
 - 安装到正式 profile 后：按 [`docs/LSP-PROVIDER-RESEARCH.md`](../docs/LSP-PROVIDER-RESEARCH.md) §6 的剩余步骤复测。

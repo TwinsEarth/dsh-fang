@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { DELEGATE_ERROR } from './contract-delegation.mjs'
 import { LSP_ACTION_TO_OPERATION, LSP_READ_ACTIONS } from './lsp-delegation.mjs'
 
-export const LSP_PROVIDER_MOTHER = 'mother-lsp'
+export const LSP_PROVIDER_MOTHER = 'mother'
 export const LSP_PROVIDER_FORK = 'fork-local'
 export const LSP_PROVIDER_TEST = 'test-hook'
 
@@ -33,7 +33,7 @@ export function advertisedActionsFromSeam(lspService) {
 }
 
 /** Resolve a provider descriptor from the live host context (no side effects). */
-export function describeLspProvider({ lspService = null, hooksEnabled = false, forkLocal = false, supportedActions = null } = {}) {
+export function describeLspProvider({ lspService = null, hooksEnabled = false, forkLocal = false, forkLspInfo = null, supportedActions = null } = {}) {
   const services = {
     [LSP_PROVIDER_MOTHER]: Boolean(lspService && typeof lspService.query === 'function'),
     [LSP_PROVIDER_FORK]: Boolean(forkLocal),
@@ -42,14 +42,24 @@ export function describeLspProvider({ lspService = null, hooksEnabled = false, f
   const available = Object.entries(services).filter(([, value]) => value).map(([name]) => name)
   const declared = Array.isArray(supportedActions) ? supportedActions.filter((action) => LSP_READ_ACTIONS.includes(action)) : null
   // Advertise real capabilities only: a missing provider (or a test-only hook) advertises no actions.
-  const actions = services[LSP_PROVIDER_MOTHER] ? [...(declared ?? LSP_READ_ACTIONS)] : []
+  const motherActions = services[LSP_PROVIDER_MOTHER] ? [...(declared ?? LSP_READ_ACTIONS)] : []
+  const providers = {
+    // 路线 A：母体进程内 provider；委托执行，跨工作区可见性由 workspaceRoot 允许根约束（dsh-lsp-stdio 无沙箱，fail-closed）。
+    [LSP_PROVIDER_MOTHER]: { mode: 'delegated', source: 'mother-process', available: services[LSP_PROVIDER_MOTHER], actions: motherActions },
+    // 路线 B：加速分身本地 provider；LSP 跑在 fork 自己的 workspace/worktree，不经过契约委托与母体文件面。
+    [LSP_PROVIDER_FORK]: { mode: 'local', source: 'fork-worktree', available: services[LSP_PROVIDER_FORK], actions: services[LSP_PROVIDER_FORK] ? [...LSP_READ_ACTIONS] : [], ...(forkLspInfo && typeof forkLspInfo === 'object' ? { detail: forkLspInfo } : {}) },
+  }
+  if (services[LSP_PROVIDER_TEST]) {
+    providers[LSP_PROVIDER_TEST] = { mode: 'test-seam', source: 'e2e-hook', available: true, nonProduction: true, actions: [] }
+  }
   return {
     available: available.length > 0,
     default: services[LSP_PROVIDER_MOTHER] ? LSP_PROVIDER_MOTHER : (services[LSP_PROVIDER_TEST] ? LSP_PROVIDER_TEST : (services[LSP_PROVIDER_FORK] ? LSP_PROVIDER_FORK : null)),
     services,
     // 契约口径：测试缝只用于 e2e/内部验证，绝不作为生产能力对外宣称。
     nonProduction: services[LSP_PROVIDER_TEST] ? [LSP_PROVIDER_TEST] : [],
-    actions,
+    actions: motherActions,
+    providers,
   }
 }
 
