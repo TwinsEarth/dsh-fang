@@ -388,9 +388,11 @@ async function main() {
     const lspCapOk = LSP_MODE
       ? (lspCap?.provider?.default === 'mother-lsp' && lspCap.provider?.available === true
         && Array.isArray(lspCap.actions) && lspCap.actions.includes('definition') && lspCap.actions.includes('hover')
-        && !lspCap.actions.includes('diagnostics'))
+        && !lspCap.actions.includes('diagnostics')
+        && Array.isArray(lspCap.provider?.nonProduction) && lspCap.provider.nonProduction.includes('test-hook'))
       : (Boolean(lspCap) && Array.isArray(lspCap.actions) && lspCap.actions.length === 0
-        && !lspCap.actions.includes('diagnostics') && lspCap.provider?.services?.['test-hook'] === true)
+        && !lspCap.actions.includes('diagnostics') && lspCap.provider?.services?.['test-hook'] === true
+        && Array.isArray(lspCap.provider?.nonProduction) && lspCap.provider.nonProduction.includes('test-hook'))
     check('delegated fang.capability.list returns catalog + provider-tagged lsp capability (advertises only real provider capabilities)', capList.status === 200 && capList.body?.ok === true
       && capItems.some((c) => c.method === 'fang.session.list')
       && capItems.filter((c) => c.kind === 'write').every((c) => c.approval === 'required')
@@ -451,8 +453,9 @@ async function main() {
         && lspDiagnostics.body?.error?.detail?.reason === 'test-seam-only',
         JSON.stringify({ status: lspDiagnostics.status, code: lspDiagnostics.body?.error?.code ?? null }).slice(0, 180))
     } else {
-      check('delegated lsp diagnostics works only through the test seam (not advertised)', lspDiagnostics.status === 200
+      check('delegated lsp diagnostics works only through the test seam (not advertised; non-production)', lspDiagnostics.status === 200
         && lspDiagnostics.body?.ok === true && lspDiagnostics.body?.result?.provider === 'test-hook'
+        && lspDiagnostics.body?.result?.testSeam === true && lspDiagnostics.body?.result?.nonProduction === true
         && Array.isArray(lspDiagnostics.body.result.diagnostics),
         JSON.stringify({ status: lspDiagnostics.status, code: lspDiagnostics.body?.error?.code ?? null, provider: lspDiagnostics.body?.result?.provider ?? null }).slice(0, 180))
     }

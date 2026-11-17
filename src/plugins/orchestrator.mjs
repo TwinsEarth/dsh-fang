@@ -2193,7 +2193,9 @@ export function apply(ctx, config) {
               character: validated.character,
               ok: true,
               provider: LSP_PROVIDER_TEST,
-              diagnostics: [{ file: validated.file, line: validated.line, character: validated.character, severity: 'info', message: 'stub diagnostics (test hook only)' }],
+              testSeam: true,
+              nonProduction: true,
+              diagnostics: [{ file: validated.file, line: validated.line, character: validated.character, severity: 'info', message: 'stub diagnostics (test hook only, non-production)' }],
             }
           }
           const error = new Error(`lsp action '${validated.action}' is test-seam only and not provided by the official LSP seam`)

@@ -50,14 +50,17 @@ test('B-6 provider: descriptor distinguishes mother / test-hook / fork-local and
   assert.equal(none.available, false)
   assert.equal(none.default, null)
   assert.deepEqual(none.actions, [], 'no provider → nothing advertised')
+  assert.deepEqual(none.nonProduction, [], 'no test seam → no non-production marker')
 
   const hook = describeLspProvider({ hooksEnabled: true })
   assert.equal(hook.default, 'test-hook')
   assert.deepEqual(hook.actions, [], 'test seam is not a real provider capability')
+  assert.deepEqual(hook.nonProduction, ['test-hook'], 'test seam must be marked non-production')
 
   const fork = describeLspProvider({ forkLocal: true })
   assert.equal(fork.default, 'fork-local')
   assert.deepEqual(fork.actions, [], 'fork-local advertises only once installed')
+  assert.deepEqual(fork.nonProduction, [], 'fork-local is a real provider, not a test seam')
 })
 
 test('B-6 provider: advertisedActionsFromSeam intersects declared capabilities with the four seam ops', () => {
@@ -188,10 +191,22 @@ test('B-6 audit: lsp attempt records workspaceRoot/outcome/provider', () => {
   assert.equal(denied.error, DELEGATE_ERROR.UNAUTHORIZED)
 })
 
-test('B-6 error/result normalizers: unknown codes stay readable; malformed result is JSON-safe', () => {
-  const mapped = mapLspError({ code: 'LSP_SERVER_ERROR', message: 'boom' })
-  assert.equal(mapped.code, DELEGATE_ERROR.UNAVAILABLE)
-  assert.equal(mapped.detail.lspCode, 'LSP_SERVER_ERROR')
+test('B-6 contract error mapping: exact seam → delegation codes (visible detail preserved)', () => {
+  // 契约口径（B-6 修订）：这些映射是契约的一部分，不得静默漂移。
+  const cases = [
+    ['LSP_UNAVAILABLE', DELEGATE_ERROR.UNAVAILABLE],
+    ['LSP_FILE_OUTSIDE_WORKSPACE', DELEGATE_ERROR.INVALID],
+    ['LSP_INVALID_PROVIDER', DELEGATE_ERROR.INVALID],
+    ['LSP_MALFORMED_RESPONSE', DELEGATE_ERROR.UNAVAILABLE],
+    ['LSP_SERVER_ERROR', DELEGATE_ERROR.UNAVAILABLE],
+  ]
+  for (const [seamCode, expected] of cases) {
+    const mapped = mapLspError({ code: seamCode, message: 'seam failure' })
+    assert.equal(mapped.code, expected, `${seamCode} must map to ${expected}`)
+    assert.equal(mapped.detail.lspCode, seamCode)
+    assert.match(mapped.message, /lsp provider error/)
+    assert.equal(mapped.detail.serverMessage, 'seam failure')
+  }
   const unknown = mapLspError(new Error('plain'))
   assert.equal(unknown.code, DELEGATE_ERROR.UNAVAILABLE)
 

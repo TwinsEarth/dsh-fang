@@ -46,6 +46,8 @@ export function describeLspProvider({ lspService = null, hooksEnabled = false, f
     available: available.length > 0,
     default: services[LSP_PROVIDER_MOTHER] ? LSP_PROVIDER_MOTHER : (services[LSP_PROVIDER_TEST] ? LSP_PROVIDER_TEST : (services[LSP_PROVIDER_FORK] ? LSP_PROVIDER_FORK : null)),
     services,
+    // 契约口径：测试缝只用于 e2e/内部验证，绝不作为生产能力对外宣称。
+    nonProduction: services[LSP_PROVIDER_TEST] ? [LSP_PROVIDER_TEST] : [],
     actions,
   }
 }
