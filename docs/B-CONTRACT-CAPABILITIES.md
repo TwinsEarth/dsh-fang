@@ -15,7 +15,7 @@
 | 错误码 | `contract-unavailable` / `contract-unsupported` / `contract-timeout` / `contract-invalid-request`（服务不可用统一映射为 contract-unavailable） |
 | 限额/超时 | 超 64KiB → `contract-invalid-request`；读超时（默认 5s）→ `contract-timeout` |
 | 审计 | 每次委托写 `contract-delegate`：`{capability, source, outcome, error, latencyMs}`（拒绝/成功/错误都记） |
-| 新增方法 | `fang.capability.list`、`fang.decision.list`、`fang.approvals.list`、`fang.session.events`（母体 sessionCatalog.readHead 有界头读，≤200 行 / ≤256KB；服务缺失显式报错） |
+| 新增方法 | `fang.capability.list`、`fang.decision.list`、`fang.approvals.list`、`fang.session.events`（母体 sessionCatalog.readHead 有界头读，≤200 行 / ≤256KB；服务缺失显式报错）、`fang.tool.invoke`（首批 `tool:'lsp'`） |
 
 **e2e 真实断言**（`tools/e2e.mjs`，2026-11-17）：hello 200/`contractVersion=1.1.0`/**14 个方法**；`capability.list` 返回只读 5 项；`fang.fork.spawn` 委托被拒 `contract-unsupported`；`fang.orchestrator.status` 委托成功；`fang.session.list` 缺服务映射 `contract-unavailable`。
 
@@ -66,6 +66,18 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 
 > 测试缝只存在于 e2e 进程（环境变量控制），不进目录/生产部署；`allow` 白名单是权威放行表，目录仅用于能力自述。
 
+### 0.4 M3 验收（B-6 lsp 委托，2026-11-17）
+
+| 项 | 实现 | 单测 / e2e |
+|---|---|---|
+| `fang.tool.invoke`（首批仅 `tool:'lsp'`） | `validateToolInvoke()` 校验 tool/action/file；目录登记 kind=`write`、approval=`required`，**默认不在白名单**，需操作者显式放行 | 单测 `test/lsp-delegation.test.mjs` 4 项 |
+| 只读子命令 | `diagnostics` / `hover` / `definition` / `references` → 自动放行 | e2e：diagnostics 成功（provider=test-hook） |
+| 写类子命令 | `format` / `rename` / `codeAction` / `apply` → **委托层拒绝执行**，返回 `contract-approval-required`（无副作用） | e2e：format → contract-approval-required |
+| 非法子命令 | 未知 action → `contract-invalid-request` | e2e：nope → contract-invalid-request |
+| 错误码 | 新增 `contract-approval-required`（fang 层表，唯一性断言） | 单测 |
+
+> **诚实的边界**：LSP 的**执行提供方**尚未接入母体 DSH 工具运行时（当前仅 e2e 测试缝提供确定性 diagnostics；生产读类动作会返回 `contract-unavailable`）。委托通道、白名单、审批门禁与错误码已经完整；接入真实 LSP provider 属下一里程碑（需确认母体工具调用 API）。
+
 ## 1. 现有契约能力（只读盘点）
 
 | 方法 | 版本 | 类型 | 现有实现 |
@@ -106,7 +118,7 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 
 | # | 提议方法 | 输入 | 输出 | 审批策略 | 备注 |
 |---|---|---|---|---|---|
-| B-6 | `fang.tool.invoke`（首批只放开 `tool:'lsp'`） | `{tool:'lsp', action:'diagnostics'\|'hover'\|'definition'\|'references', file, line?, character?}` | 工具结果原样（大小上限 256KB） | 只读子命令自动放行；任何写类子命令需瓮城审批 | 加速核缺 `dsh-tool-lsp`（COMPAT §3.5 `string-reference`），这是最明确的能力缺口 |
+| B-6 | `fang.tool.invoke`（首批只放开 `tool:'lsp'`）**已实现通道+审批门禁；执行 provider 待接入（见 §0.4）** | `{tool:'lsp', action:'diagnostics'\|'hover'\|'definition'\|'references', file, line?, character?}` | 工具结果原样（大小上限 256KB） | 只读子命令自动放行；任何写类子命令需瓮城审批 | 加速核缺 `dsh-tool-lsp`（COMPAT §3.5 `string-reference`），这是最明确的能力缺口 |
 | B-7 | `fang.chat.import` | `{source:'deepseek', sessionId, dryRun?:true}` | `{imported, skipped, digest}` | 默认 `dryRun:true`；实际导入需审批 | 加速核无 chat-import bundle（COMPAT §2） |
 
 ### P2 · 暂缓（高风险/待定）

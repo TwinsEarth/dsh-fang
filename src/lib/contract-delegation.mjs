@@ -12,6 +12,7 @@ export const DELEGATE_ERROR = Object.freeze({
   UNSUPPORTED: 'contract-unsupported',
   TIMEOUT: 'contract-timeout',
   INVALID: 'contract-invalid-request',
+  APPROVAL_REQUIRED: 'contract-approval-required',
 })
 
 export const DELEGATE_KIND = Object.freeze({ READ: 'read', WRITE: 'write' })
@@ -27,6 +28,7 @@ export const CAPABILITY_CATALOG = Object.freeze([
   { method: 'fang.session.events', kind: 'read', approval: 'none', since: '1.1', summary: '母体会话有界头读（只读；<200 行）' },
   { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体决策中心快照（只读）' },
   { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体审批队列（只读）' },
+  { method: 'fang.tool.invoke', kind: 'write', approval: 'required', since: '1.1', summary: '工具委托（首批 lsp：只读子命令放行，写类需审批；默认不在白名单）' },
 ])
 
 export const DEFAULT_READ_ALLOW = Object.freeze([

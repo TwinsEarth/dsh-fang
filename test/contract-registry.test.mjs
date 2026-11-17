@@ -21,15 +21,20 @@ import {
   checkDelegation,
 } from '../src/lib/contract-delegation.mjs'
 
-test('M1 registry: fang delegation catalog is append-only, read-only and whitelist-consistent', () => {
+test('M1 registry: fang delegation catalog is append-only and whitelist-consistent', () => {
   // vendored contract SDK 未被手改（保持 1.1.0）
   assert.equal(CONTRACT_VERSION, '1.1.0')
-  // 委托方法注册在 fang 层注册表，且默认白名单 = 目录中的只读能力
-  assert.ok(CAPABILITY_CATALOG.length >= 5)
-  assert.ok(CAPABILITY_CATALOG.every((item) => item.kind === 'read'))
-  assert.ok(CAPABILITY_CATALOG.every((item) => item.approval === 'none'))
-  const catalogMethods = CAPABILITY_CATALOG.map((item) => item.method).sort()
-  assert.deepEqual([...DEFAULT_READ_ALLOW].sort(), catalogMethods)
+  // 委托方法注册在 fang 层注册表；只读能力进默认白名单，写能力（tool.invoke）需显式放行
+  assert.ok(CAPABILITY_CATALOG.length >= 6)
+  const readCatalog = CAPABILITY_CATALOG.filter((item) => item.kind === 'read')
+  assert.ok(readCatalog.length >= 6)
+  assert.ok(readCatalog.every((item) => item.approval === 'none'))
+  const writeCatalog = CAPABILITY_CATALOG.filter((item) => item.kind === 'write')
+  assert.deepEqual(writeCatalog.map((item) => item.method), ['fang.tool.invoke'])
+  assert.equal(writeCatalog[0].approval, 'required')
+  const catalogReadMethods = readCatalog.map((item) => item.method).sort()
+  assert.deepEqual([...DEFAULT_READ_ALLOW].sort(), catalogReadMethods)
+  assert.ok(!DEFAULT_READ_ALLOW.includes('fang.tool.invoke'), 'write capability must not be allowed by default')
   // 未登记能力默认拒绝
   const unknown = checkDelegation({ method: 'fang.unknown.capability', config: {} })
   assert.equal(unknown.ok, false)
@@ -39,6 +44,7 @@ test('M1 registry: fang delegation catalog is append-only, read-only and whiteli
 test('M1 error codes: fang delegation codes are a unique, stable append-only table', () => {
   const codes = Object.values(DELEGATE_ERROR)
   assert.deepEqual(codes.sort(), [
+    'contract-approval-required',
     'contract-invalid-request',
     'contract-timeout',
     'contract-unauthorized',

@@ -118,7 +118,7 @@ function makeProfile(homeRoot) {
     '- id: fang-queue-journal\n  disabled: false\n' +
     '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n' +
     '      delegate:\n        readTimeoutMs: 100\n        allow:\n' +
-    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.test.sleep\n")
+    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.test.sleep\n")
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
@@ -312,11 +312,12 @@ async function main() {
       body: JSON.stringify(createEnvelope({ method, params, source: 'fork-e2e', meta: { delegate: true } })),
     })
     const capList = await delegatedInvoke('fang.capability.list')
-    check('delegated fang.capability.list returns read-only catalog', capList.status === 200 && capList.body?.ok === true
-      && Array.isArray(capList.body?.result?.capabilities)
-      && capList.body.result.capabilities.some((c) => c.method === 'fang.session.list')
-      && !capList.body.result.capabilities.some((c) => c.kind === 'write'),
-      JSON.stringify({ status: capList.status, caps: (capList.body?.result?.capabilities ?? []).map((c) => c.method) }).slice(0, 200))
+    const capItems = Array.isArray(capList.body?.result?.capabilities) ? capList.body.result.capabilities : []
+    check('delegated fang.capability.list returns catalog (write caps approval-gated)', capList.status === 200 && capList.body?.ok === true
+      && capItems.some((c) => c.method === 'fang.session.list')
+      && capItems.filter((c) => c.kind === 'write').every((c) => c.approval === 'required')
+      && capItems.some((c) => c.method === 'fang.tool.invoke'),
+      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`) }).slice(0, 220))
     const rejectedCap = await delegatedInvoke('fang.fork.spawn', {})
     check('delegated unlisted capability rejected (contract-unsupported)', rejectedCap.status === 200
       && rejectedCap.body?.ok === false && rejectedCap.body?.error?.code === 'contract-unsupported',
@@ -335,11 +336,24 @@ async function main() {
     check('delegated fang.session.events bounded read answered (result or contract-unavailable)', delegatedEvents.status === 200
       && ((delegatedEvents.body?.result && Array.isArray(delegatedEvents.body.result.events)) || delegatedEventsCode === 'contract-unavailable'),
       JSON.stringify({ status: delegatedEvents.status, code: delegatedEventsCode }).slice(0, 160))
-    // 超时错误：e2e 母体 readTimeoutMs=50ms + 测试缝 sleep(500ms) → contract-timeout
+    // 超时错误：e2e 母体 readTimeoutMs=100ms + 测试缝 sleep(500ms) → contract-timeout
     const delegatedSlow = await delegatedInvoke('fang.test.sleep', { ms: 500 })
     check('delegated capability timeout maps to contract-timeout', delegatedSlow.status === 200
       && delegatedSlow.body?.ok === false && delegatedSlow.body?.error?.code === 'contract-timeout',
       JSON.stringify({ status: delegatedSlow.status, code: delegatedSlow.body?.error?.code ?? null }).slice(0, 160))
+    // B-6：LSP 委托——只读子命令成功；写类子命令必须审批（拒绝执行、无副作用）
+    const lspRead = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: 'example.mjs', line: 1 })
+    check('delegated lsp diagnostics (read action) succeeds', lspRead.status === 200
+      && lspRead.body?.ok === true && lspRead.body?.result?.ok === true && Array.isArray(lspRead.body.result.diagnostics),
+      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null }).slice(0, 160))
+    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs' })
+    check('delegated lsp write action requires approval (contract-approval-required)', lspWrite.status === 200
+      && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-approval-required',
+      JSON.stringify({ status: lspWrite.status, code: lspWrite.body?.error?.code ?? null }).slice(0, 160))
+    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs' })
+    check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
+      && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
+      JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
 
 
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')

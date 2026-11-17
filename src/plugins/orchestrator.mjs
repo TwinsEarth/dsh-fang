@@ -49,6 +49,7 @@ import {
   capabilityCatalog, checkDelegation, DELEGATE_ERROR, delegationAuditRecord,
   DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
 } from '../lib/contract-delegation.mjs'
+import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
@@ -2134,6 +2135,32 @@ export function apply(ctx, config) {
           bytesRead: head.bytesRead ?? 0,
           degraded: Array.isArray(head.degraded) ? head.degraded : [],
         }
+      },
+      // B-6：LSP 工具委托（首批）。只读子命令放行；写类子命令必须审批——委托层直接拒绝，不产生副作用。
+      'fang.tool.invoke': async (params) => {
+        const validated = validateToolInvoke(params)
+        if (validated.ok !== true) {
+          const error = new Error(validated.message)
+          error.code = validated.error ?? DELEGATE_ERROR.INVALID
+          throw error
+        }
+        if (validated.kind === 'write') {
+          const error = new Error('lsp write actions require fang approval; no side effect performed')
+          error.code = DELEGATE_ERROR.APPROVAL_REQUIRED
+          error.detail = { tool: 'lsp', action: validated.action, approval: 'required' }
+          throw error
+        }
+        if (process.env.FANG_CONTRACT_TEST_HOOKS === '1') {
+          return {
+            tool: 'lsp',
+            action: validated.action,
+            file: validated.file,
+            ok: true,
+            provider: 'test-hook',
+            diagnostics: [{ file: validated.file, line: validated.line ?? 1, character: validated.character ?? 1, severity: 'info', message: 'stub diagnostics (test hook)' }],
+          }
+        }
+        return delegateUnavailable('lsp tool provider is unavailable on mother')
       },
       // e2e 专用测试缝（仅 FANG_CONTRACT_TEST_HOOKS=1 时注册；生产不出现；且必须 delegate=true）
       ...(process.env.FANG_CONTRACT_TEST_HOOKS === '1' ? {
