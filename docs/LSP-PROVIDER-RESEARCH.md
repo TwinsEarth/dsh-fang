@@ -150,6 +150,18 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 **剩余（安装到正式 profile）**：① 在插件面板把 `lsp-provider/` 安装进母体正式 profile（bundle 已就绪）；② 生产母体重启后跑 `probe:mother` + 真实 LSP 探测（等价 `test:lsp-live`）。
 
+### 6.0 安装前提证据（E1–E5，2026-11-17 复核）
+
+复现：`npm run verify:lsp-evidence`（E1/E2/E5 自动复核；E3/E4 记录自本分支调研时的 asar 提取，方法见行内）。
+
+| 编号 | 事实 | 证据/方法 | 对安装的含义 |
+|---|---|---|---|
+| E1 | 运行版本 = `@deepseek-ai/dsh` **0.2.2-rc.3**（Desktop asar） | `dsh --version` → `0.2.2-rc.3`（自动复核 PASS） | bundle 依赖必须与运行时同版本（0.2.2-rc.3） |
+| E2 | 官方 LSP 包在 npm 有 **0.2.2-rc.3**；`latest` tag 只到 `0.0.1-rc.1` | `npm view @deepseek-ai/dsh-lsp versions` 含 0.2.2-rc.3；`dist-tags.latest=0.0.1-rc.1`（自动复核 PASS） | **必须显式按版本安装**，不能用 latest |
+| E3 | Desktop 安装**未携带 LSP trio**，官方 bundle 目录无 LSP 可选 bundle | 提取 asar：`@deepseek-ai` 331 个包中无 `dsh-lsp*`；`dsh-official-bundles/lib/index.js` 全文无 lsp（调研记录） | 必须走 **config-only bundle**（依赖+patch 行） |
+| E4 | LSP 依赖的底座插件已存在母体安装 | 提取 asar：`dsh-fs-local`、`dsh-subprocess-local`、`dsh-working-directory` 均在 `@deepseek-ai/`（调研记录） | bundle patch 显式挂载 fs-local/subprocess-local 即可用 |
+| E5 | 加速核 3.5.0 npm 有 `@twinsearth/dsh-lsp@3.5.0` 三件套；本机加速 CLI 未安装 | `npm view` 三件套 → 3.5.0；`D:\ToFuture\accel\cli\node_modules\@twinsearth` 无 `dsh-lsp*`（自动复核 PASS） | fork-local 需显式安装后才可用；当前 `forkLsp.available=false` |
+
 ### 6.1 路线 B（fork-local）契约口径（已定；安装仍默认关闭）
 
 用户方向：**路线 B fork-local；先只做契约口径修订，等语言服务器来源确定**。已定口径：
@@ -185,7 +197,7 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 ### 6.3 两条路线并存与安全边界（E5 事实，2026-11-17）
 
-- **E5 事实**：加速核已有同版本 LSP trio（`@twinsearth/dsh-lsp*`），安装后 LSP 可跑在**分身自己的 workspace/worktree**；fork-local 语义优于把分身文件路径交给母体进程。
+- **E5 事实**：npm 已发布同版本 LSP trio（`@twinsearth/dsh-lsp@3.5.0` 三件套），但本机加速 CLI **尚未安装**（`forkLsp.available=false`）；安装后 LSP 可跑在**分身自己的 workspace/worktree**，语义优于把分身文件路径交给母体进程。
 - **母体委托的边界**：`workspaceRoot` 由委托方传入，`dsh-lsp-stdio` 明确 “trusts its configured server, 无沙箱”；若母体不限制允许根，等于把母体进程的文件读取面扩大到调用方任意路径。因此母体执行**允许根 realpath 包含校验（fail-closed）+ 审计**，越界返回 `contract-invalid-request`。
 - **并存的理由**：fork-local 无法覆盖“LSP 服务器只装在母体/共享缓存”的场景；母体 provider 保持默认，fork-local 作为增强。
 - **能力目录区分**：`lspProvider.providers` 显式列出 `mother`（mode=delegated / source=mother-process）与 `fork-local`（mode=local / source=fork-worktree），各自只 advertise 实提供能力；未安装时 `available:false / actions:[]`；测试缝只以 `nonProduction` 标记出现。
