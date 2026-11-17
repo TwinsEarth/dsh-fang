@@ -8,14 +8,28 @@
 
 ### 修复
 
+- **真机：v3.5.2「分身核心加速引擎」无法启动 & 按钮点击无效（2026-11-18）**，四层根因一并修复：
+  1. `forker` 仅在显式配置 `dataRoot` 时才解析 layout → 生产 profile（bundle 层未配 dataRoot）里
+     `acceleratedHome=''`，`/fang/api/fork-core` 报 `accelerated.installed=false`（按钮只弹“未安装”，
+     看似点击无效），派生加速分身直接 `409 accelerated-cli-missing`。修复：layout 始终解析，
+     加速核安装位置统一走 `FANG_HOME` / `fang-home.txt`（与 forker 数据目录解耦）。
+  2. `orchestrator` 创建/还原/自启动分身时把**母体 stock CLI** 当 `cliPath` 传给 forker；加速档现在
+     只接受加速核入口（config / state / layout），不再把 stock CLI 当候选（JS 入口的 stock CLI 会被
+     误判成加速核，静默跑官方 core）。
+  3. `buildForkChildEnv` 白名单丢掉宿主的 `ELECTRON_RUN_AS_NODE`；桌面宿主里 JS 入口（加速核 `lib/bin.js`）
+     由 Electron 壳的 `process.execPath` 启动，变量丢失时壳把脚本当应用 → 子进程 **exit 0 且无输出**
+     （真机“无法启动”的直接原因）。修复：JS 入口 spawn 时显式补 `ELECTRON_RUN_AS_NODE=1`（真 node 无害）。
+  4. 面板「分身Core核心加速引擎」按钮的 `onClick` 调用了未定义的 `toast()`（ReferenceError）→ 点击
+     无任何反馈；改用 `app.notify()`。同时 spawn 失败响应带回 `code/signal/log`，便于定位。
+  回归测试：`test/forker-accelerated-discovery.test.mjs` 4 项 + `test/client-fork-core-dom.test.mjs` 2 项；
+  真机等价端到端：隔离母体（stock 3.5.3 + fang 3.5.3）创建加速分身 → `status=ready`、`adapter.version=3.5.3`。
+
 - **修复：原身派生的「加速核心」分身插件面不同步（静默退回 minimal）**（2026-11-18）：
   `forker.provision()` 在 accelerated 分支里误用了 `spawn()` 作用域的 `acceleratedHome`，`ReferenceError` 被
   空 `catch` 吞掉 → `accelNodeModules` 恒为空 → `writeAcceleratedForkProfile()` 静默走 minimal 分支
-  （`sync=null`）。表现为：加速分身能启动，但**原身/生产 profile 的第三方插件与 client half 全部失效**，
-  即「Core 引擎无法启动 & 无效」类假成功。修复：在 `provision()` 内按同一规则解析加速核 home；
-  并在「给了 source profile 却解析不到加速核模块树」时**显式失败 `accelerated-sync-unavailable`**，
-  不再静默退回。回归测试 `test/forker-accelerated-sync.test.mjs` 3 项。
-
+  （`sync=null`）。表现为：加速分身能启动，但**原身/生产 profile 的第三方插件与 client half 全部失效**。
+  修复：在 `provision()` 内按同一规则解析加速核 home；并在「给了 source profile 却解析不到加速核模块树」时
+  **显式失败 `accelerated-sync-unavailable`**，不再静默退回。回归测试 `test/forker-accelerated-sync.test.mjs` 3 项。
 ## v3.5.2（2026-11-17 已发布）
 
 **LSP 能力缝（路线 A/B）+ M5 回流对端 + B-8 专业版激活链 + UI client half 映射 + release 自检修正。**

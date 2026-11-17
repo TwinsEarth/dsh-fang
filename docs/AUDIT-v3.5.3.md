@@ -12,6 +12,17 @@
 | 分隔条 | 水平：拖动 / ↑↓ / 双击 50:50，偏好 `fang.panel.decision.split`；垂直（列）：沿用 `fang.panel.split` |
 | 加速分身修复 | `forker.provision()` 误用 `spawn()` 作用域的 `acceleratedHome` → 原身派生加速分身静默退回 minimal（插件面全失效）；已修复并显式失败 `accelerated-sync-unavailable` |
 
+## 1.1 真机（v3.5.2）加速核心无法启动 & 按钮点击无效 —— 根因与修复
+
+| # | 根因 | 修复 |
+|---|---|---|
+| 1 | `forker` 只在 `cfg.dataRoot` 存在时解析 layout → 生产 `acceleratedHome=''`，`fork-core` 报未安装、派生 409 | layout 始终解析；加速核位置统一 `FANG_HOME`/`fang-home.txt` |
+| 2 | orchestrator 把母体 stock CLI 作为 `cliPath` 传给加速 spawn | 加速档忽略 stock CLI，仅 config/state/layout |
+| 3 | 子进程环境白名单丢掉 `ELECTRON_RUN_AS_NODE`，桌面宿主启动 JS 入口时 exit 0 无输出 | JS 入口 spawn 补 `ELECTRON_RUN_AS_NODE=1` |
+| 4 | 面板按钮 onClick 调用未定义 `toast()` → ReferenceError（点击无效） | 改用 `app.notify()`；spawn 失败带回 code/signal/log |
+
+真机等价验证：隔离母体（stock DSH + fang 3.5.3，`FANG_HOME=D:\ToFuture`，forker 不配 `acceleratedCliPath`）
+GET fork-core `installed=true`（source=state）→ POST 切加速 200 → 创建分身 `200 status=ready`、`adapter.version=3.5.3`。
 ## 2. 测试
 
 - `test/client-layout-dom.test.mjs`：三块 DOM 结构 + 两个分隔条（含持久化/键盘/双击）；

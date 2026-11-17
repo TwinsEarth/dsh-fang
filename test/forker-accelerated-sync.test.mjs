@@ -77,6 +77,22 @@ function newService(root, cliPath) {
   })
 }
 
+/** 临时隔离 FANG_HOME/DSH_HOME，避免测试机上真实安装的加速核被 fallback 发现。 */
+function withEnv(vars, fn) {
+  const saved = {}
+  for (const key of Object.keys(vars)) {
+    saved[key] = process.env[key]
+    if (vars[key] === undefined) delete process.env[key]
+    else process.env[key] = vars[key]
+  }
+  try { return fn() } finally {
+    for (const key of Object.keys(vars)) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
+    }
+  }
+}
+
 test('forker.provision: essence-derived accelerated fork syncs the plugin surface (regression)', () => {
   const root = temp('fang-accel-sync-')
   const accel = fakeAccelInstall(root)
@@ -106,19 +122,22 @@ test('forker.provision: essence-derived accelerated fork syncs the plugin surfac
 test('forker.provision: source profile without a resolvable accelerated tree fails explicitly (no silent minimal)', () => {
   const root = temp('fang-accel-sync-miss-')
   const sourceProfileDir = fakeSourceProfile(root)
-  // acceleratedCliPath 指向一个不存在的 JS 入口 → 解析不到加速核模块树
-  const service = newService(root, path.join(root, 'nope', 'bin.js'))
-  const provisioned = service.provision({
-    forkId: 'f-miss',
-    homeDir: path.join(root, 'homes', 'f-miss'),
-    profile: 'accel-miss',
-    coreMode: 'accelerated',
-    sourceProfileDir,
-    nodeModulesSource: path.join(sourceProfileDir, 'node_modules'),
-    cleanTemplate: false,
+  // 隔离真实安装：FANG_HOME 指向空目录、DSH_HOME 临时、清掉 FANG_ACCEL_CLI；
+  // acceleratedCliPath 指向一个不存在的 JS 入口 → config/state/layout 都解析不到加速核模块树。
+  withEnv({ FANG_HOME: temp('fang-empty-fanghome-'), DSH_HOME: temp('fang-empty-dshhome-'), FANG_ACCEL_CLI: undefined }, () => {
+    const service = newService(root, path.join(root, 'nope', 'bin.js'))
+    const provisioned = service.provision({
+      forkId: 'f-miss',
+      homeDir: path.join(root, 'homes', 'f-miss'),
+      profile: 'accel-miss',
+      coreMode: 'accelerated',
+      sourceProfileDir,
+      nodeModulesSource: path.join(sourceProfileDir, 'node_modules'),
+      cleanTemplate: false,
+    })
+    assert.equal(provisioned.ok, false)
+    assert.equal(provisioned.error, 'accelerated-sync-unavailable')
   })
-  assert.equal(provisioned.ok, false)
-  assert.equal(provisioned.error, 'accelerated-sync-unavailable')
 })
 
 test('forker.provision: minimal accelerated profile (no source) still works', () => {
