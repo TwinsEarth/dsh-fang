@@ -162,6 +162,13 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 | E4 | LSP 依赖的底座插件已存在母体安装 | 提取 asar：`dsh-fs-local`、`dsh-subprocess-local`、`dsh-working-directory` 均在 `@deepseek-ai/`（调研记录） | bundle patch 显式挂载 fs-local/subprocess-local 即可用 |
 | E5 | 加速核 3.5.0 npm 有 `@twinsearth/dsh-lsp@3.5.0` 三件套；本机加速 CLI 未安装 | `npm view` 三件套 → 3.5.0；`D:\ToFuture\accel\cli\node_modules\@twinsearth` 无 `dsh-lsp*`（自动复核 PASS） | fork-local 需显式安装后才可用；当前 `forkLsp.available=false` |
 
+| **E6** | 能力缝 = Cordis 服务 `ctx.lsp`：`registerProvider(provider)` + `query(request, signal)` | `dsh-lsp/lib/types/index.d.ts`：`class Lsp extends Service`；`query(request: LspQueryRequest, signal?: AbortSignal)`（自动复核 PASS） | fang 只作为消费者调用 `query`；官方类型**没有 provider 枚举 API**，故目录在 seam 存在时按闭集 advertise 四个只读操作（自定义 provider 的 `supportedOperations` 交集是前向兼容守卫） |
+| **E7** | 查询必填 `workspaceRoot`；四操作闭集；位置 0-based UTF-16；结果为 `{kind:'locations',locations,resolvedWorkspaceUri}` / `{kind:'hover',hover}` | `types.d.ts`：`LspQueryRequest` / `LspQueryResult` / `LspOperation`（自动复核 PASS） | 委托参数 line/character 按 0-based 透传；结果归一化为 `{path,line,character}`（1-based 展示）并保留 `resolvedWorkspaceUri`；`workspaceRoot` 必填 → 允许根 realpath 校验 |
+| **E8** | 能力缝**故意不暴露** diagnostics / rename / format / symbol / 通用 JSON-RPC | `dsh-lsp/README.md`：read-only、no JSON-RPC escape、diagnostics 需单独 freshness/accumulation 规则（自动复核 PASS） | 动作集合保持 4 只读；diagnostics 仅测试缝且 nonProduction；写类无对象（通用审批门禁保留给未来自定义 provider） |
+| **E9** | stdio 配置 `servers{<id>:{command,args?,extensionToLanguage,env?,...}}`；按 workspace 懒启动并**池化**；**trusts configured server、无沙箱**，要求 fs/subprocess 同一执行世界 | `dsh-lsp-stdio/README.md`：per-workspace lazy + one pooled process per canonical workspace + security boundary（自动复核 PASS） | bundle patch 显式挂载 `dsh-fs-local` + `dsh-subprocess-local`（同执行世界）；无沙箱 → 母体必须限制允许根（fail-closed） |
+
+> **实现对齐结论（E6–E9）**：E6 决定我们只做 seam 消费者（不注册自有 provider、不伪造 provider 枚举）；E7 决定参数 0-based UTF-16 透传 + 结果 1-based 展示的契约口径；E8 决定动作闭集与 diagnostics/write 类的处置；E9 决定 stdio 配置形态、bundle 最小组合（fs-local/subprocess-local）以及“无沙箱 → 允许根 fail-closed”的安全边界。
+
 ### 6.1 路线 B（fork-local）契约口径（已定；安装仍默认关闭）
 
 用户方向：**路线 B fork-local；先只做契约口径修订，等语言服务器来源确定**。已定口径：

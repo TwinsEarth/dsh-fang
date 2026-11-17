@@ -7,6 +7,7 @@
 //
 // 用法：node tools/release/lsp-evidence.mjs [--json]
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
@@ -44,6 +45,28 @@ const accelScope = path.join(accelRoot, 'node_modules', '@twinsearth')
 const accelLsp = fs.existsSync(accelScope) ? fs.readdirSync(accelScope).filter((name) => /^dsh-lsp/.test(name)) : []
 check('E5 accelerated core has same-version LSP trio on npm', forkOk, fork.map((item) => `${item.name}@${item.version}`).join(' '))
 check('E5 accelerated CLI does not ship LSP trio locally', accelLsp.length === 0, `accelScope=${accelScope} found=[${accelLsp.join(',')}]`)
+
+// E6–E9: capability seam contract facts (static, read from a staged official LSP package tree;
+// SKIP when the staging tree is absent — run `npm run setup:lsp-live` first for live verification).
+const stageCandidates = [
+  process.env.FANG_E2E_LSP_STAGE,
+  'E:\\GPT\\.tmp\\e2e-lsp-stage',
+  path.join(os.tmpdir(), 'fang-lsp-stage'),
+].filter(Boolean)
+const stage = stageCandidates.find((candidate) => { try { return fs.existsSync(path.join(candidate, 'node_modules', '@deepseek-ai', 'dsh-lsp', 'lib', 'types', 'index.d.ts')) } catch { return false } })
+if (!stage) {
+  info('E6–E9 seam contract facts', 'staging tree absent; run `npm run setup:lsp-live` to enable static verification')
+} else {
+  const read = (rel) => fs.readFileSync(path.join(stage, 'node_modules', ...rel.split('/')), 'utf8')
+  const lspIndex = read('@deepseek-ai/dsh-lsp/lib/types/index.d.ts')
+  const lspTypes = read('@deepseek-ai/dsh-lsp/lib/types/types.d.ts')
+  const lspReadme = read('@deepseek-ai/dsh-lsp/README.md')
+  const stdioReadme = read('@deepseek-ai/dsh-lsp-stdio/README.md')
+  check('E6 ctx.lsp = Cordis Service with registerProvider + query', /class Lsp extends Service/.test(lspIndex) && /registerProvider\(provider: LspProvider\)/.test(lspIndex) && /query\(request: LspQueryRequest, signal\?: AbortSignal\)/.test(lspIndex), 'dsh-lsp/lib/types/index.d.ts')
+  check('E7 query carries required workspaceRoot + 4 ops, 0-based UTF-16, closed result union', /readonly workspaceRoot: string/.test(lspTypes) && /zero-based UTF-16/.test(lspTypes) && /'goToDefinition' \| 'findReferences' \| 'goToImplementation' \| 'hover'/.test(lspTypes) && /kind: 'locations'/.test(lspTypes) && /resolvedWorkspaceUri/.test(lspTypes) && /kind: 'hover'/.test(lspTypes), 'dsh-lsp/lib/types/types.d.ts')
+  check('E8 seam deliberately excludes diagnostics/rename/format/symbol/JSON-RPC', /no JSON-RPC escape/.test(lspReadme) && /diagnostics need separate/.test(lspReadme) && /mutation/.test(lspReadme), 'dsh-lsp/README.md')
+  check('E9 stdio config servers{command,args,extensionToLanguage}; per-workspace lazy pooled; same execution world', /extensionToLanguage/.test(stdioReadme) && /On the first query for a workspace/.test(stdioReadme) && /pooled/.test(stdioReadme) && /trusts its configured server and adds no sandbox confinement/.test(stdioReadme), 'dsh-lsp-stdio/README.md')
+}
 
 const failed = checks.filter((item) => !item.ok && !item.skipped)
 if (asJson) console.log(JSON.stringify({ ok: failed.length === 0, checks }, null, 2))

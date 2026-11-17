@@ -17,7 +17,10 @@ export const LSP_PROVIDER_FORK = 'fork-local'
 export const LSP_PROVIDER_TEST = 'test-hook'
 
 /**
- * Derive the *actually provided* actions from a live seam. The official seam provides the four
+ * Derive the *actually provided* actions from a live seam.
+ * E6：官方 `LspService` 类型只有 registerProvider/query，没有 provider 枚举/能力列表 API；
+ * 因此 seam 存在时按闭集 advertise 四个只读操作。`supportedOperations`/`capabilities` 交集
+ * 仅作为未来自定义 provider 的前向兼容守卫（官方类型不会带这些字段）。 The official seam provides the four
  * read operations; a custom provider may expose `supportedOperations`/`capabilities`, in which
  * case we advertise only the intersection (never claim an action the provider cannot serve).
  */
