@@ -14,7 +14,11 @@ import { readJson, writeJsonAtomic } from '../kernel/index.mjs'
 
 export const FORK_CORE_FILE = 'fork-core.json'
 export const FORK_CORE_MODES = Object.freeze(['stock', 'accelerated'])
-export const FORK_SESSION_MODES = Object.freeze(['new', 'inherit'])
+// Session policy for accelerated forks:
+//   new  — only new sessions (default, safest)
+//   copy — user may import old sessions, but only as COPIES into the fork home
+//          (never attach/read the original in place); `inherit` is a legacy alias.
+export const FORK_SESSION_MODES = Object.freeze(['new', 'copy'])
 export const DEFAULT_FORK_CORE = Object.freeze({ mode: 'stock', sessionMode: 'new' })
 
 /** Normalise one mode value; unknown input falls back to the safe default. */
@@ -23,9 +27,10 @@ export function normalizeForkCoreMode(value) {
   return FORK_CORE_MODES.includes(text) ? text : DEFAULT_FORK_CORE.mode
 }
 
-/** Normalise the session policy; `new` is the safe default for accelerated forks. */
+/** Normalise the session policy; `new` is the safe default, `inherit` maps to `copy`. */
 export function normalizeForkSessionMode(value) {
   const text = String(value ?? '').trim()
+  if (text === 'inherit') return 'copy'
   return FORK_SESSION_MODES.includes(text) ? text : DEFAULT_FORK_CORE.sessionMode
 }
 

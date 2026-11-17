@@ -35,7 +35,8 @@ test('normalizers: unknown values fall back to the safe defaults', () => {
   assert.equal(normalizeForkCoreMode('accelerated'), 'accelerated')
   assert.equal(normalizeForkCoreMode('ACCELERATED'), 'stock')
   assert.equal(normalizeForkCoreMode(''), 'stock')
-  assert.equal(normalizeForkSessionMode('inherit'), 'inherit')
+  assert.equal(normalizeForkSessionMode('inherit'), 'copy')
+  assert.equal(normalizeForkSessionMode('copy'), 'copy')
   assert.equal(normalizeForkSessionMode('nope'), 'new')
   assert.deepEqual(normalizeForkCoreSettings(null), { mode: 'stock', sessionMode: 'new', updatedAt: null, updatedBy: null })
 })
@@ -54,11 +55,11 @@ test('write → read round-trip persists both fields atomically', () => {
 
 test('partial patch keeps the untouched field', () => {
   const dir = tmp()
-  writeForkCoreSettings(dir, { mode: 'accelerated', sessionMode: 'inherit' })
+  writeForkCoreSettings(dir, { mode: 'accelerated', sessionMode: 'copy' })
   writeForkCoreSettings(dir, { mode: 'stock' })
   const read = readForkCoreSettings(dir)
   assert.equal(read.mode, 'stock')
-  assert.equal(read.sessionMode, 'inherit')
+  assert.equal(read.sessionMode, 'copy')
 })
 
 test('corrupt file degrades to defaults instead of throwing', () => {
@@ -83,6 +84,10 @@ test('routes and UI are wired (source guards)', () => {
   assert.match(orchestrator, /coreMode: coreSync\.coreMode/)
   assert.equal(/normalizeCoreMode\(task\.coreMode \?\? forkCoreSettings\(\)\.mode\)/.test(orchestrator), false)
   assert.match(orchestrator, /fang\/fork-core-switched/)
+  // 旧会话只以副本进入加速分身（绝不原地挂载）；`new` 时跳过导入。
+  assert.match(orchestrator, /coreSettings\.sessionMode === 'copy'/)
+  assert.match(orchestrator, /copied: true, source: 'copy'/)
+  assert.match(orchestrator, /accelerated-new-session/)
   const client = fs.readFileSync(path.join(REPO, 'client.js'), 'utf8')
   assert.match(client, /分身Core核心加速引擎：(官方|一键加速)/)
   assert.match(client, /重新打开分身 Web 生效/)

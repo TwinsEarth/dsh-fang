@@ -78,7 +78,7 @@ npm run test:accel-live                                                   # fork
 | 数据安全 | 重新 provision 只重放 profile 配置；分身 `sessions/` 与生产数据不动 |
 | 分身卡徽标 | `taskView.coreMode` / `publicFork.coreMode` → 卡片显示「加速核」 |
 | 启动失败 | 加速核缺失 → 任务错误 `accelerated-cli-missing`（附 `searched` 轨迹），**绝不静默回退 stock**；端口继续池预分配 + 冲突拒绝 |
-| 会话策略 | `sessionMode:'new'`（默认）：加速分身跳过旧会话导入，记 `accelerated-new-session`；`inherit` 可显式开启（未验证） |
+| 会话策略 | **`sessionMode:'new'`（默认）**：加速分身只建新会话，旧会话不导入；**`sessionMode:'copy'`**：允许导入旧会话，但只把会话目录**复制成新副本**进分身 home（绝不原地挂载/读原会话）；`inherit` 为旧别名，统一归一为 `copy` |
 | 审计 | 切换写 `fork-core-settings` 与 `fang/fork-core-switched` 事件/审计 |
 
 ### 6.4 测试
@@ -95,6 +95,6 @@ npm run test:accel-live                                                   # fork
 |---|---|---|---|
 | D1 | 开关生效范围 | **a) 只影响新派生/重启**（运行中不热切换） | 2026-11-17 |
 | D2 | 加速分身插件面 | **a) 极简**（base + web-app + fang） | 2026-11-17 |
-| D3 | 加速分身旧会话 | **a) 新会话**（`sessionMode:'new'` 默认；`inherit` 保留未验证） | 默认执行，待最终确认 |
+| D3 | 加速分身旧会话 | **只新会话 + 旧会话仅“复制导入”（新副本，不在旧会话上继续）**；`sessionMode:'new'` 默认，`copy` 开启复制导入 | 2026-11-17 |
 | D4 | 安装位置/体积 | `<FANG_HOME>/accel/cli`（约 738 MB / 651 包） | 2026-11-17 |
 | D5 | 版本号 | **v3.4.3** | 2026-11-17 |

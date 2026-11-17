@@ -978,8 +978,8 @@ export function apply(ctx, config) {
       // P1：核心选择只作用于分身。显式 input.coreMode 优先，否则读面板开关。
       const coreSettings = forkCoreSettings()
       const coreMode = normalizeCoreMode(input.coreMode ?? coreSettings.mode)
-      // 会话策略：加速核默认新会话（旧会话是原厂 core 写的，格式兼容未验证）。
-      const inheritSessions = coreMode !== 'accelerated' || coreSettings.sessionMode === 'inherit'
+      // 会话策略：加速核默认只新会话；`copy` 允许把旧会话复制进分身（新副本，绝不原地挂载）。
+      const allowSessionImport = coreMode !== 'accelerated' || coreSettings.sessionMode === 'copy'
       task.coreMode = coreMode
       task.sessionMode = coreSettings.sessionMode
 
@@ -1049,17 +1049,19 @@ export function apply(ctx, config) {
           }
         }
 
-        if (!inheritSessions) {
+        if (!allowSessionImport) {
           task.importedSession = { ok: false, reason: 'accelerated-new-session' }
           audit(AUDIT.FORK_CREATED + '-import-skipped', { taskId, reason: 'accelerated-new-session', coreMode })
           persist()
         } else if (input.importSession && typeof input.importSession === 'object') {
           const importSpec = input.importSession
+          // 加速分身（sessionMode:'copy'）：旧会话只以**复制副本**进入分身 home，绝不原地读原会话。
+          const copyMode = coreMode === 'accelerated'
           // 新入口：只给 sessionId（元主栏“派生”按钮）→ 由会话目录整目录复制进分身。
           if (importSpec.sessionId && !importSpec.sourceFile) {
             try {
               const imported = importSessionsInto(homeDir, [importSpec.sessionId])
-              task.importedSession = imported[0] ? { ok: true, ...imported[0] } : { ok: false, reason: 'not-imported' }
+              task.importedSession = imported[0] ? { ok: true, ...imported[0], copied: true, source: 'copy' } : { ok: false, reason: 'not-imported' }
               audit(AUDIT.FORK_CREATED + '-import', { taskId, ...task.importedSession })
             } catch (e) {
               task.importedSession = { ok: false, reason: 'import-failed', error: String(e?.message ?? e) }
@@ -3221,7 +3223,7 @@ export function apply(ctx, config) {
         if (body?.mode !== undefined && !['stock', 'accelerated'].includes(String(body.mode))) {
           return json(res, 400, { ok: false, error: 'invalid-fork-core-mode' })
         }
-        if (body?.sessionMode !== undefined && !['new', 'inherit'].includes(String(body.sessionMode))) {
+        if (body?.sessionMode !== undefined && !['new', 'copy', 'inherit'].includes(String(body.sessionMode))) {
           return json(res, 400, { ok: false, error: 'invalid-fork-session-mode' })
         }
         const written = writeForkCoreSettings(layout.dataDir, {
