@@ -46,7 +46,7 @@ node tools/release/release-order.mjs       # 发布顺序/版本一致性
   安装步骤见 [`docs/INSTALL-LSP-MOTHER.md`](INSTALL-LSP-MOTHER.md)（需用户面板操作 + 重启）。
 - **fork-local（路线 B）安装默认关闭**：现在只提供变体 bundle 与探测（`forkLsp.available=false`）。
 - 语言服务器需 bundle 依赖安装（已精确锁定 `typescript-language-server@6.1.0` + `typescript@5.9.3`）。
-- M5 探针自测受本会话打包守卫限制，采用内容等价解包目录；发布后建议对 npm tarball 复跑。
+- M5 探针自测在发布前受打包守卫限制；**发布后已用 3.5.2 Release tarball 复跑（exit 0）**，证据见 `docs/M5-fang-relay-evidence-3.5.2.json`。
 
 ## 5. 发布结果（2026-11-17 实测）
 
@@ -67,3 +67,9 @@ node tools/release/release-order.mjs       # 发布顺序/版本一致性
 
 - 本地 build：`dist/dsh-fang-3.5.2.tgz` 680,053 B / 185 entries / sha256 `9d5d3518…`；`dist/manifest.json` 同步。
 - preflight（发布前，main 树）：tests 1273 pass / e2e 123/123 / main-city A / allow-list 0 / artifact sha256 match → **GREEN 3.5.2**。
+
+### M5 证据升级（发布后，2026-11-18）
+
+- 用 **Release 资产 `dsh-fang-3.5.2.tgz`**（680,053 B，sha256 `9d5d3518…` = manifest，sha1 `08024e94…` = npm shasum）解包后复跑房主探针：**exit 0**；
+- `fangVersion=3.5.2`、`peer=dsh-fang-bundle`、5 条回执、`sameProcess=false`、幂等通过、`vendoredFilesOk=true`（8/8）、`peerLabelSource=src/plugins/orchestrator.mjs`、`relayHandlersRegistered=true`；
+- 证据：`docs/M5-fang-relay-evidence-3.5.2.json`（3.5.0 的旧证据保留为 `docs/M5-fang-relay-evidence.json`）。

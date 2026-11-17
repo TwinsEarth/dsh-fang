@@ -96,6 +96,51 @@ node scripts/fang-relay-probe.mjs --peer fang --fang-dir <解包目录> --events
 
 探针 exit 0；另对 `dist/npm/package`（3.5.0 发布包暂存内容）复跑同样 exit 0。
 
+### 3.5.2 发布 tarball 复跑（2026-11-18）
+
+为消除“证据只覆盖 3.5.0”的缺口，直接用 **v3.5.2 已发布的 GitHub Release 资产**复跑房主探针：
+
+```powershell
+# 1) 从 Release 下载资产并校验（与 manifest / npm 一致）
+#    dsh-fang-3.5.2.tgz  680,053 B
+#    sha256 9d5d3518a92811552c4eef8a45dcfd8284fccd458a29f4ef906e3b8b121df70d  （= dist/manifest.json）
+#    sha1   08024e94b05f7aae622ac00d854af42e228ebd55                          （= npm dist.shasum）
+tar -xzf dsh-fang-3.5.2.tgz -C <unpacked>     # → <unpacked>/package
+
+# 2) 房主探针对 3.5.2 包运行
+node scripts/fang-relay-probe.mjs --peer fang --fang-dir <unpacked>/package --events 5 --out evidence.json
+# exit 0
+```
+
+结果（`docs/M5-fang-relay-evidence-3.5.2.json`）：
+
+```json
+{
+  "ok": true,
+  "peer": "dsh-fang-bundle",
+  "events": 5,
+  "sameProcess": false,
+  "contractVersion": "1.2.0",
+  "provenance": {
+    "peerMode": "fang-package",
+    "fangVersion": "3.5.2",
+    "vendorVersion": "1.2.0",
+    "vendoredFilesChecked": 8,
+    "vendoredFilesOk": true,
+    "peerLabelSource": "src/plugins/orchestrator.mjs",
+    "relayHandlersRegistered": true
+  },
+  "idempotency": true,
+  "expectation": { "peer": "dsh-fang-bundle", "matched": true }
+}
+```
+
+静态核对（同一 tarball 内 `src/plugins/orchestrator.mjs`）：`peerLabel: 'dsh-fang-bundle'`、
+`limits: { maxBatch: 32, maxPayloadBytes: 512000 }`、`relayHandlers(relayStore)`、health 的
+`version/contractVersion` 顶层字段均在位。
+
+**结论**：M5 证据现在覆盖**已发布版本 3.5.2**（此前为 3.5.0），语义一致、无回退。
+
 ## 三、口径说明
 
 - **契约版本**：需求允许 `1.1.1` 或 `1.2.0`；瓮城 vendored **1.2.0**（B-6 委托方法依赖它），`contractVersion` 自报 `1.2.0`；
