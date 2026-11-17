@@ -1,0 +1,30 @@
+{
+  "name": "@twinsearth/dsh-fang-lsp-fork",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "dsh-Fang LSP provider bundle — route B (fork-local) variant for accelerated fork profiles: @twinsearth same-version LSP trio + pinned TypeScript language server. Config-only bundle; install is OFF by default.",
+  "license": "AGPL-3.0-or-later",
+  "author": {
+    "name": "dsh-Fang contributors"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@twinsearth/dsh-lsp": "3.5.0",
+    "@twinsearth/dsh-lsp-stdio": "3.5.0",
+    "@twinsearth/dsh-tool-lsp": "3.5.0",
+    "typescript-language-server": "6.1.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

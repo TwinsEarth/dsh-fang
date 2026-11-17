@@ -19,6 +19,7 @@ import {
   classifyAliasSpec,
   rewriteClientHalfPackage,
   rewriteClientSpecifiers,
+  detectForkLspSupport,
   scanDeepseekSpecs,
   translateBundles,
   writeAcceleratedForkProfile,
@@ -234,6 +235,20 @@ test('buildSyncedAcceleratedProfile: web-required client rows are re-enabled and
   assert.equal(built.ok, true)
   assert.match(built.patchText, /"id": "ui-theme"[\s\S]{0,220}?"disabled": false/)
   assert.deepEqual(built.rowOverrides.map((item) => item.id), ['ui-theme'])
+})
+
+test('detectForkLspSupport: reports route B readiness from the accelerated module tree', () => {
+  const accel = makeAccelTree()
+  const before = detectForkLspSupport(accel)
+  assert.equal(before.available, false)
+  assert.deepEqual(before.missing.sort(), ['@twinsearth/dsh-lsp', '@twinsearth/dsh-lsp-stdio', '@twinsearth/dsh-tool-lsp'])
+  for (const name of ['dsh-lsp', 'dsh-lsp-stdio', 'dsh-tool-lsp']) {
+    const dir = path.join(accel, '@twinsearth', name)
+    writeJson(path.join(dir, 'package.json'), { name: `@twinsearth/${name}`, version: '3.5.0', type: 'module', exports: { '.': './lib/index.js' } })
+  }
+  const after = detectForkLspSupport(accel)
+  assert.equal(after.available, true)
+  assert.deepEqual(after.missing, [])
 })
 
 test('writeAcceleratedForkProfile(synced): copies plugins, writes stubs, reports sync', () => {

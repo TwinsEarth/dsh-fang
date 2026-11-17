@@ -66,19 +66,49 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 
 > 测试缝只存在于 e2e 进程（环境变量控制），不进目录/生产部署；`allow` 白名单是权威放行表，目录仅用于能力自述。
 
-### 0.4 M3 验收（B-6 lsp 委托，2026-11-17）
+### 0.4 M3–M3.1 验收（B-6 lsp 委托：通道 + 真实 provider 接入，2026-11-17）
 
 | 项 | 实现 | 单测 / e2e |
 |---|---|---|
-| `fang.tool.invoke`（首批仅 `tool:'lsp'`） | `validateToolInvoke()` 校验 tool/action/file；目录登记 kind=`write`、approval=`required`，**默认不在白名单**，需操作者显式放行 | 单测 `test/lsp-delegation.test.mjs` 4 项 |
-| 只读子命令 | `diagnostics` / `hover` / `definition` / `references` → 自动放行。**口径修订（2026-11-17）**：官方 LSP 能力缝只提供 `goToDefinition/findReferences/goToImplementation/hover` 四操作；`diagnostics` 仅存在于测试缝，接真实 provider 时应移除或按 provider 实提供能力 advertise | e2e：diagnostics 成功（provider=test-hook） |
-| 写类子命令 | `format` / `rename` / `codeAction` / `apply` → **委托层拒绝执行**，返回 `contract-approval-required`（无副作用）。**口径修订**：官方 LSP 明确只读、无 mutation；该门禁保留给未来自定义 provider | e2e：format → contract-approval-required |
-| 非法子命令 | 未知 action → `contract-invalid-request` | e2e：nope → contract-invalid-request |
-| 错误码 | 新增 `contract-approval-required`（fang 层表，唯一性断言） | 单测 |
+| `fang.tool.invoke`（首批仅 `tool:'lsp'`） | `validateToolInvoke()` 校验 tool/action/file/line/character；目录登记 kind=`write`、approval=`required`，**默认不在白名单**，需操作者显式放行 | 单测 `test/lsp-delegation.test.mjs` 5 项 |
+| 只读动作（官方口径，目录只 advertise 这 4 项） | `definition` / `references` / `implementation` / `hover` → 映射官方 seam `goToDefinition/findReferences/goToImplementation/hover`；**参数 `line/character` 为 0-based 非负整数（seam 原生坐标，直接透传；非整数/负数 → contract-invalid-request）**；`file` 必填、operation 闭集；自动放行；**目录 actions 仅取 provider 实提供能力（无 provider 时 `[]`）** | 单测 `test/lsp-delegation.test.mjs` 5 项 + `test/lsp-provider.test.mjs` 11 项；e2e：真实 provider definition/references/hover |
+| 写类/legacy 动作 | 官方能力缝明确只读；`format` / `rename` / `codeAction` / `apply` 从官方语义移除 → **可读拒绝** `contract-unsupported`（消息含 “official LSP seam is read-only”），无副作用；**通用审批门禁路径保留**（`kind=write` → `contract-approval-required`，未来自定义 provider 显式登记写类动作才可达） | e2e：format → contract-unsupported；单测 `lsp-delegation` 5 项 |
+| `diagnostics`（仅测试缝，non-production） | 不属于官方 provider 能力：**不进入能力目录、不对外 advertise**；能力目录 `provider.nonProduction` 明确标记 `test-hook`；仅 `FANG_CONTRACT_TEST_HOOKS=1` 且无真实 provider 时返回确定性 stub（`testSeam:true / nonProduction:true`）；真实 provider/生产 → `contract-unsupported`（detail.reason=test-seam-only） | e2e：目录 nonProduction 标记 + 测试缝结果标记 + 真实 provider 下可读拒绝 |
+| 按“实提供能力”advertise | `advertisedActionsFromSeam(lspService)`：真实 provider 若声明 `supportedOperations`/`capabilities`，只 advertise 与官方 4 操作的**交集**；无 provider 时 `actions: []`（不虚假宣称）；测试缝/ fork-local 未安装时均不产生 actions | 单测交集/空集/nonProduction |
+| **错误码映射（契约口径）** | `LSP_UNAVAILABLE`→`contract-unavailable`；`LSP_FILE_OUTSIDE_WORKSPACE` / `LSP_INVALID_PROVIDER`→`contract-invalid-request`；`LSP_MALFORMED_RESPONSE` / `LSP_SERVER_ERROR`→`contract-unavailable`（附 `detail.lspCode` + `detail.serverMessage`，可读） | 单测 `lsp-provider`：5 组映射逐条断言 |
+| **结果归一化（契约口径）** | `locations` → `[{path, line, character}]`（**1-based 展示**，path 由 file:// URI 解码）；`hover` → `{contents}`；**超限裁剪**：`contract.delegate.lsp.maxLocations`（默认 200）/`maxResultChars`（默认 20000），超出标记 `truncated` 并附 `totalLocations` | 单测：路径/1-based/裁剪断言 |
+| **超时/并发/审计** | 复用 M5：`maxConcurrent` 门禁、`contract-delegate` 审计 outcome（ok/denied/error + workspaceRoot + latencyMs）；LSP 查询使用 `writeTimeoutMs` 冷启动预算（语言服务器首次拉起），其余只读能力仍用 `readTimeoutMs` | 单测审计 record；e2e：lspRecords outcomes=[ok,denied] |
+| **路线 A（母体 provider，优先）** | 母体 fang 插件从 host ctx 取 `ctx.lsp`，直接 `query({operation,filePath,position,workspaceRoot})`；**workspaceRoot 允许范围 = 母体配置根 + 所有 fork 工作区根（显式登记：任务 registry 的 workspace 索引；`includeForkWorktrees` 可关）**，realpath 包含校验；结果归一化 locations/hover；seam 错误码映射 | `src/lib/lsp-provider.mjs`；真实 provider 闭环：`setup:lsp-live` + `test:lsp-live`（e2e `--lsp` **125/125**：definition/hover/references 真实语义、fork 根自动登记、越界根 `contract-unauthorized`、文件逃逸 `contract-invalid-request`、审计含 workspaceRoot/outcome） |
+| **安装形态（bundle）** | `lsp-provider/` 配置型 bundle：依赖官方三件套（0.2.2-rc.3）+ npm `typescript-language-server@6.1.0` + `typescript@5.9.3`（精确锁定）；patch **最小组合** = fs-local + subprocess-local + dsh-lsp + dsh-lsp-stdio + dsh-tool-lsp（官方 README 组件集；本 DSH 解析器要求 `insert:` + id，裸 `- name:` 行会被静默忽略——已由 boot 探针实测）；**写类不提供**（跟随官方只读）；A=母体 profile（先做），B=加速分身 profile（后续增强） | `test/lsp-provider-bundle.test.mjs` **4 项** + `test:lsp-bundle` **5/5**（真实 install→boot：ctx.lsp + tools/lsp）；安装：Plugins → Add plugin 选目录（见 [`docs/INSTALL-LSP-MOTHER.md`](INSTALL-LSP-MOTHER.md)） |
+| **M3.3 真实 provider 接入（已验收）** | fang 插件实现 `ctx.lsp.query` 映射（4 只读动作→官方 seam ops）+ workspaceRoot 策略（配置根 + 任务 registry 的 fork 工作区根自动登记 + realpath 包含校验）+ 审计（workspaceRoot/outcome/latency 入 `contract-delegate`） | e2e `--lsp` **125/125**：主工作区 definition/hover/references、**fork 工作区根自动登记后可查询**、越界根/文件逃逸均 `contract-invalid-request`、审计 `ok/denied` trail |
+| **M3.5 语言服务器锁定（已落地）** | `typescript-language-server@6.1.0` + `typescript@5.9.3` + 官方三件套 `0.2.2-rc.3` 精确随 bundle 依赖锁定；`LOCKED-VERSIONS.json` 与 package.json 双向一致性测试；`setup:lsp-live` 同版本可复现 | `test/lsp-provider-bundle.test.mjs` **4 项**；锁版本后 e2e `--lsp` 125/125、`test:lsp-bundle` 5/5 |
+| **M3.4 e2e TS fixture（已验收）** | 真实 TS 双文件 fixture（`a.ts` import `base.ts`）：definition（alias→import 位置）、**references 跨文件解析**（base.ts + a.ts）、hover（含 `(alias) const base: 1`）；根策略：fork 工作区根自动登记、越界根 `contract-unauthorized`（reason=root-not-allowed）、文件逃逸 `contract-invalid-request`（reason=file-outside-root） | e2e `--lsp` **125/125** |
+| **M3.2 bundle 安装到测试 profile（已验收）** | `npm run test:lsp-bundle`（`tools/release/lsp-bundle-install.mjs`）：临时 `$DSH_HOME` 测试 profile 内链接 `lsp-provider/` bundle + staging 依赖，诊断探针在插件树稳定后采样 | **5/5 PASS**：bundle 链接 ✓、母体 boot ✓、`ctx.lsp` 存在且 `query` 可用 ✓、`tools` 服务可见 ✓、**已知工具含 `lsp`** ✓ |
+| **路线 A 审计** | 每次 LSP 尝试写 `contract-delegate`（`tool:'lsp'`、action、provider、workspaceRoot、outcome、latencyMs）；拒绝（越界根/动作不支持）同样入账 | e2e：lspRecords=3，outcomes=[ok,denied] |
+| **路线 B（fork-local，增强）** | 加速核检测 `@twinsearth/dsh-lsp` / `dsh-lsp-stdio` / `dsh-tool-lsp`（`detectForkLspSupport`），安装后 LSP 跑在分身自己工作区；未安装时保持路线 A/显式不可用 | `writeAcceleratedForkProfile(...).forkLsp`；单测 |
+| 能力目录按 provider 区分 | `fang.capability.list` 的 `fang.tool.invoke` 附带 `provider: {available, default, services, actions}`，顶层另有 `lspProvider`；生产未装 LSP 栈时 `available=false` 显式可读 | e2e：catalog provider-tagged 断言 |
+| 非法子命令 | 未知 action → `contract-invalid-request`；缺 file/位置 → `contract-invalid-request` | e2e：nope → contract-invalid-request |
+| 错误码 | 复用 contract 1.2 的委托错误码（approval-required/timeout/unauthorized 等） | 单测 |
 
-> **诚实的边界**：LSP 的**执行提供方**尚未接入母体 DSH 工具运行时（当前仅 e2e 测试缝提供确定性 diagnostics；生产读类动作会返回 `contract-unavailable`）。委托通道、白名单、审批门禁与错误码已经完整；接入真实 LSP provider 属下一里程碑（需确认母体工具调用 API）。
+> **路线 B（fork-local）契约口径（2026-11-17 定；语言服务器来源已定 ①，B 安装仍默认关闭）**：
+> 1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A，provider=`mother`）；fork-local 的 LSP 在加速分身本地 `ctx.lsp` 执行，**不经过契约委托**；
+> 2. **能力目录按 provider 显式区分**：`lspProvider.providers` 含 `mother`（mode=`delegated`，source=`mother-process`）与 `fork-local`（mode=`local`，source=`fork-worktree`），各自只 advertise **实提供**的只读操作；未安装 fork-local 时 `available:false`、`actions:[]`（不产生虚假条目）；测试缝只出现在 `nonProduction` 标记里；
+> 3. **fork-local 的可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）+ 任务记录 `accelerated.forkLsp` 呈现，母体目录里只作就绪探测（不改变执行路径）；
+> 4. **安装默认关闭**：bundle 依赖已锁定；路线 B 安装作为后续增强，需显式安装/启用，不自动装载到 fork profile。
+
+> **动作集合对齐（B-6 口径，2026-11-17）**：契约动作 ↔ 官方 seam 操作 = `definition`↔`goToDefinition`、`references`↔`findReferences`、`implementation`↔`goToImplementation`（本表新增，真实 TS interface implementation e2e 已验证）、`hover`↔`hover`；`diagnostics` 不在官方能力缝（仅测试缝保留、`nonProduction` 标记、不 advertise）；写类（format/rename/codeAction/apply）官方无对象，可读拒绝，通用审批门禁保留给未来自定义 provider。
+
+> **母体接入最小正确路径（2026-11-17 确认）**：无需伪造 Agent Session、也不经过 tools 服务，直接：
+> `const lsp = ctx.get('lsp'); const result = await lsp.query({ operation: 'goToDefinition', filePath, position: { line, character }, workspaceRoot }, signal)`。
+> 依据：能力缝本身不要求 Agent Session（E7：`workspaceRoot` 是调用者显式传入的必填字段）；`dsh-tool-lsp` 的 Agent Session 要求（E10）只约束**模型工具**，不约束委托。fang 的 handler 即走该 seam（`queryMotherLsp`），e2e 母体无 Agent Session 也能完成 definition/references/implementation/hover。
+> **路线 B 安装形态（默认关闭）**：复用方式是**同 patch 形状的 fork 变体** `lsp-provider-fork/`（依赖 `@twinsearth/dsh-lsp@3.5.0` 三件套，与加速核同版本），
+> 不是把 `@deepseek-ai@0.2.2-rc.3` 母体 bundle 直接装进加速 fork；fs-local/subprocess-local 由加速核自带；
+> fork-local 不经过契约委托，能力目录仍以 `provider:'fork-local'`（mode=local）区分，安装默认关闭、待后续增强启用。
+> **安全边界（2026-11-17，E5 事实）**：加速核有同版本 LSP trio 时，fork-local 让 LSP 跑在**分身自己的 workspace/worktree**，语义上优于“把分身文件路径交给母体进程”；而母体委托的 `workspaceRoot` 由调用方传入，`dsh-lsp-stdio` 明确 **trusts its configured server，无沙箱**，因此母体必须用允许根限制文件读取面（realpath 包含 + fail-closed，越界 `contract-invalid-request`），否则等于把母体进程的读取面扩大到调用方任意路径。两条路线**并存**：`provider: 'mother' | 'fork-local'` 在能力目录显式区分；fork-local 无法覆盖“LSP 服务器只装在母体/共享缓存”的场景，故母体 provider 仍是默认。
 >
-> **调研已更新（2026-11-17）**：官方 LSP 是可选安装包族（`dsh-lsp` 能力缝 + `dsh-lsp-stdio` provider + `dsh-tool-lsp` 工具），npm 有与运行版本一致的 `0.2.2-rc.3`；能力缝 `ctx.lsp.query({operation,filePath,position,workspaceRoot})` **不需要 Agent Session**，可由母体 fang 插件直接调用。官方能力缝**只支持 4 个只读操作**（definition/references/implementation/hover），**不支持 diagnostics/format/rename** → B-6 动作口径需按 provider 实提供能力修订。详见 [`docs/LSP-PROVIDER-RESEARCH.md`](LSP-PROVIDER-RESEARCH.md)。
+> **诚实的边界**：路线 A 的**代码路径已完整**并在隔离 staging 中用真实 provider 跑通（`setup:lsp-live` / `test:lsp-live`）；但**母体正式 profile 尚未安装**官方 LSP 栈，生产读类动作仍显式 `contract-unavailable`，默认 e2e 使用测试缝提供确定性结果。
+>
+> **调研与决策（2026-11-17）**：官方 LSP 为可选包族；能力缝 `ctx.lsp.query` 不需要 Agent Session；只支持 4 个只读操作。**路线 A 先行（对应 B-6 目标），路线 B 作为增强，能力目录按 provider 区分**。详见 [`docs/LSP-PROVIDER-RESEARCH.md`](LSP-PROVIDER-RESEARCH.md)。
 
 ### 0.5 M4 验收（B-7 chat.import，2026-11-17）
 

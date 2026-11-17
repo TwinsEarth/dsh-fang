@@ -6,6 +6,9 @@
 // 做什么：
 //   1. 在临时 $DSH_HOME 里生成一个只装 @local/dsh-fang 的 e2e profile；
 //   2. 用真实 dsh CLI 启动一个独立母体（动态端口），等它打印带 token 的 URL；
+//      默认走测试缝；`--lsp`（或 FANG_E2E_LSP=1）会把官方 LSP 三件套 +
+//      typescript-language-server staging 目录接进 profile，用真实 ctx.lsp provider 验证
+//      definition/hover（准备：node tools/release/lsp-live-setup.mjs）。
 //   3. 通过 HTTP 走完整任务生命周期：status → 派生任务（真分身）→ Adapter 握手 →
 //      分身角色矩阵断言 → 任务状态 → 归档（flush+回收）；
 //   4. 校验母体审计账本（哈希链）与母体/分身两侧数据布局；
@@ -43,6 +46,10 @@ if (!CLI) {
   console.error('SKIP: dsh CLI not found')
   process.exit(2)
 }
+// 路线 A 真实 LSP 模式：安装官方三件套 + typescript-language-server 后，用真实 provider
+// 替换 e2e 测试缝（默认仍走测试缝，保证 CI 确定性）。
+const LSP_MODE = process.argv.includes('--lsp') || process.env.FANG_E2E_LSP === '1'
+const LSP_STAGE = process.env.FANG_E2E_LSP_STAGE || 'E:\\GPT\\.tmp\\e2e-lsp-stage'
 
 const results = []
 function check(id, ok, detail = '') {
@@ -78,7 +85,6 @@ async function waitFor(fn, { timeoutMs = 60000, intervalMs = 500, label = 'condi
   return { ok: false, error: `timeout waiting for ${label}`, last }
 }
 
-/** Create a real multi-frame session log + workspace index so /api/sessions can be asserted. */
 function seedSession(homeRoot, { sessionId, workspacePath, title }) {
   const sessionsDir = path.join(homeRoot, 'sessions', encodeWorkspaceKey(workspacePath), sessionId)
   fs.mkdirSync(sessionsDir, { recursive: true })
@@ -97,6 +103,21 @@ function seedSession(homeRoot, { sessionId, workspacePath, title }) {
   }, null, 2))
 }
 
+/**
+ * M3.3 workspaceRoot 策略：把一个 fork 任务（含 workspace 索引）登记进任务 registry，
+ * 让母体的 LSP 允许根自动登记该 fork 的工作区（“母体 + 所有 fork 工作区根，显式登记”）。
+ */
+function seedLspForkTask(homeRoot, forkHome) {
+  const dataDir = path.join(homeRoot, 'fang', 'e2e')
+  fs.mkdirSync(dataDir, { recursive: true })
+  const file = path.join(dataDir, 'tasks.json')
+  let existing = { version: 2, forks: [] }
+  try { existing = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* first run */ }
+  const forks = Array.isArray(existing.forks) ? existing.forks.filter((task) => task?.forkId !== 'lsp-fork-probe') : []
+  forks.push({ forkId: 'lsp-fork-probe', homeDir: forkHome, coreMode: 'accelerated', status: 'running', createdAt: new Date().toISOString() })
+  fs.writeFileSync(file, JSON.stringify({ version: 2, at: new Date().toISOString(), forks }, null, 2))
+}
+
 function makeProfile(homeRoot) {
   const profileDir = path.join(homeRoot, 'profiles', 'e2e')
   fs.mkdirSync(path.join(profileDir, 'node_modules'), { recursive: true })
@@ -111,15 +132,46 @@ function makeProfile(homeRoot) {
     dependencies: {},
   }, null, 2))
   fs.writeFileSync(path.join(profileDir, 'cordis.yml'), '[]\n')
+  const lspWorkspace = path.join(homeRoot, 'lsp-workspace')
+  if (LSP_MODE) {
+    fs.mkdirSync(lspWorkspace, { recursive: true })
+    fs.writeFileSync(path.join(lspWorkspace, 'base.ts'), 'export interface Shape {\n  area(): number\n}\nexport const base = 1\nexport const unused = 0\n')
+    fs.writeFileSync(path.join(lspWorkspace, 'a.ts'), "import { base, Shape } from './base'\nexport function add(x: number) {\n  return x + base\n}\nexport class Circle implements Shape {\n  area(): number { return base }\n}\n")
+    fs.writeFileSync(path.join(lspWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, target: 'ES2022', module: 'ESNext' }, include: ['a.ts', 'base.ts'] }, null, 2))
+    // Fork workspace fixture: the task registry entry below registers this root explicitly.
+    const forkHome = path.join(homeRoot, 'lsp-fork-home')
+    const forkWorkspace = path.join(homeRoot, 'lsp-fork-workspace')
+    fs.mkdirSync(path.join(forkHome, 'storages'), { recursive: true })
+    fs.mkdirSync(forkWorkspace, { recursive: true })
+    fs.writeFileSync(path.join(forkWorkspace, 'a.ts'), 'export const forkBase = 2\nexport function forkUse(x: number) {\n  return x + forkBase\n}\n')
+    fs.writeFileSync(path.join(forkHome, 'storages', 'workspace.json'), JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { initialized: true, workspaceIds: ['fw-lsp'] },
+      tables: { workspaces: { 'fw-lsp': { path: forkWorkspace, title: 'LSP fork', sessionIds: [] } } },
+    }, null, 2))
+  }
+  const lspDelegate = LSP_MODE
+    ? '        lsp:\n          allowedRoots:\n            - ' + JSON.stringify(lspWorkspace) + '\n'
+    : ''
+  const lspRows = LSP_MODE
+    ? '- insert:\n' +
+      '    - id: dsh-lsp\n      name: \'@deepseek-ai/dsh-lsp\'\n' +
+      '    - id: dsh-lsp-stdio\n      name: \'@deepseek-ai/dsh-lsp-stdio\'\n      config:\n        servers:\n          typescript:\n' +
+      '            command: ' + JSON.stringify(process.execPath) + '\n' +
+      '            args:\n              - ' + JSON.stringify(path.join(LSP_STAGE, 'node_modules', 'typescript-language-server', 'lib', 'cli.mjs')) + '\n              - "--stdio"\n' +
+      '            extensionToLanguage:\n              ".ts": typescript\n'
+    : ''
   // v3.3.3: queue-journal is disabled by default in the bundle. The e2e profile
   // explicitly enables it so the journal/queue recovery API is exercised; the
   // default-off + 503 path is covered by unit tests.
   fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'),
     '- id: fang-queue-journal\n  disabled: false\n' +
     '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n' +
-    '      delegate:\n        readTimeoutMs: 100\n        maxConcurrent: 2\n        allow:\n' +
+    '      delegate:\n        readTimeoutMs: 100\n        maxConcurrent: 2\n' + lspDelegate +
+    '        allow:\n' +
     "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.chat.import\n          - fang.test.sleep\n" +
-    '        pro:\n          enabled: true\n          allow:\n            - fang.code.run\n          maxConcurrent: 1\n          timeoutMs: 2000\n          maxOutputBytes: 4096\n')
+    '        pro:\n          enabled: true\n          allow:\n            - fang.code.run\n          maxConcurrent: 1\n          timeoutMs: 2000\n          maxOutputBytes: 4096\n' +
+    lspRows)
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
@@ -131,6 +183,22 @@ function makeProfile(homeRoot) {
   const entryLink = path.join(profileDir, 'node_modules', '@twinsearth', 'dsh-fang-web-entry')
   fs.mkdirSync(path.dirname(entryLink), { recursive: true })
   fs.symlinkSync(path.join(ROOT, 'web-entry'), entryLink, 'junction')
+  if (LSP_MODE) {
+    // Stage the official LSP stack + typescript-language-server from a real npm install;
+    // junction each package into the profile (no writes into the user profile).
+    const staged = path.join(LSP_STAGE, 'node_modules')
+    const target = path.join(profileDir, 'node_modules')
+    const linkEntry = (from, to) => { try { if (!fs.existsSync(to)) fs.symlinkSync(from, to, 'junction') } catch { /* ignore */ } }
+    for (const entry of fs.readdirSync(staged, { withFileTypes: true })) {
+      if (entry.name === '.bin') continue
+      if (entry.name.startsWith('@')) {
+        fs.mkdirSync(path.join(target, entry.name), { recursive: true })
+        for (const sub of fs.readdirSync(path.join(staged, entry.name))) linkEntry(path.join(staged, entry.name, sub), path.join(target, entry.name, sub))
+      } else {
+        linkEntry(path.join(staged, entry.name), path.join(target, entry.name))
+      }
+    }
+  }
   return profileDir
 }
 
@@ -141,6 +209,9 @@ async function main() {
   const E2E_NATIVE_TITLE = 'e2e 原生会话标题'
   const E2E_SESSION_ID = 'session-11111111-2222-4333-8444-555555555555'
   const E2E_WS_PATH = 'E:\\e2e-ws'
+  const LSP_WS = path.join(homeRoot, 'lsp-workspace')
+  const LSP_FORK_HOME = path.join(homeRoot, 'lsp-fork-home')
+  const LSP_FORK_WS = path.join(homeRoot, 'lsp-fork-workspace')
   seedSession(homeRoot, { sessionId: E2E_SESSION_ID, workspacePath: E2E_WS_PATH, title: E2E_NATIVE_TITLE })
   const profileDir = makeProfile(homeRoot)
   console.log(`e2e: home=${homeRoot}`)
@@ -295,6 +366,13 @@ async function main() {
       && Array.isArray(hello.methods) && hello.methods.includes('fang.session.list')
       && Array.isArray(hello.capabilities),
       JSON.stringify({ status: helloRes.status, version: hello.contractVersion, methods: (hello.methods ?? []).length }).slice(0, 180))
+    // M5：health 无 Bearer，返回 { ok, role, version, peer, accepted }（房主回流对端约定字段）。
+    const contractHealth = await api('/fang/api/contract/health')
+    check('contract health is public and reports {ok,role,version,peer,accepted}', contractHealth.status === 200
+      && contractHealth.body?.ok === true && contractHealth.body?.role === 'mother'
+      && contractHealth.body?.version === '1.2.0' && contractHealth.body?.peer === 'dsh-fang-bundle'
+      && typeof contractHealth.body?.accepted === 'number',
+      JSON.stringify({ status: contractHealth.status, peer: contractHealth.body?.peer ?? null, accepted: contractHealth.body?.accepted ?? null }).slice(0, 200))
     const contractInvoke = async (method, params) => api('/fang/api/contract/invoke', {
       method: 'POST', headers: contractAuth, body: JSON.stringify(createEnvelope({ method, params, source: 'e2e' })),
     })
@@ -314,11 +392,24 @@ async function main() {
     })
     const capList = await delegatedInvoke('fang.capability.list')
     const capItems = Array.isArray(capList.body?.result?.capabilities) ? capList.body.result.capabilities : []
-    check('delegated fang.capability.list returns catalog (write caps approval-gated)', capList.status === 200 && capList.body?.ok === true
+    const lspCap = capItems.find((c) => c.method === 'fang.tool.invoke')
+    const lspCapOk = LSP_MODE
+      ? (lspCap?.provider?.default === 'mother' && lspCap.provider?.available === true
+        && Array.isArray(lspCap.actions) && ['definition', 'references', 'implementation', 'hover'].every((action) => lspCap.actions.includes(action))
+        && !lspCap.actions.includes('diagnostics')
+        && lspCap.provider?.providers?.mother?.mode === 'delegated'
+        && lspCap.provider?.providers?.['fork-local']?.mode === 'local'
+        && Array.isArray(lspCap.provider?.nonProduction) && lspCap.provider.nonProduction.includes('test-hook'))
+      : (Boolean(lspCap) && Array.isArray(lspCap.actions) && lspCap.actions.length === 0
+        && !lspCap.actions.includes('diagnostics') && lspCap.provider?.services?.['test-hook'] === true
+        && lspCap.provider?.providers?.mother?.mode === 'delegated'
+        && lspCap.provider?.providers?.['fork-local']?.mode === 'local'
+        && Array.isArray(lspCap.provider?.nonProduction) && lspCap.provider.nonProduction.includes('test-hook'))
+    check('delegated fang.capability.list returns catalog + provider-tagged lsp capability (advertises only real provider capabilities)', capList.status === 200 && capList.body?.ok === true
       && capItems.some((c) => c.method === 'fang.session.list')
       && capItems.filter((c) => c.kind === 'write').every((c) => c.approval === 'required')
-      && capItems.some((c) => c.method === 'fang.tool.invoke'),
-      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`) }).slice(0, 220))
+      && lspCapOk,
+      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`), provider: lspCap?.provider?.default ?? null, actions: lspCap?.actions ?? null }).slice(0, 900))
     const rejectedCap = await delegatedInvoke('fang.fork.spawn', {})
     check('delegated unlisted capability rejected (contract-unsupported)', rejectedCap.status === 200
       && rejectedCap.body?.ok === false && rejectedCap.body?.error?.code === 'contract-unsupported',
@@ -342,22 +433,88 @@ async function main() {
     check('delegated capability timeout maps to contract-timeout', delegatedSlow.status === 200
       && delegatedSlow.body?.ok === false && delegatedSlow.body?.error?.code === 'contract-timeout',
       JSON.stringify({ status: delegatedSlow.status, code: delegatedSlow.body?.error?.code ?? null }).slice(0, 160))
-    // B-6：LSP 委托——只读子命令成功；写类子命令必须审批（拒绝执行、无副作用）
-    const lspRead = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: 'example.mjs', line: 1 })
-    check('delegated lsp diagnostics (read action) succeeds', lspRead.status === 200
-      && lspRead.body?.ok === true && lspRead.body?.result?.ok === true && Array.isArray(lspRead.body.result.diagnostics),
-      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null }).slice(0, 160))
-    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs' })
-    check('delegated lsp write action requires approval (contract-approval-required)', lspWrite.status === 200
-      && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-approval-required',
-      JSON.stringify({ status: lspWrite.status, code: lspWrite.body?.error?.code ?? null }).slice(0, 160))
-    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs' })
+    // B-6：LSP 委托——路线 A 真实 provider（--lsp）或测试缝（默认）；写类子命令可读拒绝。
+    if (LSP_MODE) seedLspForkTask(homeRoot, LSP_FORK_HOME)
+    const lspReadParams = LSP_MODE
+      ? { tool: 'lsp', action: 'definition', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_WS }
+      : { tool: 'lsp', action: 'definition', file: 'example.mjs', line: 0, character: 0 }
+    const lspRead = await delegatedInvoke('fang.tool.invoke', lspReadParams)
+    const lspReadOk = LSP_MODE
+      ? (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'mother'
+        && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations)
+        && lspRead.body.result.locations.length > 0
+        && lspRead.body.result.locations.every((loc) => typeof loc?.path === 'string' && loc.path.length > 0 && Number(loc?.line) === 1))
+      : (lspRead.body?.ok === true && lspRead.body?.result?.provider === 'test-hook'
+        && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations))
+    check(LSP_MODE ? 'delegated lsp definition via real mother provider (ctx.lsp) succeeds' : 'delegated lsp definition (official read action) succeeds', lspRead.status === 200 && lspReadOk,
+      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null, locations: lspRead.body?.result?.locations ?? null, detail: lspRead.body?.error?.detail ?? null }).slice(0, 500))
+    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs', line: 0, character: 0 })
+    check('delegated lsp legacy write action rejected (official seam is read-only: contract-unsupported)', lspWrite.status === 200
+      && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-unsupported'
+      && /official LSP seam is read-only/i.test(String(lspWrite.body?.error?.message ?? '')),
+      JSON.stringify({ status: lspWrite.status, code: lspWrite.body?.error?.code ?? null }).slice(0, 180))
+    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs', line: 0, character: 0 })
     check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
       && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
       JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
+    // diagnostics 仅 e2e 测试缝可用（不对外 advertise）：测试缝返回 stub；真实 provider 下显式拒绝。
+    const lspDiagnostics = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: LSP_MODE ? 'a.ts' : 'example.mjs', line: 0, character: 0, ...(LSP_MODE ? { workspaceRoot: LSP_WS } : {}) })
+    if (LSP_MODE) {
+      check('delegated lsp diagnostics rejected with real provider (test-seam-only)', lspDiagnostics.status === 200
+        && lspDiagnostics.body?.ok === false && lspDiagnostics.body?.error?.code === 'contract-unsupported'
+        && lspDiagnostics.body?.error?.detail?.reason === 'test-seam-only',
+        JSON.stringify({ status: lspDiagnostics.status, code: lspDiagnostics.body?.error?.code ?? null }).slice(0, 180))
+    } else {
+      check('delegated lsp diagnostics works only through the test seam (not advertised; non-production)', lspDiagnostics.status === 200
+        && lspDiagnostics.body?.ok === true && lspDiagnostics.body?.result?.provider === 'test-hook'
+        && lspDiagnostics.body?.result?.testSeam === true && lspDiagnostics.body?.result?.nonProduction === true
+        && Array.isArray(lspDiagnostics.body.result.diagnostics),
+        JSON.stringify({ status: lspDiagnostics.status, code: lspDiagnostics.body?.error?.code ?? null, provider: lspDiagnostics.body?.result?.provider ?? null }).slice(0, 180))
+    }
+    if (LSP_MODE) {
+      const lspForkRoot = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_FORK_WS })
+      check('delegated lsp auto-registers fork workspace root (task registry explicit registration)', lspForkRoot.status === 200
+        && lspForkRoot.body?.ok === true && lspForkRoot.body?.result?.provider === 'mother'
+        && lspForkRoot.body.result.kind === 'locations' && lspForkRoot.body.result.locations.length > 0
+        && lspForkRoot.body.result.locations.some((loc) => /lsp-fork-workspace/i.test(String(loc?.path ?? ''))),
+        JSON.stringify({ status: lspForkRoot.status, code: lspForkRoot.body?.error?.code ?? null, detail: lspForkRoot.body?.error?.detail ?? null }).slice(0, 240))
+      const lspHover = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'hover', file: 'a.ts', line: 2, character: 13, workspaceRoot: LSP_WS })
+      check('delegated lsp hover via real mother provider returns normalized {contents}', lspHover.status === 200
+        && lspHover.body?.ok === true && lspHover.body?.result?.provider === 'mother'
+        && lspHover.body.result.kind === 'hover'
+        && typeof lspHover.body.result.contents === 'string'
+        && lspHover.body.result.contents.length > 0
+        && /base/i.test(lspHover.body.result.contents),
+        JSON.stringify({ status: lspHover.status, code: lspHover.body?.error?.code ?? null, provider: lspHover.body?.result?.provider ?? null, contents: String(lspHover.body?.result?.contents ?? '').slice(0, 120), detail: lspHover.body?.error?.detail ?? null }).slice(0, 420))
+      const lspRefs = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'references', file: 'base.ts', line: 3, character: 13, workspaceRoot: LSP_WS })
+      const refPaths = Array.isArray(lspRefs.body?.result?.locations) ? lspRefs.body.result.locations.map((loc) => String(loc?.path ?? '')) : []
+      check('delegated lsp references resolve across fixture files (real TS semantics)', lspRefs.status === 200
+        && lspRefs.body?.ok === true && lspRefs.body?.result?.provider === 'mother'
+        && lspRefs.body.result.kind === 'locations' && refPaths.length >= 2
+        && refPaths.some((item) => /base\.ts$/i.test(item)) && refPaths.some((item) => /a\.ts$/i.test(item)),
+        JSON.stringify({ status: lspRefs.status, code: lspRefs.body?.error?.code ?? null, refs: refPaths }).slice(0, 320))
+      const lspImpl = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'implementation', file: 'base.ts', line: 1, character: 2, workspaceRoot: LSP_WS })
+      const implPaths = Array.isArray(lspImpl.body?.result?.locations) ? lspImpl.body.result.locations.map((loc) => String(loc?.path ?? '')) : []
+      check('delegated lsp implementation maps to goToImplementation (TS interface implementation)', lspImpl.status === 200
+        && lspImpl.body?.ok === true && lspImpl.body?.result?.provider === 'mother'
+        && lspImpl.body.result.kind === 'locations' && implPaths.length > 0
+        && implPaths.some((item) => /a\.ts$/i.test(item)),
+        JSON.stringify({ status: lspImpl.status, code: lspImpl.body?.error?.code ?? null, locations: implPaths }).slice(0, 300))
+      const lspEscape = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: '../outside.ts', line: 0, character: 0, workspaceRoot: LSP_WS })
+      check('delegated lsp rejects file escaping the registered root (contract-invalid-request)', lspEscape.status === 200
+        && lspEscape.body?.ok === false && lspEscape.body?.error?.code === 'contract-invalid-request'
+        && lspEscape.body?.error?.detail?.reason === 'file-outside-root',
+        JSON.stringify({ status: lspEscape.status, code: lspEscape.body?.error?.code ?? null, detail: lspEscape.body?.error?.detail ?? null }).slice(0, 240))
+      const lspDenied = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 2, character: 13, workspaceRoot: path.join(os.tmpdir(), 'outside-lsp-root') })
+      check('delegated lsp rejects workspaceRoot outside the registered allowlist (contract-invalid-request)', lspDenied.status === 200
+        && lspDenied.body?.ok === false && lspDenied.body?.error?.code === 'contract-invalid-request'
+        && lspDenied.body?.error?.detail?.reason === 'root-not-allowed',
+        JSON.stringify({ status: lspDenied.status, code: lspDenied.body?.error?.code ?? null, detail: lspDenied.body?.error?.detail ?? null }).slice(0, 240))
+    }
     // B-8 激活链（专业版，e2e profile 显式开启 pro 并 allow fang.code.run）：
     // ③ 无审批票 → approval-required；签发一次性票 → provider-missing（激活链验证通过）；
     // 重放同一张票 → approval-invalid；pro status 可读。
+    // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported
     const codeRun = await delegatedInvoke('fang.code.run', { code: 'console.log(1)' })
     check('B-8 pro code.run without approval ticket → contract-approval-required', codeRun.status === 200
       && codeRun.body?.ok === false && codeRun.body?.error?.code === 'contract-approval-required'
@@ -615,6 +772,12 @@ check('POST /fang/api/derive accepted with exactly one session',
         && delegateRecords.some((r) => r.outcome === 'rate-limited')
         && delegateRecords.some((r) => r.outcome === 'error' && r.error === 'contract-timeout'),
         JSON.stringify({ outcomes: [...new Set(delegateRecords.map((r) => r.outcome))] }).slice(0, 160))
+      if (LSP_MODE) {
+        const lspRecords = delegateRecords.filter((r) => r.tool === 'lsp')
+        check('audit records lsp workspaceRoot/outcome trail', lspRecords.some((r) => r.outcome === 'ok' && r.workspaceRoot)
+          && lspRecords.some((r) => r.outcome === 'denied' && r.workspaceRoot),
+          JSON.stringify({ lspRecords: lspRecords.length, outcomes: [...new Set(lspRecords.map((r) => r.outcome))] }).slice(0, 200))
+      }
     }
 
     // ── decision center: real submit → list → resolve → 落库断言 ──────────
