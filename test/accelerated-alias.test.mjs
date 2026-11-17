@@ -6,6 +6,10 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const FANG_ROOT = path.resolve(HERE, '..')
 
 import {
   ACCEL_BUNDLES_WITH_FANG,
@@ -118,7 +122,7 @@ test('writeAliasStubs: creates re-export stubs with export maps; unsupported lea
 test('buildSyncedAcceleratedProfile: translated bundles + wrapped patch + plugin list', () => {
   const accel = makeAccelTree()
   const source = makeSourceProfile()
-  const built = buildSyncedAcceleratedProfile({ sourceProfileDir: source, accelNodeModules: accel, profileName: 'p1', fangRoot: 'E:/GPT/dsh-fang' })
+  const built = buildSyncedAcceleratedProfile({ sourceProfileDir: source, accelNodeModules: accel, profileName: 'p1', fangRoot: FANG_ROOT })
   assert.equal(built.ok, true)
   assert.deepEqual(built.bundles.translated, ['@twinsearth/dsh-base', '@twinsearth/dsh-web-app', 'dsh-context', '@openviking/dsh-memory-plugin'])
   assert.deepEqual(built.bundles.unsupported.map((u) => u.bundle), ['@deepseek-ai/dsh-experimental-forge-bundle'])
@@ -161,7 +165,7 @@ test('writeAcceleratedForkProfile(synced): copies plugins, writes stubs, reports
   const profileDir = path.join(home, 'profiles', 'web-accel')
   const out = writeAcceleratedForkProfile({
     profileDir,
-    fangRoot: 'E:/GPT/dsh-fang',
+    fangRoot: FANG_ROOT,
     homeDir: home,
     motherHome: '',
     profileName: 'web-accel',
@@ -182,7 +186,7 @@ test('writeAcceleratedForkProfile(synced): copies plugins, writes stubs, reports
 test('writeAcceleratedForkProfile: no source profile keeps the minimal composition', () => {
   const home = temp('fang-home-min-')
   const profileDir = path.join(home, 'profiles', 'web-accel-min')
-  const out = writeAcceleratedForkProfile({ profileDir, fangRoot: 'E:/GPT/dsh-fang', homeDir: home, motherHome: '', profileName: 'web-accel-min' })
+  const out = writeAcceleratedForkProfile({ profileDir, fangRoot: FANG_ROOT, homeDir: home, motherHome: '', profileName: 'web-accel-min' })
   assert.equal(out.ok, true)
   assert.deepEqual(out.bundles, [...ACCEL_BUNDLES_WITH_FANG])
   assert.equal(out.sync, null)
