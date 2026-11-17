@@ -42,6 +42,6 @@ preflight --e2e              GREEN 3.5.2
 
 ## 5. 发布渠道
 
-1. git：`release/v3.5.2` → PR → 门禁 → 合并 `main` → annotated tag `v3.5.2`；
-2. GitHub Release（tgz + sha256 + manifest）；
-3. npm `@twinsearth/fang-dsh-plugin@3.5.2`（发布后轮询 registry 并核验哈希与 `dist-tags.latest`）。
+1. git：`release/v3.5.2-linear` → PR **#123**（CI 全绿）→ squash 合并 `main` `b0d1633` → annotated tag `v3.5.2`（API 创建，tag object `19c7a091…`）；
+2. GitHub Release `v3.5.2`（tgz 680,053 B + sha256 + manifest）；
+3. npm `@twinsearth/fang-dsh-plugin@3.5.2`：`latest=3.5.2`，shasum 与本地 tarball 一致（`08024e94…`），sha256 `9d5d3518…`；`release` 工作流因自托管 runner 离线被取消（与 v3.5.0 同处置）。

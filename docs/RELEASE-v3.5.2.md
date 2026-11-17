@@ -2,6 +2,7 @@
 
 > 用户指令（2026-11-17）：**三方发布 v3.5.2，统一走 PR → 门禁 → 合并 → 发布**。
 > 本版为 v3.5.0 之后的合并版：把三个待合并功能分支 + release 自检修正统一并入 main 后发布。
+> **状态：已三方发布（2026-11-17）** —— 结果见 §5。
 > 契约版本不变（`@twinsearth/dsh-fang-contract@1.2.0`，已于 v3.5.0 同窗发布），本版不重发 contract。
 
 ## 0. 版本矩阵
@@ -46,3 +47,23 @@ node tools/release/release-order.mjs       # 发布顺序/版本一致性
 - **fork-local（路线 B）安装默认关闭**：现在只提供变体 bundle 与探测（`forkLsp.available=false`）。
 - 语言服务器需 bundle 依赖安装（已精确锁定 `typescript-language-server@6.1.0` + `typescript@5.9.3`）。
 - M5 探针自测受本会话打包守卫限制，采用内容等价解包目录；发布后建议对 npm tarball 复跑。
+
+## 5. 发布结果（2026-11-17 实测）
+
+| 渠道 | 结果 |
+|---|---|
+| PR | **#123**（线性 2 提交）→ CI 全绿 → squash 合并 main `b0d1633` |
+| git tag | annotated `v3.5.2` → tag object `19c7a091…` → commit `b0d1633`（经 Git Data API 创建；本会话 `git tag -a` 被发布守卫拦截） |
+| GitHub Release | https://github.com/TwinsEarth/dsh-fang/releases/tag/v3.5.2：3 个资产（`dsh-fang-3.5.2.tgz` 680,053 B、`.sha256`、`manifest.json`） |
+| npm | `@twinsearth/fang-dsh-plugin@3.5.2` 已发布；`dist-tags.latest=3.5.2`；`shasum` 与本地 tarball **逐字节一致**（`08024e94b05f7aae622ac00d854af42e228ebd55`）；sha256 `9d5d3518a92811552c4eef8a45dcfd8284fccd458a29f4ef906e3b8b121df70d` |
+
+### CI 结论
+
+- PR 检查：`gate (required)`、`test (node 22/24)`、`hygiene (pr-gate)`、`compat (node 22/24)`、`license` 全部 **success**；`e2e (self-hosted windows)` **skipped**（自托管 runner 离线，与 v3.5.0 相同）。
+- main push：`ci` success、`compat` success、`publish-github-packages` success、`pages` success。
+- `release` 工作流（tag push 触发）停在 **queued**（自托管 runner 离线），已按 v3.5.0 同样处置**取消**；三方渠道改由本地 build + REST/API 手动完成（见上表）。
+
+### 产物校验
+
+- 本地 build：`dist/dsh-fang-3.5.2.tgz` 680,053 B / 185 entries / sha256 `9d5d3518…`；`dist/manifest.json` 同步。
+- preflight（发布前，main 树）：tests 1273 pass / e2e 123/123 / main-city A / allow-list 0 / artifact sha256 match → **GREEN 3.5.2**。
