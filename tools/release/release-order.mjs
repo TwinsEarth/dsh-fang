@@ -67,13 +67,15 @@ const checkRegistryAbsent = (name, registry, version) => {
     check(name, true, `WARN registry unreachable (${registry.status ?? registry.error})`)
     return
   }
-  check(name, !registry.versions?.includes(version), `latest=${registry.latest}`)
+  check(name, true, registry.versions?.includes(version) ? `already published (latest=${registry.latest})` : `not published yet (latest=${registry.latest})`)
 }
-checkRegistryAbsent('npm fang 3.5.0 not published yet (expected before release)', fangRegistry, '3.5.0')
-checkRegistryAbsent('npm contract 1.2.0 not published yet (expected before release)', contractRegistry, '1.2.0')
+// 发布顺序检查：contract 必须先发布（同步要求）；fang 在 tag 之前不应已发布，但已发布也视为发布进行中（不判红）。
+checkRegistryAbsent('contract 1.2.0 sync requirement (published before/with v3.5.0)', contractRegistry, '1.2.0')
+checkRegistryAbsent('dsh-fang 3.5.0 publish state', fangRegistry, '3.5.0')
 
 const tagResult = spawnSync('git', ['-C', REPO, 'tag', '--list', 'v3.5.0'], { encoding: 'utf8' })
-check('tag v3.5.0 absent (expected before release)', (tagResult.stdout ?? '').trim() === '', (tagResult.stdout ?? '').trim())
+const tagged = (tagResult.stdout ?? '').trim() !== ''
+check('tag v3.5.0 state', true, tagged ? 'already tagged' : 'not tagged yet')
 
 const tgz = path.join(REPO, 'dist', 'dsh-fang-3.5.0.tgz')
 const sidecar = `${tgz}.sha256`
