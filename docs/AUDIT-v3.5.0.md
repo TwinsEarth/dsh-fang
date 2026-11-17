@@ -58,6 +58,7 @@
 - **`lsp-provider/` 配置型 bundle**（`@twinsearth/dsh-fang-lsp`）：依赖官方三件套 0.2.2-rc.3 + 语言服务器；patch insert 挂 seam/provider/tool；`test/lsp-provider-bundle.test.mjs` 3 项完整性断言；
 - **fang 委托层**：`collectForkWorkspaceRoots` / `resolveLspAllowedRoots` / `lspAuditRecord`（workspaceRoot/outcome 审计 trail）；配置 `contract.delegate.lsp.allowedRoots` + `includeForkWorktrees`；
 - e2e `--lsp` **121/121**：真实 definition/hover、越界根 `contract-unauthorized`、审计 ok/denied trail。
+- **M3.2 母体 LSP 栈原型（已验收）**：`npm run test:lsp-bundle`（`tools/release/lsp-bundle-install.mjs`）在临时测试 profile 安装 bundle 并真机 boot：5/5 PASS（bundle 链接 / boot banner / `ctx.lsp` 存在且 query 可用 / tools 服务可见 / knownNames 含 `lsp`）；不写用户 profile。
 
 - `src/lib/lsp-provider.mjs`：契约四动作 → 官方 `ctx.lsp.query`；1-based→0-based；locations/hover 归一化；seam 错误码映射；`workspaceRoot` 显式 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝）；
 - `src/lib/lsp-delegation.mjs`：对齐官方只读口径（4 动作）；legacy diagnostics/format/rename → `contract-unsupported`；位置必填；

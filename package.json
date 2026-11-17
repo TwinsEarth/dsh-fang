@@ -108,7 +108,8 @@
     "spike:ui-client": "node tools/release/ui-client-half-spike.mjs",
     "release:check": "node tools/release/release-order.mjs",
     "setup:lsp-live": "node tools/release/lsp-live-setup.mjs",
-    "test:lsp-live": "node tools/e2e.mjs --lsp"
+    "test:lsp-live": "node tools/e2e.mjs --lsp",
+    "test:lsp-bundle": "node tools/release/lsp-bundle-install.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {
