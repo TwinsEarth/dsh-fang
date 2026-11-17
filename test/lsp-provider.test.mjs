@@ -76,6 +76,7 @@ test('B-6 provider: advertisedActionsFromSeam intersects declared capabilities w
   assert.deepEqual(advertisedActionsFromSeam({ query: async () => ({}) }), ['definition', 'references', 'implementation', 'hover'])
   assert.deepEqual(advertisedActionsFromSeam({ query: async () => ({}), supportedOperations: ['goToDefinition', 'hover'] }), ['definition', 'hover'])
   assert.deepEqual(advertisedActionsFromSeam({ query: async () => ({}), capabilities: ['findReferences'] }), ['references'])
+  assert.deepEqual(advertisedActionsFromSeam({ query: async () => ({}), supportedOperations: ['goToImplementation'] }), ['implementation'], 'implementation maps to goToImplementation')
 })
 
 test('B-6 root policy: empty allowlist denies; outside roots deny; file escaping denies; inside accepts', () => {

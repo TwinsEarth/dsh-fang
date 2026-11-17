@@ -58,6 +58,7 @@
 - **`lsp-provider/` 配置型 bundle**（`@twinsearth/dsh-fang-lsp`）：依赖官方三件套 0.2.2-rc.3 + 语言服务器；patch insert 挂 seam/provider/tool；`test/lsp-provider-bundle.test.mjs` 3 项完整性断言；
 - **fang 委托层**：`collectForkWorkspaceRoots` / `resolveLspAllowedRoots` / `lspAuditRecord`（workspaceRoot/outcome 审计 trail）；配置 `contract.delegate.lsp.allowedRoots` + `includeForkWorktrees`；
 - e2e `--lsp` **124/124**：TS 双文件 fixture 真实 definition/hover/**references 跨文件解析**、fork 工作区根自动登记后可查询、越界根 `contract-unauthorized`（root-not-allowed）、文件逃逸 `contract-invalid-request`（file-outside-root）、审计 ok/denied trail。
+- **B-6 动作集合对齐**：definition→goToDefinition、references→findReferences、implementation→goToImplementation（补入并真实 e2e 验证）、hover→hover；diagnostics 仅测试缝（不 advertise/nonProduction）；写类无对象、通用审批门禁保留；e2e --lsp 125/125。
 - **bundle 最小组合与安装形式**：patch = fs-local + subprocess-local + dsh-lsp + dsh-lsp-stdio + dsh-tool-lsp（官方 README 组件集）；本 DSH 需 `insert:` + id（裸 name-only 行实测静默忽略）；test:lsp-bundle 5/5。
 - **provider 显式区分与安全边界**：目录 `lspProvider.providers` 区分 `mother`(delegated/mother-process) 与 `fork-local`(local/fork-worktree)，各只 advertise 实提供能力；fork-local 就绪探测进目录但不改执行路径；母体委托 workspaceRoot 允许根 realpath fail-closed + 审计（dsh-lsp-stdio 无沙箱）；e2e --lsp 124/124、默认 118/118。
 - **3.1 母体侧实现口径落地**：参数 0-based 非负整数（seam 原生坐标透传）、workspaceRoot 必填+realpath 校验（越界→contract-invalid-request）、结果归一化 `{path,line,character}`(1-based)/`{contents}` + maxLocations/maxResultChars 裁剪（truncated）、审计/并发/超时复用 M5；e2e --lsp 124/124、默认 118/118。

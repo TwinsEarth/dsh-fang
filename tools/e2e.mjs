@@ -135,8 +135,8 @@ function makeProfile(homeRoot) {
   const lspWorkspace = path.join(homeRoot, 'lsp-workspace')
   if (LSP_MODE) {
     fs.mkdirSync(lspWorkspace, { recursive: true })
-    fs.writeFileSync(path.join(lspWorkspace, 'base.ts'), 'export const base = 1\nexport const unused = 0\n')
-    fs.writeFileSync(path.join(lspWorkspace, 'a.ts'), "import { base } from './base'\nexport function add(x: number) {\n  return x + base\n}\n")
+    fs.writeFileSync(path.join(lspWorkspace, 'base.ts'), 'export interface Shape {\n  area(): number\n}\nexport const base = 1\nexport const unused = 0\n')
+    fs.writeFileSync(path.join(lspWorkspace, 'a.ts'), "import { base, Shape } from './base'\nexport function add(x: number) {\n  return x + base\n}\nexport class Circle implements Shape {\n  area(): number { return base }\n}\n")
     fs.writeFileSync(path.join(lspWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, target: 'ES2022', module: 'ESNext' }, include: ['a.ts', 'base.ts'] }, null, 2))
     // Fork workspace fixture: the task registry entry below registers this root explicitly.
     const forkHome = path.join(homeRoot, 'lsp-fork-home')
@@ -387,7 +387,7 @@ async function main() {
     const lspCap = capItems.find((c) => c.method === 'fang.tool.invoke')
     const lspCapOk = LSP_MODE
       ? (lspCap?.provider?.default === 'mother' && lspCap.provider?.available === true
-        && Array.isArray(lspCap.actions) && lspCap.actions.includes('definition') && lspCap.actions.includes('hover')
+        && Array.isArray(lspCap.actions) && ['definition', 'references', 'implementation', 'hover'].every((action) => lspCap.actions.includes(action))
         && !lspCap.actions.includes('diagnostics')
         && lspCap.provider?.providers?.mother?.mode === 'delegated'
         && lspCap.provider?.providers?.['fork-local']?.mode === 'local'
@@ -478,13 +478,20 @@ async function main() {
         && lspHover.body.result.contents.length > 0
         && /base/i.test(lspHover.body.result.contents),
         JSON.stringify({ status: lspHover.status, code: lspHover.body?.error?.code ?? null, provider: lspHover.body?.result?.provider ?? null, contents: String(lspHover.body?.result?.contents ?? '').slice(0, 120), detail: lspHover.body?.error?.detail ?? null }).slice(0, 420))
-      const lspRefs = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'references', file: 'base.ts', line: 0, character: 13, workspaceRoot: LSP_WS })
+      const lspRefs = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'references', file: 'base.ts', line: 3, character: 13, workspaceRoot: LSP_WS })
       const refPaths = Array.isArray(lspRefs.body?.result?.locations) ? lspRefs.body.result.locations.map((loc) => String(loc?.path ?? '')) : []
       check('delegated lsp references resolve across fixture files (real TS semantics)', lspRefs.status === 200
         && lspRefs.body?.ok === true && lspRefs.body?.result?.provider === 'mother'
         && lspRefs.body.result.kind === 'locations' && refPaths.length >= 2
         && refPaths.some((item) => /base\.ts$/i.test(item)) && refPaths.some((item) => /a\.ts$/i.test(item)),
         JSON.stringify({ status: lspRefs.status, code: lspRefs.body?.error?.code ?? null, refs: refPaths }).slice(0, 320))
+      const lspImpl = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'implementation', file: 'base.ts', line: 1, character: 2, workspaceRoot: LSP_WS })
+      const implPaths = Array.isArray(lspImpl.body?.result?.locations) ? lspImpl.body.result.locations.map((loc) => String(loc?.path ?? '')) : []
+      check('delegated lsp implementation maps to goToImplementation (TS interface implementation)', lspImpl.status === 200
+        && lspImpl.body?.ok === true && lspImpl.body?.result?.provider === 'mother'
+        && lspImpl.body.result.kind === 'locations' && implPaths.length > 0
+        && implPaths.some((item) => /a\.ts$/i.test(item)),
+        JSON.stringify({ status: lspImpl.status, code: lspImpl.body?.error?.code ?? null, locations: implPaths }).slice(0, 300))
       const lspEscape = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: '../outside.ts', line: 0, character: 0, workspaceRoot: LSP_WS })
       check('delegated lsp rejects file escaping the registered root (contract-invalid-request)', lspEscape.status === 200
         && lspEscape.body?.ok === false && lspEscape.body?.error?.code === 'contract-invalid-request'
