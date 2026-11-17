@@ -116,7 +116,9 @@ function makeProfile(homeRoot) {
   // default-off + 503 path is covered by unit tests.
   fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'),
     '- id: fang-queue-journal\n  disabled: false\n' +
-    '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n')
+    '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n' +
+    '      delegate:\n        readTimeoutMs: 100\n        allow:\n' +
+    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.test.sleep\n")
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
@@ -147,7 +149,7 @@ async function main() {
   let child = null
   let stdout = ''
   let stderr = ''
-  const env = { ...process.env, DSH_HOME: homeRoot, DSH_PROFILE: 'e2e', DSH_PROFILE_DIR: profileDir }
+  const env = { ...process.env, DSH_HOME: homeRoot, DSH_PROFILE: 'e2e', DSH_PROFILE_DIR: profileDir, FANG_CONTRACT_TEST_HOOKS: '1' }
   delete env.DSH_FANG_ROLE
   delete env.DSH_FANG_TASK_ID
 
@@ -328,6 +330,16 @@ async function main() {
     check('delegated capability maps missing mother service to contract-unavailable', delegatedSessionList.status === 200
       && ((delegatedSessionList.body?.result && typeof delegatedSessionList.body.result === 'object') || delegatedSessionCode === 'contract-unavailable'),
       JSON.stringify({ status: delegatedSessionList.status, code: delegatedSessionCode }).slice(0, 160))
+    const delegatedEvents = await delegatedInvoke('fang.session.events', { sessionId: E2E_SESSION_ID, limit: 5 })
+    const delegatedEventsCode = delegatedEvents.body?.error?.code ?? null
+    check('delegated fang.session.events bounded read answered (result or contract-unavailable)', delegatedEvents.status === 200
+      && ((delegatedEvents.body?.result && Array.isArray(delegatedEvents.body.result.events)) || delegatedEventsCode === 'contract-unavailable'),
+      JSON.stringify({ status: delegatedEvents.status, code: delegatedEventsCode }).slice(0, 160))
+    // 超时错误：e2e 母体 readTimeoutMs=50ms + 测试缝 sleep(500ms) → contract-timeout
+    const delegatedSlow = await delegatedInvoke('fang.test.sleep', { ms: 500 })
+    check('delegated capability timeout maps to contract-timeout', delegatedSlow.status === 200
+      && delegatedSlow.body?.ok === false && delegatedSlow.body?.error?.code === 'contract-timeout',
+      JSON.stringify({ status: delegatedSlow.status, code: delegatedSlow.body?.error?.code ?? null }).slice(0, 160))
 
 
     check('mother has no adapter service', status.body?.services?.adapter === false, 'adapter is fork-only')

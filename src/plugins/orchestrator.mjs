@@ -2114,6 +2114,40 @@ export function apply(ctx, config) {
         allow: delegationCfg.allow,
         limits: { maxPayloadBytes: delegationCfg.maxPayloadBytes, readTimeoutMs: delegationCfg.readTimeoutMs, writeTimeoutMs: delegationCfg.writeTimeoutMs },
       }),
+      'fang.session.events': async (params) => {
+        const catalog = contractService('sessionCatalog', 'readHead', false)
+        if (!catalog) return delegateUnavailable('fang session catalog is unavailable', 'fang-service-unavailable')
+        const sessionId = String(params?.sessionId ?? '').trim()
+        if (!sessionId) {
+          const error = new Error('sessionId is required')
+          error.code = DELEGATE_ERROR.INVALID
+          throw error
+        }
+        const limit = Math.min(200, Math.max(1, Number(params?.limit) || 50))
+        const maxChars = Math.min(256 * 1024, Math.max(0, Number(params?.maxChars) || 64 * 1024))
+        const head = await catalog.readHead(sessionId, { maxLines: limit, maxChars })
+        if (!head || head.ok === false) return head ?? delegateUnavailable('session read failed', 'fang-service-unavailable')
+        return {
+          sessionId: head.sessionId ?? sessionId,
+          events: (Array.isArray(head.lines) ? head.lines : []).slice(0, limit).map((line, index) => ({ index, line })),
+          redactions: head.redactions ?? 0,
+          bytesRead: head.bytesRead ?? 0,
+          degraded: Array.isArray(head.degraded) ? head.degraded : [],
+        }
+      },
+      // e2e 专用测试缝（仅 FANG_CONTRACT_TEST_HOOKS=1 时注册；生产不出现；且必须 delegate=true）
+      ...(process.env.FANG_CONTRACT_TEST_HOOKS === '1' ? {
+        'fang.test.sleep': async (params, envelope) => {
+          if (envelope?.meta?.delegate !== true) {
+            const error = new Error('test hook requires delegated invocation')
+            error.code = DELEGATE_ERROR.UNSUPPORTED
+            throw error
+          }
+          const ms = Math.min(10000, Math.max(0, Number(params?.ms) || 100))
+          await sleep(ms)
+          return { sleptMs: ms }
+        },
+      } : {}),
       'fang.decision.list': async (params) => {
         const center = contractService('decisionCenter', 'snapshot', false)
         if (!center || typeof center.snapshot !== 'function') return delegateUnavailable('fang decision center is unavailable')

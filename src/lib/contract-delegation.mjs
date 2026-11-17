@@ -24,6 +24,7 @@ export const CAPABILITY_CATALOG = Object.freeze([
   { method: 'fang.capability.list', kind: 'read', approval: 'none', since: '1.1', summary: '列出已放行的委托能力（引导方法，总是可用）' },
   { method: 'fang.orchestrator.status', kind: 'read', approval: 'none', since: '1.0', summary: '母体 orchestrator 状态' },
   { method: 'fang.session.list', kind: 'read', approval: 'none', since: '1.0', summary: '母体会话目录（只读）' },
+  { method: 'fang.session.events', kind: 'read', approval: 'none', since: '1.1', summary: '母体会话有界头读（只读；<200 行）' },
   { method: 'fang.decision.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体决策中心快照（只读）' },
   { method: 'fang.approvals.list', kind: 'read', approval: 'none', since: '1.1', summary: '母体审批队列（只读）' },
 ])
@@ -32,6 +33,7 @@ export const DEFAULT_READ_ALLOW = Object.freeze([
   'fang.capability.list',
   'fang.orchestrator.status',
   'fang.session.list',
+  'fang.session.events',
   'fang.decision.list',
   'fang.approvals.list',
 ])
@@ -78,8 +80,8 @@ export function checkDelegation({ method, allow, config } = {}) {
   const name = String(method ?? '')
   if (name === 'fang.capability.list') return { ok: true, descriptor: CAPABILITY_CATALOG[0] }
   if (!cfg.allow.includes(name)) return { ok: false, error: DELEGATE_ERROR.UNSUPPORTED, message: `capability not allowed: ${name}` }
-  const descriptor = CAPABILITY_CATALOG.find((item) => item.method === name)
-  if (!descriptor) return { ok: false, error: DELEGATE_ERROR.UNSUPPORTED, message: `capability not registered: ${name}` }
+  const descriptor = CAPABILITY_CATALOG.find((item) => item.method === name) ?? null
+  // allowlist 是权威白名单；目录仅用于 hello/能力自述（允许无描述的运维/测试缝能力被显式放行）。
   return { ok: true, descriptor }
 }
 

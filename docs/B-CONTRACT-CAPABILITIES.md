@@ -15,24 +15,11 @@
 | 错误码 | `contract-unavailable` / `contract-unsupported` / `contract-timeout` / `contract-invalid-request`（服务不可用统一映射为 contract-unavailable） |
 | 限额/超时 | 超 64KiB → `contract-invalid-request`；读超时（默认 5s）→ `contract-timeout` |
 | 审计 | 每次委托写 `contract-delegate`：`{capability, source, outcome, error, latencyMs}`（拒绝/成功/错误都记） |
-| 新增方法 | `fang.capability.list`、`fang.decision.list`、`fang.approvals.list`（服务缺失显式报错） |
+| 新增方法 | `fang.capability.list`、`fang.decision.list`、`fang.approvals.list`、`fang.session.events`（母体 sessionCatalog.readHead 有界头读，≤200 行 / ≤256KB；服务缺失显式报错） |
 
 **e2e 真实断言**（`tools/e2e.mjs`，2026-11-17）：hello 200/`contractVersion=1.1.0`/**14 个方法**；`capability.list` 返回只读 5 项；`fang.fork.spawn` 委托被拒 `contract-unsupported`；`fang.orchestrator.status` 委托成功；`fang.session.list` 缺服务映射 `contract-unavailable`。
 
 **未实现（待确认后推进）**：P1 `fang.tool.invoke`（lsp）/ `fang.chat.import`；异步长任务模型；背压/并发上限；分侧调用方身份（目前记录 `meta.source` 审计，未做 per-fork 鉴权策略）；UI client half。
-
-### 0.2 M1 验收（2026-11-17）
-
-| M1 要求 | 实现 | 单测 |
-|---|---|---|
-| 能力注册表 | `CAPABILITY_CATALOG`（fang 委托层，5 项只读）+ `DEFAULT_READ_ALLOW`；未登记默认拒绝 | `M1 registry: fang delegation catalog is append-only, read-only and whitelist-consistent` |
-| hello 广告 | `contract.hello` 广告 **实际注册的 handler**（新增 3 个委托方法随注册自动出现；vendored contract SDK 保持 1.1.0 逐字节不变） | `M1 hello advertises fang-layer handlers registered on the contract server` |
-| 白名单校验 | invoke 路由 `meta.delegate=true` + `checkDelegation()`；未登记 → `contract-unsupported`；`enabled:false` → `contract-unavailable` | `checkDelegation: disabled → contract-unavailable, not listed → contract-unsupported, listed → ok` |
-| 错误码 | fang 委托层稳定表：`contract-unavailable/unauthorized/unsupported/timeout/invalid-request`（唯一性 + 稳定性断言） | `M1 error codes: fang delegation codes are a unique, stable append-only table` |
-| 版本裁剪 | `negotiate()` 按 `METHOD_VERSION` 裁剪：1.0 对端拿不到 1.1 方法（relay），1.1 对端完整可见 | 2 个 `M1 version trimming` 用例 |
-| payload 上限 | `exceedPayloadLimit()`（默认 64KiB）→ `contract-invalid-request` | `exceedPayloadLimit: default 64KiB boundary` |
-
-> 设计取舍：为保持 vendored contract SDK（`@twinsearth/dsh-fang-contract@1.1.0`）**逐字节一致**（有 vendor-sync 门禁），委托方法名/错误码注册在 fang 层；hello 广告仍由实际注册 handler 驱动，对端看到的能力与白名单一致。
 
 ### 0.1 生产母体服务确认（2026-11-17，`npm run probe:mother`）
 
@@ -51,6 +38,33 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 - **`session-catalog` 插件在生产母体已挂载并服务**（`/fang/api/sessions` 200 + 真实会话项；该路由由 `src/plugins/session-catalog.mjs` 注册），因此 `fang.session.list` 可以保留在首批；
 - e2e 环境是**精简 profile**，未挂载 session-catalog，故 e2e 中委托返回 `contract-unavailable` 属于已覆盖的“服务缺失”分支；
 - `fang.capability.list` 在生产缺失仅因为运行版本为 3.4.2（委托功能在 3.5.0 才引入）——**重启到 3.5.0 后需用同一 probe 复测**，作为发布后验收项。
+
+### 0.2 M1 验收（2026-11-17）
+
+| M1 要求 | 实现 | 单测 |
+|---|---|---|
+| 能力注册表 | `CAPABILITY_CATALOG`（fang 委托层，6 项只读）+ `DEFAULT_READ_ALLOW`；未登记默认拒绝 | `M1 registry: fang delegation catalog is append-only, read-only and whitelist-consistent` |
+| hello 广告 | `contract.hello` 广告 **实际注册的 handler**（新增 3 个委托方法随注册自动出现；vendored contract SDK 保持 1.1.0 逐字节不变） | `M1 hello advertises fang-layer handlers registered on the contract server` |
+| 白名单校验 | invoke 路由 `meta.delegate=true` + `checkDelegation()`；未登记 → `contract-unsupported`；`enabled:false` → `contract-unavailable` | `checkDelegation: disabled → contract-unavailable, not listed → contract-unsupported, listed → ok` |
+| 错误码 | fang 委托层稳定表：`contract-unavailable/unauthorized/unsupported/timeout/invalid-request`（唯一性 + 稳定性断言） | `M1 error codes: fang delegation codes are a unique, stable append-only table` |
+| 版本裁剪 | `negotiate()` 按 `METHOD_VERSION` 裁剪：1.0 对端拿不到 1.1 方法（relay），1.1 对端完整可见 | 2 个 `M1 version trimming` 用例 |
+| payload 上限 | `exceedPayloadLimit()`（默认 64KiB）→ `contract-invalid-request` | `exceedPayloadLimit: default 64KiB boundary` |
+
+> 设计取舍：为保持 vendored contract SDK（`@twinsearth/dsh-fang-contract@1.1.0`）**逐字节一致**（有 vendor-sync 门禁），委托方法名/错误码注册在 fang 层；hello 广告仍由实际注册 handler 驱动，对端看到的能力与白名单一致。
+
+### 0.3 M2 验收（P0 只读四件 + B-5 复用，2026-11-17）
+
+| 能力 | 实现 | 单测 / e2e |
+|---|---|---|
+| B-1 `fang.capability.list` | fang 层目录 + limits 自述 | 单测 catalog/hello；e2e 200 返回只读 6 项 |
+| B-2 `fang.session.events` | 母体 `sessionCatalog.readHead`（有界 ≤200 行 / ≤256KB、只读） | e2e 200（有结果，或服务缺失 → contract-unavailable） |
+| B-3 `fang.decision.list` | decisionCenter.snapshot（只读、≤50 条） | 单测白名单；e2e 目录含该能力（服务缺失 → contract-unavailable） |
+| B-4 `fang.approvals.list` | approver.pending（只读、≤50 条） | 同上 |
+| B-5 `fang.session.list` | 复用既有 `sessionCatalog.list` | e2e 真实委托调用成功（生产已确认 sessionCatalog READY） |
+| 越权被拒 | `fang.fork.spawn` 委托 → `contract-unsupported` | e2e 200 + contract-unsupported |
+| 超时错误 | e2e 母体 `readTimeoutMs=100` + 测试缝 `fang.test.sleep`（仅 `FANG_CONTRACT_TEST_HOOKS=1`，必须 `meta.delegate=true`） | e2e → `contract-timeout` |
+
+> 测试缝只存在于 e2e 进程（环境变量控制），不进目录/生产部署；`allow` 白名单是权威放行表，目录仅用于能力自述。
 
 ## 1. 现有契约能力（只读盘点）
 

@@ -58,7 +58,7 @@ accelerated-fork 单测                9/9
 fork-core-settings 单测              8/8
 accelerated-fork-live（FANG_ACCEL_LIVE=1）  pass（forker 真派生：identity role=fork, version=3.5.0）
 accelerated-fork-smoke               7/7（banner/identity/client.js/core 版本/非 stock CLI）
-tools/e2e.mjs                       106/106（含 4 项 fork-core 契约断言 + 3 项 B 契约基线 + 4 项 B 委托：白名单只读目录 / contract-unsupported 拒绝 / 只读能力委托成功 / contract-unavailable 映射）
+tools/e2e.mjs                       108/108（含 4 项 fork-core 契约断言 + 3 项 B 契约基线 + 6 项 B 委托：白名单只读目录 / contract-unsupported 拒绝 / 只读委托成功 / contract-unavailable 映射 / session.events 有界读 / contract-timeout 超时）
 allow-list self-check               110 路由 findings=0
 main-city source gate               grade=A blockers=0
 ```
