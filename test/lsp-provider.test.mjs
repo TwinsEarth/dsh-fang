@@ -12,10 +12,13 @@ import {
   LSP_PROVIDER_MOTHER,
   advertisedActionsFromSeam,
   checkWorkspaceRoot,
+  collectForkWorkspaceRoots,
   describeLspProvider,
+  lspAuditRecord,
   mapLspError,
   normalizeLspResult,
   queryMotherLsp,
+  resolveLspAllowedRoots,
 } from '../src/lib/lsp-provider.mjs'
 
 function tempRoot() {
@@ -146,6 +149,39 @@ test('B-6 query: seam failures map to contract error codes; missing service / ba
   })
   assert.equal(invalid.ok, false)
   assert.equal(invalid.code, DELEGATE_ERROR.INVALID)
+})
+
+test('B-6 provider: collectForkWorkspaceRoots reads every fork workspace index (explicit registration)', () => {
+  const homeA = tempRoot()
+  const homeB = tempRoot()
+  const wsA = path.join(homeA, 'ws-a')
+  const wsB = path.join(homeB, 'ws-b')
+  fs.mkdirSync(path.join(homeA, 'storages'), { recursive: true })
+  fs.mkdirSync(path.join(homeB, 'storages'), { recursive: true })
+  fs.writeFileSync(path.join(homeA, 'storages', 'workspace.json'), JSON.stringify({ global: { workspaceIds: ['w1', 'w2'] }, tables: { workspaces: { w1: { path: wsA }, w2: { path: wsA } } } }))
+  fs.writeFileSync(path.join(homeB, 'storages', 'workspace.json'), JSON.stringify({ global: { workspaceIds: ['w3'] }, tables: { workspaces: { w3: { path: wsB } } } }))
+  const roots = collectForkWorkspaceRoots([homeA, homeB, path.join(homeA, 'missing-fork')])
+  assert.deepEqual(roots.sort(), [wsA, wsB].sort())
+})
+
+test('B-6 roots: configured + fork workspace roots merge with dedupe; fork auto-registration is switchable', () => {
+  const merged = resolveLspAllowedRoots({ configuredRoots: ['C:/mother'], forkRoots: ['C:/fork-ws', 'C:/mother'], includeForkWorktrees: true })
+  assert.deepEqual(merged, ['C:/mother', 'C:/fork-ws'])
+  const configuredOnly = resolveLspAllowedRoots({ configuredRoots: ['C:/mother'], forkRoots: ['C:/fork-ws'], includeForkWorktrees: false })
+  assert.deepEqual(configuredOnly, ['C:/mother'])
+})
+
+test('B-6 audit: lsp attempt records workspaceRoot/outcome/provider', () => {
+  const record = lspAuditRecord({ action: 'definition', workspaceRoot: 'C:/ws', outcome: 'ok', latencyMs: 12.4 })
+  assert.equal(record.capability, 'fang.tool.invoke')
+  assert.equal(record.tool, 'lsp')
+  assert.equal(record.action, 'definition')
+  assert.equal(record.provider, LSP_PROVIDER_MOTHER)
+  assert.equal(record.workspaceRoot, 'C:/ws')
+  assert.equal(record.outcome, 'ok')
+  assert.equal(record.latencyMs, 12)
+  const denied = lspAuditRecord({ action: 'hover', workspaceRoot: 'C:/outside', outcome: 'denied', error: DELEGATE_ERROR.UNAUTHORIZED })
+  assert.equal(denied.error, DELEGATE_ERROR.UNAUTHORIZED)
 })
 
 test('B-6 error/result normalizers: unknown codes stay readable; malformed result is JSON-safe', () => {

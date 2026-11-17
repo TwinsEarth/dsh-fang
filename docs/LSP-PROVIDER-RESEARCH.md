@@ -119,11 +119,11 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 | 决策点 | 选项 | 建议 |
 |---|---|---|
-| 语言服务器来源 | ① bundle 依赖 npm `typescript-language-server`；② 系统安装；③ 先支持 clangd/rust-analyzer 等已有服务器 | ① 最可控（随 bundle 版本化），但增包体 |
-| 安装位置 | ① 仅母体（路线 A）；② 仅加速分身（路线 B）；③ 两者都装、能力目录区分 | ③ 渐进：先 A（本次目标），B 作为后续增强 |
-| workspaceRoot 允许范围 | ① 仅母体工作区；② 母体 + 所有 fork 工作区根（显式登记）；③ 任意路径 | ②：显式登记、realpath 校验、审计 |
-| 写类 LSP（rename/format） | ① 不提供；② 自研 provider + 审批 | ①：跟随官方语义，不扩大攻击面 |
-| 是否同时给母体 Agent 挂 `lsp` 工具 | ① 是（装 dsh-tool-lsp）；② 只给委托用 | ①：一次装齐，母体自身也受益 |
+| 语言服务器来源 | ① bundle 依赖 npm `typescript-language-server`；② 系统安装；③ 先支持 clangd/rust-analyzer 等已有服务器 | ✅ **已定 ①**：bundle 依赖 npm `typescript-language-server` + `typescript@5.9.3`（随 bundle 版本化） |
+| 安装位置 | ① 仅母体（路线 A）；② 仅加速分身（路线 B）；③ 两者都装、能力目录区分 | ✅ **已定 ③**：先 A（本次目标已打通真实闭环），B 作为后续增强；`lsp-provider/` 配置型 bundle 可装两处 |
+| workspaceRoot 允许范围 | ① 仅母体工作区；② 母体 + 所有 fork 工作区根（显式登记）；③ 任意路径 | ✅ **已定 ②**：配置根 + 任务 registry 的 fork 工作区根自动登记（`includeForkWorktrees` 可关）、realpath 校验、审计 |
+| 写类 LSP（rename/format） | ① 不提供；② 自研 provider + 审批 | ✅ **已定 ①**：不提供（跟随官方只读语义） |
+| 是否同时给母体 Agent 挂 `lsp` 工具 | ① 是（装 dsh-tool-lsp）；② 只给委托用 | ✅ **已定 ①**：bundle patch 同时挂载 `dsh-tool-lsp`，母体自身也受益 |
 
 ## 6. 决策落地（2026-11-17，已实现代码）
 
@@ -137,21 +137,27 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 | 路线 B（增强）探测 | `detectForkLspSupport(accelNodeModules)`：检测 `@twinsearth/dsh-lsp`/`dsh-lsp-stdio`/`dsh-tool-lsp`；结果暴露在 `writeAcceleratedForkProfile(...).forkLsp`，默认不启用 | `test/accelerated-alias.test.mjs` |
 | 诚实边界 | 母体正式 profile 尚未安装 LSP 栈；未安装时读类动作显式 `contract-unavailable`。**但路线 A 真实 provider 已在隔离 staging 中跑通**：`npm run setup:lsp-live` → `npm run test:lsp-live`（e2e `--lsp` 模式，真实官方 LSP 栈 + typescript-language-server）| e2e `--lsp`：**119/119**，`definition` 返回 `provider='mother-lsp'` + 1 个 location，`hover` 返回归一化 hover；`diagnostics` 真实 provider 下被 `contract-unsupported`（test-seam-only） |
 
-**真实 provider e2e（路线 A 首个真实闭环，2026-11-17 实测）**：
+**真实 provider e2e（路线 A 真实闭环，2026-11-17 实测）**：
 - 准备：`npm run setup:lsp-live`（隔离 staging 安装 `@deepseek-ai/dsh-lsp@0.2.2-rc.3` 三件套 + `typescript-language-server` + `typescript@5.9.3`；不写用户 profile）；
 - 运行：`npm run test:lsp-live`（`tools/e2e.mjs --lsp`：profile 内挂载 dsh-lsp/dsh-lsp-stdio，`ctx.lsp` 就绪，fang 委托走真实 provider）；
-- 断言：catalog provider=`mother-lsp`、actions 4 项；definition → `mother-lsp` + 真实 location；hover → 归一化；diagnostics → `contract-unsupported`（test-seam-only）；legacy 写类仍可读拒绝。
+- 断言（**121/121**）：catalog provider=`mother-lsp`、actions 4 项；definition → `mother-lsp` + 真实 location；hover → 归一化；**越界 workspaceRoot → `contract-unauthorized`（root policy）**；**审计含 `tool:'lsp'` 的 workspaceRoot/outcome trail（ok/denied）**；diagnostics → `contract-unsupported`（test-seam-only）；legacy 写类仍可读拒绝。
 
-**剩余（安装到正式 profile）**：① 把同一组合以 config-only bundle 装进母体正式 profile（含语言服务器来源/版本锁定）；② 生产母体重启后跑 `probe:mother` + `test:lsp-live` 的等价探测。
+**安装形态（已按决策实现）**：`lsp-provider/` 配置型 bundle（`@twinsearth/dsh-fang-lsp`）：
+- 依赖：官方三件套 `0.2.2-rc.3` + npm `typescript-language-server` + `typescript@5.9.3`；
+- patch：挂载 `dsh-lsp`（seam）+ `dsh-lsp-stdio`（TS/TSX/JS/JSX 映射）+ `dsh-tool-lsp`（母体 Agent 的 lsp 工具）；
+- 安装：母体 profile（A，本次目标）优先，加速分身 profile（B）作为后续增强；安装后若 PATH 无语言服务器，用 profile patch 覆盖 `command` 为绝对路径；
+- 完整性测试：`test/lsp-provider-bundle.test.mjs` 3 项（依赖钉死/挂载行/只读口径）。
 
-### 6.1 路线 B（fork-local）契约口径（已定，实现待语言服务器来源决策）
+**剩余（安装到正式 profile）**：① 在插件面板把 `lsp-provider/` 安装进母体正式 profile（bundle 已就绪）；② 生产母体重启后跑 `probe:mother` + 真实 LSP 探测（等价 `test:lsp-live`）。
+
+### 6.1 路线 B（fork-local）契约口径（已定；安装仍默认关闭）
 
 用户方向：**路线 B fork-local；先只做契约口径修订，等语言服务器来源确定**。已定口径：
 
 1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A）；fork-local LSP 在加速分身本地 `ctx.lsp` 执行，**不走契约委托**；
 2. **能力目录按 provider 区分**只描述母体真实 provider（`mother-lsp`）与是否存在测试缝；不 advertise `fork-local`（无虚假条目）；`actions` 取真实交集；
 3. **fork-local 可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）与任务记录 `accelerated.forkLsp` 呈现——属于任务视图能力，不是契约能力；
-4. **安装默认关闭**：语言服务器来源（① npm 依赖随 profile 版本化；② 系统安装；③ 复用宿主已装服务器）未决前，不自动安装、不默认启用路线 B；
+4. **安装默认关闭**：语言服务器来源已定为 ①（bundle 依赖 npm `typescript-language-server`，随 bundle 版本化）；路线 B 的安装作为后续增强，**不自动装载到 fork profile**，需显式安装/启用；
 5. 本次仅做上述口径修订 + 探测字段传播（`forkLsp` 进任务记录），**不改 profile 组合、不装包**。
 
 **待决**：语言服务器来源与版本锁定策略；确定后再评估 fork-local provider 的启用开关与能力目录呈现（届时仍走分身本地，不进契约）。

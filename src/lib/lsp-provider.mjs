@@ -50,6 +50,58 @@ export function describeLspProvider({ lspService = null, hooksEnabled = false, f
   }
 }
 
+/**
+ * Collect the workspace roots of every fork task from its `storages/workspace.json`.
+ * "母体根 + 所有 fork 工作区根（显式登记）" — the task registry is the explicit registration.
+ */
+export function collectForkWorkspaceRoots(taskHomes = [], { readFileSync = fs.readFileSync } = {}) {
+  const roots = new Set()
+  for (const home of Array.isArray(taskHomes) ? taskHomes : []) {
+    const homeDir = String(home ?? '').trim()
+    if (!homeDir) continue
+    try {
+      const doc = JSON.parse(String(readFileSync(path.join(homeDir, 'storages', 'workspace.json'), 'utf8')))
+      const ids = Array.isArray(doc?.global?.workspaceIds) ? doc.global.workspaceIds : []
+      const tables = doc?.tables?.workspaces ?? {}
+      for (const id of ids) {
+        const workspacePath = String(tables?.[id]?.path ?? '').trim()
+        if (workspacePath) roots.add(path.resolve(workspacePath))
+      }
+    } catch { /* a fork without a workspace index contributes nothing */ }
+  }
+  return [...roots]
+}
+
+/** Merge configured roots with (optionally) every fork workspace root; dedupe, keep order. */
+export function resolveLspAllowedRoots({ configuredRoots = [], forkRoots = [], includeForkWorktrees = true } = {}) {
+  const roots = new Set()
+  for (const root of Array.isArray(configuredRoots) ? configuredRoots : []) {
+    const text = String(root ?? '').trim()
+    if (text) roots.add(text)
+  }
+  if (includeForkWorktrees) {
+    for (const root of Array.isArray(forkRoots) ? forkRoots : []) {
+      const text = String(root ?? '').trim()
+      if (text) roots.add(text)
+    }
+  }
+  return [...roots]
+}
+
+/** Audit record for one LSP delegation attempt (workspace root recorded for the allowlist trail). */
+export function lspAuditRecord({ action = '', provider = LSP_PROVIDER_MOTHER, workspaceRoot = null, outcome = 'error', error = null, latencyMs = 0 } = {}) {
+  return {
+    capability: 'fang.tool.invoke',
+    tool: 'lsp',
+    action: String(action ?? ''),
+    provider: String(provider ?? ''),
+    workspaceRoot: workspaceRoot ? String(workspaceRoot) : null,
+    outcome: String(outcome ?? 'error'),
+    error: error ?? null,
+    latencyMs: Math.max(0, Math.round(Number(latencyMs) || 0)),
+  }
+}
+
 /** Canonicalise a path for allowlist comparison (best effort; missing paths still normalise). */
 function canonical(pathValue) {
   const resolved = path.resolve(String(pathValue ?? ''))

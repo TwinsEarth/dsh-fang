@@ -432,6 +432,11 @@ async function main() {
         && lspHover.body?.ok === true && lspHover.body?.result?.provider === 'mother-lsp'
         && lspHover.body.result.kind === 'hover',
         JSON.stringify({ status: lspHover.status, code: lspHover.body?.error?.code ?? null, provider: lspHover.body?.result?.provider ?? null, detail: lspHover.body?.error?.detail ?? null }).slice(0, 400))
+      const lspDenied = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'a.ts', line: 3, character: 14, workspaceRoot: path.join(os.tmpdir(), 'outside-lsp-root') })
+      check('delegated lsp rejects workspaceRoot outside the registered allowlist (contract-unauthorized)', lspDenied.status === 200
+        && lspDenied.body?.ok === false && lspDenied.body?.error?.code === 'contract-unauthorized'
+        && lspDenied.body?.error?.detail?.reason === 'workspace-root-denied',
+        JSON.stringify({ status: lspDenied.status, code: lspDenied.body?.error?.code ?? null, detail: lspDenied.body?.error?.detail ?? null }).slice(0, 240))
     }
     // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported
     const codeRun = await delegatedInvoke('fang.code.run', { code: 'console.log(1)' })
@@ -666,6 +671,12 @@ check('POST /fang/api/derive accepted with exactly one session',
         && delegateRecords.some((r) => r.outcome === 'rate-limited')
         && delegateRecords.some((r) => r.outcome === 'error' && r.error === 'contract-timeout'),
         JSON.stringify({ outcomes: [...new Set(delegateRecords.map((r) => r.outcome))] }).slice(0, 160))
+      if (LSP_MODE) {
+        const lspRecords = delegateRecords.filter((r) => r.tool === 'lsp')
+        check('audit records lsp workspaceRoot/outcome trail', lspRecords.some((r) => r.outcome === 'ok' && r.workspaceRoot)
+          && lspRecords.some((r) => r.outcome === 'denied' && r.workspaceRoot),
+          JSON.stringify({ lspRecords: lspRecords.length, outcomes: [...new Set(lspRecords.map((r) => r.outcome))] }).slice(0, 200))
+      }
     }
 
     // ── decision center: real submit → list → resolve → 落库断言 ──────────

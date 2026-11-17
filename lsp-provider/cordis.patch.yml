@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# dsh-Fang LSP provider bundle: route A (mother profile) / route B (accelerated fork profile).
+#
+# - `dsh-lsp`          官方能力缝 ctx.lsp（只读 4 操作：goToDefinition/findReferences/goToImplementation/hover）
+# - `dsh-lsp-stdio`    stdio provider（按 workspace 懒启动语言服务器）
+# - `dsh-tool-lsp`     母体 Agent 的模型工具 `lsp`（用户决策：一次装齐，母体自身也受益）
+#
+# 安装位置：A = 母体正式 profile（本次目标）；B = 加速分身 profile（后续增强）。
+# 写类 LSP（rename/format）不提供——跟随官方只读语义；diagnostics 不属于官方 seam。
+#
+# 注意：`command` 必须是语言服务器可执行文件；这里默认按子进程 PATH 解析
+# (`typescript-language-server`)，profile 安装时可在 profile 覆盖 patch 里改成绝对路径
+# （例如 `<profile>/node_modules/.bin/typescript-language-server.cmd`）。
+- insert:
+    - id: fang-lsp-seam
+      name: '@deepseek-ai/dsh-lsp'
+    - id: fang-lsp-stdio
+      name: '@deepseek-ai/dsh-lsp-stdio'
+      config:
+        servers:
+          typescript:
+            command: typescript-language-server
+            args:
+              - '--stdio'
+            extensionToLanguage:
+              '.ts': typescript
+              '.tsx': typescriptreact
+              '.js': javascript
+              '.jsx': javascriptreact
+    - id: fang-lsp-tool
+      name: '@deepseek-ai/dsh-tool-lsp'

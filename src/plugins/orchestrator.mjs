@@ -50,7 +50,7 @@ import {
   DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
 } from '../lib/contract-delegation.mjs'
 import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
-import { LSP_PROVIDER_TEST, advertisedActionsFromSeam, checkWorkspaceRoot, describeLspProvider, queryMotherLsp } from '../lib/lsp-provider.mjs'
+import { LSP_PROVIDER_TEST, advertisedActionsFromSeam, checkWorkspaceRoot, collectForkWorkspaceRoots, describeLspProvider, lspAuditRecord, queryMotherLsp, resolveLspAllowedRoots } from '../lib/lsp-provider.mjs'
 import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
@@ -245,6 +245,7 @@ export const Config = z.object({
       maxConcurrent: z.number().min(1).max(64).default(4).description('委托并发上限；超过立即 contract-rate-limited（fail-closed，不排队）'),
       lsp: z.object({
         allowedRoots: z.array(z.string()).default([]).description('LSP 委托允许的 workspaceRoot 前缀（空 = 拒绝，fail-closed；realpath 包含校验）'),
+        includeForkWorktrees: z.boolean().default(true).description('自动登记所有 fork 任务的工作区根（母体根 + fork 工作区根，显式登记）'),
       }).default({}),
     }).default({}),
   }).default({}),
@@ -2086,7 +2087,20 @@ export function apply(ctx, config) {
   const delegationGate = createDelegationGate({ maxConcurrent: delegationCfg.maxConcurrent })
   // B-6 路线 A：母体 LSP 能力缝（ctx.lsp）。未安装官方 LSP 栈时显式不可用，不假装成功。
   const lspService = (() => { try { return typeof ctx.get === 'function' ? ctx.get('lsp') : null } catch { return null } })()
-  const lspCfg = { allowedRoots: Array.isArray(cfg.contract?.delegate?.lsp?.allowedRoots) ? cfg.contract.delegate.lsp.allowedRoots.map((root) => String(root)) : [] }
+  const lspCfg = {
+    allowedRoots: Array.isArray(cfg.contract?.delegate?.lsp?.allowedRoots) ? cfg.contract.delegate.lsp.allowedRoots.map((root) => String(root)) : [],
+    includeForkWorktrees: cfg.contract?.delegate?.lsp?.includeForkWorktrees !== false,
+  }
+  /** 显式登记：母体配置根 + 所有 fork 任务工作区根（任务 registry 即登记来源）。 */
+  const resolveLspRootsForTask = () => {
+    let forkRoots = []
+    try {
+      const registryFile = exists(layout.tasksFile) ? layout.tasksFile : layout.forksFile
+      const homes = loadRegistry(registryFile).map((task) => task?.homeDir).filter(Boolean)
+      forkRoots = collectForkWorkspaceRoots(homes)
+    } catch { /* registry unavailable → configured roots only */ }
+    return resolveLspAllowedRoots({ configuredRoots: lspCfg.allowedRoots, forkRoots, includeForkWorktrees: lspCfg.includeForkWorktrees })
+  }
   const lspHooksEnabled = process.env.FANG_CONTRACT_TEST_HOOKS === '1'
   const lspProviderInfo = describeLspProvider({ lspService, hooksEnabled: lspHooksEnabled, supportedActions: advertisedActionsFromSeam(lspService) })
   const delegateUnavailable = (message, code = DELEGATE_ERROR.UNAVAILABLE) => { const error = new Error(message); error.code = code; throw error }
@@ -2188,17 +2202,24 @@ export function apply(ctx, config) {
           throw error
         }
         if (lspService) {
+          const startedAt = Date.now()
+          const auditLsp = (outcome, error, workspaceRoot = null) => {
+            try { audit('contract-delegate', lspAuditRecord({ action: validated.action, provider: 'mother-lsp', workspaceRoot, outcome, error, latencyMs: Date.now() - startedAt })) } catch { /* audit optional */ }
+          }
           if (!lspProviderInfo.actions.includes(validated.action)) {
             const error = new Error(`lsp provider does not provide action '${validated.action}' (advertised: ${lspProviderInfo.actions.join(',') || 'none'})`)
             error.code = DELEGATE_ERROR.UNSUPPORTED
             error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', reason: 'provider-capability-missing', advertised: lspProviderInfo.actions }
+            auditLsp('rejected', DELEGATE_ERROR.UNSUPPORTED)
             throw error
           }
-          const rootCheck = checkWorkspaceRoot({ workspaceRoot: params?.workspaceRoot, file: validated.file, allowedRoots: lspCfg.allowedRoots })
+          const allowedRoots = resolveLspRootsForTask()
+          const rootCheck = checkWorkspaceRoot({ workspaceRoot: params?.workspaceRoot, file: validated.file, allowedRoots })
           if (rootCheck.ok !== true) {
             const error = new Error(rootCheck.message)
             error.code = rootCheck.code
-            error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', reason: 'workspace-root-denied' }
+            error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', reason: 'workspace-root-denied', allowedRoots: allowedRoots.length }
+            auditLsp('denied', rootCheck.code, String(params?.workspaceRoot ?? ''))
             throw error
           }
           const query = await queryMotherLsp({ lspService, invoke: validated, workspaceRoot: rootCheck.workspaceRoot })
@@ -2206,8 +2227,10 @@ export function apply(ctx, config) {
             const error = new Error(query.message)
             error.code = query.code
             error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', ...(query.detail ?? {}) }
+            auditLsp('error', query.code, rootCheck.workspaceRoot)
             throw error
           }
+          auditLsp('ok', null, rootCheck.workspaceRoot)
           return {
             tool: 'lsp',
             file: validated.file,
