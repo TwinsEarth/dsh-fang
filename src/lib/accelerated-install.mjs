@@ -16,6 +16,8 @@ import { spawn } from 'node:child_process'
 
 export const ACCEL_PACKAGE = '@twinsearth/dsh'
 export const DEFAULT_ACCEL_VERSION = '3.5.0'
+/** Hard budget for the install directory: above this the operator must confirm explicitly. */
+export const ACCEL_INSTALL_LIMIT_BYTES = 1024 * 1024 * 1024
 export const ACCEL_ENTRY_REL = path.join('node_modules', '@twinsearth', 'dsh', 'lib', 'bin.js')
 const SCRIPT_RE = /\.(?:mjs|cjs|js)$/i
 
@@ -118,6 +120,7 @@ export function acceleratedCoreInfo(options = {}) {
   const { env = process.env, cliPath = '', fangHome = '' } = options
   const resolved = resolveAcceleratedCore({ cliPath, env, fangHome })
   const state = readAcceleratedState(fangHome)
+  const sizeBytes = acceleratedInstallSize(fangHome)
   return {
     installed: resolved.ok === true,
     version: installedAcceleratedVersion(fangHome) ?? state?.version ?? null,
@@ -126,8 +129,54 @@ export function acceleratedCoreInfo(options = {}) {
     error: resolved.ok ? null : resolved.error,
     searched: resolved.ok ? [] : resolved.searched,
     installedAt: state?.installedAt ?? null,
+    sizeBytes,
+    limitBytes: ACCEL_INSTALL_LIMIT_BYTES,
+    requiresConfirmation: sizeBytes > ACCEL_INSTALL_LIMIT_BYTES,
     layout: acceleratedLayout(fangHome),
   }
+}
+
+/** Recursive size of a directory in bytes (0 when absent). */
+export function dirSizeBytes(dir) {
+  let total = 0
+  const walk = (current) => {
+    let entries
+    try { entries = fs.readdirSync(current, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+      } else {
+        try { total += fs.statSync(full).size } catch { /* vanished */ }
+      }
+    }
+  }
+  walk(String(dir ?? ''))
+  return total
+}
+
+/** Measured install size for the current <FANG_HOME>/accel/cli (0 when absent). */
+export function acceleratedInstallSize(fangHome) {
+  return dirSizeBytes(acceleratedLayout(fangHome).cliDir)
+}
+
+/**
+ * Enforce the 1 GiB budget. Above it the caller must obtain an explicit second
+ * confirmation (`confirmOversize`) or answer the interactive prompt.
+ * @returns {Promise<{ok:boolean, sizeBytes:number, limitBytes:number, requiresConfirmation?:boolean,
+ *   error?:string}>}
+ */
+export async function ensureInstallBudget(options = {}) {
+  const { sizeBytes = 0, confirmOversize = false, promptImpl = null } = options
+  const limitBytes = ACCEL_INSTALL_LIMIT_BYTES
+  if (sizeBytes <= limitBytes) return { ok: true, sizeBytes, limitBytes }
+  if (confirmOversize === true) return { ok: true, sizeBytes, limitBytes, confirmed: true }
+  if (typeof promptImpl === 'function') {
+    let accepted = false
+    try { accepted = (await promptImpl({ sizeBytes, limitBytes })) === true } catch { accepted = false }
+    if (accepted) return { ok: true, sizeBytes, limitBytes, confirmed: true }
+  }
+  return { ok: false, error: 'accelerated-install-too-large', sizeBytes, limitBytes, requiresConfirmation: true }
 }
 
 /** Build the npm install invocation (pure, unit-testable). */
@@ -179,20 +228,26 @@ function runOnce(spec, { spawnImpl = spawn, timeoutMs = 600000, cwd } = {}) {
  * @returns {Promise<{ok:boolean, version?:string, cliPath?:string, reused?:boolean, error?:string, output?:string}>}
  */
 export async function installAcceleratedCore(options = {}) {
-  const { fangHome = '', version = DEFAULT_ACCEL_VERSION, force = false, spawnImpl = spawn, npmBin = process.env.FANG_NPM_BIN || 'npm' } = options
+  const {
+    fangHome = '', version = DEFAULT_ACCEL_VERSION, force = false,
+    spawnImpl = spawn, npmBin = process.env.FANG_NPM_BIN || 'npm',
+    confirmOversize = false, promptImpl = null,
+  } = options
   const layout = acceleratedLayout(fangHome)
   if (!String(fangHome ?? '').trim()) return { ok: false, error: 'fang-home-missing' }
   const currentVersion = installedAcceleratedVersion(fangHome)
   if (!force && currentVersion) {
     const checked = checkCliCandidate(layout.cliPath)
     if (checked.ok && (!version || currentVersion === version)) {
+      const budget = await ensureInstallBudget({ sizeBytes: acceleratedInstallSize(fangHome), confirmOversize, promptImpl })
+      if (budget.ok !== true) return budget
       const state = writeAcceleratedState(fangHome, {
         version: currentVersion,
         cliPath: checked.cliPath,
         installedAt: readAcceleratedState(fangHome)?.installedAt ?? new Date().toISOString(),
         checkedAt: new Date().toISOString(),
       })
-      return { ok: true, version: currentVersion, cliPath: checked.cliPath, reused: true, state }
+      return { ok: true, version: currentVersion, cliPath: checked.cliPath, reused: true, state, sizeBytes: budget.sizeBytes, limitBytes: budget.limitBytes }
     }
   }
   fs.mkdirSync(layout.cliDir, { recursive: true })
@@ -204,11 +259,16 @@ export async function installAcceleratedCore(options = {}) {
   if (!installed || !checked.ok) {
     return { ok: false, error: 'install-verify-failed', output: run.output, version: installed, cliPath: checked.ok ? checked.cliPath : null }
   }
+  // 体积门禁：>1 GiB 必须二次确认；未确认时不写 state（视为未安装），文件保留待人工处理。
+  const budget = await ensureInstallBudget({ sizeBytes: acceleratedInstallSize(fangHome), confirmOversize, promptImpl })
+  if (budget.ok !== true) return { ...budget, output: run.output, attemptedVersion: installed }
   const state = writeAcceleratedState(fangHome, {
     version: installed,
     cliPath: checked.cliPath,
     installedAt: new Date().toISOString(),
     spec: spec.spec,
+    sizeBytes: budget.sizeBytes,
+    limitBytes: budget.limitBytes,
   })
-  return { ok: true, version: installed, cliPath: checked.cliPath, reused: false, state, output: run.output }
+  return { ok: true, version: installed, cliPath: checked.cliPath, reused: false, state, output: run.output, sizeBytes: budget.sizeBytes, limitBytes: budget.limitBytes }
 }

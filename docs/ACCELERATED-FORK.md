@@ -27,9 +27,16 @@
 ## 3. 安装
 
 ```powershell
-# 安装到 <FANG_HOME>/accel/cli（约 651 包 / 738MB；实测 8 分钟）
-node -e "import('<repo>/src/lib/accelerated-install.mjs').then(async m=>console.log(await m.installAcceleratedCore({fangHome:'<FANG_HOME>'})))"
+# 安装到 <FANG_HOME>/accel/cli（约 651 包 / ~738 MiB）
+npm run install:accel -- --fang-home <FANG_HOME>
+# 或显式确认超限安装：
+node tools/release/accelerated-install.mjs --fang-home <FANG_HOME> --confirm-oversize
 ```
+
+**体积门禁（产品约束）**：安装目录上限 **1 GiB**（`ACCEL_INSTALL_LIMIT_BYTES`）。
+- ≤ 1 GiB：正常安装/复用；
+- > 1 GiB：**必须二次确认**——交互式终端会弹确认提示；无 TTY（CI/自动化）默认失败（`accelerated-install-too-large`），需显式 `--confirm-oversize` / `--yes`；
+- 未确认时不写 `state.json`（视为未安装），已下载文件保留待人工处理。
 
 ## 4. 验证
 
@@ -96,5 +103,5 @@ npm run test:accel-live                                                   # fork
 | D1 | 开关生效范围 | **a) 只影响新派生/重启**（运行中不热切换） | 2026-11-17 |
 | D2 | 加速分身插件面 | **a) 极简**（base + web-app + fang） | 2026-11-17 |
 | D3 | 加速分身旧会话 | **只新会话 + 旧会话仅“复制导入”（新副本，不在旧会话上继续）**；`sessionMode:'new'` 默认，`copy` 开启复制导入 | 2026-11-17 |
-| D4 | 安装位置/体积 | `<FANG_HOME>/accel/cli`（约 738 MB / 651 包） | 2026-11-17 |
+| D4 | 安装位置/体积 | `<FANG_HOME>/accel/cli`；**上限 1 GiB，超过必须二次确认**（交互提示 / `--confirm-oversize`） | 2026-11-17 |
 | D5 | 版本号 | **v3.4.3** | 2026-11-17 |

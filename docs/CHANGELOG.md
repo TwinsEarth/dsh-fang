@@ -8,6 +8,7 @@
 - `src/lib/accelerated-fork.mjs`：加速分身极简 profile（`@twinsearth/dsh-base` + `@twinsearth/dsh-web-app` + `@local/dsh-fang`，恒定三项）+ fang/子插件 junction + 模型 overlay（`@deepseek-ai/dsh-` → `@twinsearth/dsh-`，避免 name mismatch）；
 - `src/lib/fork-core-settings.mjs`：`<dataDir>/fork-core.json`（mode/sessionMode），原子写、损坏降级 stock+new；
 - `tools/release/accelerated-fork-smoke.mjs` 与 `npm run test:accel-live`；
+- `tools/release/accelerated-install.mjs`（`npm run install:accel`）：安装加速核到 `<FANG_HOME>/accel/cli`；**体积上限 1 GiB，超过需二次确认**（交互提示；CI 用 `--confirm-oversize`），未确认不登记安装；
 - 文档：`docs/ACCELERATED-FORK.md`、`docs/ACCEL-FORK-COMPAT.md`、`docs/AUDIT-v3.4.3.md`。
 
 ### 变更

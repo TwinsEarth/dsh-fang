@@ -23,6 +23,7 @@
 | `src/lib/accelerated-fork.mjs` | 极简 profile（base+web-app+fang 三 bundle 恒定）；fang/子插件 junction；模型 overlay（`@deepseek-ai/dsh-`→`@twinsearth/dsh-`）；不覆盖非本工具生成的 home patch |
 | `src/plugins/forker.mjs` | `provision({coreMode})` 加速分支；`spawn` 按 coreMode 解析 CLI、缺失即失败；跳过 fork-seed / 官方 node_modules 镜像 / 官方 headless overlay；`publicFork.coreMode` |
 | `src/plugins/orchestrator.mjs` | 加速侧车路由下线；essence provision+spawn 显式 `coreMode:'stock'` |
+| `tools/release/accelerated-install.mjs` | 安装 CLI + **1 GiB 体积门禁**：`>1 GiB` 必须二次确认（TTY 提示 / `--confirm-oversize`），未确认不写 `state.json`；`acceleratedCoreInfo` 暴露 `sizeBytes/limitBytes/requiresConfirmation` |
 | `tools/release/accelerated-fork-smoke.mjs` | 真实加速分身 smoke（7 检查） |
 | `test/accelerated-{install,fork,fork-live}.test.mjs` | 单测 + `FANG_ACCEL_LIVE=1` 真机 live |
 
