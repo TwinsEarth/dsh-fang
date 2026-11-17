@@ -82,14 +82,23 @@
 2. 只读自检（把生产 token 传入；token 可能在 fang 配置里而不是 dataDir 文件）：
 
 ```powershell
-npm run check:lsp-mother -- --base http://127.0.0.1:50895 --token <生产 token>
-# 真实一次 definition（fixture 工作区自备且必须在 allowedRoots 内）：
-npm run check:lsp-mother -- --base http://127.0.0.1:50895 --token <token> ^
-  --workspace-root <仓库绝对路径> --definition-file README.md --line 0 --character 0
+npm run check:lsp-mother -- --base <生产URL> --token <生产 token> `
+  --workspace-root <允许根内的目录> --definition-file <相对文件> --line 0 --character 0
 ```
 
-3. 预期：`lsp provider` PASS（`default=mother`、`actions=definition,references,implementation,hover`）；
-   `real definition` PASS（返回 `{path,line,character}` 1-based 展示）。
+3. 母体能力探针（含 LSP provider + 真实 definition/hover；`--require-lsp` 在缺失时退出非 0）：
+
+```powershell
+npm run probe:mother -- --base <生产URL> --token <生产 token> --require-lsp `
+  --workspace-root <允许根内的目录> --definition-file <相对文件> --line 0 --character 0
+```
+
+4. 预期：
+   - `check:lsp-mother`：`lsp provider` PASS（`default=mother`、`actions=definition,references,implementation,hover`）、`real definition` / `real hover` PASS；
+   - `probe:mother`：`readiness: fang.tool.invoke:lsp=READY`，`lsp.definition/lsp.hover` PASS（返回值是 `{path,line,character}` 1-based 展示 / `{contents}`）。
+
+> 注意：`allowedRoots` 必须是**显式登记**的绝对工作区根；仅当查询对象是 fork 工作区时才可以依赖
+> `includeForkWorktrees: true` 自动登记。母体自身工作区（例如仓库目录）需要显式写进 `allowedRoots`。
 
 ## 6. 回滚
 

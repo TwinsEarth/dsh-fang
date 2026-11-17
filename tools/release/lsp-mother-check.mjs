@@ -114,9 +114,11 @@ async function probe() {
   if (definitionFile && workspaceRoot) {
     const line = Number.parseInt(arg('line', '0'), 10) || 0
     const character = Number.parseInt(arg('character', '0'), 10) || 0
-    const result = await invoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: definitionFile, line, character, workspaceRoot })
-    const ok = result.status === 200 && result.body?.ok === true
-    record('real definition via delegation', ok ? 'PASS' : 'FAIL', JSON.stringify(result.body?.result ?? result.body?.error ?? { status: result.status }).slice(0, 320))
+    const params = { tool: 'lsp', action: 'definition', file: definitionFile, line, character, workspaceRoot }
+    const definition = await invoke('fang.tool.invoke', params)
+    record('real definition via delegation', definition.status === 200 && definition.body?.ok === true ? 'PASS' : 'FAIL', JSON.stringify(definition.body?.result ?? definition.body?.error ?? { status: definition.status }).slice(0, 320))
+    const hover = await invoke('fang.tool.invoke', { ...params, action: 'hover' })
+    record('real hover via delegation', hover.status === 200 && hover.body?.ok === true ? 'PASS' : 'FAIL', JSON.stringify(hover.body?.result ?? hover.body?.error ?? { status: hover.status }).slice(0, 320))
   }
 }
 

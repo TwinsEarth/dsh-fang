@@ -148,6 +148,8 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 - 安装：母体 profile（A，本次目标）优先，加速分身 profile（B）作为后续增强；安装后若 PATH 无语言服务器，用 profile patch 覆盖 `command` 为绝对路径；
 - 完整性测试：`test/lsp-provider-bundle.test.mjs` 3 项（依赖钉死/挂载行/只读口径）。
 
+**验收命令**：`npm run probe:mother -- --base <url> --token <token> --require-lsp --workspace-root <root> --definition-file <file> --line 0 --character 0`（真实 definition+hover；provider 缺失时退出非 0）。
+
 **剩余（安装到正式 profile）**：① 在插件面板把 `lsp-provider/` 安装进母体正式 profile（bundle 已就绪；当前正式 profile 仍 fang 3.4.2，需先升级 3.5.0）；② 配置 profile patch（语言服务器绝对路径 + `allowedRoots`）；③ 重启后跑 `npm run check:lsp-mother` + `probe:mother` + 真实 LSP 探测。**执行清单见 [`docs/INSTALL-LSP-MOTHER.md`](INSTALL-LSP-MOTHER.md)（含当前实测状态与回滚）。**
 
 ### 6.0 安装前提证据（E1–E5，2026-11-17 复核）
