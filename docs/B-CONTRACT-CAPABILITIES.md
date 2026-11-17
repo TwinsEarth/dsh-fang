@@ -98,6 +98,18 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 超时上限 | `readTimeoutMs`（默认 5s）→ `contract-timeout`（已覆盖） | e2e 断言 |
 | 错误码 | 新增 `contract-rate-limited`（fang 层表，唯一性断言） | 单测 |
 
+### 0.7 B-8 激活链实现（专业版，2026-11-17）
+
+| 环节 | 实现 | 拒绝路径（显式可读） |
+|---|---|---|
+| ① 专业版开关 | `contract.delegate.pro.enabled`（默认 **false**） | `contract-unsupported` + `detail.stage='pro-disabled'`，消息含 "default off" |
+| ② 逐项 allow | `contract.delegate.pro.allow`（默认空；每项独立显式授权） | `contract-unsupported` + `detail.stage='pro-not-allowed'`，消息指出应加入 allow 的能力名 |
+| ③ 每次调用审批票 | `POST /fang/api/contract/pro/approval`（Bearer 母体 token）签发**一次性/TTL**票；调用带 `params.approvalTicket`，绑定能力 + 参数摘要 | 无票 → `contract-approval-required` + `stage='approval-required'`；重放/过期/串用 → `contract-approval-required` + `stage='approval-invalid'`（reason 显式） |
+| ④ 审计 + 限额 | 每次尝试写 `contract-delegate` 审计（stage/outcome/limits，ticket 仅存哈希）；`maxConcurrent`（默认 1）/`timeoutMs`（默认 30s）/`maxOutputBytes`（默认 64KiB） | 超限 → `contract-rate-limited` / `contract-timeout` / `contract-invalid-request`，`stage='pro-limit-exceeded'` |
+| provider | 当前构建**没有** `code-runtime` provider → 四环全通过后仍返回 `contract-unavailable` + `detail.stage='provider-missing'`，**无副作用、不假成功** | — |
+
+可观测：`GET /fang/api/contract/pro/status`（Bearer）返回 `{enabled, allow, pendingTickets, limits}`。单测 `test/pro-delegation.test.mjs` 10 项；e2e 5 项（无票/签票/执行/重放/status）。
+
 ## 1. 现有契约能力（只读盘点）
 
 | 方法 | 版本 | 类型 | 现有实现 |
@@ -145,7 +157,7 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 
 | # | 能力 | 决议 |
 |---|---|---|
-| B-8 | `fang.code.run`（run_code / code-runtime） | **单独专业版能力**：默认**不开启**，不进普通能力目录/默认白名单；需**手动单独每项授权激活**（专业版配置启用 + 该项显式 allow + 每次调用审批）；实现前必须**独立安全评审**。当前未注册 handler → 请求返回 `contract-unsupported`（有单测 + e2e 覆盖） |
+| B-8 | `fang.code.run`（run_code / code-runtime） | **单独专业版能力**：默认**不开启**，不进普通能力目录/默认白名单；需**手动单独每项授权激活**（专业版配置启用 + 该项显式 allow + 每次调用审批票）；实现前必须**独立安全评审**。**激活链已实现**（§0.7：开关/allow/一次性审批票/审计+限额四环，缺一即显式拒绝）；当前无 code-runtime provider，四环通过后仍 `contract-unavailable`（无副作用） |
 | B-9 | UI client half 代理 | 契约只覆盖**无头能力**；UI 走**浏览器模块映射**（独立阶段，先 spike），不进入契约委托 |
 | B-10 | 任意第三方工具透传 | **明确不做**（违反白名单原则）；只允许“已注册 + 白名单”的能力，未注册一律 `contract-unsupported`（单测覆盖） |
 
@@ -188,7 +200,7 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 加强 | 审计完整性 + 并发/超时上限（`contract-rate-limited` / `contract-timeout`） | ✅ M5 完成 |
 
 **范围外（保持待定/后续）**：
-1. `fang.code.run`（P2）：**单独专业版**，默认关闭，需手动单独每项授权激活 + 独立安全评审；当前请求显式 `contract-unsupported`；
+1. `fang.code.run`（P2）：**单独专业版**，默认关闭，需手动单独每项授权激活 + 独立安全评审；**激活链已实现**（§0.7，四环缺一即显式拒绝），当前无 code-runtime provider → `contract-unavailable`（无副作用）；
 2. LSP **真实执行 provider** 接入母体 DSH 工具运行时（需确认工具调用 API）；
 3. UI client half 浏览器映射（独立阶段，先做单个 spike；契约不代理 UI）；
 4. 任意第三方工具透传：**明确不做**（B-10）；

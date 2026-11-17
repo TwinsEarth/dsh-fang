@@ -118,7 +118,8 @@ function makeProfile(homeRoot) {
     '- id: fang-queue-journal\n  disabled: false\n' +
     '- id: fang-orchestrator\n  config:\n    contract:\n      token: e2e-contract-token\n' +
     '      delegate:\n        readTimeoutMs: 100\n        maxConcurrent: 2\n        allow:\n' +
-    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.chat.import\n          - fang.test.sleep\n")
+    "          - fang.capability.list\n          - fang.orchestrator.status\n          - fang.session.list\n          - fang.session.events\n          - fang.decision.list\n          - fang.approvals.list\n          - fang.tool.invoke\n          - fang.chat.import\n          - fang.test.sleep\n" +
+    '        pro:\n          enabled: true\n          allow:\n            - fang.code.run\n          maxConcurrent: 1\n          timeoutMs: 2000\n          maxOutputBytes: 4096\n')
   // the bundle resolves from profile node_modules; point it at the workspace package
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
@@ -354,11 +355,38 @@ async function main() {
     check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
       && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
       JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
-    // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported
+    // B-8 激活链（专业版，e2e profile 显式开启 pro 并 allow fang.code.run）：
+    // ③ 无审批票 → approval-required；签发一次性票 → provider-missing（激活链验证通过）；
+    // 重放同一张票 → approval-invalid；pro status 可读。
     const codeRun = await delegatedInvoke('fang.code.run', { code: 'console.log(1)' })
-    check('P2 pro capability fang.code.run rejected by default (contract-unsupported)', codeRun.status === 200
-      && codeRun.body?.ok === false && codeRun.body?.error?.code === 'contract-unsupported',
-      JSON.stringify({ status: codeRun.status, code: codeRun.body?.error?.code ?? null }).slice(0, 160))
+    check('B-8 pro code.run without approval ticket → contract-approval-required', codeRun.status === 200
+      && codeRun.body?.ok === false && codeRun.body?.error?.code === 'contract-approval-required'
+      && codeRun.body?.error?.detail?.stage === 'approval-required',
+      JSON.stringify({ status: codeRun.status, code: codeRun.body?.error?.code ?? null, stage: codeRun.body?.error?.detail?.stage ?? null }).slice(0, 200))
+    const proApproval = await api('/fang/api/contract/pro/approval', {
+      method: 'POST', headers: contractAuth, body: JSON.stringify({ capability: 'fang.code.run', source: 'fork-e2e' }),
+    })
+    const proTicket = proApproval.body?.approval?.id ?? ''
+    check('B-8 pro approval ticket issued (one-time, TTL)', proApproval.status === 200 && proApproval.body?.ok === true
+      && typeof proTicket === 'string' && proTicket.startsWith('pro_'),
+      JSON.stringify({ status: proApproval.status, ok: proApproval.body?.ok ?? null }).slice(0, 160))
+    const codeRunWithTicket = await delegatedInvoke('fang.code.run', { code: 'console.log(1)', approvalTicket: proTicket })
+    check('B-8 pro code.run with ticket passes activation chain → provider-missing (no fake success)', codeRunWithTicket.status === 200
+      && codeRunWithTicket.body?.ok === false && codeRunWithTicket.body?.error?.code === 'contract-unavailable'
+      && codeRunWithTicket.body?.error?.detail?.stage === 'provider-missing'
+      && codeRunWithTicket.body?.error?.detail?.activation === 'verified',
+      JSON.stringify({ status: codeRunWithTicket.status, code: codeRunWithTicket.body?.error?.code ?? null, stage: codeRunWithTicket.body?.error?.detail?.stage ?? null }).slice(0, 200))
+    const codeRunReplay = await delegatedInvoke('fang.code.run', { code: 'console.log(1)', approvalTicket: proTicket })
+    check('B-8 pro approval ticket is one-time (replay → approval-invalid)', codeRunReplay.status === 200
+      && codeRunReplay.body?.ok === false && codeRunReplay.body?.error?.code === 'contract-approval-required'
+      && codeRunReplay.body?.error?.detail?.stage === 'approval-invalid',
+      JSON.stringify({ status: codeRunReplay.status, code: codeRunReplay.body?.error?.code ?? null }).slice(0, 160))
+    const proStatus = await api('/fang/api/contract/pro/status', { headers: contractAuth })
+    check('B-8 pro status exposes enabled/allow/limits (readable)', proStatus.status === 200
+      && proStatus.body?.ok === true && proStatus.body?.enabled === true
+      && Array.isArray(proStatus.body?.allow) && proStatus.body.allow.includes('fang.code.run')
+      && typeof proStatus.body?.limits?.timeoutMs === 'number',
+      JSON.stringify({ status: proStatus.status, enabled: proStatus.body?.enabled ?? null }).slice(0, 160))
     // B-7：chat.import——dryRun 两次结果一致；真实导入必须审批（拒绝执行、无副作用）
     const importParams = { source: 'deepseek', sessionId: E2E_SESSION_ID, dryRun: true }
     const importDry1 = await delegatedInvoke('fang.chat.import', importParams)
