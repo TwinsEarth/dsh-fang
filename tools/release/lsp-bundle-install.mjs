@@ -46,15 +46,6 @@ function freePort(start = 18120) {
 function killTree(pid) { try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }) } catch { /* ignore */ } }
 function linkEntry(from, to) { try { if (!fs.existsSync(to)) fs.symlinkSync(from, to, 'junction') } catch { /* ignore */ } }
 
-/** Merge the bundle's patch text into the profile patch, wiring the language server to absolute paths. */
-function bundlePatchText({ cliPath }) {
-  const file = path.join(ROOT, 'lsp-provider', 'cordis.patch.yml')
-  let text = fs.readFileSync(file, 'utf8')
-  text = text.replace('command: typescript-language-server', `command: ${JSON.stringify(process.execPath)}`)
-  text = text.replace("            args:\n              - '--stdio'", `            args:\n              - ${JSON.stringify(cliPath)}\n              - '--stdio'`)
-  return text
-}
-
 async function main() {
   if (!CLI) { console.error(JSON.stringify({ ok: false, error: 'dsh CLI not found' })); return 2 }
   if (!fs.existsSync(path.join(STAGE, 'node_modules', 'typescript-language-server', 'lib', 'cli.mjs'))) {
@@ -98,7 +89,7 @@ async function main() {
     name: '@local/lsp-boot-probe', version: '0.0.0', private: true, type: 'module', main: 'index.js',
     dsh: { bundle: { patch: './cordis.patch.yml' } },
   }, null, 2))
-  fs.writeFileSync(path.join(probeDir, 'cordis.patch.yml'), '- insert:\n    - id: lsp-boot-probe\n      name: \'@local/lsp-boot-probe\'\n')
+  fs.writeFileSync(path.join(probeDir, 'cordis.patch.yml'), "- name: '@local/lsp-boot-probe'\n")
   fs.writeFileSync(path.join(probeDir, 'index.js'), [
     "import fs from 'node:fs'",
     "import path from 'node:path'",
@@ -123,8 +114,7 @@ async function main() {
     '}',
     '',
   ].join('\n'))
-  const profilePatch = bundlePatchText({ cliPath: path.join(moduleDir, 'typescript-language-server', 'lib', 'cli.mjs') }) +
-    '- insert:\n    - id: lsp-boot-probe\n      name: \'@local/lsp-boot-probe\'\n'
+  const profilePatch = '- insert:\n    - id: lsp-boot-probe\n      name: \'@local/lsp-boot-probe\'\n'
   fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'), profilePatch)
 
   // 3) boot the isolated mother and wait for the probe file.

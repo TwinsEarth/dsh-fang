@@ -142,7 +142,7 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 - 运行：`npm run test:lsp-live`（`tools/e2e.mjs --lsp`：profile 内挂载 dsh-lsp/dsh-lsp-stdio，`ctx.lsp` 就绪，fang 委托走真实 provider）；
 - 断言（**124/124**）：catalog provider=`mother`、actions 4 项；definition → `mother` + 真实 location；hover → 归一化；**越界 workspaceRoot → `contract-unauthorized`（root policy）**；**fork 工作区根自动登记后可查询（任务 registry 显式登记）**；**references 跨文件解析**（base.ts + a.ts）；**文件逃逸根 → contract-invalid-request（file-outside-root）**；**审计含 `tool:'lsp'` 的 workspaceRoot/outcome trail（ok/denied）**；diagnostics → `contract-unsupported`（test-seam-only）；legacy 写类仍可读拒绝。
 
-**安装形态（已按决策实现）**：`lsp-provider/` 配置型 bundle（`@twinsearth/dsh-fang-lsp`）：
+**安装形态（已按决策实现）**：`lsp-provider/` 配置型 bundle（`@twinsearth/dsh-fang-lsp`，最小组合 = **fs-local + subprocess-local + dsh-lsp + dsh-lsp-stdio + dsh-tool-lsp**；本 DSH 解析器要求 `insert:` + id，裸 `- name:` 行实测被静默忽略）：
 - 依赖：官方三件套 `0.2.2-rc.3` + npm `typescript-language-server` + `typescript@5.9.3`；
 - patch：挂载 `dsh-lsp`（seam）+ `dsh-lsp-stdio`（TS/TSX/JS/JSX 映射）+ `dsh-tool-lsp`（母体 Agent 的 lsp 工具）；
 - 安装：母体 profile（A，本次目标）优先，加速分身 profile（B）作为后续增强；安装后若 PATH 无语言服务器，用 profile patch 覆盖 `command` 为绝对路径；

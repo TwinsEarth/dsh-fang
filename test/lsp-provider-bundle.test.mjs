@@ -37,8 +37,10 @@ test('lsp bundle: LOCKED-VERSIONS.json matches package.json pins (reproducible i
   assert.ok(pkg.files.includes('LOCKED-VERSIONS.json'))
 })
 
-test('lsp bundle: patch inserts seam + stdio provider + model-facing tool (route A composition)', () => {
+test('lsp bundle: patch mounts the minimal official composition (fs-local + subprocess-local + seam + stdio + tool)', () => {
   assert.match(patch, /^- insert:/m)
+  assert.match(patch, /id: fang-lsp-fs-local\s*\n\s*name: '@deepseek-ai\/dsh-fs-local'/)
+  assert.match(patch, /id: fang-lsp-subprocess-local\s*\n\s*name: '@deepseek-ai\/dsh-subprocess-local'/)
   assert.match(patch, /id: fang-lsp-seam\s*\n\s*name: '@deepseek-ai\/dsh-lsp'/)
   assert.match(patch, /id: fang-lsp-stdio\s*\n\s*name: '@deepseek-ai\/dsh-lsp-stdio'/)
   assert.match(patch, /id: fang-lsp-tool\s*\n\s*name: '@deepseek-ai\/dsh-tool-lsp'/)

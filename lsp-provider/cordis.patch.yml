@@ -1,17 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# dsh-Fang LSP provider bundle: route A (mother profile) / route B (accelerated fork profile).
+# dsh-Fang LSP provider bundle — 最小组合（路线 A：母体 profile）。
 #
-# - `dsh-lsp`          官方能力缝 ctx.lsp（只读 4 操作：goToDefinition/findReferences/goToImplementation/hover）
-# - `dsh-lsp-stdio`    stdio provider（按 workspace 懒启动语言服务器）
-# - `dsh-tool-lsp`     母体 Agent 的模型工具 `lsp`（用户决策：一次装齐，母体自身也受益）
+# DSH config-only bundle 规范：bundle 的 cordis.patch.yml 挂载插件行，package.json 声明依赖。
+# 最小组合按官方 dsh-lsp README：
+#   fs-local + subprocess-local（stdio provider 的宿主能力）
+#   + dsh-lsp（能力缝 ctx.lsp）
+#   + dsh-lsp-stdio（按 workspace 懒启动语言服务器）
+#   + dsh-tool-lsp（可选：给母体 Agent 的模型工具 lsp）
 #
-# 安装位置：A = 母体正式 profile（本次目标）；B = 加速分身 profile（后续增强）。
+# 注意：本仓库运行的 DSH 解析器要求显式 `- insert:` 包装并给行 id；实测
+# name-only 裸行（官方 README 展示形式）会被静默忽略（boot 探针 ctx.lsp 缺失），
+# 因此这里用 insert + 稳定 id，行组合与官方 README 一致。
+#
+# 语言服务器来源已单独决策：bundle 依赖 npm typescript-language-server@6.1.0 + typescript@5.9.3
+# （见 package.json / LOCKED-VERSIONS.json）；也可在 profile 覆盖 command 为绝对路径。
 # 写类 LSP（rename/format）不提供——跟随官方只读语义；diagnostics 不属于官方 seam。
-#
-# 注意：`command` 必须是语言服务器可执行文件；这里默认按子进程 PATH 解析
-# (`typescript-language-server`)，profile 安装时可在 profile 覆盖 patch 里改成绝对路径
-# （例如 `<profile>/node_modules/.bin/typescript-language-server.cmd`）。
 - insert:
+    - id: fang-lsp-fs-local
+      name: '@deepseek-ai/dsh-fs-local'
+    - id: fang-lsp-subprocess-local
+      name: '@deepseek-ai/dsh-subprocess-local'
     - id: fang-lsp-seam
       name: '@deepseek-ai/dsh-lsp'
     - id: fang-lsp-stdio
