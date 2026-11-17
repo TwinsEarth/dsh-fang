@@ -15,6 +15,7 @@ import {
   ACCEL_BUNDLES_WITH_FANG,
   buildSyncedAcceleratedProfile,
   classifyAliasSpec,
+  detectForkLspSupport,
   scanDeepseekSpecs,
   translateBundles,
   writeAcceleratedForkProfile,
@@ -156,6 +157,20 @@ test('writeAliasStubs: unsupported entries carry the disposition category', () =
   const bySpec = Object.fromEntries(out.unsupported.map((u) => [u.spec, u.category]))
   assert.equal(bySpec['@deepseek-ai/dsh-desktop'], 'desktop-only')
   assert.equal(bySpec['@deepseek-ai/dsh-tool-lsp'], 'string-reference')
+})
+
+test('detectForkLspSupport: reports route B readiness from the accelerated module tree', () => {
+  const accel = makeAccelTree()
+  const before = detectForkLspSupport(accel)
+  assert.equal(before.available, false)
+  assert.deepEqual(before.missing.sort(), ['@twinsearth/dsh-lsp', '@twinsearth/dsh-lsp-stdio', '@twinsearth/dsh-tool-lsp'])
+  for (const name of ['dsh-lsp', 'dsh-lsp-stdio', 'dsh-tool-lsp']) {
+    const dir = path.join(accel, '@twinsearth', name)
+    writeJson(path.join(dir, 'package.json'), { name: `@twinsearth/${name}`, version: '3.5.0', type: 'module', exports: { '.': './lib/index.js' } })
+  }
+  const after = detectForkLspSupport(accel)
+  assert.equal(after.available, true)
+  assert.deepEqual(after.missing, [])
 })
 
 test('writeAcceleratedForkProfile(synced): copies plugins, writes stubs, reports sync', () => {

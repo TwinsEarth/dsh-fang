@@ -125,13 +125,27 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 | 写类 LSP（rename/format） | ① 不提供；② 自研 provider + 审批 | ①：跟随官方语义，不扩大攻击面 |
 | 是否同时给母体 Agent 挂 `lsp` 工具 | ① 是（装 dsh-tool-lsp）；② 只给委托用 | ①：一次装齐，母体自身也受益 |
 
-## 5. 下一步（建议排期）
+## 6. 决策落地（2026-11-17，已实现代码）
 
-1. **M3.2 母体 LSP 栈原型**：bundle + 安装到测试 profile，boot 校验 `ctx.lsp` 存在、`tools` 里出现 `lsp`（可选）；
-2. **M3.3 真实 provider 接入**：fang 插件实现 `ctx.lsp.query` 映射 + workspaceRoot 策略 + 审计；
-3. **M3.4 e2e**：TS fixture 真实 definition/hover + 越界拒绝；
-4. **M3.5 决策落地**：语言服务器来源/版本随 bundle 依赖锁定；
-5. 视需要再评估路线 B（fork-local）。
+用户确认：**路线 A 先行（对应 B-6 目标），路线 B 作为增强，能力目录按 provider 区分**。已实现：
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| 路线 A 真实 provider 适配 | `src/lib/lsp-provider.mjs`：契约动作 `definition/references/implementation/hover` → `ctx.lsp.query` 四操作；1-based→0-based；locations/hover 归一化；seam 错误码映射（`LSP_UNAVAILABLE`→contract-unavailable 等）；**workspaceRoot 显式传入 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝，fail-closed）** | `test/lsp-provider.test.mjs` 6 项 |
+| 契约口径对齐 | `src/lib/lsp-delegation.mjs` 只读四动作；legacy `diagnostics/format/rename/codeAction/apply` → `contract-unsupported`（消息 “official LSP seam is read-only”）；位置必填校验 | `test/lsp-delegation.test.mjs` 5 项；e2e 更新 |
+| 能力目录按 provider 区分 | `fang.capability.list` 的 `fang.tool.invoke` 带 `provider:{available,default,services,actions}`，顶层 `lspProvider`；未安装时为 `available:false`（显式，不假成功） | e2e provider-tagged 断言 |
+| 路线 B（增强）探测 | `detectForkLspSupport(accelNodeModules)`：检测 `@twinsearth/dsh-lsp`/`dsh-lsp-stdio`/`dsh-tool-lsp`；结果暴露在 `writeAcceleratedForkProfile(...).forkLsp`，默认不启用 | `test/accelerated-alias.test.mjs` |
+| 诚实边界 | 母体尚未安装官方 LSP 栈（npm 有匹配 0.2.2-rc.3）；未安装时读类动作显式 `contract-unavailable`；e2e 仍用测试缝提供确定性结果 | preflight GREEN |
+
+**剩余（需安装/决策）**：① 把官方 LSP 栈（0.2.2-rc.3）以 config-only bundle 装进母体 profile 并配置语言服务器（本机当前无任何 LSP 服务器）；② 真实 LSP e2e（TS fixture definition/hover + 越界拒绝）；③ 路线 B 的安装方式与能力目录开关。
+
+## 7. 原下一步（已由 §6 取代）
+
+1. ~~M3.2 母体 LSP 栈原型~~ → provider 适配代码已完成，安装待办；
+2. ~~M3.3 真实 provider 接入~~ → `ctx.lsp.query` 映射/根策略/归一化已完成；
+3. M3.4 e2e：TS fixture 真实 definition/hover（阻塞于语言服务器安装）；
+4. M3.5：语言服务器来源/版本随 bundle 锁定；
+5. 路线 B（fork-local）：已具备安装探测与目录区分，默认关闭。
 
 ---
 

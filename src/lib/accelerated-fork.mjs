@@ -216,6 +216,24 @@ export function writeAliasStubs({ profileNodeModules = '', accelNodeModules = ''
   return { resolved, unsupported, stubCount }
 }
 
+/** 路线 B（增强）：fork-local LSP 所需的加速核 client/host 包。 */
+export const FORK_LSP_PACKAGES = Object.freeze([
+  '@twinsearth/dsh-lsp',
+  '@twinsearth/dsh-lsp-stdio',
+  '@twinsearth/dsh-tool-lsp',
+])
+
+/**
+ * Detect whether the accelerated core can host a fork-local LSP stack (route B).
+ * Detection only — provisioning stays opt-in; absent packages mean the fork keeps
+ * delegating to the mother (route A) or reporting contract-unavailable.
+ */
+export function detectForkLspSupport(accelNodeModules) {
+  const packages = FORK_LSP_PACKAGES.map((name) => ({ name, installed: accelHasPackage(accelNodeModules, name) }))
+  const missing = packages.filter((item) => item.installed !== true).map((item) => item.name)
+  return { available: missing.length === 0, packages, missing }
+}
+
 function copyPackageDir(source, target) {
   fs.mkdirSync(target, { recursive: true })
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
@@ -399,6 +417,7 @@ export function writeAcceleratedForkProfile(options = {}) {
     junctions,
     warning,
     overlay,
+    forkLsp: accelNodeModules ? detectForkLspSupport(accelNodeModules) : null,
     sync: synced ? {
       source: synced.source,
       mapped: synced.bundles.mapped,

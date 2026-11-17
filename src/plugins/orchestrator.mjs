@@ -49,7 +49,8 @@ import {
   capabilityCatalog, checkDelegation, createDelegationGate, DELEGATE_ERROR, delegationAuditRecord,
   DEFAULT_READ_ALLOW, exceedPayloadLimit, normalizeDelegationConfig, runDelegated,
 } from '../lib/contract-delegation.mjs'
-import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
+import { LSP_READ_ACTIONS, validateToolInvoke } from '../lib/lsp-delegation.mjs'
+import { LSP_PROVIDER_TEST, checkWorkspaceRoot, describeLspProvider, queryMotherLsp } from '../lib/lsp-provider.mjs'
 import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
 import { normalizeCoreMode } from '../lib/accelerated-fork.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
@@ -242,6 +243,9 @@ export const Config = z.object({
       readTimeoutMs: z.number().min(100).max(120000).default(5000),
       writeTimeoutMs: z.number().min(100).max(600000).default(30000),
       maxConcurrent: z.number().min(1).max(64).default(4).description('委托并发上限；超过立即 contract-rate-limited（fail-closed，不排队）'),
+      lsp: z.object({
+        allowedRoots: z.array(z.string()).default([]).description('LSP 委托允许的 workspaceRoot 前缀（空 = 拒绝，fail-closed；realpath 包含校验）'),
+      }).default({}),
     }).default({}),
   }).default({}),
 })
@@ -2080,6 +2084,11 @@ export function apply(ctx, config) {
   })
   const delegationCfg = normalizeDelegationConfig(cfg.contract?.delegate ?? {})
   const delegationGate = createDelegationGate({ maxConcurrent: delegationCfg.maxConcurrent })
+  // B-6 路线 A：母体 LSP 能力缝（ctx.lsp）。未安装官方 LSP 栈时显式不可用，不假装成功。
+  const lspService = (() => { try { return typeof ctx.get === 'function' ? ctx.get('lsp') : null } catch { return null } })()
+  const lspCfg = { allowedRoots: Array.isArray(cfg.contract?.delegate?.lsp?.allowedRoots) ? cfg.contract.delegate.lsp.allowedRoots.map((root) => String(root)) : [] }
+  const lspHooksEnabled = process.env.FANG_CONTRACT_TEST_HOOKS === '1'
+  const lspProviderInfo = describeLspProvider({ lspService, hooksEnabled: lspHooksEnabled })
   const delegateUnavailable = (message, code = DELEGATE_ERROR.UNAVAILABLE) => { const error = new Error(message); error.code = code; throw error }
   const contractServer = createContractServer({
     role: gate.role,
@@ -2114,7 +2123,12 @@ export function apply(ctx, config) {
       [CONTRACT_METHODS.CAPABILITY_LIST]: async () => ({
         enabled: true,
         contractVersion: CONTRACT_VERSION,
-        capabilities: capabilityCatalog(delegationCfg.allow),
+        capabilities: capabilityCatalog(delegationCfg.allow).map((item) => (
+          item.method === 'fang.tool.invoke'
+            ? { ...item, actions: [...LSP_READ_ACTIONS], provider: lspProviderInfo }
+            : item
+        )),
+        lspProvider: lspProviderInfo,
         allow: delegationCfg.allow,
         limits: { maxPayloadBytes: delegationCfg.maxPayloadBytes, readTimeoutMs: delegationCfg.readTimeoutMs, writeTimeoutMs: delegationCfg.writeTimeoutMs },
       }),
@@ -2139,7 +2153,8 @@ export function apply(ctx, config) {
           degraded: Array.isArray(head.degraded) ? head.degraded : [],
         }
       },
-      // B-6：LSP 工具委托（首批）。只读子命令放行；写类子命令必须审批——委托层直接拒绝，不产生副作用。
+      // B-6：LSP 工具委托。官方能力缝只读（definition/references/implementation/hover）；
+      // 路线 A 优先用母体 ctx.lsp；路线 B（fork-local）作为增强，同一契约按 provider 区分。
       'fang.tool.invoke': async (params) => {
         const validated = validateToolInvoke(params)
         if (validated.ok !== true) {
@@ -2153,17 +2168,45 @@ export function apply(ctx, config) {
           error.detail = { tool: 'lsp', action: validated.action, approval: 'required' }
           throw error
         }
-        if (process.env.FANG_CONTRACT_TEST_HOOKS === '1') {
+        if (lspService) {
+          const rootCheck = checkWorkspaceRoot({ workspaceRoot: params?.workspaceRoot, file: validated.file, allowedRoots: lspCfg.allowedRoots })
+          if (rootCheck.ok !== true) {
+            const error = new Error(rootCheck.message)
+            error.code = rootCheck.code
+            error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', reason: 'workspace-root-denied' }
+            throw error
+          }
+          const query = await queryMotherLsp({ lspService, invoke: validated, workspaceRoot: rootCheck.workspaceRoot })
+          if (query.ok !== true) {
+            const error = new Error(query.message)
+            error.code = query.code
+            error.detail = { tool: 'lsp', action: validated.action, provider: 'mother-lsp', ...(query.detail ?? {}) }
+            throw error
+          }
+          return {
+            tool: 'lsp',
+            file: validated.file,
+            line: validated.line,
+            character: validated.character,
+            workspaceRoot: rootCheck.workspaceRoot,
+            ...query.result,
+          }
+        }
+        if (lspHooksEnabled) {
           return {
             tool: 'lsp',
             action: validated.action,
+            operation: validated.operation,
             file: validated.file,
+            line: validated.line,
+            character: validated.character,
             ok: true,
-            provider: 'test-hook',
-            diagnostics: [{ file: validated.file, line: validated.line ?? 1, character: validated.character ?? 1, severity: 'info', message: 'stub diagnostics (test hook)' }],
+            provider: LSP_PROVIDER_TEST,
+            kind: 'locations',
+            locations: [],
           }
         }
-        return delegateUnavailable('lsp tool provider is unavailable on mother')
+        return delegateUnavailable('lsp tool provider is unavailable on mother (install dsh-lsp + dsh-lsp-stdio, or enable the fork-local provider)')
       },
       // B-7：chat.import。dryRun（默认）确定性预览；真实导入必须审批——委托层拒绝执行、零副作用。
       'fang.chat.import': async (params) => {

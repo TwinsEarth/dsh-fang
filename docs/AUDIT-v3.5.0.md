@@ -52,6 +52,14 @@
 - 本审计；
 - `package.json` `test:accel-live` 脚本。
 
+### 发布后（Unreleased）：B-6 LSP 真实 provider 接入（路线 A 先行）
+
+- `src/lib/lsp-provider.mjs`：契约四动作 → 官方 `ctx.lsp.query`；1-based→0-based；locations/hover 归一化；seam 错误码映射；`workspaceRoot` 显式 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝）；
+- `src/lib/lsp-delegation.mjs`：对齐官方只读口径（4 动作）；legacy diagnostics/format/rename → `contract-unsupported`；位置必填；
+- Orchestrator：母体 `ctx.lsp` 优先（`provider:'mother-lsp'`），测试缝保留，未安装时 `contract-unavailable`；`fang.capability.list` 增加 `provider`/`lspProvider`（按 provider 区分、available=false 显式）；
+- 路线 B（增强）：`detectForkLspSupport(accelNodeModules)` 探测 `@twinsearth/dsh-lsp*`，暴露 `forkLsp`，默认关闭；
+- 测试：`test/lsp-provider.test.mjs` 6 项 + `test/lsp-delegation.test.mjs` 5 项；e2e 117/117（provider-tagged catalog / definition 成功 / legacy 写类可读拒绝）。
+
 ## 3. 验证证据（本机实测）
 
 ```

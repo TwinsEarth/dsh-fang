@@ -313,11 +313,13 @@ async function main() {
     })
     const capList = await delegatedInvoke('fang.capability.list')
     const capItems = Array.isArray(capList.body?.result?.capabilities) ? capList.body.result.capabilities : []
-    check('delegated fang.capability.list returns catalog (write caps approval-gated)', capList.status === 200 && capList.body?.ok === true
+    const lspCap = capItems.find((c) => c.method === 'fang.tool.invoke')
+    check('delegated fang.capability.list returns catalog + provider-tagged lsp capability', capList.status === 200 && capList.body?.ok === true
       && capItems.some((c) => c.method === 'fang.session.list')
       && capItems.filter((c) => c.kind === 'write').every((c) => c.approval === 'required')
-      && capItems.some((c) => c.method === 'fang.tool.invoke'),
-      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`) }).slice(0, 220))
+      && Boolean(lspCap) && Array.isArray(lspCap.actions) && lspCap.actions.includes('definition')
+      && lspCap.provider?.services?.['test-hook'] === true,
+      JSON.stringify({ status: capList.status, caps: capItems.map((c) => `${c.method}:${c.kind}`), provider: lspCap?.provider?.default ?? null }).slice(0, 240))
     const rejectedCap = await delegatedInvoke('fang.fork.spawn', {})
     check('delegated unlisted capability rejected (contract-unsupported)', rejectedCap.status === 200
       && rejectedCap.body?.ok === false && rejectedCap.body?.error?.code === 'contract-unsupported',
@@ -342,15 +344,17 @@ async function main() {
       && delegatedSlow.body?.ok === false && delegatedSlow.body?.error?.code === 'contract-timeout',
       JSON.stringify({ status: delegatedSlow.status, code: delegatedSlow.body?.error?.code ?? null }).slice(0, 160))
     // B-6：LSP 委托——只读子命令成功；写类子命令必须审批（拒绝执行、无副作用）
-    const lspRead = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'diagnostics', file: 'example.mjs', line: 1 })
-    check('delegated lsp diagnostics (read action) succeeds', lspRead.status === 200
-      && lspRead.body?.ok === true && lspRead.body?.result?.ok === true && Array.isArray(lspRead.body.result.diagnostics),
-      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null }).slice(0, 160))
-    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs' })
-    check('delegated lsp write action requires approval (contract-approval-required)', lspWrite.status === 200
-      && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-approval-required',
-      JSON.stringify({ status: lspWrite.status, code: lspWrite.body?.error?.code ?? null }).slice(0, 160))
-    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs' })
+    const lspRead = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'definition', file: 'example.mjs', line: 1, character: 1 })
+    check('delegated lsp definition (official read action) succeeds', lspRead.status === 200
+      && lspRead.body?.ok === true && lspRead.body?.result?.provider === 'test-hook'
+      && lspRead.body.result.kind === 'locations' && Array.isArray(lspRead.body.result.locations),
+      JSON.stringify({ status: lspRead.status, code: lspRead.body?.error?.code ?? null, provider: lspRead.body?.result?.provider ?? null }).slice(0, 180))
+    const lspWrite = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'format', file: 'example.mjs', line: 1, character: 1 })
+    check('delegated lsp legacy write action rejected (official seam is read-only: contract-unsupported)', lspWrite.status === 200
+      && lspWrite.body?.ok === false && lspWrite.body?.error?.code === 'contract-unsupported'
+      && /official LSP seam is read-only/i.test(String(lspWrite.body?.error?.message ?? '')),
+      JSON.stringify({ status: lspWrite.status, code: lspWrite.body?.error?.code ?? null }).slice(0, 180))
+    const lspInvalid = await delegatedInvoke('fang.tool.invoke', { tool: 'lsp', action: 'nope', file: 'example.mjs', line: 1, character: 1 })
     check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
       && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
       JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))

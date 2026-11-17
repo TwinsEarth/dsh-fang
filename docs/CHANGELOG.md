@@ -1,3 +1,7 @@
+## Unreleased（v3.5.0 发布后）
+
+- **B-6 LSP 真实 provider 接入（路线 A 先行 + 路线 B 增强）**：新增 `src/lib/lsp-provider.mjs`——契约四动作 `definition/references/implementation/hover` 映射官方 `ctx.lsp.query`（无需 Agent Session），1-based→0-based、locations/hover 归一化、seam 错误码映射；**workspaceRoot 显式传入 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝，fail-closed）**；契约口径与官方能力缝对齐（legacy `diagnostics/format/rename/codeAction/apply` → 可读 `contract-unsupported`）；`fang.capability.list` 按 provider 区分（`provider`/`lspProvider`，未安装时 available=false）；`detectForkLspSupport()` 探测加速核 fork-local LSP 栈（增强，默认关闭）。单测 11 项（`test/lsp-provider.test.mjs` + `test/lsp-delegation.test.mjs`），e2e 117/117。**诚实边界：母体尚未安装官方 LSP 栈，未安装时读类动作仍显式 contract-unavailable。**
+
 ## v3.5.0（2026-11-17）
 
 **加速分身：P0 地基 + P1 开关与运行 + P2 兼容与文档。**
