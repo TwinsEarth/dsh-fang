@@ -95,17 +95,30 @@ npm run smoke:accel                                   # 加速核/分身冒烟
 | npm 发布内容错误 | 72h 内可 unpublish（版本号不可复用）；超时用 `npm deprecate` + 补丁版；**不跳版本号**（发布纪律：跳号需二次确认） |
 | 三者不一致 | 以 GitHub Release tag 为唯一锚点；补齐另一渠道或按补丁版重发，不并行两个版本号 |
 
-## 5. 当前阻塞（2026-11-17）
+## 5. 发布记录（2026-11-17）
+
+| 渠道/组件 | 状态 | 证据 |
+|---|---|---|
+| `@twinsearth/dsh-fang-contract@1.2.0`（npm） | ✅ 已发布 | `npm view` → 1.2.0，dist-tag latest=1.2.0 |
+| `@twinsearth/fang-dsh-plugin@3.5.0`（npm） | ✅ 已发布 | `npm view` → latest=3.5.0；shasum `ec79c855…` |
+| git tag `v3.5.0` | ✅ 已推送（main 尖端） | release workflow guard: tag on main **success** |
+| GitHub Release `v3.5.0` | ✅ 已创建 + 资产 | assets: `dsh-fang-3.5.0.tgz`（665,931 B）/ `.sha256`；附件 sha256 `0a8ebaf5386226c24457d47b326b72b9258a411cab366f6ddbac829df7ab9d89` 与本地一致 |
+| dsh-fang release workflow | ⚠️ 已取消（手动发布替代） | `build tarball + manifest (e2e)` 依赖的 **self-hosted Windows runner 离线**，job 长期 queued；guard + test 矩阵已 success；已 cancel 并走手动发布（见 §3 第 2 步的产物 + 手动 npm/GitHub Release） |
+| contract 仓库 GitHub tag/Release | ⏳ 未完成 | 提供的 fine-grained PAT 无 `dsh-fang-contract` 仓库 Contents 写权限（push 403）；npm 渠道已满足同步要求，GitHub 侧待补权限后打 `v1.2.0` tag/Release |
+
+> 发布顺序核对：contract 1.2.0 先上线（npm），随后 dsh-fang 3.5.0 三方发布；`npm run release:check` 复核 GREEN。
+
+## 6. 当前阻塞（发布前记录，已大部分解除）
 
 | # | 阻塞 | 影响 | 解除方式 |
 |---|---|---|---|
-| B1 | GitHub 写权限 PAT 缺失（当前 token scopes=[]，push 403） | 分支/tag/Release 全链路不可推 | 用户提供有写权限的 PAT，或用户代推 |
-| B2 | main 合并需审核 | 不能打 tag（tag 必须 main 尖端） | 用户合并 PR |
-| B3 | npm 发布需面板批准（DSH 危险命令守卫） | npm 渠道不可发 | 面板批准（或 CI secret token 可用） |
-| B4 | contract 仓库远端推送权限未验证 | contract 1.2.0 不能上线 | 同 B1 |
+| B1 | GitHub 写权限 PAT 缺失（当前 token scopes=[]，push 403） | 分支/tag/Release 全链路不可推 | ✅ 用户已提供 PAT（dsh-fang 有效；contract 仓库无权限） |
+| B2 | main 合并需审核 | 不能打 tag（tag 必须 main 尖端） | ✅ PR #120 全部门禁通过后合并（squash → `b90ac12`） |
+| B3 | npm 发布需面板批准（DSH 危险命令守卫） | npm 渠道不可发 | ✅ 面板放行，npm publish 成功 |
+| B4 | contract 仓库远端推送权限未验证 | contract 1.2.0 不能上线 | ⏳ npm 已上线；GitHub tag/Release 需含该仓库 Contents 写权限的 token |
 | B5 | 产物当前为旧 HEAD 构建（13:35 vs HEAD 16:47） | 直接发会发错字节 | ✅ **已解决**：`build.mjs` 重建并验证（sha256 以 `dist/dsh-fang-3.5.0.tgz.sha256` 为准，会随提交变化）；发布前必须在最终 main 尖端**再重建一次** |
 
-## 6. 发布说明草稿（v3.5.0）
+## 7. 发布说明草稿（v3.5.0）
 
 - **加速分身 `official / 一键加速` 可切换**：母体面板 `M-09` 切换、「官方 / 一键加速」显示当前档位；仅新派生/重开生效；未安装加速核时 409 + `unchanged`，设置不静默改变；
 - **同步插件面（synced profile）**：加速分身按元主插件面同步，`@deepseek-ai/*` → `@twinsearth/*` alias 层（57 resolved / 8 unsupported 显式分类）；
@@ -113,7 +126,7 @@ npm run smoke:accel                                   # 加速核/分身冒烟
 - **UI client half**：浏览器模块映射 spike 完成（`dsh-context` 等第三方 client half 已在启动清单、bundle 可提供；缺口 = `@deepseek-ai/*` 作用域行别名）；
 - 门禁：tests 全绿 / e2e 117/117 / allow-list 0 findings / main-city grade A。
 
-## 7. 关联文档
+## 8. 关联文档
 
 - 发布检查：`tools/release/build.mjs`、`tools/release/preflight.mjs`、`tools/release/publish-npm.mjs`、`tools/release/upload-release-assets.mjs`、`npm run release:check`
 - 发布流程与纪律：`docs/RELEASE-FLOW-v3.0.8-v3.3.3.md`、`AGENTS.md` §4（版本发布纪律）
