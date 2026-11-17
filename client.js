@@ -8,7 +8,7 @@
 //   * 不新增依赖：仅宿主插槽契约要求 factory 返回 React 元素，故保留一个 15 行的
 //     挂载壳（DomMount）；它不做布局、不持有状态，UI 本身与 React 无关。
 //     如果宿主未来允许插槽返回 DOM 节点，直接去掉 DomMount 即可。
-//   * 视觉：顶部 Header（品牌 / Stats / 动作）→ 左 30% 元主区 → 右 70% 分身区；
+//   * 视觉：顶部 Header（品牌 / Stats / 动作）→ v3.5.3 三块：左列上「决策中心」/ 下「分身」（水平分隔条调比例），右列「母体&元主」；
 //     白卡、圆角、柔和阴影、毛玻璃浮窗（Mother / 确认 / 输入）。
 //   * 颜色语义：绿 = 派生/健康，蓝 = 运行/母体身份，红 = 派发/破坏性，橘 = 配置/警告。
 //
@@ -918,11 +918,20 @@ window.__ModuleLoader__.load({
 .fang-body{position:relative;display:grid;grid-template-columns:minmax(320px,50fr) minmax(0,50fr);gap:16px;align-items:stretch;height:100%;min-height:0;flex:1 1 auto;overflow:hidden}
 .fang-body.is-resizing{cursor:col-resize;user-select:none}
 .fang-body.is-resizing *{user-select:none}
+.fang-body.is-resizing-y{cursor:row-resize;user-select:none}
+.fang-body.is-resizing-y *{user-select:none}
+/* v3.5.3 三块布局：左列 = 上「决策中心」/ 下「分身」（中间水平分隔条可调比例）；右列 = 母体&元主 */
+.fang-col{display:flex;flex-direction:column;min-height:0;min-width:0}
+.fang-col--left{display:grid;grid-template-rows:minmax(120px,1fr) 12px minmax(160px,1fr);gap:0;min-height:0}
+.fang-vsplit-handle{position:relative;cursor:row-resize;z-index:5;border-radius:6px;background:transparent;touch-action:none}
+.fang-vsplit-handle::after{content:"";position:absolute;top:50%;left:50%;width:52px;height:3px;transform:translate(-50%,-50%);border-radius:3px;background:var(--f-border-strong,var(--f-border));opacity:.55;transition:opacity .15s,background .15s}
+.fang-vsplit-handle:hover::after,.fang-vsplit-handle:focus-visible::after,.fang-body.is-resizing-y .fang-vsplit-handle::after{opacity:1;background:var(--f-blue,#3b82f6)}
+.fang-vsplit-handle:focus-visible{outline:2px solid var(--f-blue,#3b82f6);outline-offset:2px}
 .fang-split-handle{position:absolute;top:0;bottom:0;left:50%;width:10px;transform:translateX(-50%);cursor:col-resize;z-index:6;border-radius:6px;background:transparent;touch-action:none}
 .fang-split-handle::after{content:"";position:absolute;top:50%;left:50%;width:3px;height:46px;transform:translate(-50%,-50%);border-radius:3px;background:var(--f-border-strong,var(--f-border));opacity:.55;transition:opacity .15s,background .15s}
 .fang-split-handle:hover::after,.fang-split-handle:focus-visible::after,.fang-body.is-resizing .fang-split-handle::after{opacity:1;background:var(--f-blue,#3b82f6)}
 .fang-split-handle:focus-visible{outline:2px solid var(--f-blue,#3b82f6);outline-offset:2px}
-@media (max-width:1100px){.fang-console{overflow:auto}.fang-body{grid-template-columns:1fr;align-items:start;height:auto;flex:1 0 auto;overflow:visible}.fang-split-handle{display:none}}
+@media (max-width:1100px){.fang-console{overflow:auto}.fang-body{grid-template-columns:1fr;align-items:start;height:auto;flex:1 0 auto;overflow:visible}.fang-col--left{display:block}.fang-split-handle,.fang-vsplit-handle{display:none}}
 .panel{background:var(--f-surface);border:1px solid var(--f-border);border-radius:var(--f-radius-panel);
   box-shadow:var(--f-shadow-card);display:flex;flex-direction:column;min-height:0;overflow:hidden;
   height:100%;max-height:100%}
@@ -1357,6 +1366,10 @@ window.__ModuleLoader__.load({
 .fang-decision-mini-context{font-size:11px;color:var(--f-text-2,#5F6368);margin-top:2px;overflow-wrap:anywhere}
 .fang-decision-mini-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .fang-decision-mini-actions .fang-inbox-btn{height:22px;font-size:11px;padding:0 7px}
+/* v3.5.3：决策中心成为独立面板块（左列上），mini 组件填满并自行滚动 */
+.fang-decision-panel{padding:0}
+.fang-decision-panel .fang-decision-mini{margin:0;border:0;border-radius:var(--f-radius-panel);height:100%;min-height:0;display:flex;flex-direction:column;background:transparent;overflow:hidden}
+.fang-decision-panel .fang-decision-mini-body{max-height:none;flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-gutter:stable}
 .fang-inbox-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,92vw);height:100vh;height:100dvh;max-height:100vh;min-height:0;overflow:hidden;z-index:2147483001;background:#fff;border-left:1px solid rgba(16,17,20,.12);box-shadow:-18px 0 48px rgba(0,0,0,.18);transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
 .fang-inbox-drawer.is-open{transform:none}
 .fang-inbox-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.26);z-index:2147483000;animation:fang-fade .15s ease}
@@ -1553,6 +1566,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         splitRatio: (() => {
           const n = readNumberPref('fang.panel.split', 0.5)
           return Math.min(0.75, Math.max(0.25, Number.isFinite(n) ? n : 0.5))
+        })(),
+        // v3.5.3：左列内「决策中心 / 分身」垂直比例，默认 50:50，可拖动分隔条调整。
+        decisionSplit: (() => {
+          const n = readNumberPref('fang.panel.decision.split', 0.5)
+          return Math.min(0.8, Math.max(0.2, Number.isFinite(n) ? n : 0.5))
         })(),
         showTemporary: readPref('fang.panel.showTemporary', true),
         // 母体会话只读投影：默认只看最近 20 条，可切 50 / 全部（偏好存本机）。
@@ -4078,7 +4096,6 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         renderCapacityStrip(cap))
 
       const scroll = h('div', { class: 'panel-scroll', 'data-sk': 'right' })
-      scroll.append(renderDecisionMini())
 
       if (S.tasks.state === 'loading' && all.length === 0) {
         scroll.append(h('div', { class: 'loading-line' }, icon('spinner', 14), '正在读取分身任务…'))
@@ -4933,17 +4950,74 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
       if (S.role.value === 'mother') {
         const body = h('div', { class: 'fang-body', 'aria-busy': S.refreshing ? 'true' : undefined })
-        body.append(renderMotherPanel(S, app), renderForkPanel(S, app))
+        // v3.5.3 三块：左列上「决策中心」/ 下「分身」（中间水平分隔条可调比例），右列「母体&元主」。
+        const leftCol = h('div', { class: 'fang-col fang-col--left', 'data-zone': 'left-column' })
+        const decisionPanel = h('section', { class: 'panel fang-decision-panel', 'data-zone': 'decision', 'aria-label': '决策中心' }, renderDecisionMini())
+        const forkPanel = renderForkPanel(S, app)
+        const motherPanel = renderMotherPanel(S, app)
+        const vsplit = h('div', {
+          class: 'fang-vsplit-handle',
+          role: 'separator',
+          'aria-orientation': 'horizontal',
+          'aria-label': '调整决策中心与分身工作区比例',
+          'aria-valuemin': '20',
+          'aria-valuemax': '80',
+          tabindex: '0',
+          title: '拖动调整决策中心/分身高度；双击恢复 50:50',
+        })
+        leftCol.append(decisionPanel, vsplit, forkPanel)
+        body.append(leftCol, motherPanel)
+        // 左列内部（决策中心 / 分身）比例：默认 50:50，可拖动/键盘上下键调整，双击恢复（偏好存本机）。
+        const applyDecisionSplit = (ratio, persist = false) => {
+          const clamped = Math.min(0.8, Math.max(0.2, Number.isFinite(ratio) ? ratio : 0.5))
+          S.decisionSplit = clamped
+          const a = (clamped * 100).toFixed(2)
+          const b = ((1 - clamped) * 100).toFixed(2)
+          leftCol.style.gridTemplateRows = `minmax(120px, ${a}fr) 12px minmax(160px, ${b}fr)`
+          vsplit.setAttribute('aria-valuenow', String(Math.round(clamped * 100)))
+          if (persist) writeNumberPref('fang.panel.decision.split', clamped)
+        }
+        applyDecisionSplit(S.decisionSplit)
+        const onVMove = (event) => {
+          const y = event.touches ? event.touches[0]?.clientY : event.clientY
+          if (typeof y !== 'number') return
+          const rect = leftCol.getBoundingClientRect()
+          if (rect.height > 0) applyDecisionSplit((y - rect.top) / rect.height)
+        }
+        const stopV = () => {
+          body.classList.remove('is-resizing-y')
+          document.removeEventListener('mousemove', onVMove)
+          document.removeEventListener('touchmove', onVMove)
+          document.removeEventListener('mouseup', stopV)
+          document.removeEventListener('touchend', stopV)
+          writeNumberPref('fang.panel.decision.split', S.decisionSplit)
+        }
+        const startV = (event) => {
+          event.preventDefault()
+          body.classList.add('is-resizing-y')
+          document.addEventListener('mousemove', onVMove)
+          document.addEventListener('touchmove', onVMove, { passive: false })
+          document.addEventListener('mouseup', stopV, { once: true })
+          document.addEventListener('touchend', stopV, { once: true })
+        }
+        vsplit.addEventListener('mousedown', startV)
+        vsplit.addEventListener('touchstart', startV, { passive: false })
+        vsplit.addEventListener('dblclick', () => applyDecisionSplit(0.5, true))
+        vsplit.addEventListener('keydown', (event) => {
+          if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+          event.preventDefault()
+          applyDecisionSplit(S.decisionSplit + (event.key === 'ArrowUp' ? -0.02 : 0.02), true)
+        })
         // 中间拖动手柄：默认 50:50，可拖动/键盘方向键调整，双击恢复 50:50（偏好存本机）。
         const handle = h('div', {
           class: 'fang-split-handle',
           role: 'separator',
           'aria-orientation': 'vertical',
-          'aria-label': '调整元宝工作区与分身工作区比例',
+          'aria-label': '调整左列（决策中心 + 分身）与母体&元主比例',
           'aria-valuemin': '25',
           'aria-valuemax': '75',
           tabindex: '0',
-          title: '拖动调整比例；双击恢复 50:50',
+          title: '拖动调整左列与母体&元主比例；双击恢复 50:50',
         })
         const applyRatio = (ratio, persist = false) => {
           const clamped = Math.min(0.75, Math.max(0.25, Number.isFinite(ratio) ? ratio : 0.5))
