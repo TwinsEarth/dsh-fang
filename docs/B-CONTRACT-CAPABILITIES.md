@@ -81,7 +81,13 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 非法子命令 | 未知 action → `contract-invalid-request`；缺 file/位置 → `contract-invalid-request` | e2e：nope → contract-invalid-request |
 | 错误码 | 复用 contract 1.2 的委托错误码（approval-required/timeout/unauthorized 等） | 单测 |
 
-> **诚实的边界**：路线 A 的**代码路径已完整**（含根策略与结果归一化），但母体尚未安装官方 LSP 栈（npm 有匹配 `0.2.2-rc.3`）；未安装时生产读类动作仍显式 `contract-unavailable`，e2e 使用测试缝提供确定性结果。路线 B 已具备安装探测与能力目录区分，默认关闭（增强项）。
+> **路线 B（fork-local）契约口径（2026-11-17 定，安装待语言服务器来源决策）**：
+> 1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A）；fork-local 的 LSP 在加速分身本地 `ctx.lsp` 执行，**不经过契约委托**，因此不在 `fang.capability.list` 里 advertise，也不产生 `provider:'fork-local'` 的虚假条目；
+> 2. **能力目录按 provider 区分**只描述母体真实 provider（`mother-lsp`）与是否存在测试缝；`actions` 取真实交集（无 provider 时为空）；
+> 3. **fork-local 的可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）+ 任务记录 `accelerated.forkLsp` 呈现，属于任务视图能力，不是契约能力；
+> 4. **安装默认关闭**：语言服务器来源（npm 依赖随 profile / 系统安装 / 复用宿主服务器）未决前，不自动安装、不默认启用路线 B。
+>
+> **诚实的边界**：路线 A 的**代码路径已完整**并在隔离 staging 中用真实 provider 跑通（`setup:lsp-live` / `test:lsp-live`）；但**母体正式 profile 尚未安装**官方 LSP 栈，生产读类动作仍显式 `contract-unavailable`，默认 e2e 使用测试缝提供确定性结果。
 >
 > **调研与决策（2026-11-17）**：官方 LSP 为可选包族；能力缝 `ctx.lsp.query` 不需要 Agent Session；只支持 4 个只读操作。**路线 A 先行（对应 B-6 目标），路线 B 作为增强，能力目录按 provider 区分**。详见 [`docs/LSP-PROVIDER-RESEARCH.md`](LSP-PROVIDER-RESEARCH.md)。
 

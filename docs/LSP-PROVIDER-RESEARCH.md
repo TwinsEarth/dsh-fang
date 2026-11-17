@@ -144,6 +144,18 @@ LSP trio 不在官方 bundle 目录（E3），因此走**config-only bundle**（
 
 **剩余（安装到正式 profile）**：① 把同一组合以 config-only bundle 装进母体正式 profile（含语言服务器来源/版本锁定）；② 生产母体重启后跑 `probe:mother` + `test:lsp-live` 的等价探测。
 
+### 6.1 路线 B（fork-local）契约口径（已定，实现待语言服务器来源决策）
+
+用户方向：**路线 B fork-local；先只做契约口径修订，等语言服务器来源确定**。已定口径：
+
+1. **契约不新增 fork-local 方法/错误码**：`fang.tool.invoke:lsp` 仍只承载**母体侧 provider**（路线 A）；fork-local LSP 在加速分身本地 `ctx.lsp` 执行，**不走契约委托**；
+2. **能力目录按 provider 区分**只描述母体真实 provider（`mother-lsp`）与是否存在测试缝；不 advertise `fork-local`（无虚假条目）；`actions` 取真实交集；
+3. **fork-local 可用性**由分身侧 `writeAcceleratedForkProfile(...).forkLsp`（`available/packages/missing`）与任务记录 `accelerated.forkLsp` 呈现——属于任务视图能力，不是契约能力；
+4. **安装默认关闭**：语言服务器来源（① npm 依赖随 profile 版本化；② 系统安装；③ 复用宿主已装服务器）未决前，不自动安装、不默认启用路线 B；
+5. 本次仅做上述口径修订 + 探测字段传播（`forkLsp` 进任务记录），**不改 profile 组合、不装包**。
+
+**待决**：语言服务器来源与版本锁定策略；确定后再评估 fork-local provider 的启用开关与能力目录呈现（届时仍走分身本地，不进契约）。
+
 ## 7. 原下一步（已由 §6 取代）
 
 1. ~~M3.2 母体 LSP 栈原型~~ → provider 适配代码已完成，安装待办；

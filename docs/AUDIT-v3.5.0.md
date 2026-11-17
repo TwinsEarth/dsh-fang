@@ -57,7 +57,7 @@
 - `src/lib/lsp-provider.mjs`：契约四动作 → 官方 `ctx.lsp.query`；1-based→0-based；locations/hover 归一化；seam 错误码映射；`workspaceRoot` 显式 + `contract.delegate.lsp.allowedRoots` realpath 包含校验（空=拒绝）；
 - `src/lib/lsp-delegation.mjs`：对齐官方只读口径（4 动作）；legacy diagnostics/format/rename → `contract-unsupported`；位置必填；
 - Orchestrator：母体 `ctx.lsp` 优先（`provider:'mother-lsp'`），测试缝保留，未安装时 `contract-unavailable`；`fang.capability.list` 增加 `provider`/`lspProvider`（按 provider 区分、available=false 显式）；
-- 路线 B（增强）：`detectForkLspSupport(accelNodeModules)` 探测 `@twinsearth/dsh-lsp*`，暴露 `forkLsp`，默认关闭；
+- 路线 B（增强，口径已定）：`detectForkLspSupport(accelNodeModules)` 探测 `@twinsearth/dsh-lsp*`，暴露 `forkLsp` 并传播进任务记录 `accelerated.forkLsp`；**fork-local 不走契约委托**（契约不新增方法/错误码，能力目录不 advertise fork-local，避免虚假宣称）；安装默认关闭，待语言服务器来源决策；
 - 测试：`test/lsp-provider.test.mjs` 7 项 + `test/lsp-delegation.test.mjs` 5 项；e2e 测试缝 **118/118**；**真实 provider 闭环** `npm run test:lsp-live`（**e2e --lsp 119/119**：definition/hover 走真实 `ctx.lsp`、provider=mother-lsp；diagnostics 真实 provider 下只在测试缝可用并被可读拒绝；staging 安装走 `npm run setup:lsp-live`，不写用户 profile）。
 
 ## 3. 验证证据（本机实测）
