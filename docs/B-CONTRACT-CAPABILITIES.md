@@ -139,13 +139,15 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | B-6 | `fang.tool.invoke`（首批只放开 `tool:'lsp'`）**已实现通道+审批门禁；执行 provider 待接入（见 §0.4）** | `{tool:'lsp', action:'diagnostics'\|'hover'\|'definition'\|'references', file, line?, character?}` | 工具结果原样（大小上限 256KB） | 只读子命令自动放行；任何写类子命令需瓮城审批 | 加速核缺 `dsh-tool-lsp`（COMPAT §3.5 `string-reference`），这是最明确的能力缺口 |
 | B-7 | `fang.chat.import` **已实现通道+dryRun+审批门禁（§0.5）** | `{source:'deepseek', sessionId, dryRun?:true}` | `{imported, skipped, digest}` | 默认 `dryRun:true`；实际导入需审批 | 加速核无 chat-import bundle（COMPAT §2） |
 
-### P2 · 暂缓（高风险/待定）
+### P2 · 决议（2026-11-17，用户确认）
 
-| # | 能力 | 原因 |
+| # | 能力 | 决议 |
 |---|---|---|
-| B-8 | `fang.code.run`（run_code / code-runtime） | 加速核缺 `dsh-code-runtime`；代码执行安全边界大，需独立评审 |
-| B-9 | UI client half 代理 | 契约只覆盖无头能力；UI 走浏览器模块映射（另一阶段） |
-| B-10 | 任意第三方工具透传 | 违反白名单原则，不做 |
+| B-8 | `fang.code.run`（run_code / code-runtime） | **单独专业版能力**：默认**不开启**，不进普通能力目录/默认白名单；需**手动单独每项授权激活**（专业版配置启用 + 该项显式 allow + 每次调用审批）；实现前必须**独立安全评审**。当前未注册 handler → 请求返回 `contract-unsupported`（有单测 + e2e 覆盖） |
+| B-9 | UI client half 代理 | 契约只覆盖**无头能力**；UI 走**浏览器模块映射**（独立阶段，先 spike），不进入契约委托 |
+| B-10 | 任意第三方工具透传 | **明确不做**（违反白名单原则）；只允许“已注册 + 白名单”的能力，未注册一律 `contract-unsupported`（单测覆盖） |
+
+> B-8 的激活链（实现时按此设计）：① 专业版构建/配置开启 `code.run` 专项开关（默认 false）→ ② 该项加入委托 allow → ③ 每次调用仍需审批票 → ④ 全程审计 + 资源限额（超时/并发/输出上限）。三项缺一即拒绝，且拒绝路径显式可读。
 
 ## 3. 安全与门禁（所有委托共享）
 
@@ -184,7 +186,8 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 加强 | 审计完整性 + 并发/超时上限（`contract-rate-limited` / `contract-timeout`） | ✅ M5 完成 |
 
 **范围外（保持待定/后续）**：
-1. `fang.code.run`（P2，高风险，需单独评审）；
+1. `fang.code.run`（P2）：**单独专业版**，默认关闭，需手动单独每项授权激活 + 独立安全评审；当前请求显式 `contract-unsupported`；
 2. LSP **真实执行 provider** 接入母体 DSH 工具运行时（需确认工具调用 API）；
-3. UI client half 浏览器映射（独立阶段，先做单个 spike）；
-4. 契约 SDK 版本：**已按用户确认升到 1.2.0（仅追加）**；vendored 副本从 contract 仓库重新同步（8 文件 sha256 钉死），旧 1.1 对端按 METHOD_VERSION 自动裁剪 1.2 方法。
+3. UI client half 浏览器映射（独立阶段，先做单个 spike；契约不代理 UI）；
+4. 任意第三方工具透传：**明确不做**（B-10）；
+5. 契约 SDK 版本：**已按用户确认升到 1.2.0（仅追加）**；vendored 副本从 contract 仓库重新同步（8 文件 sha256 钉死），旧 1.1 对端按 METHOD_VERSION 自动裁剪 1.2 方法。

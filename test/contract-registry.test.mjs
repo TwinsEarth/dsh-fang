@@ -17,6 +17,7 @@ import {
   CAPABILITY_CATALOG,
   DEFAULT_READ_ALLOW,
   DELEGATE_ERROR,
+  PRO_ONLY_CAPABILITIES,
   capabilityCatalog,
   checkDelegation,
 } from '../src/lib/contract-delegation.mjs'
@@ -54,8 +55,26 @@ test('M1 registry: delegation catalog is append-only and whitelist-consistent', 
   assert.equal(unknown.error, DELEGATE_ERROR.UNSUPPORTED)
 })
 
-test('M1 error codes: delegation codes are registered in the contract SDK, unique and stable', () => {
-  const registered = new Set(Object.values(ERROR_CODES))
+test('P2 pro capabilities: fang.code.run is registered but default-off and always rejected until pro activation', () => {
+  assert.deepEqual(PRO_ONLY_CAPABILITIES.map((item) => item.method), ['fang.code.run'])
+  const catalogMethods = CAPABILITY_CATALOG.map((item) => item.method)
+  assert.ok(!catalogMethods.includes('fang.code.run'), 'pro capability must not appear in the normal catalog')
+  assert.ok(!DEFAULT_READ_ALLOW.includes('fang.code.run'), 'pro capability must not be in the default allowlist')
+  const rejected = checkDelegation({ method: 'fang.code.run', config: {} })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.error, DELEGATE_ERROR.UNSUPPORTED)
+  assert.match(String(rejected.message ?? ''), /pro capability/i)
+})
+
+test('B-10: no catch-all passthrough — unregistered tool methods are rejected', () => {
+  for (const method of ['fang.tool.passthrough', 'fang.tool.invoke.any', 'fang.exec']) {
+    const rejected = checkDelegation({ method, config: {} })
+    assert.equal(rejected.ok, false, method)
+    assert.equal(rejected.error, DELEGATE_ERROR.UNSUPPORTED, method)
+  }
+})
+
+test('M1 error codes: delegation codes are registered in the contract SDK, unique and stable', () => {  const registered = new Set(Object.values(ERROR_CODES))
   for (const code of Object.values(DELEGATE_ERROR)) assert.ok(registered.has(code), `unregistered delegation code: ${code}`)
   const codes = Object.values(DELEGATE_ERROR)
   assert.deepEqual(codes.sort(), [

@@ -354,6 +354,11 @@ async function main() {
     check('delegated lsp unknown action rejected (contract-invalid-request)', lspInvalid.status === 200
       && lspInvalid.body?.ok === false && lspInvalid.body?.error?.code === 'contract-invalid-request',
       JSON.stringify({ status: lspInvalid.status, code: lspInvalid.body?.error?.code ?? null }).slice(0, 160))
+    // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported
+    const codeRun = await delegatedInvoke('fang.code.run', { code: 'console.log(1)' })
+    check('P2 pro capability fang.code.run rejected by default (contract-unsupported)', codeRun.status === 200
+      && codeRun.body?.ok === false && codeRun.body?.error?.code === 'contract-unsupported',
+      JSON.stringify({ status: codeRun.status, code: codeRun.body?.error?.code ?? null }).slice(0, 160))
     // B-7：chat.import——dryRun 两次结果一致；真实导入必须审批（拒绝执行、无副作用）
     const importParams = { source: 'deepseek', sessionId: E2E_SESSION_ID, dryRun: true }
     const importDry1 = await delegatedInvoke('fang.chat.import', importParams)

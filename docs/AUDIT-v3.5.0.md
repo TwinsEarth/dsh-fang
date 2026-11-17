@@ -58,7 +58,7 @@ accelerated-fork 单测                9/9
 fork-core-settings 单测              8/8
 accelerated-fork-live（FANG_ACCEL_LIVE=1）  pass（forker 真派生：identity role=fork, version=3.5.0）
 accelerated-fork-smoke               7/7（banner/identity/client.js/core 版本/非 stock CLI）
-tools/e2e.mjs                       116/116（含 4 项 fork-core 契约断言 + 3 项 B 契约基线 + 14 项 B 委托：白名单目录 / contract-unsupported 拒绝 / 只读委托成功 / contract-unavailable 映射 / session.events 有界读 / contract-timeout 超时 / lsp diagnostics 成功 / 写类 contract-approval-required / 非法 action contract-invalid-request / chat.import dryRun 一致 / 真实导入 contract-approval-required / 并发 contract-rate-limited / 委托审计完整性 / 审计 outcome 覆盖）
+tools/e2e.mjs                       117/117（含 4 项 fork-core 契约断言 + 3 项 B 契约基线 + 14 项 B 委托：白名单目录 / contract-unsupported 拒绝 / 只读委托成功 / contract-unavailable 映射 / session.events 有界读 / contract-timeout 超时 / lsp diagnostics 成功 / 写类 contract-approval-required / 非法 action contract-invalid-request / chat.import dryRun 一致 / 真实导入 contract-approval-required / 并发 contract-rate-limited / 委托审计完整性 / 审计 outcome 覆盖 / P2 pro 能力默认拒绝）
 allow-list self-check               110 路由 findings=0
 main-city source gate               grade=A blockers=0
 ```

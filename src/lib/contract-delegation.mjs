@@ -44,6 +44,15 @@ export const DEFAULT_READ_ALLOW = Object.freeze([
   'fang.approvals.list',
 ])
 
+/**
+ * 专业版（Pro）专属能力：默认**不开启**，不进能力目录、不在默认白名单，
+ * 需要“单独专业版 + 每项手动授权激活（配置级 + 每次调用审批）”后才可由上层注册 handler。
+ * 当前仅登记决策，不注册任何 handler；请求即返回 contract-unsupported。
+ */
+export const PRO_ONLY_CAPABILITIES = Object.freeze([
+  { method: 'fang.code.run', kind: 'write', approval: 'required', since: 'pro-1', summary: '代码执行（run_code / code-runtime；专业版，默认关闭，需每项手动授权激活 + 独立安全评审）' },
+])
+
 export const DELEGATE_DEFAULTS = Object.freeze({
   enabled: true,
   allow: [...DEFAULT_READ_ALLOW],
@@ -105,6 +114,9 @@ export function checkDelegation({ method, allow, config } = {}) {
   const cfg = normalizeDelegationConfig(config)
   if (cfg.enabled !== true) return { ok: false, error: DELEGATE_ERROR.UNAVAILABLE, message: 'contract delegation is disabled' }
   const name = String(method ?? '')
+  if (PRO_ONLY_CAPABILITIES.some((item) => item.method === name)) {
+    return { ok: false, error: DELEGATE_ERROR.UNSUPPORTED, message: `pro capability requires separate authorization activation (default off): ${name}` }
+  }
   if (name === 'fang.capability.list') return { ok: true, descriptor: CAPABILITY_CATALOG[0] }
   if (!cfg.allow.includes(name)) return { ok: false, error: DELEGATE_ERROR.UNSUPPORTED, message: `capability not allowed: ${name}` }
   const descriptor = CAPABILITY_CATALOG.find((item) => item.method === name) ?? null
