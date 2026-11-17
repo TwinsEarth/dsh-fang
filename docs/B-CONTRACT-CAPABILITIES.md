@@ -71,8 +71,8 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 | 项 | 实现 | 单测 / e2e |
 |---|---|---|
 | `fang.tool.invoke`（首批仅 `tool:'lsp'`） | `validateToolInvoke()` 校验 tool/action/file；目录登记 kind=`write`、approval=`required`，**默认不在白名单**，需操作者显式放行 | 单测 `test/lsp-delegation.test.mjs` 4 项 |
-| 只读子命令 | `diagnostics` / `hover` / `definition` / `references` → 自动放行 | e2e：diagnostics 成功（provider=test-hook） |
-| 写类子命令 | `format` / `rename` / `codeAction` / `apply` → **委托层拒绝执行**，返回 `contract-approval-required`（无副作用） | e2e：format → contract-approval-required |
+| 只读子命令 | `diagnostics` / `hover` / `definition` / `references` → 自动放行。**口径修订（2026-11-17）**：官方 LSP 能力缝只提供 `goToDefinition/findReferences/goToImplementation/hover` 四操作；`diagnostics` 仅存在于测试缝，接真实 provider 时应移除或按 provider 实提供能力 advertise | e2e：diagnostics 成功（provider=test-hook） |
+| 写类子命令 | `format` / `rename` / `codeAction` / `apply` → **委托层拒绝执行**，返回 `contract-approval-required`（无副作用）。**口径修订**：官方 LSP 明确只读、无 mutation；该门禁保留给未来自定义 provider | e2e：format → contract-approval-required |
 | 非法子命令 | 未知 action → `contract-invalid-request` | e2e：nope → contract-invalid-request |
 | 错误码 | 新增 `contract-approval-required`（fang 层表，唯一性断言） | 单测 |
 
