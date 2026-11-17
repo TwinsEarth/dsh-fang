@@ -52,6 +52,13 @@
 - 本审计；
 - `package.json` `test:accel-live` 脚本。
 
+### 发布后（Unreleased）：UI client half 映射实现
+
+- `src/lib/accelerated-fork.mjs`：`availableClientModules()` / `rewriteClientSpecifiers()` / `rewriteClientHalfPackage()`——第三方 client half 的 `dsh.client.inject/external` 与客户端 bundle 作用域重写（未映射项显式保留并进入 `sync.unsupportedClientHalves`）；`dsh-client-ui-primitives` 等 web 静态 seed 作为 shim 目标；
+- `CLIENT_ROW_ENABLE_OVERRIDES`：具名重开 web 组合必需的 `ui-theme` client 行（其余 disabled 行保持），结果写入 `sync.rowOverrides`；
+- `tools/release/ui-client-render-smoke.mjs`（`npm run smoke:ui-client-render`）：真机 synced 加速分身 + Edge/Chrome headless 验收——启动图 88 项含 dsh-context、inject 6/6 重写、app shell 挂载、零模块解析错误；`dsh-context` tab 渲染需工作区会话（诚实边界见 `docs/UI-CLIENT-HALF-IMPL.md`）；
+- 单测：`test/accelerated-alias.test.mjs` 新增 5 项（静态 seed/作用域重写/client half 重写/目标行纠正）。
+
 ## 3. 验证证据（本机实测）
 
 ```

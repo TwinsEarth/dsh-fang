@@ -1,3 +1,7 @@
+## Unreleased（v3.5.0 发布后）
+
+- **UI client half 映射实现（非 spike）**：synced 加速分身对第三方 client half 做**浏览器作用域重写**——`dsh.client.inject` / `external` 与客户端 bundle 中的 `@deepseek-ai/*` 仅在加速核存在对应 client half（含 `dsh-client-ui-primitives` 等 web 静态 seed）时改写为 `@twinsearth/*`，未映射项原样保留并写入 `sync.unsupportedClientHalves`；同时具名纠正 web 组合必需的 `ui-theme` client 行（`CLIENT_ROW_ENABLE_OVERRIDES`，其余 disabled 行不动）。新增 `npm run smoke:ui-client-render` 真机 headless 验收（启动图 88 项含 dsh-context、inject 6/6 重写、app shell 挂载、零模块解析错误）；`dsh-context`「上下文」tab 需打开工作区会话（headless welcome 屏限制已记录）。文档 `docs/UI-CLIENT-HALF-IMPL.md`。
+
 ## v3.5.0（2026-11-17）
 
 **加速分身：P0 地基 + P1 开关与运行 + P2 兼容与文档。**
