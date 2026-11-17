@@ -3353,26 +3353,26 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             const mode = fc?.mode === 'accelerated' ? 'accelerated' : 'stock'
             const next = mode === 'accelerated' ? 'stock' : 'accelerated'
             const installed = fc?.accelerated?.installed === true
-            return button(mode === 'accelerated' ? '分身核心：加速版' : '分身核心：原版', {
+            return button(mode === 'accelerated' ? '分身Core核心加速引擎：一键加速' : '分身Core核心加速引擎：官方', {
               variant: mode === 'accelerated' ? 'primary' : 'quiet', size: 'sm', icon: icon('power', 14),
               title: installed
-                ? '切换新派生/重启分身的 core；当前生效：' + mode + '（母体与元主始终原版）'
+                ? '当前：' + (mode === 'accelerated' ? '一键加速' : '官方') + '。非热更新：切换后需重新打开分身 Web（或重新派生）才生效；母体与元主始终官方 core。'
                 : '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing'),
               onClick: async () => {
                 if (next === 'accelerated' && !installed) {
-                  toast({ tone: 'warn', title: '分身核心', message: '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing') })
+                  toast({ tone: 'warn', title: '分身Core核心加速引擎', message: '加速核未安装：' + (fc?.accelerated?.error ?? 'accelerated-cli-missing') })
                   return
                 }
                 try {
                   const res = await api('/fang/api/fork-core', { method: 'POST', body: JSON.stringify({ mode: next }) })
                   if (res.status === 200 && res.body?.ok !== false) {
                     S.forkCore = { state: 'ready', data: res.body, error: '', at: Date.now() }
-                    toast({ tone: 'ok', title: '分身核心', message: '已切换为' + (next === 'accelerated' ? '加速版' : '原版') + '（新派生/重启生效）' })
+                    toast({ tone: 'ok', title: '分身Core核心加速引擎', message: '已切换为「' + (next === 'accelerated' ? '一键加速' : '官方') + '」· 重新打开分身 Web 生效' })
                     app.render(true)
                   } else {
-                    toast({ tone: 'warn', title: '分身核心', message: res.body?.error ?? '切换失败' })
+                    toast({ tone: 'warn', title: '分身Core核心加速引擎', message: res.body?.error ?? '切换失败' })
                   }
-                } catch (error) { toast({ tone: 'warn', title: '分身核心', message: String(error?.message ?? error) }) }
+                } catch (error) { toast({ tone: 'warn', title: '分身Core核心加速引擎', message: String(error?.message ?? error) }) }
               },
               fk: 'fork-core', dataBtnId: 'M-09',
             })

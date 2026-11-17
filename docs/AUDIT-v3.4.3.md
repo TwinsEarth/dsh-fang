@@ -31,8 +31,8 @@
 | 文件 | 内容 |
 |---|---|
 | `src/lib/fork-core-settings.mjs` | `<dataDir>/fork-core.json`（mode/sessionMode/updatedAt/updatedBy），原子写，损坏降级 stock+new |
-| `src/plugins/orchestrator.mjs` | `GET/POST /fang/api/fork-core`（同路径经 `routeMethods`，避免二次 register 抛错）；createTask/归档还原/autostart 按设置传 coreMode；加速缺失错误透传 `accelerated-cli-missing` + `searched`；`taskView.coreMode` |
-| `client.js` | 母体头部 `M-09`「分身核心：原版/加速版」开关；分身卡「加速核」徽标；刷新轮询 `/fang/api/fork-core` |
+| `src/plugins/orchestrator.mjs` | `GET/POST /fang/api/fork-core`（同路径经 `routeMethods`，避免二次 register 抛错）；createTask/归档还原/autostart 按设置传 coreMode；**重新打开时按开关重新 provision（非热更新）**；加速缺失错误透传 `accelerated-cli-missing` + `searched`；`taskView.coreMode` |
+| `client.js` | 母体头部 `M-09`「分身Core核心加速引擎：官方 / 一键加速」开关（切换提示需重新打开分身 Web）；分身卡「加速核」徽标；刷新轮询 `/fang/api/fork-core` |
 | 会话策略 | `sessionMode:'new'`（默认）跳过旧会话导入并记 `accelerated-new-session`；`inherit` 可选 |
 
 ### P2 兼容与文档

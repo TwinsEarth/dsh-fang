@@ -343,6 +343,52 @@ export function apply(ctx, config) {
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
   // P1：分身核心开关（只影响新派生/重启的分身；母体与元主不读它）。
   const forkCoreSettings = () => readForkCoreSettings(layout.dataDir)
+  /** 当前开关期望的分身核心。 */
+  const desiredForkCoreMode = () => normalizeCoreMode(forkCoreSettings().mode)
+  /**
+   * 开关不是热更新：重新打开（restore/autostart）分身时才应用。
+   * 分身是生产盘——每次打开本来就会从模板重放 profile 配置，因此换核等价于重放一次：
+   *   official ←→ accelerated 需要重新 provision（profile 形状不同），会话目录不动。
+   * @returns {{ok:boolean, switched:boolean, coreMode:string, error?:string, detail?:string}}
+   */
+  const syncForkCoreMode = async (task) => {
+    const desired = desiredForkCoreMode()
+    const current = normalizeCoreMode(task?.coreMode)
+    if (!task || desired === current) return { ok: true, switched: false, coreMode: current || desired }
+    const f = forker()
+    if (!f || typeof f.provision !== 'function') return { ok: false, switched: false, coreMode: current, error: 'forker-unavailable' }
+    let provisioned
+    if (desired === 'accelerated') {
+      provisioned = await f.provision({
+        forkId: task.taskId,
+        taskTitle: task.title,
+        homeDir: task.homeDir,
+        profile: task.profile,
+        coreMode: 'accelerated',
+      })
+    } else {
+      provisioned = await f.provision({
+        forkId: task.taskId,
+        taskTitle: task.title,
+        homeDir: task.homeDir,
+        profile: task.profile,
+        profileTemplate: templateDir(),
+        cleanTemplate: true,
+        coreMode: 'stock',
+        nodeModulesSource: path.join(templateDir(), 'node_modules'),
+      })
+    }
+    if (!provisioned || provisioned.ok === false) {
+      return { ok: false, switched: false, coreMode: current, error: desired === 'accelerated' ? 'accelerated-provision-failed' : 'stock-provision-failed', detail: provisioned?.error }
+    }
+    task.prevCoreMode = current
+    task.coreMode = desired
+    task.updatedAt = nowMs()
+    persist()
+    try { audit('fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* audit optional */ }
+    try { bus.emit('fang/fork-core-switched', { taskId: task.taskId, from: current, to: desired }) } catch { /* bus optional */ }
+    return { ok: true, switched: true, coreMode: desired }
+  }
   const branchStore = new BranchStore(layout.dataDir)
   const composerJournal = new ComposerJournal(layout.dataDir)
   // v3.0.5/B1：安装级 token（0600 文件 / env / 显式配置）；关闭仅限测试
@@ -1684,12 +1730,20 @@ export function apply(ctx, config) {
       // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
       let sessionGuard = null
       try { sessionGuard = applyForkSessionGuard(task) } catch { sessionGuard = { ok: false } }
+      // 开关不是热更新：重新打开分身时按当前开关换核（重新 provision profile；会话目录不动）。
+      const coreSync = await syncForkCoreMode(task)
+      if (coreSync.ok !== true) {
+        task.status = TASK_STATUS.FAILED
+        persist()
+        audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: coreSync.error })
+        return { ok: false, error: coreSync.error, detail: coreSync.detail ?? null, taskId: id }
+      }
       const started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
         profile: task.profile,
         cliPath: cliPath(),
-        coreMode: normalizeCoreMode(task.coreMode ?? forkCoreSettings().mode),
+        coreMode: coreSync.coreMode,
         env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
       })
       if (!started || started.ok === false) {
@@ -1764,12 +1818,18 @@ export function apply(ctx, config) {
         persist()
         let started
         try {
+          const coreSync = await syncForkCoreMode(task)
+          if (coreSync.ok !== true) {
+            report.failed.push({ taskId: id, error: coreSync.error })
+            audit(AUDIT.FORK_CRASHED, { taskId: id, error: coreSync.error, reason: 'autostart-core-switch' })
+            continue
+          }
           started = await f.spawn({
             forkId: id,
             homeDir: task.homeDir,
             profile: task.profile,
             cliPath: cliPath(),
-            coreMode: normalizeCoreMode(task.coreMode ?? forkCoreSettings().mode),
+            coreMode: coreSync.coreMode,
             env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
           })
         } catch (error) {
@@ -1995,7 +2055,7 @@ export function apply(ctx, config) {
       [CONTRACT_METHODS.FORK_SPAWN]: async (params) => {
         const forker = contractService('forker', 'spawn')
         const input = params && typeof params === 'object' ? params : {}
-        return await forker.spawn({ ...input, env: contractEnv(input.env) })
+        return await forker.spawn({ ...input, coreMode: normalizeCoreMode(input.coreMode ?? forkCoreSettings().mode), env: contractEnv(input.env) })
       },
       [CONTRACT_METHODS.FORK_STOP]: async (params) => {
         const forker = contractService('forker', 'stop', false)

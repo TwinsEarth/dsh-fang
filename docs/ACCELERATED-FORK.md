@@ -74,7 +74,8 @@ node --test --test-concurrency=1 test/accelerated-fork-live.test.mjs   # 经 for
 
 | 项 | 行为 |
 |---|---|
-| 生效范围 | 新派生、归档还原、autostart 重启；运行中的分身不重启不切换 |
+| 生效范围 | **不是热更新**：开关只决定「下一次打开分身」用哪个 core。新派生、归档还原、autostart 重启时都会按当前开关重新 provision 该分身的 profile（会话目录不动）；运行中的分身保持原 core，直到被重新打开 |
+| 面板开关 | 母体头部 `M-09`：**「分身Core核心加速引擎：官方 / 一键加速」**（当前状态即按钮文案，点击切到另一档） |
 | 分身卡徽标 | `taskView.coreMode` → 卡片 meta 显示「加速核」；`forks.json` 的 `publicFork.coreMode` 同步 |
 | 启动失败 | 加速核缺失 → 任务错误 `accelerated-cli-missing`（附 `searched` 轨迹），**绝不静默回退 stock**；端口仍走池预分配 + 冲突拒绝 |
 | 会话策略 | `sessionMode:'new'`（默认）：加速分身跳过旧会话导入，记录 `accelerated-new-session`；`inherit` 才允许导入（旧会话由原厂 core 写入，兼容性未验证） |
