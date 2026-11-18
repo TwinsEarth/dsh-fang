@@ -23,3 +23,8 @@
 
 - 布局为 jsdom 结构级验证 + 现有 headless 冒烟；未做真实桌面窗口截图回归；
 - 母体正式 profile 的 LSP 仍未安装；fork-local（路线 B）默认关闭。
+
+## 4. 发布（2026-11-18）
+
+- 三方发布完成：annotated tag `v3.5.4`（tag object `c20264de…` → commit `4b2b3c8cd8`）、GitHub Release（3 资产，tgz sha256 `4ae5b1d9…`）、npm `@twinsearth/fang-dsh-plugin@3.5.4`（`latest=3.5.4`，shasum `f2576023…`）；
+- 发布 PR #129 经 CI 8/8 绿后 squash 合并；preflight --e2e 全绿（1282 tests / e2e 123/123）。
