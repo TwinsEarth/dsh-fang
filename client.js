@@ -8,7 +8,7 @@
 //   * 不新增依赖：仅宿主插槽契约要求 factory 返回 React 元素，故保留一个 15 行的
 //     挂载壳（DomMount）；它不做布局、不持有状态，UI 本身与 React 无关。
 //     如果宿主未来允许插槽返回 DOM 节点，直接去掉 DomMount 即可。
-//   * 视觉：顶部 Header（品牌 / Stats / 动作）→ v3.5.3 三块：左列上「决策中心」/ 下「分身」（水平分隔条调比例），右列「母体&元主」；
+//   * 视觉：顶部 Header（品牌 / Stats / 动作）→ v3.5.4 三块：左列「母体&元主」，右列上「分身」/ 下「决策中心」（水平分隔条调比例）；
 //     白卡、圆角、柔和阴影、毛玻璃浮窗（Mother / 确认 / 输入）。
 //   * 颜色语义：绿 = 派生/健康，蓝 = 运行/母体身份，红 = 派发/破坏性，橘 = 配置/警告。
 //
@@ -920,9 +920,9 @@ window.__ModuleLoader__.load({
 .fang-body.is-resizing *{user-select:none}
 .fang-body.is-resizing-y{cursor:row-resize;user-select:none}
 .fang-body.is-resizing-y *{user-select:none}
-/* v3.5.3 三块布局：左列 = 上「决策中心」/ 下「分身」（中间水平分隔条可调比例）；右列 = 母体&元主 */
+/* v3.5.4 三块布局：左列 = 母体&元主；右列 = 上「分身」/ 下「决策中心」（中间水平分隔条可调比例） */
 .fang-col{display:flex;flex-direction:column;min-height:0;min-width:0}
-.fang-col--left{display:grid;grid-template-rows:minmax(120px,1fr) 12px minmax(160px,1fr);gap:0;min-height:0}
+.fang-col--right{display:grid;grid-template-rows:minmax(160px,1fr) 12px minmax(120px,1fr);gap:0;min-height:0}
 .fang-vsplit-handle{position:relative;cursor:row-resize;z-index:5;border-radius:6px;background:transparent;touch-action:none}
 .fang-vsplit-handle::after{content:"";position:absolute;top:50%;left:50%;width:52px;height:3px;transform:translate(-50%,-50%);border-radius:3px;background:var(--f-border-strong,var(--f-border));opacity:.55;transition:opacity .15s,background .15s}
 .fang-vsplit-handle:hover::after,.fang-vsplit-handle:focus-visible::after,.fang-body.is-resizing-y .fang-vsplit-handle::after{opacity:1;background:var(--f-blue,#3b82f6)}
@@ -931,7 +931,7 @@ window.__ModuleLoader__.load({
 .fang-split-handle::after{content:"";position:absolute;top:50%;left:50%;width:3px;height:46px;transform:translate(-50%,-50%);border-radius:3px;background:var(--f-border-strong,var(--f-border));opacity:.55;transition:opacity .15s,background .15s}
 .fang-split-handle:hover::after,.fang-split-handle:focus-visible::after,.fang-body.is-resizing .fang-split-handle::after{opacity:1;background:var(--f-blue,#3b82f6)}
 .fang-split-handle:focus-visible{outline:2px solid var(--f-blue,#3b82f6);outline-offset:2px}
-@media (max-width:1100px){.fang-console{overflow:auto}.fang-body{grid-template-columns:1fr;align-items:start;height:auto;flex:1 0 auto;overflow:visible}.fang-col--left{display:block}.fang-split-handle,.fang-vsplit-handle{display:none}}
+@media (max-width:1100px){.fang-console{overflow:auto}.fang-body{grid-template-columns:1fr;align-items:start;height:auto;flex:1 0 auto;overflow:visible}.fang-col--right{display:block}.fang-split-handle,.fang-vsplit-handle{display:none}}
 .panel{background:var(--f-surface);border:1px solid var(--f-border);border-radius:var(--f-radius-panel);
   box-shadow:var(--f-shadow-card);display:flex;flex-direction:column;min-height:0;overflow:hidden;
   height:100%;max-height:100%}
@@ -4950,8 +4950,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
       if (S.role.value === 'mother') {
         const body = h('div', { class: 'fang-body', 'aria-busy': S.refreshing ? 'true' : undefined })
-        // v3.5.3 三块：左列上「决策中心」/ 下「分身」（中间水平分隔条可调比例），右列「母体&元主」。
-        const leftCol = h('div', { class: 'fang-col fang-col--left', 'data-zone': 'left-column' })
+        // v3.5.4 三块：左列「母体&元主」；右列上「分身」/ 下「决策中心」（中间水平分隔条可调比例）。
+        const rightCol = h('div', { class: 'fang-col fang-col--right', 'data-zone': 'right-column' })
         const decisionPanel = h('section', { class: 'panel fang-decision-panel', 'data-zone': 'decision', 'aria-label': '决策中心' }, renderDecisionMini())
         const forkPanel = renderForkPanel(S, app)
         const motherPanel = renderMotherPanel(S, app)
@@ -4959,21 +4959,22 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           class: 'fang-vsplit-handle',
           role: 'separator',
           'aria-orientation': 'horizontal',
-          'aria-label': '调整决策中心与分身工作区比例',
+          'aria-label': '调整分身与决策中心工作区比例',
           'aria-valuemin': '20',
           'aria-valuemax': '80',
           tabindex: '0',
-          title: '拖动调整决策中心/分身高度；双击恢复 50:50',
+          title: '拖动调整分身/决策中心高度；双击恢复 50:50',
         })
-        leftCol.append(decisionPanel, vsplit, forkPanel)
-        body.append(leftCol, motherPanel)
-        // 左列内部（决策中心 / 分身）比例：默认 50:50，可拖动/键盘上下键调整，双击恢复（偏好存本机）。
+        rightCol.append(forkPanel, vsplit, decisionPanel)
+        body.append(motherPanel, rightCol)
+        // 右列内部（上分身 / 下决策中心）比例：S.decisionSplit 始终表示“决策中心占比”（在下方），
+        // 默认 50:50；拖动/键盘上下键调整，双击恢复（偏好存本机，沿用同一 key，语义向后兼容）。
         const applyDecisionSplit = (ratio, persist = false) => {
           const clamped = Math.min(0.8, Math.max(0.2, Number.isFinite(ratio) ? ratio : 0.5))
           S.decisionSplit = clamped
-          const a = (clamped * 100).toFixed(2)
-          const b = ((1 - clamped) * 100).toFixed(2)
-          leftCol.style.gridTemplateRows = `minmax(120px, ${a}fr) 12px minmax(160px, ${b}fr)`
+          const forks = ((1 - clamped) * 100).toFixed(2)
+          const decision = (clamped * 100).toFixed(2)
+          rightCol.style.gridTemplateRows = `minmax(160px, ${forks}fr) 12px minmax(120px, ${decision}fr)`
           vsplit.setAttribute('aria-valuenow', String(Math.round(clamped * 100)))
           if (persist) writeNumberPref('fang.panel.decision.split', clamped)
         }
@@ -4981,8 +4982,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const onVMove = (event) => {
           const y = event.touches ? event.touches[0]?.clientY : event.clientY
           if (typeof y !== 'number') return
-          const rect = leftCol.getBoundingClientRect()
-          if (rect.height > 0) applyDecisionSplit((y - rect.top) / rect.height)
+          const rect = rightCol.getBoundingClientRect()
+          // 决策中心在下方：鼠标越往下 → 决策中心占比越大。
+          if (rect.height > 0) applyDecisionSplit(1 - (y - rect.top) / rect.height)
         }
         const stopV = () => {
           body.classList.remove('is-resizing-y')
@@ -5006,6 +5008,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         vsplit.addEventListener('keydown', (event) => {
           if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
           event.preventDefault()
+          // 决策中心在下方：↑ 收缩决策中心（放大分身），↓ 放大决策中心。
           applyDecisionSplit(S.decisionSplit + (event.key === 'ArrowUp' ? -0.02 : 0.02), true)
         })
         // 中间拖动手柄：默认 50:50，可拖动/键盘方向键调整，双击恢复 50:50（偏好存本机）。
@@ -5013,11 +5016,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           class: 'fang-split-handle',
           role: 'separator',
           'aria-orientation': 'vertical',
-          'aria-label': '调整左列（决策中心 + 分身）与母体&元主比例',
+          'aria-label': '调整母体&元主与右侧（分身 + 决策中心）比例',
           'aria-valuemin': '25',
           'aria-valuemax': '75',
           tabindex: '0',
-          title: '拖动调整左列与母体&元主比例；双击恢复 50:50',
+          title: '拖动调整母体&元主与右侧比例；双击恢复 50:50',
         })
         const applyRatio = (ratio, persist = false) => {
           const clamped = Math.min(0.75, Math.max(0.25, Number.isFinite(ratio) ? ratio : 0.5))
