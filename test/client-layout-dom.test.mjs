@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
-// Client layout regression (v3.5.3): the mother console is three blocks —
-//   left column: decision center (top) / forks (bottom) with a horizontal splitter,
-//   right column: mother & essence.
+// Client layout regression (v3.5.4): the mother console is three blocks —
+//   left column: mother & essence,
+//   right column: forks (top) / decision center (bottom) with a horizontal splitter.
 // Both scroll areas stay fixed-height scroll containers, and both splitters persist
 // their ratio locally.
 import test from 'node:test'
@@ -117,7 +117,7 @@ const waitFor = async (fn, { timeout = 2500, interval = 20 } = {}) => {
   throw new Error('waitFor timeout')
 }
 
-test('client layout: three blocks — decision (left top) / forks (left bottom) / mother (right)', async () => {
+test('client layout: three blocks — mother (left) / forks (right top) / decision center (right bottom)', async () => {
   const harness = makeHarness()
   const { host } = mountConsole(harness)
   const doc = harness.window.document
@@ -132,19 +132,21 @@ test('client layout: three blocks — decision (left top) / forks (left bottom) 
     && doc.querySelectorAll('.panel-scroll[data-sk="left"] .essence-card').length === essences.length)
   const consoleEl = doc.querySelector('.fang-console')
   const body = doc.querySelector('.fang-body')
-  const panels = [...doc.querySelectorAll('.fang-body > .fang-col > .panel, .fang-body > .panel')]
+  const panels = [...doc.querySelectorAll('.fang-body > .fang-col--right > .panel, .fang-body > .panel')]
   assert.ok(consoleEl && body, 'console and body must render')
-  assert.equal(panels.length, 3, 'three work zones: decision + forks + mother')
+  assert.equal(panels.length, 3, 'three work zones: mother + forks + decision')
 
-  const leftCol = body.querySelector(':scope > .fang-col--left[data-zone="left-column"]')
-  assert.ok(leftCol, 'left column carries decision + forks')
-  const decisionPanel = leftCol.querySelector(':scope > [data-zone="decision"]')
-  const forkPanel = leftCol.querySelector(':scope > [data-zone="derived"]')
+  const rightCol = body.querySelector(':scope > .fang-col--right[data-zone="right-column"]')
+  assert.ok(rightCol, 'right column carries forks + decision')
+  const decisionPanel = rightCol.querySelector(':scope > [data-zone="decision"]')
+  const forkPanel = rightCol.querySelector(':scope > [data-zone="derived"]')
   const motherPanel = body.querySelector(':scope > [data-zone="mother"]')
-  assert.ok(decisionPanel, 'decision center is the top block of the left column')
-  assert.ok(forkPanel, 'forks panel is the bottom block of the left column')
-  assert.ok(motherPanel, 'mother & essence panel is the right column')
-  assert.equal(decisionPanel.compareDocumentPosition(forkPanel) & decisionPanel.DOCUMENT_POSITION_FOLLOWING ? true : false, true, 'decision sits above forks')
+  assert.ok(decisionPanel, 'decision center is the bottom block of the right column')
+  assert.ok(forkPanel, 'forks panel is the top block of the right column')
+  assert.ok(motherPanel, 'mother & essence panel is the left column')
+  // v3.5.4：母体&元主在左；右列分身在上、决策中心在下。
+  assert.equal(motherPanel.compareDocumentPosition(rightCol) & motherPanel.DOCUMENT_POSITION_FOLLOWING ? true : false, true, 'mother column comes first (left)')
+  assert.equal(forkPanel.compareDocumentPosition(decisionPanel) & forkPanel.DOCUMENT_POSITION_FOLLOWING ? true : false, true, 'forks sit above decision center')
 
   const motherScroll = motherPanel.querySelector(':scope > .panel-scroll[data-sk="left"]')
   const forkScroll = forkPanel.querySelector(':scope > .panel-scroll[data-sk="right"]')
@@ -165,7 +167,7 @@ test('client layout: three blocks — decision (left top) / forks (left bottom) 
   const css = [...doc.querySelectorAll('style')].map((node) => node.textContent).join('\n')
   assert.match(css, /\.fang-console\{[^}]*height:100%[^}]*overflow:hidden/)
   assert.match(css, /\.fang-body\{[^}]*align-items:stretch[^}]*height:100%[^}]*overflow:hidden/)
-  assert.match(css, /\.fang-col--left\{[^}]*grid-template-rows:[^}]*minmax\(120px,[^}]*minmax\(160px,/)
+  assert.match(css, /\.fang-col--right\{[^}]*grid-template-rows:[^}]*minmax\(160px,[^}]*minmax\(120px,/)
   assert.match(css, /\.fang-decision-panel \.fang-decision-mini\{[^}]*height:100%/)
   assert.match(css, /\.panel\{[^}]*height:100%[^}]*max-height:100%/)
   assert.match(css, /\.panel-scroll\{[^}]*overflow-y:auto[^}]*scrollbar-gutter:stable/)
@@ -175,7 +177,7 @@ test('client layout: three blocks — decision (left top) / forks (left bottom) 
   harness.window.close()
 })
 
-test('client layout: two splitters — columns (left/right) and decision/forks (vertical)', async () => {
+test('client layout: two splitters — mother/right and forks/decision vertical', async () => {
   const harness = makeHarness()
   const { host } = mountConsole(harness)
   const doc = harness.window.document
@@ -191,14 +193,14 @@ test('client layout: two splitters — columns (left/right) and decision/forks (
   assert.ok(host.querySelector('.fang-body'), 'body grid exists for the splitters')
 
   // 垂直分隔条：双击恢复 50:50，并写入本机偏好；键盘上下键可微调。
-  const leftCol = doc.querySelector('.fang-col--left')
-  assert.match(leftCol.style.gridTemplateRows, /minmax\(120px,[^)]*\)\s+12px\s+minmax\(160px,/)
+  const rightCol = doc.querySelector('.fang-col--right')
+  assert.match(rightCol.style.gridTemplateRows, /minmax\(160px,[^)]*\)\s+12px\s+minmax\(120px,/)
   const dbl = new harness.window.MouseEvent('dblclick', { bubbles: true })
   rowHandle.dispatchEvent(dbl)
   assert.equal(harness.window.localStorage.getItem('fang.panel.decision.split'), '0.5')
   const key = new harness.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
   rowHandle.dispatchEvent(key)
-  assert.ok(Number(harness.window.localStorage.getItem('fang.panel.decision.split')) > 0.5, 'ArrowDown grows the decision block')
+  assert.ok(Number(harness.window.localStorage.getItem('fang.panel.decision.split')) > 0.5, 'ArrowDown grows the bottom decision block')
   harness.window.close()
 })
 
