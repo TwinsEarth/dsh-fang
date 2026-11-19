@@ -83,7 +83,7 @@ jobs:
       - name: install jsdom for client DOM harness
         run: npm install --no-save --no-audit --no-fund --ignore-scripts jsdom@^31.0.0
       - name: full unit + integration suite
-        run: node --test --test-concurrency=1 "test/*.test.mjs"
+        run: node --test --test-concurrency=1 --test-timeout=180000 "test/*.test.mjs"
       - name: offline status (informational, clean runner has no profile)
         continue-on-error: true
         run: node tools/fangctl.mjs status

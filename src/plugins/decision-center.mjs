@@ -1032,12 +1032,24 @@ export function apply(ctx, config) {
     if (ticket.level !== 'yellow' && ticket.level !== 'blue') return
     const deadline = Number(ticket.waitDeadlineAt)
     if (!Number.isFinite(deadline)) return
-    const timer = setTimeout(() => {
-      timers.delete(timer)
-      try { settlePolicy(ticket.id) } catch { /* policy timers must not crash the host */ }
-    }, Math.max(0, deadline - nowMs()))
-    timer.unref?.()
-    timers.add(timer)
+    // Windows 计时器可能提前 1–15ms 触发（CI 上实测把 walk 窗口打成“永远不结算”）。
+    // settlePolicy 对“窗口还没到”会拒绝推进；此时必须按剩余时间重排，否则 waiter 永远悬挂。
+    const arm = () => {
+      const timer = setTimeout(() => {
+        timers.delete(timer)
+        let settled = false
+        try { settled = settlePolicy(ticket.id) } catch { /* policy timers must not crash the host */ }
+        if (settled) return
+        const current = tickets.get(ticket.id)
+        if (!current || current.status !== 'pending' || disposed) return
+        if (Number(current.waitDeadlineAt) - nowMs() > 0) { arm(); return }
+        // 截止已过仍未结算：再试一次（幂等）；仍失败则交给 waiters 的兜底，绝不无限挂起。
+        try { settlePolicy(ticket.id) } catch { /* ignore */ }
+      }, Math.max(1, deadline - nowMs()))
+      timer.unref?.()
+      timers.add(timer)
+    }
+    arm()
   }
 
   const create = (input = {}) => {
@@ -1258,13 +1270,24 @@ export function apply(ctx, config) {
       }
       const policyDeadline = ticket.level === 'red' ? ticket.expiresAt : ticket.waitDeadlineAt
       if (policyDeadline && Number.isFinite(policyDeadline)) {
-        const delay = Math.max(1, policyDeadline - nowMs())
-        waiter.timer = setTimeout(() => {
-          const current = tickets.get(ticketId)
-          if (!current || current.status !== 'pending') return
-          if (current.level === 'red') expire(ticketId)
-          else settlePolicy(ticketId)
-        }, delay)
+        // 计时器提前触发时状态机不会推进（窗口未到），必须重排到截止点；截止已过仍未推进则
+        // 把当前状态交还调用方，保证任何情况下 wait 都不会无限挂起（CI 曾因此整文件挂 24min）。
+        const arm = () => {
+          waiter.timer = setTimeout(() => {
+            const current = tickets.get(ticketId)
+            if (!current || current.status !== 'pending') return
+            let settled = false
+            try {
+              settled = current.level === 'red' ? expire(ticketId) : settlePolicy(ticketId)
+            } catch { /* timers must never crash the host */ }
+            if (settled) return
+            const still = tickets.get(ticketId)
+            if (!still || still.status !== 'pending') return
+            if (policyDeadline - nowMs() > 0) { arm(); return }
+            waiter.resolve({ ...publicTicket(still), outcome: still.deferredAt ? 'deferred' : 'timeout' })
+          }, Math.max(1, policyDeadline - nowMs()))
+        }
+        arm()
       }
       let set = waiters.get(ticketId)
       if (!set) { set = new Set(); waiters.set(ticketId, set) }

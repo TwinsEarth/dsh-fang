@@ -243,6 +243,34 @@ test('ask_user_choice honours explicit yellow/blue/green levels', async () => {
   } finally { drop(ctx, root) }
 })
 
+test('yellow wait re-arms when the timer fires early (clock skew) instead of hanging forever', async () => {
+  const registered = []
+  const tools = { register(definition) { registered.push(definition); return () => {} } }
+  const { ctx, root } = boot({ services: { tools } })
+  const realNow = Date.now
+  try {
+    const tool = registered.find((item) => item.name === 'ask_user_choice')
+    assert.ok(tool, 'ask_user_choice must be registered')
+    const exec = tool.execute({
+      question: 'early timer?', choices: [{ value: 'a', label: 'A' }], level: 'yellow', timeoutMinutes: 0.001,
+    }, { agent: { id: 'pm-early' } })
+    // 模拟 Windows CI 上计时器提前触发：计时器按真实时间到期，但此刻 nowMs() 比调度时刻回退
+    // 200ms（窗口尚未到期）。修复前 settlePolicy 会拒绝推进且不再重排 → waiter 永远悬挂。
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    Date.now = () => realNow() - 200
+    const result = await Promise.race([
+      exec,
+      new Promise((resolve) => setTimeout(() => resolve({ hung: true }), 4000)),
+    ])
+    assert.equal(result.hung, undefined, 'yellow wait must not hang when the timer fires early')
+    assert.equal(result.level, 'yellow')
+    assert.equal(result.outcome, 'deferred')
+  } finally {
+    Date.now = realNow
+    drop(ctx, root)
+  }
+})
+
 test('ingest accepts priority/risk and persists them with the ticket', () => {
   const { ctx, service, root } = boot()
   try {
