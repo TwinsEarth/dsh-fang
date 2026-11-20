@@ -1,3 +1,14 @@
+## Unreleased（v3.5.4 之后）
+
+**安全与静默错误修复（R28 / R23 / R13 / R14 / R15，按优先级）。**
+
+- **R28 `GET /fang/api/auth-token` bootstrap 收紧**：仅本机回环 peer + 同源 Origin（host:port 与 Host 完全一致）+ `Sec-Fetch-Site: same-origin|none`；拒绝跨站/同站/Origin 不匹配/非回环 peer，响应 `cache-control: no-store`。同机同用户进程仍可读 0600 token 文件——本层只收敛浏览器侧攻击面（`src/lib/http-auth.mjs`、`src/plugins/orchestrator.mjs`）。
+- **R23 pro 审批票参数绑定修复**：`POST /fang/api/contract/pro/approval` 必须携带 `params`（要审批的精确负载）；票据摘要 = `proParamsDigest(params)`（排除 `approvalTicket` 自身）；consume 侧强制校验摘要，无摘要旧票 `params-unbound` 一律失效，参数不符 `params-mismatch`（`src/lib/pro-delegation.mjs`、`src/plugins/orchestrator.mjs`、`tools/e2e.mjs`）。
+- **R13 镜像官方源 Promise 修复**：`mirror.getStatus()` 改为只读同步缓存，永不 `String()` 一个 Promise；新增 `refreshOfficialLatest()`（60s 缓存/in-flight 去重/异常捕获/保留上次成功版本），`GET /fang/api/mirror/status` 先 await 刷新缓存（`src/lib/mirror.mjs`、`src/plugins/orchestrator.mjs`）。
+- **R14 会话目录脱敏与服务形状**：`listSessions`/`getSession` 的 title/preview、digest/seed 文本统一走 `redact()`（email/token/手机/绝对路径）；服务补 `.list`/`.get` 别名（契约/编排器/adapter 读取的形状）；`src/compose.mjs` 补装载 `session-catalog`（`src/plugins/session-catalog.mjs`、`src/compose.mjs`）。
+- **R15 审计链失败不再静默**：`auditor.appendStrict()`（失败即 throw）与 `auditor.status()` 健康面；`append()` 失败累计失败数/限频告警/事件；orchestrator 的 `audit()` 记录失败并在 `GET /fang/api/status.audit.health` 暴露；pro 审批签发改为 **auditStrict**（审计写不进 → 503 拒绝签票）（`src/plugins/auditor.mjs`、`src/plugins/orchestrator.mjs`）。
+- 测试：`http-auth` R28 ×3、`pro-delegation` R23 ×3、`mirror` R13 ×N、`session-catalog` R14 ×3、`auditor` R15 ×2、`plugins-shape` compose 守护；e2e 新增「签票缺 params 400」「参数不符 params-mismatch」→ **125/125**。
+
 ## v3.5.4（2026-11-18 已发布）
 
 **UI 布局调整：母体&元主 与 决策中心&分身 左右对调；右列改为「分身在上 / 决策中心在下」。**

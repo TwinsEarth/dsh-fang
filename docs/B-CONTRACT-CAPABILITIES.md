@@ -134,11 +134,11 @@ evidence: /fang/api/sessions -> 200 (5 item(s))
 |---|---|---|
 | ① 专业版开关 | `contract.delegate.pro.enabled`（默认 **false**） | `contract-unsupported` + `detail.stage='pro-disabled'`，消息含 "default off" |
 | ② 逐项 allow | `contract.delegate.pro.allow`（默认空；每项独立显式授权） | `contract-unsupported` + `detail.stage='pro-not-allowed'`，消息指出应加入 allow 的能力名 |
-| ③ 每次调用审批票 | `POST /fang/api/contract/pro/approval`（Bearer 母体 token）签发**一次性/TTL**票；调用带 `params.approvalTicket`，绑定能力 + 参数摘要 | 无票 → `contract-approval-required` + `stage='approval-required'`；重放/过期/串用 → `contract-approval-required` + `stage='approval-invalid'`（reason 显式） |
+| ③ 每次调用审批票 | `POST /fang/api/contract/pro/approval`（Bearer 母体 token）签发**一次性/TTL**票；**必须携带 `params`**（要审批的精确负载，可为 null），票据在签发时绑定 `proParamsDigest(params)`；调用带 `params.approvalTicket`，摘要计算自动排除 ticket id 本身 | 无票 → `contract-approval-required` + `stage='approval-required'`；签票缺 params → HTTP 400 `approval-params-required`；参数不符 → `stage='approval-invalid'`（reason=`params-mismatch`）；无摘要旧票 → `reason='params-unbound'`；重放/过期/串用 → `stage='approval-invalid'`（reason 显式） |
 | ④ 审计 + 限额 | 每次尝试写 `contract-delegate` 审计（stage/outcome/limits，ticket 仅存哈希）；`maxConcurrent`（默认 1）/`timeoutMs`（默认 30s）/`maxOutputBytes`（默认 64KiB） | 超限 → `contract-rate-limited` / `contract-timeout` / `contract-invalid-request`，`stage='pro-limit-exceeded'` |
 | provider | 当前构建**没有** `code-runtime` provider → 四环全通过后仍返回 `contract-unavailable` + `detail.stage='provider-missing'`，**无副作用、不假成功** | — |
 
-可观测：`GET /fang/api/contract/pro/status`（Bearer）返回 `{enabled, allow, pendingTickets, limits}`。单测 `test/pro-delegation.test.mjs` 10 项；e2e 5 项（无票/签票/执行/重放/status）。
+可观测：`GET /fang/api/contract/pro/status`（Bearer）返回 `{enabled, allow, pendingTickets, limits}`。单测 `test/pro-delegation.test.mjs` 13 项（含 R23 参数绑定 3 项）；e2e 7 项（无票/缺 params/签票/参数不符/执行/重放/status）。
 
 ## 1. 现有契约能力（只读盘点）
 
