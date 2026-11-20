@@ -515,28 +515,42 @@ async function main() {
         JSON.stringify({ status: lspDenied.status, code: lspDenied.body?.error?.code ?? null, detail: lspDenied.body?.error?.detail ?? null }).slice(0, 240))
     }
     // B-8 激活链（专业版，e2e profile 显式开启 pro 并 allow fang.code.run）：
-    // ③ 无审批票 → approval-required；签发一次性票 → provider-missing（激活链验证通过）；
-    // 重放同一张票 → approval-invalid；pro status 可读。
+    // ③ 无审批票 → approval-required；签发票必须绑定 params（R23）→ provider-missing（激活链验证通过）；
+    // 参数不符 → params-mismatch；重放同一张票 → approval-invalid；pro status 可读。
     // P2：专业版能力默认关闭——fang.code.run 未激活时一律 contract-unsupported
-    const codeRun = await delegatedInvoke('fang.code.run', { code: 'console.log(1)' })
+    const PRO_APPROVED_CODE = 'console.log(1)'
+    const codeRun = await delegatedInvoke('fang.code.run', { code: PRO_APPROVED_CODE })
     check('B-8 pro code.run without approval ticket → contract-approval-required', codeRun.status === 200
       && codeRun.body?.ok === false && codeRun.body?.error?.code === 'contract-approval-required'
       && codeRun.body?.error?.detail?.stage === 'approval-required',
       JSON.stringify({ status: codeRun.status, code: codeRun.body?.error?.code ?? null, stage: codeRun.body?.error?.detail?.stage ?? null }).slice(0, 200))
-    const proApproval = await api('/fang/api/contract/pro/approval', {
+    const proApprovalUnbound = await api('/fang/api/contract/pro/approval', {
       method: 'POST', headers: contractAuth, body: JSON.stringify({ capability: 'fang.code.run', source: 'fork-e2e' }),
     })
+    check('B-8 pro approval without params is refused (R23: ticket must bind exact payload)', proApprovalUnbound.status === 400
+      && proApprovalUnbound.body?.ok === false && proApprovalUnbound.body?.code === 'approval-params-required',
+      JSON.stringify({ status: proApprovalUnbound.status, code: proApprovalUnbound.body?.code ?? null }).slice(0, 160))
+    const proApproval = await api('/fang/api/contract/pro/approval', {
+      method: 'POST', headers: contractAuth,
+      body: JSON.stringify({ capability: 'fang.code.run', source: 'fork-e2e', params: { code: PRO_APPROVED_CODE } }),
+    })
     const proTicket = proApproval.body?.approval?.id ?? ''
-    check('B-8 pro approval ticket issued (one-time, TTL)', proApproval.status === 200 && proApproval.body?.ok === true
+    check('B-8 pro approval ticket issued (one-time, TTL, params bound)', proApproval.status === 200 && proApproval.body?.ok === true
       && typeof proTicket === 'string' && proTicket.startsWith('pro_'),
       JSON.stringify({ status: proApproval.status, ok: proApproval.body?.ok ?? null }).slice(0, 160))
-    const codeRunWithTicket = await delegatedInvoke('fang.code.run', { code: 'console.log(1)', approvalTicket: proTicket })
+    const codeRunWrongParams = await delegatedInvoke('fang.code.run', { code: 'console.log(2)', approvalTicket: proTicket })
+    check('B-8 pro ticket rejects different params (R23: params-mismatch)', codeRunWrongParams.status === 200
+      && codeRunWrongParams.body?.ok === false && codeRunWrongParams.body?.error?.code === 'contract-approval-required'
+      && codeRunWrongParams.body?.error?.detail?.stage === 'approval-invalid'
+      && String(codeRunWrongParams.body?.error?.message ?? '').includes('params-mismatch'),
+      JSON.stringify({ status: codeRunWrongParams.status, message: String(codeRunWrongParams.body?.error?.message ?? '').slice(0, 120) }).slice(0, 200))
+    const codeRunWithTicket = await delegatedInvoke('fang.code.run', { code: PRO_APPROVED_CODE, approvalTicket: proTicket })
     check('B-8 pro code.run with ticket passes activation chain → provider-missing (no fake success)', codeRunWithTicket.status === 200
       && codeRunWithTicket.body?.ok === false && codeRunWithTicket.body?.error?.code === 'contract-unavailable'
       && codeRunWithTicket.body?.error?.detail?.stage === 'provider-missing'
       && codeRunWithTicket.body?.error?.detail?.activation === 'verified',
       JSON.stringify({ status: codeRunWithTicket.status, code: codeRunWithTicket.body?.error?.code ?? null, stage: codeRunWithTicket.body?.error?.detail?.stage ?? null }).slice(0, 200))
-    const codeRunReplay = await delegatedInvoke('fang.code.run', { code: 'console.log(1)', approvalTicket: proTicket })
+    const codeRunReplay = await delegatedInvoke('fang.code.run', { code: PRO_APPROVED_CODE, approvalTicket: proTicket })
     check('B-8 pro approval ticket is one-time (replay → approval-invalid)', codeRunReplay.status === 200
       && codeRunReplay.body?.ok === false && codeRunReplay.body?.error?.code === 'contract-approval-required'
       && codeRunReplay.body?.error?.detail?.stage === 'approval-invalid',

@@ -50,6 +50,22 @@ export function isLoopbackHost(host) {
   return match[1] === 'localhost' || match[1] === '127.0.0.1'
 }
 
+/** IPv4/IPv6 回环地址判定（含 IPv4-mapped ::ffff:127.0.0.1）。 */
+export function isLoopbackAddress(address) {
+  const raw = String(address ?? '').trim().toLowerCase()
+  if (!raw) return false
+  if (raw === '::1' || raw === '0:0:0:0:0:0:0:1') return true
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(raw)
+  if (mapped) return isLoopbackAddress(mapped[1])
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(raw)
+  if (v4) {
+    const octets = v4.slice(1).map((part) => Number(part))
+    if (octets.some((part) => part > 255)) return false
+    return octets[0] === 127
+  }
+  return false
+}
+
 /** Origin 是否允许（同源 loopback / dsh-app 壳 / 无 Origin）。 */
 export function isAllowedOrigin(origin) {
   const raw = String(origin ?? '').trim()
@@ -96,6 +112,26 @@ export function checkRequestAuth(req, options) {
   const site = header(req, 'sec-fetch-site')
   if (site && site !== 'same-origin' && site !== 'same-site' && site !== 'none') {
     return { ok: false, status: 403, code: 'cross-site' }
+  }
+  // v3.5.5（安全）：bootstrap 路由（/fang/api/auth-token）收紧为「仅同源页面 + 本机回环 peer」：
+  // 拒绝对端非回环、拒绝 same-site（localhost 不同端口也属 same-site）、Origin 的 host:port 必须
+  // 与 Host 完全一致。浏览器跨站页面读不到响应（CORS），再加 Host/Origin 绑定。
+  // 注意：同机同用户进程仍可自行读 0600 token 文件——本层只收紧浏览器侧攻击面，不宣称进程隔离。
+  if (options?.bootstrap === true) {
+    const peer = String(req?.socket?.remoteAddress ?? req?.connection?.remoteAddress ?? '').trim()
+    if (peer && !isLoopbackAddress(peer)) return { ok: false, status: 403, code: 'non-loopback-peer' }
+    if (site && site !== 'same-origin' && site !== 'none') return { ok: false, status: 403, code: 'cross-site' }
+    if (origin) {
+      const raw = String(origin).trim()
+      if (!(raw === 'dsh-app://app' || raw.startsWith('dsh-app://'))) {
+        let parsed = null
+        try { parsed = new URL(raw) } catch { return { ok: false, status: 403, code: 'bad-origin' } }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false, status: 403, code: 'bad-origin' }
+        if (String(parsed.host).toLowerCase() !== String(host).toLowerCase()) {
+          return { ok: false, status: 403, code: 'origin-mismatch' }
+        }
+      }
+    }
   }
   if (options?.publicRoute === true) return { ok: true }
   const given = header(req, AUTH_HEADER) || (() => {

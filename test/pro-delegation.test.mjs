@@ -13,6 +13,7 @@ import {
   normalizeProConfig,
   paramsDigest,
   proAuditRecord,
+  proParamsDigest,
   providerMissingResult,
   runProCapability,
 } from '../src/lib/pro-delegation.mjs'
@@ -61,24 +62,25 @@ test('B-8 gate ③: allowed capability requires a per-call approval ticket', () 
 
 test('B-8 tickets: one-time, TTL-bound, capability/params-bound', () => {
   let clock = 1000
+  const digest = paramsDigest({ code: 'one' })
   const store = createProApprovalStore({ now: () => clock, idFactory: () => 'pro_fixed' })
-  const issued = store.issue({ capability: PRO_CAPABILITY, ttlMs: 5000 })
+  const issued = store.issue({ capability: PRO_CAPABILITY, digest, ttlMs: 5000 })
   assert.equal(issued.ok, true)
   assert.equal(store.pendingCount(), 1)
 
-  const wrongCapability = store.consume({ id: 'pro_fixed', capability: 'fang.other' })
+  const wrongCapability = store.consume({ id: 'pro_fixed', capability: 'fang.other', digest })
   assert.equal(wrongCapability.ok, false)
   assert.equal(wrongCapability.reason, 'capability-mismatch')
 
-  const first = store.consume({ id: 'pro_fixed', capability: PRO_CAPABILITY })
+  const first = store.consume({ id: 'pro_fixed', capability: PRO_CAPABILITY, digest })
   assert.equal(first.ok, true)
-  const replay = store.consume({ id: 'pro_fixed', capability: PRO_CAPABILITY })
+  const replay = store.consume({ id: 'pro_fixed', capability: PRO_CAPABILITY, digest })
   assert.equal(replay.ok, false)
   assert.equal(replay.reason, 'ticket-consumed')
 
-  store.issue({ capability: PRO_CAPABILITY, ttlMs: 1000 })
+  store.issue({ capability: PRO_CAPABILITY, digest, ttlMs: 1000 })
   clock += 2000
-  const expired = store.consume({ id: 'pro_fixed', capability: PRO_CAPABILITY })
+  const expired = store.consume({ id: 'pro_fixed', capability: PRO_CAPABILITY, digest })
   assert.equal(expired.ok, false)
   assert.equal(expired.reason, 'ticket-expired')
   assert.equal(store.pendingCount(), 0)
@@ -138,4 +140,35 @@ test('B-8 audit: stage/limits/approval-digest recorded, raw ticket never logged'
   assert.equal(record.latencyMs, 13)
   assert.equal(record.limits.timeoutMs, 30000)
   assert.ok(record.approval && record.approval !== 'pro_secret_ticket', 'ticket id must be hashed')
+})
+
+// ── R23（v3.5.5）：审批票必须绑定“精确参数”，无摘要票一律失效 ──────────────────
+test('B-8 R23: proParamsDigest 排除 approvalTicket，等价于对其余参数取摘要', () => {
+  const params = { code: 'console.log(1)', approvalTicket: 'pro_ticket_1' }
+  const expected = paramsDigest({ code: 'console.log(1)' })
+  assert.equal(proParamsDigest(params), expected)
+  assert.notEqual(proParamsDigest(params), paramsDigest(params), 'ticket id must not feed the digest')
+  assert.equal(proParamsDigest(null), paramsDigest(null))
+})
+
+test('B-8 R23: 无摘要票（历史/被伪造）在 consume 侧 fail-closed', () => {
+  const store = createProApprovalStore({ idFactory: () => 'pro_unbound' })
+  store.issue({ capability: PRO_CAPABILITY, digest: '' })
+  const rejected = store.consume({ id: 'pro_unbound', capability: PRO_CAPABILITY, digest: paramsDigest({ code: 'x' }) })
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.reason, 'params-unbound')
+  assert.equal(rejected.stage, PRO_STAGE.APPROVAL_INVALID)
+})
+
+test('B-8 R23: checkProGate 返回的 digest 与签发票一致（含 approvalTicket 时也不漂移）', () => {
+  const config = normalizeProConfig({ enabled: true, allow: [PRO_CAPABILITY] })
+  const store = createProApprovalStore({ idFactory: () => 'pro_gate_bound' })
+  const paramsWithoutTicket = { code: 'console.log(42)' }
+  const digest = proParamsDigest(paramsWithoutTicket)
+  store.issue({ capability: PRO_CAPABILITY, digest })
+  const gate = checkProGate({ method: PRO_CAPABILITY, config, ticketId: 'pro_gate_bound', params: { ...paramsWithoutTicket, approvalTicket: 'pro_gate_bound' } })
+  assert.equal(gate.ok, true)
+  assert.equal(gate.digest, digest)
+  const consumed = store.consume({ id: 'pro_gate_bound', capability: PRO_CAPABILITY, digest: gate.digest })
+  assert.equal(consumed.ok, true)
 })

@@ -55,6 +55,17 @@ export function paramsDigest(params) {
   return crypto.createHash('sha256').update(text).digest('hex').slice(0, 16)
 }
 
+/**
+ * Approval-bound params digest. The one-time ticket id is itself part of the call params
+ * (`approvalTicket`), so it must be excluded — otherwise nothing could ever match the
+ * digest computed at issue time. Returns the digest of the remaining payload.
+ */
+export function proParamsDigest(params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return paramsDigest(params ?? null)
+  const { approvalTicket: _ticket, ...rest } = params
+  return paramsDigest(rest)
+}
+
 const digestTicket = (ticketId) => crypto.createHash('sha256').update(String(ticketId ?? '')).digest('hex').slice(0, 12)
 
 /**
@@ -84,8 +95,10 @@ export function createProApprovalStore({ now = () => Date.now(), idFactory } = {
       if (ticket.consumedAt !== null) return { ok: false, reason: 'ticket-consumed', stage: PRO_STAGE.APPROVAL_INVALID }
       if (ticket.expiresAt <= now()) { tickets.delete(ticket.id); return { ok: false, reason: 'ticket-expired', stage: PRO_STAGE.APPROVAL_INVALID } }
       if (ticket.capability !== String(capability ?? '')) return { ok: false, reason: 'capability-mismatch', stage: PRO_STAGE.APPROVAL_INVALID }
-      if (ticket.source && source && ticket.source !== String(source)) return { ok: false, reason: 'source-mismatch', stage: PRO_STAGE.APPROVAL_INVALID }
-      if (ticket.digest && ticket.digest !== String(digest ?? '')) return { ok: false, reason: 'params-mismatch', stage: PRO_STAGE.APPROVAL_INVALID }
+      // v3.5.5（安全）：参数摘要必须绑定且在消费时强制校验；旧的无摘要票一律失效（fail-closed）。
+      if (!ticket.digest) return { ok: false, reason: 'params-unbound', stage: PRO_STAGE.APPROVAL_INVALID }
+      if (ticket.digest !== String(digest ?? '')) return { ok: false, reason: 'params-mismatch', stage: PRO_STAGE.APPROVAL_INVALID }
+      if (ticket.source && ticket.source !== String(source ?? '')) return { ok: false, reason: 'source-mismatch', stage: PRO_STAGE.APPROVAL_INVALID }
       ticket.consumedAt = now()
       return { ok: true, ticket: { ...ticket } }
     },
@@ -112,7 +125,7 @@ export function checkProGate({ method, config, ticketId, source, params } = {}) 
   if (!ticketId) {
     return { ok: false, code: DELEGATE_ERROR.APPROVAL_REQUIRED, stage: PRO_STAGE.APPROVAL_REQUIRED, message: 'per-call approval ticket required: issue one via POST /fang/api/contract/pro/approval and pass params.approvalTicket', digest: paramsDigest(params) }
   }
-  return { ok: true, pro, stage: 'approval-verified', digest: paramsDigest(params), ticketDigest: digestTicket(ticketId) }
+  return { ok: true, pro, stage: 'approval-verified', digest: proParamsDigest(params), ticketDigest: digestTicket(ticketId) }
 }
 
 /** Audit record for every pro attempt (stage/outcome/limits; ticket id is hashed, not logged). */

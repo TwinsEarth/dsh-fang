@@ -41,8 +41,26 @@ export const UPGRADE_STAGE = Object.freeze({
   SWAPPING: 'swapping', FINALIZING: 'finalizing', DONE: 'done', FAILED: 'failed',
 })
 
+/** 官方最新版缓存默认有效期：60 秒内复用上次结果，不重复请求官方源（R13）。 */
+export const OFFICIAL_LATEST_MAX_AGE_MS = 60_000
+
 const HOUR_MS = 3_600_000
 const BACKUP_ID_RE = /^\d{10,16}-[a-z0-9]{4,12}$/
+
+/** 错误对象 → 可读文本（绝不把 Promise/对象 String 成 "[object Promise]")。 */
+function formatError(error) {
+  if (error instanceof Error && typeof error.message === 'string' && error.message.length > 0) return error.message
+  if (typeof error === 'string' && error.length > 0) return error
+  return 'unknown error'
+}
+
+/** 描述官方源非法返回值的类型（诊断用，不泄漏 "[object Promise]")。 */
+function describeVersionValue(value) {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  if (typeof value === 'object') return 'object'
+  return typeof value
+}
 
 /** @param {unknown} value */
 function normalizeIntervalHours(value) {
@@ -92,6 +110,12 @@ export class MirrorManager {
     this.logger = options.logger ?? {}
     this.now = typeof options.now === 'function' ? options.now : () => Date.now()
     this.usageProvider = typeof options.usageProvider === 'function' ? options.usageProvider : null
+    // R13：官方最新版缓存。getStatus() 只同步读它，刷新走 refreshOfficialLatest()。
+    //   version   —— 最近一次成功取到的版本（失败时保留上次成功值，绝不存 Promise）；
+    //   checkedAt —— 最近一次尝试刷新的时间（用于 maxAge 去重，未尝试过为 null）；
+    //   error     —— 最近一次失败原因（成功为 null）。
+    this.officialLatest = { version: null, checkedAt: null, error: null }
+    this.officialLatestInFlight = null
     // v3.0.9：升级成功后的副作用钩子（由协调器注入；异步触发，不阻塞 upgrade 返回）
     this.postUpgradeHook = typeof options.postUpgradeHook === 'function' ? options.postUpgradeHook : null
     // v3.0.3：客户端升级后的兼容性门禁；失败时保持子插件关闭（默认策略）
@@ -169,27 +193,114 @@ export class MirrorManager {
 
   /**
    * 完整状态（供 UI / 路由）。
+   *
+   * R13：本方法保持同步、只读内存缓存，**绝不**直接调用异步的
+   * officialSource.getLatestVersion()。旧实现直接 `String(getLatestVersion())`，async 源会被
+   * 字符串化成 "[object Promise]"、updateAvailable 恒为 true，且未被 }catch 的 rejection
+   * 会变成未处理拒绝（可导致进程崩溃）。官方最新版由 refreshOfficialLatest() 异步刷新，
+   * 路由在返回状态前 await 它即可。
    * @returns {Record<string, unknown>}
    */
   getStatus() {
     this.ensureLayoutWithoutRecursion()
     const meta = this.readMeta()
-    let latest = null
-    if (this.officialSource !== null && typeof this.officialSource.getLatestVersion === 'function') {
-      try { latest = String(this.officialSource.getLatestVersion() ?? null) } catch { latest = null }
-    }
+    const latest = this.officialLatest.version
     const usage = this.usageProvider === null ? {} : (this.usageProvider() ?? {})
     return {
       ok: true,
       meta,
       currentVersion: meta.version,
+      // 兼容字段：缓存中的官方最新版（无缓存即 null），永远是字符串或 null。
       officialLatest: latest,
       updateAvailable: latest !== null && latest !== meta.version,
+      officialSource: {
+        latest,
+        checkedAt: this.officialLatest.checkedAt,
+        error: this.officialLatest.error,
+      },
       backups: this.listBackups(),
       activeEssenceCount: Number(usage.activeEssenceCount ?? 0) || 0,
       activeSessionCount: Number(usage.activeSessionCount ?? 0) || 0,
       diskUsageBytes: dirSize(this.mirrorRoot),
     }
+  }
+
+  /**
+   * 官方最新版缓存快照（同步、不发起请求）。
+   * @param {boolean} [refreshed] 本次调用是否真的请求了官方源
+   * @returns {{latest: string|null, checkedAt: number|null, error: string|null, refreshed: boolean}}
+   */
+  officialSourceStatus(refreshed = false) {
+    return {
+      latest: this.officialLatest.version,
+      checkedAt: this.officialLatest.checkedAt,
+      error: this.officialLatest.error,
+      refreshed: refreshed === true,
+    }
+  }
+
+  /**
+   * 刷新官方最新版缓存：await 官方源、校验 string、catch 一切异常，**绝不抛出**。
+   * - maxAgeMs（默认 60s）内的缓存直接复用，不重复请求；
+   * - 并发调用共享同一个 in-flight 请求；
+   * - 失败只写 error（并保留上次成功版本），不会产生未处理的 Promise rejection。
+   * @param {{maxAgeMs?: number}} [options] maxAgeMs=0 表示强制刷新
+   * @returns {Promise<{latest: string|null, checkedAt: number|null, error: string|null, refreshed: boolean}>}
+   */
+  async refreshOfficialLatest(options = {}) {
+    const requestedMaxAge = Number(options?.maxAgeMs)
+    const maxAgeMs = Number.isFinite(requestedMaxAge) && requestedMaxAge >= 0
+      ? requestedMaxAge
+      : OFFICIAL_LATEST_MAX_AGE_MS
+    if (this.officialLatest.checkedAt !== null && this.now() - this.officialLatest.checkedAt < maxAgeMs) {
+      return this.officialSourceStatus(false)
+    }
+    if (this.officialLatestInFlight !== null) {
+      try { return await this.officialLatestInFlight } catch { return this.officialSourceStatus(false) }
+    }
+    const pending = this.fetchOfficialLatest()
+    this.officialLatestInFlight = pending
+    try {
+      return await pending
+    } finally {
+      if (this.officialLatestInFlight === pending) this.officialLatestInFlight = null
+    }
+  }
+
+  /**
+   * 真正请求官方源并写入缓存；仅供 refreshOfficialLatest 在去重后调用，自身也不抛。
+   * @returns {Promise<{latest: string|null, checkedAt: number|null, error: string|null, refreshed: boolean}>}
+   */
+  async fetchOfficialLatest() {
+    const previous = this.officialLatest
+    let version = null
+    let error = null
+    try {
+      const source = this.officialSource
+      if (source === null || typeof source.getLatestVersion !== 'function') {
+        error = 'official-source-unavailable'
+      } else {
+        // 同步返回与 async 返回统一 await；getLatestVersion() 自身抛错也被这里 catch。
+        const raw = await Promise.resolve(source.getLatestVersion())
+        if (typeof raw === 'string' && raw.trim().length > 0) {
+          version = raw.trim()
+        } else {
+          error = `official-source-invalid-version: expected non-empty string, received ${describeVersionValue(raw)}`
+        }
+      }
+    } catch (cause) {
+      error = `official-source-failed: ${formatError(cause)}`
+    }
+    this.officialLatest = {
+      // 失败时保留上次成功版本：已知的最新版仍然有效，UI 可同时展示 error。
+      version: version !== null ? version : previous.version,
+      checkedAt: this.now(),
+      error,
+    }
+    if (error !== null) {
+      try { this.logger?.warn?.(`[mirror] official latest unavailable: ${error}`) } catch { /* 日志失败不影响状态 */ }
+    }
+    return this.officialSourceStatus(true)
   }
 
   /** getStatus 内部调用；只补齐目录，避免递归。 */
