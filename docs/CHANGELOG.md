@@ -1,6 +1,8 @@
-## Unreleased（v3.5.4 之后）
+## v3.5.5（2026-11-21 已发布）
 
 **安全与静默错误修复（R28 / R23 / R13 / R14 / R15，按优先级）。**
+
+### 修复
 
 - **R28 `GET /fang/api/auth-token` bootstrap 收紧**：仅本机回环 peer + 同源 Origin（host:port 与 Host 完全一致）+ `Sec-Fetch-Site: same-origin|none`；拒绝跨站/同站/Origin 不匹配/非回环 peer，响应 `cache-control: no-store`。同机同用户进程仍可读 0600 token 文件——本层只收敛浏览器侧攻击面（`src/lib/http-auth.mjs`、`src/plugins/orchestrator.mjs`）。
 - **R23 pro 审批票参数绑定修复**：`POST /fang/api/contract/pro/approval` 必须携带 `params`（要审批的精确负载）；票据摘要 = `proParamsDigest(params)`（排除 `approvalTicket` 自身）；consume 侧强制校验摘要，无摘要旧票 `params-unbound` 一律失效，参数不符 `params-mismatch`（`src/lib/pro-delegation.mjs`、`src/plugins/orchestrator.mjs`、`tools/e2e.mjs`）。
