@@ -21,7 +21,9 @@ const arg = (name, fallback = '') => {
 }
 const asJson = argv.includes('--json')
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..')
-const CONTRACT_REPO = arg('contract-repo', 'E:\\GPT\\dsh-fang-contract')
+// Migration 2026-11-21: the contract repo is a local sub-repo at <REPO>/contract (git-ignored),
+// so the default stays location-independent; --contract-repo still overrides it.
+const CONTRACT_REPO = arg('contract-repo', path.join(REPO, 'contract'))
 
 const checks = []
 const check = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail ?? '') })

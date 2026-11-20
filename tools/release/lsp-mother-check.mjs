@@ -21,6 +21,7 @@ const arg = (name, fallback = '') => {
   const index = argv.indexOf(`--${name}`)
   return index >= 0 ? String(argv[index + 1] ?? '') : fallback
 }
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..')
 const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const profileDir = path.resolve(arg('profile-dir', path.join(dshHome, 'profiles', 'desktop')))
 const dataDir = path.resolve(arg('data-dir', path.join(dshHome, 'fang', path.basename(profileDir))))
@@ -57,7 +58,7 @@ const bundleDir = path.join(profileDir, 'node_modules', '@twinsearth', 'dsh-fang
 const bundleInstalled = fs.existsSync(path.join(bundleDir, 'package.json'))
 const bundleListed = profileBundles.includes(bundleName)
 if (!bundleInstalled) {
-  record('lsp-provider bundle installed', 'TODO', `missing ${bundleDir} — Plugins → Add plugin → select E:\\GPT\\dsh-fang\\lsp-provider`)
+  record('lsp-provider bundle installed', 'TODO', `missing ${bundleDir} — Plugins → Add plugin → select ${path.join(repoRoot, 'lsp-provider')}`)
 } else {
   const bundlePatchFile = path.join(bundleDir, 'cordis.patch.yml')
   const patchText = fs.existsSync(bundlePatchFile) ? fs.readFileSync(bundlePatchFile, 'utf8') : ''

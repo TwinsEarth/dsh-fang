@@ -93,10 +93,10 @@ export function selectFilesFromManifest(pkg) {
   return [...out].sort()
 }
 
-/** token file helpers: env first, then E:\GPT\.secrets\<name>.txt (never printed). */
+/** token file helpers: env first, then <ROOT>/.secrets/<name>.txt, user .secrets, legacy old-root .secrets (never printed). */
 export function readSecret(envName, fileName) {
   if (process.env[envName]) return process.env[envName].trim()
-  for (const p of [path.join(process.env.USERPROFILE ?? '', '.secrets', fileName), `E:/GPT/.secrets/${fileName}`]) {
+  for (const p of [path.join(ROOT, '.secrets', fileName), path.join(process.env.USERPROFILE ?? '', '.secrets', fileName), `E:/GPT/.secrets/${fileName}`]) {
     try {
       const t = fs.readFileSync(p, 'utf8').trim()
       if (t) return t

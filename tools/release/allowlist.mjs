@@ -13,7 +13,8 @@ const fail = (code, file, detail = '') => findings.push({ code, file, detail })
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (['.git', 'node_modules', 'dist', '.tmp'].includes(entry.name)) continue
+    // Local-only areas (migration 2026-11-21): never part of the repo/package, so never scanned.
+    if (['.git', 'node_modules', 'dist', '.tmp', 'sessions', 'scratch', 'runtime', 'archive', '.secrets', 'contract'].includes(entry.name)) continue
     const abs = path.join(dir, entry.name)
     if (entry.isDirectory()) walk(abs, out)
     else out.push(abs)
