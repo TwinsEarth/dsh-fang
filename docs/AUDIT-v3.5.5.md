@@ -26,3 +26,8 @@
 - R15 的 strict 只覆盖安全关键路径（pro 签票）；其余 `audit()` 保持不抛但失败可见；
 - 母体正式 profile 的 LSP 仍未安装；fork-local 默认关闭；
 - 三方发布手动执行（self-hosted runner 离线）。
+
+## 4. 发布（2026-11-21）
+
+- 三方发布完成：annotated tag `v3.5.5`（tag object `392c8470…` → commit `20cfe3bcc4`）、GitHub Release（3 资产，tgz 689,970 B，sha256 `7a4edc15…`）、npm `@twinsearth/fang-dsh-plugin@3.5.5`（`latest=3.5.5`，shasum `62468e93…`）；
+- 发布 PR #133 经 CI 8/8 绿后 squash 合并；preflight --e2e 全绿（1300 tests / e2e 125/125）。
