@@ -51,7 +51,7 @@ import {
 } from '../lib/contract-delegation.mjs'
 import {
   PRO_CAPABILITIES, PRO_STAGE, checkProGate, createProApprovalStore, normalizeProConfig,
-  proAuditRecord, providerMissingResult, runProCapability,
+  proAuditRecord, proParamsDigest, providerMissingResult, runProCapability,
 } from '../lib/pro-delegation.mjs'
 import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
 import { LSP_PROVIDER_TEST, advertisedActionsFromSeam, checkWorkspaceRoot, collectForkWorkspaceRoots, describeLspProvider, lspAuditRecord, queryMotherLsp, resolveLspAllowedRoots } from '../lib/lsp-provider.mjs'
@@ -487,9 +487,66 @@ export function apply(ctx, config) {
     } catch { return null }
   }
   const businessProducers = createBusinessProducers({ submit: (spec) => raiseDecisionTicket(spec) })
+  // R15：审计失败不再完全静默——累计失败数 + 限频告警，并暴露在 /fang/api/status.audit。
+  // 失败语义保持不变（audit() 不抛：审计不可用不能把普通业务路径打挂）；安全关键路径用 auditStrict()。
+  let auditFailures = 0
+  let lastAuditError = null
+  let lastAuditWarnAt = 0
+  const recordAuditFailure = (kind, error) => {
+    auditFailures += 1
+    lastAuditError = String(error?.message ?? error ?? 'audit-append-failed').slice(0, 300)
+    const now = Date.now()
+    if (now - lastAuditWarnAt >= 60_000) {
+      lastAuditWarnAt = now
+      try { ctx.logger?.warn?.(`[fang] 审计写入失败（kind=${String(kind)}）：${lastAuditError}`) } catch { /* logger optional */ }
+    }
+  }
   const audit = (kind, data) => {
-    try { safeGet(SERVICE.auditor)?.append(kind, data) } catch { /* auditor optional */ }
+    try {
+      const auditor = safeGet(SERVICE.auditor)
+      if (auditor && typeof auditor.append === 'function') {
+        const record = auditor.append(kind, data)
+        if (record === null || record === undefined) throw new Error('audit-append-failed')
+      }
+    } catch (error) {
+      recordAuditFailure(kind, error)
+    }
     try { bus.emit('fang/audit', { kind, data }) } catch { /* ignore */ }
+  }
+  /**
+   * 安全关键路径的审计：必须确实写入链，否则抛错让调用方 fail-closed
+   * （R15：静默丢失比拒绝更危险；审计服务缺失时仍允许“跳过”，与旧部署兼容）。
+   */
+  const auditStrict = (kind, data) => {
+    const auditor = safeGet(SERVICE.auditor)
+    if (!auditor) return { ok: true, skipped: true }
+    let record = null
+    try {
+      if (typeof auditor.appendStrict === 'function') record = auditor.appendStrict(kind, data)
+      else {
+        record = typeof auditor.append === 'function' ? auditor.append(kind, data) : null
+        if (record === null || record === undefined) throw new Error('audit-append-failed')
+      }
+    } catch (error) {
+      recordAuditFailure(kind, error)
+      throw error instanceof Error ? error : new Error(String(error))
+    }
+    try { bus.emit('fang/audit', { kind, data }) } catch { /* ignore */ }
+    return { ok: true, record }
+  }
+  /** 审计健康快照（只读）：auditor 自述 + 本进程观察到的失败。 */
+  const auditHealth = () => {
+    let auditorStatus = null
+    try {
+      const auditor = safeGet(SERVICE.auditor)
+      if (auditor && typeof auditor.status === 'function') auditorStatus = auditor.status()
+    } catch { auditorStatus = null }
+    return {
+      ...(auditorStatus ?? {}),
+      processFailures: auditFailures,
+      processLastError: lastAuditError,
+      ok: auditFailures === 0 && (auditorStatus === null || auditorStatus.ok !== false),
+    }
   }
   const persist = () => {
     try {
@@ -2005,7 +2062,18 @@ export function apply(ctx, config) {
         tasks: { total: list.length, ready, running, max: cfg.maxForks, list },
         // v1 兼容视图：Client 徽标与旧调用方仍读 forks.*
         forks: { total: list.length, running: ready + running, max: cfg.maxForks, list },
-        audit: { checkedAt: bootState.at, ok: bootState.ok, findings: bootState.findings },
+        audit: (() => {
+          const health = auditHealth()
+          return {
+            checkedAt: bootState.at,
+            ok: bootState.ok === true && health.ok !== false,
+            findings: bootState.findings,
+            // R15 健康面：链完整性/追加失败次数/最后失败时间；UI 与运维据此发现“静默丢失”。
+            health,
+            failures: health.processFailures,
+            lastError: health.processLastError,
+          }
+        })(),
         commercial: { ...commercialHooks },
         services: {
           forker: !!safeGet(SERVICE.forker),
@@ -3363,6 +3431,7 @@ export function apply(ctx, config) {
           const decision = checkRequestAuth(req, {
             token: authToken,
             publicRoute: authToken.length === 0 || routeOptions?.public === true,
+            bootstrap: routeOptions?.bootstrap === true,
           })
           if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
           if (req.method !== method) {
@@ -3386,6 +3455,7 @@ export function apply(ctx, config) {
           const decision = checkRequestAuth(req, {
             token: authToken,
             publicRoute: authToken.length === 0 || routeOptions?.public === true,
+            bootstrap: routeOptions?.bootstrap === true,
           })
           if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
           const allow = Object.keys(handlers)
@@ -3428,10 +3498,15 @@ export function apply(ctx, config) {
         }
       }
 
-      // 浏览器面板 bootstrap：同源读取 token（Host/Origin 已校验；不跨站）
-      route('GET', `${prefix}/api/auth-token`, (req, res) => json(res, 200, {
-        ok: true, token: authToken,
-      }), { public: true })
+      // 浏览器面板 bootstrap：同源读取 token（Host/Origin 已校验；v3.5.5 起 bootstrap 收紧：
+      // 仅回环 peer + 同源 Origin（host:port 完全一致）+ Sec-Fetch-Site same-origin/none）。
+      route('GET', `${prefix}/api/auth-token`, (req, res) => {
+        try {
+          res.setHeader?.('cache-control', 'no-store')
+          res.setHeader?.('vary', 'Origin')
+        } catch { /* fake res */ }
+        return json(res, 200, { ok: true, token: authToken })
+      }, { public: true, bootstrap: true })
 
       // 母体不可删除：即使有人直接打接口也返回 403，而不是“没有这个路由”。
       // 仅 POST（allow-list 只允许 GET/POST；DELETE 语义由该 403 表达）。
@@ -3556,10 +3631,31 @@ export function apply(ctx, config) {
           if (!PRO_CAPABILITIES.includes(capability)) return json(res, 200, { ok: false, code: DELEGATE_ERROR.UNSUPPORTED, stage: 'not-pro', message: `not a pro capability: ${capability || '(empty)'}` })
           if (proCfg.enabled !== true) return json(res, 200, { ok: false, code: DELEGATE_ERROR.UNSUPPORTED, stage: PRO_STAGE.DISABLED, message: 'pro capability disabled (default off): enable contract.delegate.pro.enabled first' })
           if (!proCfg.allow.includes(capability)) return json(res, 200, { ok: false, code: DELEGATE_ERROR.UNSUPPORTED, stage: PRO_STAGE.NOT_ALLOWED, message: `pro capability not activated: add '${capability}' to contract.delegate.pro.allow` })
-          const issued = proApprovals.issue({ capability, source: String(body.source ?? '').slice(0, 120), digest: '', ttlMs: proCfg.approvalTtlMs })
+          // v3.5.5（R23 安全）：审批票必须绑定“这一次调用的精确参数”。调用方必须显式提供 params
+          // （可为 null）；未绑定参数的票在 consume 侧会被 params-unbound 拒绝，这里提前给出可读错误。
+          if (!Object.prototype.hasOwnProperty.call(body, 'params')) {
+            return json(res, 400, {
+              ok: false,
+              code: 'approval-params-required',
+              stage: 'approval-params-required',
+              message: 'approval ticket must bind the exact delegated params: send "params" (may be null) representing the payload to be approved',
+            })
+          }
+          const digest = proParamsDigest(body.params)
+          const issued = proApprovals.issue({ capability, source: String(body.source ?? '').slice(0, 120), digest, ttlMs: proCfg.approvalTtlMs })
           if (issued.ok !== true) return json(res, 200, { ok: false, code: DELEGATE_ERROR.INVALID, stage: 'invalid-request', message: String(issued.reason ?? 'cannot issue approval') })
-          try { audit('contract-delegate', proAuditRecord({ method: capability, source: body.source, outcome: 'approval-issued', stage: 'approval-issued', ticketId: issued.ticket.id, limits: proCfg })) } catch { /* audit optional */ }
-          return json(res, 200, { ok: true, approval: { id: issued.ticket.id, capability: issued.ticket.capability, source: issued.ticket.source, expiresAt: issued.ticket.expiresAt } })
+          // 审计是审批链的硬一环：账本写不进去就不签发（避免“批了但无证据”）。
+          try {
+            auditStrict('contract-delegate', proAuditRecord({ method: capability, source: body.source, outcome: 'approval-issued', stage: 'approval-issued', ticketId: issued.ticket.id, limits: proCfg }))
+          } catch (error) {
+            return json(res, 503, {
+              ok: false,
+              code: 'audit-unavailable',
+              stage: 'audit-unavailable',
+              message: `refusing to issue approval without an auditable ledger: ${String(error?.message ?? error).slice(0, 200)}`,
+            })
+          }
+          return json(res, 200, { ok: true, approval: { id: issued.ticket.id, capability: issued.ticket.capability, source: issued.ticket.source, expiresAt: issued.ticket.expiresAt, paramsDigest: issued.ticket.digest } })
         })
         route('GET', `${contractPath}/pro/status`, (req, res) => {
           if (!contractCfg.token) return json(res, 503, { ok: false, code: 'contract-token-required' })
@@ -4158,7 +4254,10 @@ export function apply(ctx, config) {
         return json(res, 200, out)
       })
       // v2.11.0 母体镜像管理
-      route('GET', `${prefix}/api/mirror/status`, (req, res) => {
+      route('GET', `${prefix}/api/mirror/status`, async (req, res) => {
+        // R13 修复：官方源版本是 async，先刷新缓存（RL 60s），getStatus 只读缓存，
+        // 避免 "[object Promise]" 与未处理 rejection。
+        try { await mirrorManager.refreshOfficialLatest?.({ maxAgeMs: 60_000 }) } catch { /* 官方源不可用不阻塞镜像状态 */ }
         const payload = mirrorService.status()
         const ifNoneMatch = req && req.headers ? req.headers['if-none-match'] : undefined
         const out = buildMirrorStatusResponse(payload, ifNoneMatch)

@@ -28,6 +28,7 @@ import {
   AUDIT,
   SERVICE,
   appendChained,
+  bus,
   ensureDir,
   iso,
   newId,
@@ -62,6 +63,17 @@ export const Config = z
   .description('fang-auditor 配置')
 
 const msgOf = (e) => String(e && e.message ? e.message : e)
+
+// ───────── R15：append 失败的可观测面 ─────────
+// append() 失败在过去只把原因存进 lastError 并返回 null，调用方几乎都忽略，
+// 于是审计链断掉既没有告警也没有健康面。现在失败会：
+//   * 累加 failureCount / 记录 lastFailureAt（lastError 保留原 string 语义）；
+//   * 通过 logger.warn 告警（60s 限频，避免连续失败刷屏）；
+//   * 发出 AUDIT_APPEND_FAILED_EVENT 事件（ctx.bus 优先，缺失时回落 kernel 进程级 bus）。
+// append() 的返回语义仍是“记录或 null”；安全关键调用点改用 appendStrict()（失败即 throw）。
+export const AUDIT_APPEND_FAILED_EVENT = 'fang/audit-append-failed'
+/** 告警限频窗口：失败可能成串发生，60s 内最多一条 warn。 */
+const FAILURE_WARN_INTERVAL_MS = 60_000
 
 /** A restart was opened by the guard (requested or already committed). */
 function isRestartOpen(rec) {
@@ -99,6 +111,10 @@ export function apply(ctx, config) {
   // Fail-closed after a chain check failed: appending on top of a broken chain would
   // launder the tampering (the kernel appendChained only refuses an unparsable TAIL).
   let integrityBroken = false
+  // R15 失败状态（累积）：次数、最后失败时间；lastError 语义保持不变。
+  let failureCount = 0
+  let lastFailureAt = null
+  let lastWarnAt = 0 // 0 = 第一次失败必定告警
 
   /** Tolerant JSONL read: bad lines are skipped here and reported by verify(). */
   const readAll = () => {
@@ -117,32 +133,102 @@ export function apply(ctx, config) {
   }
 
   /**
+   * R15：发出“审计追加失败”事件。ctx.bus 优先（隔离/测试可注入）；真实 cordis 上下文
+   * 没有 ctx.bus（其他插件都直接 import kernel 的进程级 bus），因此缺失时回落到同一个
+   * kernel bus —— 事件才能真正到达 orchestrator / 健康面。任何异常都不得影响 append 语义。
+   */
+  const emitAppendFailed = (kind, message, at) => {
+    const payload = { kind: typeof kind === 'string' ? kind.trim() : null, error: message, at }
+    try {
+      if (ctx.bus && typeof ctx.bus.emit === 'function') {
+        ctx.bus.emit(AUDIT_APPEND_FAILED_EVENT, payload)
+        return
+      }
+    } catch {
+      /* ctx.bus 只做通知：监听器/实现抛错不得影响 append() 的返回语义 */
+    }
+    try {
+      bus.emit(AUDIT_APPEND_FAILED_EVENT, payload)
+    } catch {
+      /* bus 缺失（极端隔离环境）时跳过：可观测性永远不能反噬审计写入 */
+    }
+  }
+
+  /**
+   * 记录一次失败的 append（R15）：累加失败状态、限频告警、发事件，然后返回 null，
+   * 让 append() 保持“记录或 null”的旧返回语义。
+   */
+  const recordFailure = (kind, error) => {
+    const message = msgOf(error)
+    const at = iso(nowMs())
+    failureCount += 1
+    lastError = message
+    lastFailureAt = at
+    const now = nowMs()
+    if (now - lastWarnAt >= FAILURE_WARN_INTERVAL_MS) {
+      lastWarnAt = now
+      try {
+        ctx.logger?.warn?.(`[fang-auditor] 审计追加失败（kind=${String(kind)}）：${message}`)
+      } catch {
+        /* logger 失败不得影响审计返回语义 */
+      }
+    }
+    emitAppendFailed(kind, message, at)
+    return null
+  }
+
+  /**
+   * 真正写一条链式记录：失败一律 throw（由 append / appendStrict 决定吞还是抛）。
+   * `at` / `seq` 自动填充；`data` 在冲突时优先（调用方可记录分身自己的 pid）。
+   * @returns {object} the appended record (including hash/prevHash/seq).
+   */
+  const writeRecord = (kind, data) => {
+    if (typeof kind !== 'string' || !kind.trim()) {
+      throw new Error('invalid-kind: audit kind must be a non-empty string')
+    }
+    if (integrityBroken) {
+      // An unparsable/篡改过的链不允许续写（否则等于帮着掩盖篡改）。
+      throw new Error('ledger-integrity-broken: refusing to append on top of a broken chain')
+    }
+    ensureDir(path.dirname(ledgerFile))
+    const body = {
+      kind: kind.trim(),
+      pid: process.pid,
+      at: iso(nowMs()),
+      ...(data ?? {}),
+      inst: (data && data.inst) || instanceId,
+    }
+    const chain = appendChained(ledgerFile, body)
+    lastError = null
+    return { ...body, ...chain }
+  }
+
+  /**
    * Append one chained record. `at` and `seq` are filled automatically; `data` wins on
    * collision (so callers can record a fork's own pid via data.pid).
+   * 失败仍然返回 null（兼容所有旧调用方），但失败状态/告警/事件不再是静默的（R15）。
    * @returns {object|null} the appended record, or null when the ledger tail is unusable.
    */
   const append = (kind, data) => {
-    if (typeof kind !== 'string' || !kind.trim()) return null
-    if (integrityBroken) {
-      lastError = 'ledger-integrity-broken: refusing to append on top of a broken chain'
-      return null
-    }
     try {
-      ensureDir(path.dirname(ledgerFile))
-      const body = {
-        kind: kind.trim(),
-        pid: process.pid,
-        at: iso(nowMs()),
-        ...(data ?? {}),
-        inst: (data && data.inst) || instanceId,
-      }
-      const chain = appendChained(ledgerFile, body)
-      lastError = null
-      return { ...body, ...chain }
+      return writeRecord(kind, data)
     } catch (e) {
       // An unparsable tail is deliberately NOT overwritten (that would hide tampering).
-      lastError = msgOf(e)
-      return null
+      return recordFailure(kind, e)
+    }
+  }
+
+  /**
+   * R15：同 append()，但失败时 throw 而不是返回 null —— 供安全关键路径使用，
+   * 保证“审计写不进去”不会被调用方无声吞掉。
+   * @returns {object} the appended record; throws on any failure (also counted in status()).
+   */
+  const appendStrict = (kind, data) => {
+    try {
+      return writeRecord(kind, data)
+    } catch (e) {
+      recordFailure(kind, e)
+      throw e instanceof Error ? e : new Error(msgOf(e))
     }
   }
 
@@ -231,6 +317,23 @@ export function apply(ctx, config) {
     return { ok: findings.length === 0, findings, records: recs.length, previous: previous.length, pid: process.pid }
   }
 
+  /**
+   * R15 健康面：一次只读快照，供 orchestrator 状态路由 / UI / 测试使用。
+   * ok = 本进程没有失败记录 && 链没被判坏 && 最近一次 bootCheck 不是坏结论。
+   * 只读：不刷新 integrityBroken（需要重新判链请显式调用 verify()）。
+   * @returns {{ok:boolean, ledgerFile:string, records:number, integrityBroken:boolean, failures:number, lastError:string|null, lastFailureAt:string|null, lastBoot:object|null}}
+   */
+  const status = () => ({
+    ok: failureCount === 0 && !integrityBroken && !(lastBoot && lastBoot.ok === false),
+    ledgerFile,
+    records: readAll().length,
+    integrityBroken,
+    failures: failureCount,
+    lastError,
+    lastFailureAt,
+    lastBoot,
+  })
+
   // ───────── v2 §5.7 汇总 / 商用钩子 ─────────
 
   const atMsOf = (rec) => {
@@ -293,6 +396,8 @@ export function apply(ctx, config) {
   const service = {
     scope,
     append,
+    /** R15：安全关键路径使用；失败会 throw（而不是返回 null）。 */
+    appendStrict,
     read,
     verify,
     bootCheck,
@@ -300,6 +405,8 @@ export function apply(ctx, config) {
     bootAudit: bootCheck,
     aggregate,
     cloudSink,
+    /** R15 健康面：失败次数/最后失败/链完整性，供 orchestrator status 与 UI 展示。 */
+    status,
     get ledgerFile() {
       return ledgerFile
     },

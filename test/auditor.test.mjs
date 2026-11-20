@@ -452,3 +452,43 @@ test('v2 bootAudit 是 bootCheck 的等价别名；cloudSink 是未配置占位'
     ctx.dispose()
   }
 })
+
+// ── R15（v3.5.5）：append 失败不再静默 ─────────────────────────────────────────
+test('R15: append 失败累计 status.failures/lastError；appendStrict 失败即 throw', () => {
+  const root = tmp()
+  const { ctx, service } = newAuditor({ dataRoot: root })
+  try {
+    const initial = service.status()
+    assert.equal(initial.ok, true)
+    assert.equal(initial.failures, 0)
+
+    const bad = service.append('', { any: 1 })
+    assert.equal(bad, null, 'old return semantics preserved (record | null)')
+    const afterBad = service.status()
+    assert.equal(afterBad.failures, 1)
+    assert.match(String(afterBad.lastError), /invalid-kind/)
+    assert.equal(afterBad.ok, false, 'status must not claim healthy after a failed append')
+
+    assert.throws(() => service.appendStrict('', { any: 2 }), /invalid-kind/)
+    assert.equal(service.status().failures, 2)
+
+    const record = service.appendStrict('r15-self-test', { note: 'strict ok' })
+    assert.ok(record && typeof record.hash === 'string', 'successful strict append returns chained record')
+    assert.equal(record.note, 'strict ok')
+  } finally {
+    ctx.dispose()
+  }
+})
+
+test('R15: service exposes appendStrict/status (orchestrator health surface contract)', () => {
+  const root = tmp()
+  const { ctx, service } = newAuditor({ dataRoot: root })
+  try {
+    assert.equal(typeof service.appendStrict, 'function')
+    assert.equal(typeof service.status, 'function')
+    assert.equal(typeof service.status().ledgerFile, 'string')
+    assert.equal(typeof service.status().records, 'number')
+  } finally {
+    ctx.dispose()
+  }
+})

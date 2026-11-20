@@ -219,3 +219,109 @@ test('mirror: getStatus 带磁盘占用与资源计数（usageProvider）', () =
   assert.equal(status.activeSessionCount, 7)
   assert.equal(status.diskUsageBytes > 0, true)
 })
+
+// ── R13：getStatus 不得把 async 官方源 String(Promise) 成 "[object Promise]" ─────────
+// 旧实现同步调用 async getLatestVersion() → officialLatest="[object Promise]"、
+// updateAvailable 恒 true、rejection 未处理可崩进程。修复后 getStatus 只读缓存，
+// 刷新由 async refreshOfficialLatest() 完成（await + string 校验 + catch 一切异常）。
+
+function makeAsyncSource(getLatestVersion) {
+  return { getLatestVersion, download() {} }
+}
+
+test('mirror R13: getStatus 不触发官方源请求，缓存前 officialLatest 为 null', () => {
+  let calls = 0
+  const source = makeAsyncSource(async () => { calls += 1; return '9.9.9' })
+  const { manager } = makeMirror('2.10.0', { officialSource: source })
+  const status = manager.getStatus()
+  assert.equal(calls, 0, '同步 getStatus 不得调用官方源')
+  assert.equal(status.officialLatest, null)
+  assert.equal(status.updateAvailable, false)
+  assert.deepEqual(status.officialSource, { latest: null, checkedAt: null, error: null })
+  assert.equal(JSON.stringify(status).includes('[object Promise]'), false)
+})
+
+test('mirror R13: refreshOfficialLatest 缓存 async 官方最新版，状态不再出现 Promise', async () => {
+  let calls = 0
+  const source = makeAsyncSource(async () => { calls += 1; return '9.9.9' })
+  const { manager } = makeMirror('2.10.0', { officialSource: source })
+  const refreshed = await manager.refreshOfficialLatest()
+  assert.equal(calls, 1)
+  assert.equal(refreshed.latest, '9.9.9')
+  assert.equal(refreshed.error, null)
+  assert.equal(refreshed.refreshed, true)
+
+  const status = manager.getStatus()
+  assert.equal(status.officialLatest, '9.9.9')
+  assert.equal(status.updateAvailable, true)
+  assert.equal(status.officialSource.latest, '9.9.9')
+  assert.equal(status.officialSource.error, null)
+  assert.equal(typeof status.officialSource.checkedAt, 'number')
+  assert.equal(typeof status.officialLatest, 'string')
+  assert.equal(String(status.officialLatest).includes('Promise'), false)
+  assert.equal(status.officialLatest instanceof Promise, false)
+  assert.equal(JSON.stringify(status).includes('[object Promise]'), false)
+})
+
+test('mirror R13: 官方源 async reject 时 refreshOfficialLatest 不抛并记录 error', async () => {
+  const source = makeAsyncSource(async () => { throw new Error('network down') })
+  const { manager } = makeMirror('2.10.0', { officialSource: source })
+  const refreshed = await manager.refreshOfficialLatest()
+  assert.equal(refreshed.latest, null)
+  assert.match(refreshed.error, /network down/)
+
+  assert.doesNotThrow(() => manager.getStatus())
+  const status = manager.getStatus()
+  assert.match(status.officialSource.error, /network down/)
+  assert.equal(status.officialLatest, null)
+  assert.equal(status.updateAvailable, false)
+  assert.equal(status.officialLatest instanceof Promise, false)
+  assert.equal(JSON.stringify(status).includes('[object Promise]'), false)
+})
+
+test('mirror R13: refreshOfficialLatest 在 maxAge 内复用缓存、maxAgeMs=0 强制刷新', async () => {
+  let calls = 0
+  const source = makeAsyncSource(async () => { calls += 1; return calls === 1 ? '9.9.9' : '10.0.0' })
+  const { manager } = makeMirror('2.10.0', { officialSource: source })
+  await manager.refreshOfficialLatest()
+  const cached = await manager.refreshOfficialLatest()
+  assert.equal(calls, 1, 'maxAge 内不得重复请求官方源')
+  assert.equal(cached.refreshed, false)
+  assert.equal(cached.latest, '9.9.9')
+
+  const forced = await manager.refreshOfficialLatest({ maxAgeMs: 0 })
+  assert.equal(calls, 2, 'maxAgeMs=0 必须强制请求')
+  assert.equal(forced.refreshed, true)
+  assert.equal(forced.latest, '10.0.0')
+  assert.equal(manager.getStatus().officialLatest, '10.0.0')
+})
+
+test('mirror R13: 官方源返回非字符串时只记录 error，不把对象当版本', async () => {
+  const source = makeAsyncSource(async () => ({ version: '9.9.9' }))
+  const { manager } = makeMirror('2.10.0', { officialSource: source })
+  const refreshed = await manager.refreshOfficialLatest()
+  assert.match(refreshed.error, /expected non-empty string/)
+  const status = manager.getStatus()
+  assert.equal(status.officialLatest, null)
+  assert.match(status.officialSource.error, /expected non-empty string/)
+  assert.equal(JSON.stringify(status).includes('[object Promise]'), false)
+})
+
+test('mirror R13: 官方源同步抛错也被捕获，失败时保留上次成功版本', async () => {
+  let mode = 'ok'
+  const source = makeAsyncSource(() => {
+    if (mode === 'fail') throw new Error('boom sync')
+    return '9.9.9'
+  })
+  const { manager } = makeMirror('2.10.0', { officialSource: source })
+  await manager.refreshOfficialLatest()
+  assert.equal(manager.getStatus().officialLatest, '9.9.9')
+
+  mode = 'fail'
+  const failed = await manager.refreshOfficialLatest({ maxAgeMs: 0 })
+  assert.match(failed.error, /boom sync/)
+  const status = manager.getStatus()
+  assert.equal(status.officialLatest, '9.9.9', '失败时保留上次成功版本')
+  assert.equal(status.updateAvailable, true)
+  assert.match(status.officialSource.error, /boom sync/)
+})

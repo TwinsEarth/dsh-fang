@@ -23,6 +23,7 @@ function req(options = {}) {
       ...(options.token === undefined ? {} : { [AUTH_HEADER]: options.token }),
       ...(options.contentType === undefined ? {} : { 'content-type': options.contentType }),
     },
+    ...(options.peer === undefined ? {} : { socket: { remoteAddress: options.peer } }),
   }
 }
 
@@ -115,4 +116,27 @@ test('http-auth: createHttpGuard 统一 token/env/dataDir 解析并保留 Host/O
   const explicitOnly = createHttpGuard({ token: TOKEN })
   assert.equal(explicitOnly.check(req({ token: TOKEN })).ok, true)
   assert.equal(authErrorBody({ status: 403, code: 'bad-origin' }).code, 'bad-origin')
+})
+
+// ── R28：/fang/api/auth-token bootstrap 收紧（仅回环 peer + 同源 Origin + same-origin/none）──
+test('http-auth R28: bootstrap 允许同源页面与 dsh-app 壳取 token', () => {
+  const base = req({ host: '127.0.0.1:53472', peer: '127.0.0.1' })
+  assert.equal(checkRequestAuth(base, { token: TOKEN, publicRoute: true, bootstrap: true }).ok, true)
+  assert.equal(checkRequestAuth(req({ host: '127.0.0.1:53472', peer: '127.0.0.1', origin: 'http://127.0.0.1:53472', site: 'same-origin' }), { token: TOKEN, publicRoute: true, bootstrap: true }).ok, true)
+  assert.equal(checkRequestAuth(req({ host: '127.0.0.1:53472', peer: '::1', origin: 'dsh-app://app' }), { token: TOKEN, publicRoute: true, bootstrap: true }).ok, true)
+})
+
+test('http-auth R28: bootstrap 拒绝跨站/同站/Origin 不匹配/非回环 peer', () => {
+  const options = { token: TOKEN, publicRoute: true, bootstrap: true }
+  assert.equal(checkRequestAuth(req({ peer: '127.0.0.1', origin: 'http://127.0.0.1:53472', site: 'cross-site' }), options).code, 'cross-site')
+  assert.equal(checkRequestAuth(req({ peer: '127.0.0.1', origin: 'http://127.0.0.1:53472', site: 'same-site' }), options).code, 'cross-site')
+  assert.equal(checkRequestAuth(req({ peer: '127.0.0.1', origin: 'http://127.0.0.1:60000', site: 'same-origin' }), options).code, 'origin-mismatch')
+  assert.equal(checkRequestAuth(req({ peer: '127.0.0.1', origin: 'https://evil.example', site: 'same-origin' }), options).code, 'bad-origin')
+  assert.equal(checkRequestAuth(req({ peer: '10.0.0.8', origin: 'http://127.0.0.1:53472', site: 'same-origin' }), options).code, 'non-loopback-peer')
+})
+
+test('http-auth R28: 非 bootstrap 路由不受影响（普通公开路由行为保持）', () => {
+  // publicRoute 仍允许无 token；bootstrap 额外限制只作用于显式 bootstrap 路由。
+  assert.equal(checkRequestAuth(req({ host: '127.0.0.1:53472' }), { token: TOKEN, publicRoute: true }).ok, true)
+  assert.equal(checkRequestAuth(req({ host: '127.0.0.1:53472', peer: '10.0.0.8' }), { token: TOKEN, publicRoute: true }).ok, true)
 })

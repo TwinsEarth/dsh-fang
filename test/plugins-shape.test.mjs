@@ -87,6 +87,7 @@ for (const spec of PLUGINS) {
 test('compose mode mounts every plugin of the current role through one row', async () => {
   const mod = await import('../src/compose.mjs')
   assert.equal(mod.name, 'fang-compose')
+  assert.ok(mod._modules.sessionCatalog, 'R14: compose must include session-catalog (split-row parity)')
   const dataRoot = tmpRoot()
   const previous = process.env.DSH_FANG_ROLE
   try {
@@ -98,6 +99,7 @@ test('compose mode mounts every plugin of the current role through one row', asy
       forker: { dataRoot },
     })
     assert.ok(ctx.get(SERVICE.orchestrator), 'compose must mount orchestrator in mother')
+    assert.ok(ctx.get(SERVICE.sessionCatalog), 'R14: compose must mount session-catalog in mother')
     assert.equal(ctx.get(SERVICE.adapter), undefined, 'compose must not activate adapter in mother')
     ctx.dispose()
 

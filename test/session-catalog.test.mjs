@@ -783,3 +783,70 @@ test('seed() extracts the bounded transcript and refuses empty sessions', () => 
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+// ── R14（v3.5.5）：目录/交接文本必须脱敏 + 服务形状补 .list/.get 别名 ─────────────
+function sensitiveHome() {
+  const home = makeHome()
+  writeIndex(home, { workspaces: [WS_GPT] })
+  addSession(home, WS_GPT.path, SESSION_A, [
+    `${headerLine(SESSION_A, { cwd: 'C:\\Users\\fangw\\secret' })}\n`,
+    `${JSON.stringify({ type: 'session/title', seq: 1, data: { title: '联系 a@b.com 使用 sk-ABCDEFGH12345678' } })}\n`,
+    `${JSON.stringify({ type: 'user/message', seq: 2, data: { text: 'Bearer abc.def.ghi 手机 13812345678 路径 C:\\Users\\fangw\\secret' } })}\n`,
+  ], 1793500005000)
+  return home
+}
+
+test('R14: listSessions 对 title/preview 脱敏（email/token/手机/路径）', () => {
+  const home = sensitiveHome()
+  const { ctx, service } = applyCatalog({ home })
+  try {
+    const listed = service.listSessions()
+    const item = listed.sessions[0]
+    assert.ok(item, 'session must be listed')
+    assert.equal(/a@b\.com/.test(String(item.title)), false, 'email must be redacted from title')
+    assert.equal(/sk-[A-Za-z0-9]/.test(String(item.title)), false, 'token must be redacted from title')
+    assert.ok(Number(item.redactions) > 0, 'redactions count must be exposed')
+    const preview = String(item.preview ?? '')
+    assert.equal(/13812345678/.test(preview), false, 'phone must be redacted from preview')
+    const detail = service.getSession(SESSION_A)
+    assert.equal(detail.ok, true)
+    assert.equal(/a@b\.com/.test(String(detail.session.title)), false, 'getSession title must be redacted')
+  } finally {
+    ctx.dispose()
+  }
+})
+
+test('R14: digest/seed 文本同样脱敏（派生 lineage seed 不泄漏路径/token）', () => {
+  const home = sensitiveHome()
+  const { ctx, service } = applyCatalog({ home })
+  try {
+    const digest = service.digest(SESSION_A)
+    if (digest.ok) {
+      assert.equal(/a@b\.com/.test(String(digest.markdown)), false, 'digest must not leak email')
+      assert.equal(/sk-[A-Za-z0-9]/.test(String(digest.markdown)), false, 'digest must not leak token')
+      assert.equal(/13812345678/.test(String(digest.markdown)), false, 'digest must not leak phone')
+    }
+    const seed = service.seed(SESSION_A)
+    if (seed.ok) {
+      assert.equal(/a@b\.com/.test(String(seed.markdown)), false, 'seed must not leak email')
+      assert.equal(/sk-[A-Za-z0-9]/.test(String(seed.markdown)), false, 'seed must not leak token')
+      assert.equal(/13812345678/.test(String(seed.markdown)), false, 'seed must not leak phone')
+    }
+  } finally {
+    ctx.dispose()
+  }
+})
+
+test('R14: 服务提供 .list/.get 别名（契约/编排器/adapter 读取的形状）', () => {
+  const home = standardHome()
+  const { ctx, service } = applyCatalog({ home })
+  try {
+    assert.equal(service.list, service.listSessions, '.list must alias listSessions')
+    assert.equal(service.get, service.getSession, '.get must alias getSession')
+    const viaAlias = service.list({ limit: 5 })
+    assert.equal(viaAlias.ok, true)
+    assert.ok(Array.isArray(viaAlias.sessions))
+  } finally {
+    ctx.dispose()
+  }
+})

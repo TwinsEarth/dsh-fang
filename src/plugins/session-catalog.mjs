@@ -282,16 +282,31 @@ export function apply(ctx, config) {
     return value
   }
 
-  const titleFields = (info, fallbackTitle = null) => ({
-    title: info.title ?? fallbackTitle ?? null,
-    titleSource: info.title ? (info.titleSource ?? 'unknown') : 'workspace',
-    preview: info.preview ?? null,
-    titleDegraded: info.degraded ?? [],
-    createdAt: info.createdAt ?? null,
-    createdAtIso: isIsoFromMs(info.createdAt),
-    userMessages: info.userMessages ?? 0,
-    empty: info.empty === true,
-  })
+  /**
+   * R14：目录对外的文本字段必须脱敏（自述契约：「返回的文本一律脱敏」）。
+   * 旧实现只对 head 行做了 redact，title/preview/seed/digest 仍会泄漏 token/邮箱/绝对路径。
+   */
+  const redactText = (value) => {
+    if (typeof value !== 'string') return { text: value, redactions: 0 }
+    const result = redact(value)
+    return { text: result.text, redactions: result.redactions ?? 0 }
+  }
+
+  const titleFields = (info, fallbackTitle = null) => {
+    const title = redactText(info.title ?? fallbackTitle ?? null)
+    const preview = redactText(info.preview ?? null)
+    return {
+      title: title.text,
+      titleSource: info.title ? (info.titleSource ?? 'unknown') : 'workspace',
+      preview: preview.text,
+      redactions: title.redactions + preview.redactions,
+      titleDegraded: info.degraded ?? [],
+      createdAt: info.createdAt ?? null,
+      createdAtIso: isIsoFromMs(info.createdAt),
+      userMessages: info.userMessages ?? 0,
+      empty: info.empty === true,
+    }
+  }
 
   /** 按 sessionId 定位（前端只传 id；路径永远由扫描结果推出）。 */
   const findSession = (sessionId) => {
@@ -530,7 +545,9 @@ export function apply(ctx, config) {
       ...(head.ok ? head.degraded : [head.code ?? 'head-failed']),
     ])]
     const markdown = buildDigest(session, lines, degraded)
-    const bytes = Buffer.byteLength(markdown, 'utf8')
+    // R14：digest 文本会被 derive() 当作 lineage seed 写入分身，兜底再脱敏一次。
+    const safeDigest = redactText(markdown)
+    const bytes = Buffer.byteLength(safeDigest.text, 'utf8')
     if (bytes > DIGEST_MAX_BYTES) {
       // 契约：超限 halt，不静默截断（调用方要么收紧 previewMaxChars，要么只读 head）。
       return {
@@ -547,11 +564,11 @@ export function apply(ctx, config) {
       ok: true,
       sessionId: session.sessionId,
       // `markdown` 是 orchestrator.derive() 读取的字段（lineage seed）；`digest` 为等价别名。
-      markdown,
-      digest: markdown,
+      markdown: safeDigest.text,
+      digest: safeDigest.text,
       bytes,
       limit: DIGEST_MAX_BYTES,
-      redactions: lines.redactions ?? 0,
+      redactions: (lines.redactions ?? 0) + safeDigest.redactions,
       degraded,
     }
   }
@@ -601,12 +618,16 @@ export function apply(ctx, config) {
       lines.push(`> degraded: ${decoded.degraded.join(', ')}`)
     }
     const markdown = lines.join('\n')
+    // R14：交接种子会写入分身/文件，必须与 head 一样脱敏（title/正文/路径/cwd）。
+    const safeTitle = redactText(title)
+    const safeMarkdown = redactText(markdown)
     return {
       ok: true,
       sessionId: session.sessionId,
-      title,
-      markdown,
-      bytes: Buffer.byteLength(markdown, 'utf8'),
+      title: safeTitle.text,
+      markdown: safeMarkdown.text,
+      redactions: safeTitle.redactions + safeMarkdown.redactions,
+      bytes: Buffer.byteLength(safeMarkdown.text, 'utf8'),
       messages: conv.messages,
       truncated: conv.truncated,
       framesDecoded: decoded.framesDecoded,
@@ -618,8 +639,8 @@ export function apply(ctx, config) {
       workspaceTitle: session.workspaceTitle,
       createdAt: Number.isFinite(header?.createdAt) ? header.createdAt : null,
       updatedAt: session.updatedAt,
-      cwd: typeof header?.cwd === 'string' ? header.cwd : null,
-      agentPreset: typeof header?.agentPreset === 'string' ? header.agentPreset : null,
+      cwd: typeof header?.cwd === 'string' ? redactText(header.cwd).text : null,
+      agentPreset: typeof header?.agentPreset === 'string' ? redactText(header.agentPreset).text : null,
     }
   }
 
@@ -634,7 +655,10 @@ export function apply(ctx, config) {
 
     status,
     listSessions,
+    /** R14：契约/编排器/adapter 读取的是 `.list`，补别名避免“服务形状不匹配”。 */
+    list: listSessions,
     getSession,
+    get: getSession,
     readHead,
     digest,
     seed,
