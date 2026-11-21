@@ -47,7 +47,7 @@ npm run release:check                      # 契约版本 + 发布顺序（需�
 
 ## 6. 迁移后要点
 
-- 仓库根 = `E:\DSH\DS\Fang`；完整历史 70 tag；当前 `main` 与 `origin/main` 同步（v3.5.8 已于 2026-11-21 三方发布）；
+- 仓库根 = `E:\DSH\DS\Fang`；完整历史 71 tag；当前 `main` 与 `origin/main` 同步（v3.5.9 已于 2026-11-21 三方发布）；
 - 本地目录通过 `.git/info/exclude` 排除，随文件夹复制带走；
 - 会话恢复/官方 ZIP 导入见 [SESSIONS.md](SESSIONS.md)；目录职责见 [PROJECT-LAYOUT.md](PROJECT-LAYOUT.md)；
 - 迁移记录见 [MIGRATION-2026-11-21.md](MIGRATION-2026-11-21.md)。
