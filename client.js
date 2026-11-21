@@ -367,6 +367,24 @@ window.__ModuleLoader__.load({
     }
     const taskHealth = projectTask;
 
+    /**
+     * 2026-11-22：分身状态栏（4 态 + 2 操作）。
+     * 运行中 / 等待启动 / 已停止 / 故障；故障优先于「进程在跑」（适配器失联也算故障）。
+     * @returns {{key:'running'|'starting'|'stopped'|'failed', label:string, tone:'ok'|'warn'|'bad'|'info', hint:string}}
+     */
+    function forkStateOf(task) {
+      const status = String(task?.status ?? '')
+      const adapter = String(task?.health?.adapter ?? (task?.adapter?.ok ? 'ok' : ''))
+      if (status === 'failed') return { key: 'failed', label: '故障', tone: 'bad', hint: '启动失败或进程崩溃，可一键修复' }
+      if (status === 'provisioning' || status === 'starting' || status === 'resuming') return { key: 'starting', label: '等待启动', tone: 'warn', hint: '正在分配端口并拉起进程' }
+      if (status === 'running' || status === 'ready') {
+        if (adapter === 'error') return { key: 'failed', label: '故障', tone: 'bad', hint: '进程在跑但适配器失联，可一键修复' }
+        if (adapter === 'pending') return { key: 'starting', label: '等待启动', tone: 'warn', hint: '进程已就绪，正在握手适配器' }
+        return { key: 'running', label: '运行中', tone: 'ok', hint: task?.port ? `端口 ${task.port}` : '' }
+      }
+      return { key: 'stopped', label: '已停止', tone: 'info', hint: status === 'archived' ? '存档保留，可启动或还原' : '进程未运行' }
+    }
+
     /** 容量投影：slots=7 硬上限，limit=5 默认配额；v3.0.5 用 tasks 数兜底并显式标注“估算”。 */
     function projectCapacity(statusData, tasks) {
       const items = Array.isArray(tasks) ? tasks : []
@@ -1111,6 +1129,15 @@ window.__ModuleLoader__.load({
   font-variant-numeric:tabular-nums;align-items:center}
 .fork-meta code{font-family:var(--f-mono);font-size:11px;color:var(--f-text-3);background:var(--f-surface-3);
   padding:1px 5px;border-radius:5px}
+.fork-status{display:flex;align-items:center;gap:8px;margin:8px 0 0 30px;padding:6px 10px;border:1px solid var(--f-border);border-radius:8px;background:var(--f-surface-3);font-size:12px;flex-wrap:wrap}
+.fork-status-dot{width:8px;height:8px;border-radius:50%;background:var(--f-text-3);flex:none}
+.fork-status[data-tone="ok"] .fork-status-dot{background:var(--f-green)}
+.fork-status[data-tone="warn"] .fork-status-dot{background:var(--f-orange)}
+.fork-status[data-tone="bad"] .fork-status-dot{background:var(--f-red)}
+.fork-status[data-tone="info"] .fork-status-dot{background:var(--f-blue)}
+.fork-status-label{font-weight:600}
+.fork-status-hint{color:var(--f-text-3)}
+.fork-status-actions{margin-left:auto;display:flex;gap:6px}
 .fork-warn{margin-top:8px;font-size:11.5px;line-height:17px;color:var(--f-red);display:flex;gap:6px;align-items:flex-start}
 .fork-sub{margin-top:10px;padding-top:8px;border-top:1px solid var(--f-border)}
 .fork-sub-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--f-text-3)}
@@ -2010,6 +2037,51 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             } else {
               const code = body?.error || (result.status ? 'http-' + result.status : 'network')
               setNotice({ tone: 'bad', title: '还原失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+            }
+            await refresh()
+          },
+        })
+      }
+
+      /**
+       * 2026-11-22：一键修复。服务端按 停残留 → 清加速别名桩 → 重置 profile → 重新拉起
+       * 的顺序处理，不删除 home/会话/存档；运行中的分身会被重启。
+       */
+      async function repairTask(task) {
+        if (isBusy()) return
+        askConfirm({
+          tone: 'warn',
+          title: '一键修复这个分身？',
+          confirm: 'repair',
+          message: `「${task.title || task.taskId}」\n\n将依次：停掉残留进程 → 清理加速别名桩 → 按来源原身重置 profile 配置 → 修复 node_modules → 重新分配端口并拉起。\n不会删除 home、会话或存档；运行中的分身会被重启。`,
+          confirmLabel: '开始修复',
+          onConfirm: async () => {
+            S.busy = 'repair:' + task.taskId
+            setNotice(null)
+            const result = await api('/fang/api/tasks/repair', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
+            S.busy = ''
+            const body = result.body
+            const steps = Array.isArray(body?.steps) ? body.steps : []
+            const stepText = steps
+              .map((step) => `${step?.step ?? '?'}: ${step?.ok === false ? (step?.error || 'failed') : 'ok'}`)
+              .join(' · ')
+            if (result.status === 200 && body?.ok) {
+              S.view = 'console'
+              setNotice({
+                tone: 'ok',
+                title: '一键修复完成',
+                message: `${task.title || task.taskId} 已重新启动 · 端口 ${body.port ?? '—'}`,
+                detail: stepText,
+                actions: [{ label: '打开分身', onClick: () => void openTask({ taskId: task.taskId }) }],
+              })
+            } else {
+              const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+              setNotice({
+                tone: 'bad',
+                title: '一键修复失败',
+                message: failureHint(code),
+                detail: [stepText, body?.detail].filter(Boolean).join(' · ') || diagnosticText(result.diagnostic),
+              })
             }
             await refresh()
           },
@@ -3127,7 +3199,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         openRestartDialog, submitRestart,
-        archiveTask, restoreTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
+        archiveTask, restoreTask, repairTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         decideApproval,
         setForkSupervision,
@@ -4272,6 +4344,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const sessionsState = S.forkSessions.get(taskId)
       const busyArchive = S.busy === 'archive:' + taskId
       const busyRestore = S.busy === 'restore:' + taskId
+      const busyRepair = S.busy === 'repair:' + taskId
       const busyDelete = S.busy === 'delete:' + taskId
       const busyPromote = S.busy === 'promote:' + taskId
       const barTone = health.tone
@@ -4365,6 +4438,32 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         h('span', null, '创建 ' + fmtShortClock(task.createdAt)),
         health.adapter === 'error' ? h('span', { style: { color: 'var(--f-red)' }, 'data-danger': '1' }, '适配器失联') : null)
 
+      // 2026-11-22：分身状态栏（4 态 + 2 操作）——折叠时也可见。
+      const stateView = forkStateOf(task)
+      const statusBar = h('div', {
+        class: 'fork-status',
+        'data-state': stateView.key,
+        'data-tone': stateView.tone,
+        role: 'status',
+        'aria-label': `分身状态：${stateView.label}`,
+      },
+        h('span', { class: 'fork-status-dot', 'aria-hidden': 'true' }),
+        h('span', { class: 'fork-status-label' }, stateView.label),
+        stateView.hint ? h('span', { class: 'fork-status-hint' }, stateView.hint) : null,
+        h('div', { class: 'fork-status-actions' },
+          stateView.key === 'running' ? null : button('启动', {
+            size: 'sm', variant: 'ghost', icon: icon('play', 12), busy: busyRestore, dataBtnId: 'C-08',
+            title: '启动/还原这个分身（新端口、新 token；不丢会话）',
+            onClick: () => void app.restoreTask(task),
+            fk: 'restore:' + taskId,
+          }),
+          button('一键修复', {
+            size: 'sm', variant: 'ghost', icon: icon('refresh', 12), busy: busyRepair, dataBtnId: 'C-09',
+            title: '停残留 → 清加速别名桩 → 按来源重置配置 → 重新拉起；不删除 home/会话',
+            onClick: () => void app.repairTask(task),
+            fk: 'repair:' + taskId,
+          })))
+
       const bodyWrap = h('div', { id: 'task-body-' + taskId, hidden: folded })
       bodyWrap.append(h('div', { class: 'fork-info', 'data-zone': 'task-info', style: { display: 'flex', gap: '10px', flexWrap: 'wrap', fontSize: '12px', opacity: '.85' } },
         h('span', null, '对话 ' + (task.sessionTitle || '—')),
@@ -4372,7 +4471,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         h('span', null, '更新 ' + fmtShortClock(task.updatedAt)),
         h('span', null, '体积 ' + formatBytes(task.projectBytes))))
       bodyWrap.append(meta)
-      card.append(head, bodyWrap)
+      card.append(head, statusBar, bodyWrap)
 
       if (health.anomaly) {
         bodyWrap.append(h('div', { class: 'fork-warn', role: 'note' },

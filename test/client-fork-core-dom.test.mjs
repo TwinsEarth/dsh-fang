@@ -23,7 +23,7 @@ const jsonResponse = (body, status = 200) => ({
   async json() { return body },
 })
 
-function makeHarness() {
+function makeHarness({ tasks = [] } = {}) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/', runScripts: 'dangerously', pretendToBeVisual: true })
   const { window } = dom
   window.TextDecoder = TextDecoder
@@ -49,7 +49,7 @@ function makeHarness() {
     }
     if (u.includes('/fang/api/fork-core')) return jsonResponse(baseView)
     if (u.includes('/fang/api/status')) return jsonResponse({ ok: true, version: '3.5.3', role: 'mother', profileTag: 'test', tasks: { ready: 0, total: 0, max: 8, list: [], capacity: { slots: 7, limit: 5, used: 0 } }, forks: { total: 0, running: 0, max: 8, list: [] }, mother: { profile: 'desktop' } })
-    if (u.includes('/fang/api/tasks')) return jsonResponse({ ok: true, tasks: [] })
+    if (u.includes('/fang/api/tasks')) return jsonResponse({ ok: true, tasks })
     if (u.includes('/fang/api/essence/list')) return jsonResponse({ ok: true, officialId: null, defaultId: null, essences: [], staleCount: 0 })
     if (u.includes('/fang/api/sessions')) return jsonResponse({ ok: true, sessions: [], total: 0, degraded: [] })
     if (u.includes('/fang/api/auth-token')) return jsonResponse({ token: 't' })
@@ -136,6 +136,38 @@ test('fork-core button: no accel install → click is fail-closed (no POST, no s
   await new Promise((resolve) => setTimeout(resolve, 120))
   assert.equal(harness.calls.some((call) => call.url.includes('/fang/api/fork-core') && call.method === 'POST'), false, 'must not POST when the accel core is not installed')
   assert.match(doc.querySelector('[data-fk="fork-core"]')?.textContent ?? '', /官方/, 'mode must stay stock')
+  harness.window.close()
+})
+
+test('task card: 4-state status bar + 启动/一键修复 buttons render without breaking the panel', async () => {
+  const task = {
+    taskId: 'task_statusbar1',
+    forkId: 'task_statusbar1',
+    title: '状态栏测试分身',
+    status: 'failed',
+    phase: 'failed',
+    health: { adapter: 'n/a', error: '' },
+    adapter: { ok: false, version: '', protocol: 0, error: 'exited' },
+    port: 18000,
+    pid: null,
+    coreMode: 'stock',
+    createdAt: Date.now() - 60000,
+    updatedAt: Date.now(),
+    projectBytes: 0,
+    collaborators: [],
+    actions: {},
+  }
+  const harness = makeHarness({ tasks: [task] })
+  mountConsole(harness)
+  const doc = harness.window.document
+  const card = await waitFor(() => doc.querySelector('[data-task="task_statusbar1"]'))
+  const status = card.querySelector('.fork-status')
+  assert.ok(status, 'status bar must render on the fork card')
+  assert.equal(status.getAttribute('data-state'), 'failed')
+  assert.match(status.textContent, /故障/)
+  assert.ok(card.querySelector('[data-fk="restore:task_statusbar1"]'), '启动 action must render')
+  assert.ok(card.querySelector('[data-fk="repair:task_statusbar1"]'), '一键修复 action must render')
+  assert.match(card.textContent, /一键修复/)
   harness.window.close()
 })
 

@@ -169,8 +169,8 @@ test('2026-11-22: pruneAliasStubs removes only accelerated alias stubs (stock re
   fs.rmSync(onlyStub, { recursive: true, force: true })
 })
 
-test('route contract: fork-core is required and the sidecar routes retired (86 total)', () => {
-  assert.equal(DEFAULT_EXPECTED_ROUTE_COUNT, 86)
+test('route contract: fork-core is required and the sidecar routes retired (87 total)', () => {
+  assert.equal(DEFAULT_EXPECTED_ROUTE_COUNT, 87)
   assert.ok(REQUIRED_ROUTE_PATHS.includes('/fang/api/fork-core'))
   for (const retired of ['/fang/api/accelerated/status', '/fang/api/accelerated/start', '/fang/api/accelerated/stop']) {
     assert.equal(REQUIRED_ROUTE_PATHS.includes(retired), false)
