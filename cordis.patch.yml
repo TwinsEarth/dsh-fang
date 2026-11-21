@@ -101,7 +101,7 @@
       name: '@local/dsh-fang/session-catalog'
       config:
         limit: 50
-        allowArchived: false
+        allowArchived: true
         previewMaxChars: 2000
 
     - id: fang-session-bridge
