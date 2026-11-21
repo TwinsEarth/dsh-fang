@@ -12,6 +12,7 @@
 // scope-rewritten model overlay for the fork's own DSH_HOME.
 import fs from 'node:fs'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { pathToFileURL } from 'node:url'
 
 export const ACCEL_BUNDLES = Object.freeze(['@twinsearth/dsh-base', '@twinsearth/dsh-web-app'])
@@ -272,6 +273,149 @@ export function pruneAliasStubs(profileDir) {
     } catch { /* ignore */ }
   }
   return { ok: true, removed }
+}
+
+/**
+ * 2026-11-22: the accelerated core 3.5.0 session-format migration only accepts
+ * `subagent/catalog` facts with version 0/1/2. A stock-DSH session imported into an
+ * accelerated fork can carry version 3, which makes the fork's session reader fail with
+ * `SessionFormatError: subagent/catalog requires a supported versioned catalog fact`.
+ *
+ * Downgrade version 3+ catalog events to the equivalent version 1/2 fact, frame-preserving:
+ * only frames containing such events are re-compressed; every other frame keeps its exact bytes.
+ * @returns {{ok:boolean, changedEvents:number, changedFrames:number, backup?:string, error?:string}}
+ */
+export function downgradeSubagentCatalogLog(logFile, { backup = true, knownEventTypes = null } = {}) {
+  const file = String(logFile ?? '').trim()
+  if (!file) return { ok: false, changedEvents: 0, changedFrames: 0, error: 'no-log-file' }
+  const known = knownEventTypes instanceof Set
+    ? knownEventTypes
+    : new Set(Array.isArray(knownEventTypes) ? knownEventTypes : [])
+  let buf
+  try { buf = fs.readFileSync(file) } catch (error) { return { ok: false, changedEvents: 0, changedFrames: 0, error: String(error?.message ?? error) } }
+  const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const offsets = []
+  for (let i = 0; (i = buf.indexOf(MAGIC, i)) !== -1; i += 4) offsets.push(i)
+  if (offsets.length === 0 || offsets[0] !== 0) return { ok: false, changedEvents: 0, changedFrames: 0, error: 'not-frame-log' }
+  const frames = []
+  let changedFrames = 0
+  let changedEvents = 0
+  let markedIgnorable = 0
+  let strippedFields = 0
+  for (let k = 0; k < offsets.length; k++) {
+    const raw = buf.subarray(offsets[k], k + 1 < offsets.length ? offsets[k + 1] : buf.length)
+    const text = zlib.zstdDecompressSync(raw).toString('utf8')
+    const lines = text.split('\n')
+    let changed = false
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      if (!line.trim()) continue
+      let event
+      try { event = JSON.parse(line) } catch { continue }
+      if (event?.type === 'subagent/catalog' && event.data && typeof event.data === 'object') {
+        const version = Number(event.data.version)
+        if (version > 2) {
+          const mode = event.data.mode === 'external' ? 'external' : (event.data.mode === 'one-shot' ? 'one-shot' : 'continuable')
+          event.data.version = mode === 'external' ? 2 : 1
+          event.data.mode = mode
+          if (mode === 'continuable' && typeof event.data.label !== 'string') event.data.label = ''
+          changed = true
+          changedEvents += 1
+        }
+        // v1/v2 schema is strict: `name` was introduced with v3 and is an unrecognized key
+        // for the accelerated core's projection (2026-11-22: unrecognized_keys "name").
+        if (event.data.name !== undefined) {
+          delete event.data.name
+          changed = true
+          strippedFields += 1
+        }
+      }
+      // The accelerated core refuses event types it does not know unless the writer marks
+      // them ignorable. Stock DSH adds new event types (e.g. team/mode) first; a fork must
+      // still be able to read the copied history, so mark only unknown-to-accelerated events.
+      if (known.size > 0 && !known.has(event.type) && event.ignorable !== true) {
+        event.ignorable = true
+        changed = true
+        markedIgnorable += 1
+      }
+      if (changed) lines[i] = JSON.stringify(event)
+    }
+    if (!changed) { frames.push(raw); continue }
+    frames.push(zlib.zstdCompressSync(Buffer.from(lines.join('\n'), 'utf8')))
+    changedFrames += 1
+  }
+  if (changedEvents === 0 && markedIgnorable === 0 && strippedFields === 0) return { ok: true, changedEvents: 0, changedFrames: 0, markedIgnorable: 0, strippedFields: 0 }
+  const backupFile = backup ? `${file}.bak-catalogv3-${Date.now()}` : ''
+  if (backup) fs.copyFileSync(file, backupFile)
+  const tmp = `${file}.tmp-catalogv3-${process.pid}`
+  fs.writeFileSync(tmp, Buffer.concat(frames))
+  // Verify: still decodable and header frame unchanged; abandon on any mismatch.
+  try {
+    const verify = fs.readFileSync(tmp)
+    const voffs = []
+    for (let i = 0; (i = verify.indexOf(MAGIC, i)) !== -1; i += 4) voffs.push(i)
+    const header = zlib.zstdDecompressSync(verify.subarray(voffs[0], voffs[1] ?? verify.length)).toString('utf8')
+    const originalHeader = zlib.zstdDecompressSync(buf.subarray(offsets[0], offsets[1] ?? buf.length)).toString('utf8')
+    if (header !== originalHeader) throw new Error('header-frame-changed')
+    for (let k = 0; k < voffs.length; k++) {
+      zlib.zstdDecompressSync(verify.subarray(voffs[k], k + 1 < voffs.length ? voffs[k + 1] : verify.length))
+    }
+  } catch (error) {
+    try { fs.rmSync(tmp, { force: true }) } catch { /* ignore */ }
+    return { ok: false, changedEvents: 0, changedFrames: 0, error: String(error?.message ?? error) }
+  }
+  fs.renameSync(tmp, file)
+  return { ok: true, changedEvents, changedFrames, markedIgnorable, strippedFields, ...(backupFile ? { backup: backupFile } : {}) }
+}
+
+/**
+ * Resolve the accelerated core's supported event vocabulary from its installed
+ * `@twinsearth/dsh-session` package (dynamic import, cached by Node).
+ * @returns {Promise<Set<string>|null>}
+ */
+export async function loadAcceleratedKnownEventTypes(accelNodeModules) {
+  const root = String(accelNodeModules ?? '').trim()
+  if (!root) return null
+  const file = path.join(root, '@twinsearth', 'dsh-session', 'lib', 'index.js')
+  if (!fs.existsSync(file)) return null
+  try {
+    const mod = await import(pathToFileURL(file).href)
+    const value = mod?.KNOWN_SESSION_EVENT_TYPES
+    if (value instanceof Set) return value
+    if (Array.isArray(value)) return new Set(value)
+  } catch { /* accelerated core unavailable: caller falls back to catalog-only compat */ }
+  return null
+}
+
+/**
+ * Walk a fork's own `$DSH_HOME/sessions` and downgrade legacy catalog facts so an
+ * accelerated core can read sessions imported from a stock mother.
+ */
+export function sanitizeAcceleratedForkSessions(homeDir, options = {}) {
+  const root = path.join(String(homeDir ?? '').trim(), 'sessions')
+  const result = { ok: true, files: [], changedEvents: 0, changedFrames: 0 }
+  let workspaces = []
+  try { workspaces = fs.readdirSync(root, { withFileTypes: true }) } catch { return result }
+  for (const workspace of workspaces) {
+    if (!workspace.isDirectory()) continue
+    let sessions = []
+    try { sessions = fs.readdirSync(path.join(root, workspace.name), { withFileTypes: true }) } catch { continue }
+    for (const session of sessions) {
+      if (!session.isDirectory()) continue
+      const logFile = path.join(root, workspace.name, session.name, 'session.v4.jsonl.zstd')
+      if (!fs.existsSync(logFile)) continue
+      const downgraded = downgradeSubagentCatalogLog(logFile, options)
+      if (downgraded.changedEvents > 0) {
+        result.files.push({ sessionId: session.name, workspace: workspace.name, ...downgraded })
+        result.changedEvents += downgraded.changedEvents
+        result.changedFrames += downgraded.changedFrames
+      } else if (downgraded.ok === false) {
+        result.ok = false
+        result.files.push({ sessionId: session.name, workspace: workspace.name, ok: false, error: downgraded.error })
+      }
+    }
+  }
+  return result
 }
 
 /**

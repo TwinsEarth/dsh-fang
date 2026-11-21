@@ -2044,6 +2044,29 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       }
 
       /**
+       * 2026-11-22：「启动」= 从 stopped/failed 直接拉起（低风险、可回退，不再二次确认）；
+       * 只有 archived 才走「还原存档」确认。此前启动按钮直接复用 restoreTask，
+       * 导致 failed 分身也弹「还原存档？」。
+       */
+      async function startTask(task) {
+        if (isBusy()) return
+        if (String(task?.status ?? '') === 'archived') { await restoreTask(task); return }
+        S.busy = 'start:' + task.taskId
+        setNotice(null)
+        const result = await api('/fang/api/tasks/restore', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
+        S.busy = ''
+        const body = result.body
+        if (result.status === 200 && body?.ok) {
+          S.view = 'console'
+          setNotice({ tone: 'ok', title: '分身已启动', message: `${task.title || task.taskId} 已启动 · 端口 ${body.port ?? '—'}`, actions: [{ label: '打开分身', onClick: () => void openTask({ taskId: task.taskId }) }] })
+        } else {
+          const code = body?.error || (result.status ? 'http-' + result.status : 'network')
+          setNotice({ tone: 'bad', title: '启动分身失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+        }
+        await refresh()
+      }
+
+      /**
        * 2026-11-22：一键修复。服务端按 停残留 → 清加速别名桩 → 重置 profile → 重新拉起
        * 的顺序处理，不删除 home/会话/存档；运行中的分身会被重启。
        */
@@ -3199,7 +3222,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         openRestartDialog, submitRestart,
-        archiveTask, restoreTask, repairTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
+        archiveTask, restoreTask, startTask, repairTask, deleteArchive, promoteTask, openTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         decideApproval,
         setForkSupervision,
@@ -4344,6 +4367,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const sessionsState = S.forkSessions.get(taskId)
       const busyArchive = S.busy === 'archive:' + taskId
       const busyRestore = S.busy === 'restore:' + taskId
+      const busyStart = S.busy === 'start:' + taskId
       const busyRepair = S.busy === 'repair:' + taskId
       const busyDelete = S.busy === 'delete:' + taskId
       const busyPromote = S.busy === 'promote:' + taskId
@@ -4452,10 +4476,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         stateView.hint ? h('span', { class: 'fork-status-hint' }, stateView.hint) : null,
         h('div', { class: 'fork-status-actions' },
           stateView.key === 'running' ? null : button('启动', {
-            size: 'sm', variant: 'ghost', icon: icon('play', 12), busy: busyRestore, dataBtnId: 'C-08',
-            title: '启动/还原这个分身（新端口、新 token；不丢会话）',
-            onClick: () => void app.restoreTask(task),
-            fk: 'restore:' + taskId,
+            size: 'sm', variant: 'ghost', icon: icon('play', 12), busy: busyStart, dataBtnId: 'C-08',
+            title: '启动这个分身（新端口、新 token；不丢会话）',
+            onClick: () => void app.startTask(task),
+            fk: 'start:' + taskId,
           }),
           button('一键修复', {
             size: 'sm', variant: 'ghost', icon: icon('refresh', 12), busy: busyRepair, dataBtnId: 'C-09',

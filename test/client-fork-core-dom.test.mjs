@@ -165,7 +165,7 @@ test('task card: 4-state status bar + 启动/一键修复 buttons render without
   assert.ok(status, 'status bar must render on the fork card')
   assert.equal(status.getAttribute('data-state'), 'failed')
   assert.match(status.textContent, /故障/)
-  assert.ok(card.querySelector('[data-fk="restore:task_statusbar1"]'), '启动 action must render')
+  assert.ok(card.querySelector('[data-fk="start:task_statusbar1"]'), '启动 action must render')
   assert.ok(card.querySelector('[data-fk="repair:task_statusbar1"]'), '一键修复 action must render')
   assert.match(card.textContent, /一键修复/)
   harness.window.close()

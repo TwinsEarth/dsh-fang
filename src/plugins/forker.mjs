@@ -65,7 +65,7 @@ import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttp
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
-import { normalizeCoreMode, pruneAliasStubs, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
+import { loadAcceleratedKnownEventTypes, normalizeCoreMode, pruneAliasStubs, sanitizeAcceleratedForkSessions, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 
 /** Repository root of this plugin (used as the @local/dsh-fang junction source). */
@@ -970,6 +970,16 @@ export function apply(ctx, config) {
       }
       warnings.push(...(Array.isArray(written.warning) ? written.warning : []))
       if (written.overlay?.ok !== true) warnings.push(`accelerated-model-overlay:${written.overlay?.error ?? 'unknown'}`)
+      // 2026-11-22: accelerated core 3.5.0 cannot read catalog v3 facts (and rejects
+      // stock-only event types). Sessions copied from a stock mother are made compatible here
+      // (frame-preserving, with a backup) so the fork's history opens.
+      try {
+        const sanitized = sanitizeAcceleratedForkSessions(homeDir)
+        if (sanitized.changedEvents > 0) warnings.push(`catalog-compat:${sanitized.changedEvents}`)
+        written.catalogSanitize = sanitized
+      } catch (error) {
+        warnings.push(`catalog-sanitize-failed:${msgOf(error)}`)
+      }
       accelerated = { bundles: written.bundles, overlay: written.overlay, junctions: written.junctions, sync: written.sync ?? null, forkLsp: written.forkLsp ?? null }
     } else if (useCleanTemplate) {
       // Forker-owned clean template: never written into the mother profile directory.
@@ -1085,6 +1095,7 @@ export function apply(ctx, config) {
     // plugin config. An accelerated fork NEVER falls back to the stock CLI — missing install is
     // a hard error so the fork cannot silently run unaccelerated.
     const coreMode = normalizeCoreMode(opts.coreMode ?? cfg.coreMode)
+    let spawnCatalogCompat = null
     const acceleratedHome = acceleratedHomeDir()
       || (layout?.dataDir ? path.resolve(layout.dataDir, '..') : '')
     let cliPath = ''
@@ -1102,6 +1113,14 @@ export function apply(ctx, config) {
       }
       cliPath = resolved.cliPath
       acceleratedSource = resolved.source
+      // 2026-11-22: the accelerated host refuses unknown event types (team/mode) and catalog
+      // v3 facts from stock DSH. Make the fork's copied sessions compatible before it starts.
+      try {
+        const known = await loadAcceleratedKnownEventTypes(accelNodeModulesRoot(cliPath))
+        spawnCatalogCompat = sanitizeAcceleratedForkSessions(homeDir, { knownEventTypes: known })
+      } catch (error) {
+        spawnCatalogCompat = { ok: false, error: msgOf(error) }
+      }
     } else {
       cliPath = String(opts.cliPath ?? cfg.cliPath ?? '').trim()
     }
@@ -1149,6 +1168,7 @@ export function apply(ctx, config) {
        */
       adapterToken: randomBytes(24).toString('hex'),
       log: collector,
+      catalogCompat: spawnCatalogCompat,
     })
     records.set(forkId, rec)
     // v3.0.9 生产盘：每次打开/重启都从来源模板重放配置（原身 merged 或 clean template），

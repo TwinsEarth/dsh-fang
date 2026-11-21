@@ -1,3 +1,35 @@
+## v3.6.1（2026-11-22）
+
+**主题：加速分身兼容 stock 新会话格式（catalog v3 / 未知事件），并修复还原时「stock 配置 + 加速 CLI」混搭导致的 timeout。**
+
+### 修复
+
+- **加速分身打不开从 stock 母体复制来的历史会话**：加速核 `@twinsearth/dsh@3.5.0` 的会话格式比当前 stock DSH 旧，连续卡在三层：
+  1. `subagent/catalog` v3（加速核只认 v0/v1/v2）→ `SessionFormatError`；
+  2. 降级到 v1 后 `name` 字段不被 v1 严格 schema 接受 → `unrecognized_keys`；
+  3. stock 新事件（如 `team/mode`）加速核不认识且未标 `ignorable` → 整份日志拒绝解析。
+  现在加速 spawn / provision / import 时会自动读取加速核的 `KNOWN_SESSION_EVENT_TYPES`，对**分身内的会话副本**做兼容（逐帧重压、带 `.bak-*` 备份）：catalog v3→v1、删除 v1 禁用的 `name`、把加速核不认识的事件标记 `ignorable: true`。母体原会话不动。
+- **「启动」按钮误弹「还原存档」确认**：状态栏的启动按钮此前直接复用还原确认（failed 分身也会弹「还原存档？」）。现在非归档分身点「启动」直接拉起，仅 archived 才走还原确认。
+- **还原 timeout**：还原流程先 `resetForkConfig` 把 profile 重置回 stock 形状，旧逻辑因 `task.coreMode` 已是 accelerated 而跳过重新 provision → 加速 CLI 加载 stock 配置，bundle 解析失败、60s 不 ready。现在还原/一键修复在 reset 后**强制 reprovision**。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=? fail=0 skip=?（全量）
+- e2e: 125/125
+- routes: 111（allowlist 0 findings） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+
+- 兼容垫片只保证加速核能**读取**历史；加速核不认识的事件（`team/mode` 等）在该视图中会被跳过/不渲染。根治需升级加速核（npm 最新仍 3.5.0）。
+- 只改分身会话副本，不改母体会话；每次改写都有 `.bak-catalogv3-*` / `.bak-accelcompat-*` 备份。
+- stock 档行为不变；不改变 FANG_HOME 布局。
+
+### 回滚锚点
+
+- 插件回滚：`npm i @twinsearth/fang-dsh-plugin@3.6.0`
+- 升级前快照/上一代目录：active-v3.6.1-pre（母体）；merged-v3.6.1-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.6.0（2026-11-22 已发布）
 
 **Stable 稳定版：母体面板分身状态栏（4 态 + 启动/一键修复）；核心切回 stock 时清理加速别名桩；还原失败任务不再强制归档。**
