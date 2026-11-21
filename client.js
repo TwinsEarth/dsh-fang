@@ -2190,19 +2190,58 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         doc.body.appendChild(backdrop)
       }
 
-      // v3.1.34：派生弹窗的自动兜底时长（毫秒）。超时未选择 → 默认新建空会话。
-      const DERIVE_PICKER_TIMEOUT_MS = 5000
+      // 派生弹窗的自动兜底时长（毫秒）。超时未选择 → 默认新建空会话。
+      // 2026-11-21：按用户要求由 5000 调为 7000（5 秒太紧，7 秒足够看清列表）。
+      const DERIVE_PICKER_TIMEOUT_MS = 7000
+
+      // 2026-11-21：派生列表默认只显示「最近 7 天活跃」的会话；更早的折叠到下方（默认收起）。
+      // updatedAt 来自 /fang/api/sessions（毫秒时间戳）。
+      const DERIVE_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+
+      function splitSessionsByRecency(sessions, now = Date.now()) {
+        const recent = []
+        const older = []
+        for (const session of Array.isArray(sessions) ? sessions : []) {
+          const updatedAt = Number(session?.updatedAt)
+          if (Number.isFinite(updatedAt) && now - updatedAt <= DERIVE_ACTIVE_WINDOW_MS) recent.push(session)
+          else older.push(session)
+        }
+        const byUpdatedDesc = (a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)
+        recent.sort(byUpdatedDesc)
+        older.sort(byUpdatedDesc)
+        return { recent, older }
+      }
+
+      function sessionOption(session) {
+        return h('option', { value: session.sessionId },
+          `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''}`)
+      }
 
       function showDerivePicker(sessions, essenceName, onPick) {
         const doc = document
+        const { recent, older } = splitSessionsByRecency(sessions)
         const select = h('select', {
-          size: Math.min(8, Math.max(4, sessions.length)),
+          size: Math.min(8, Math.max(4, recent.length)),
           style: { width: '100%', minHeight: 150, marginTop: 10, font: '12px/1.4 inherit', borderRadius: 8, padding: 6 },
-        }, ...sessions.map((session) => h('option', { value: session.sessionId },
-          `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''}`)))
+        }, ...(recent.length
+          ? recent.map(sessionOption)
+          : [h('option', { value: '', disabled: true }, '最近 7 天没有活跃会话（可在下方展开更早的会话）')]))
+        let olderSelect = null
+        const olderDetails = older.length
+          ? h('details', { 'data-role': 'derive-older-sessions', style: { marginTop: 8 } },
+            h('summary', { style: { cursor: 'pointer', fontSize: 12, opacity: .75, userSelect: 'none' } },
+              `更早的会话（${older.length} 个，超过 7 天，已折叠）`),
+            (olderSelect = h('select', {
+              size: Math.min(8, Math.max(4, older.length)),
+              'aria-label': '更早的会话（超过 7 天）',
+              style: { width: '100%', minHeight: 120, marginTop: 8, font: '12px/1.4 inherit', borderRadius: 8, padding: 6 },
+            }, ...older.map(sessionOption))))
+          : null
         const hint = h('div', { style: { fontSize: 12, opacity: .7, marginTop: 6 } },
-          '选择一个进行中的 DSH 会话，整目录复制进新分身的沙箱（归档会话不列出）。')
-        // v3.1.34：5 秒内不选择 → 默认新建空会话继续派生（不再卡住或报 session-required）。
+          older.length
+            ? '默认只列最近 7 天活跃的会话；更早的会话折叠在下方，展开后可选择。整目录复制进新分身的沙箱（归档会话不列出）。'
+            : '选择一个进行中的 DSH 会话，整目录复制进新分身的沙箱（归档会话不列出）。')
+        // 2026-11-21：7 秒内不选择 → 默认新建空会话继续派生（不再卡住或报 session-required）。
         const countdown = h('div', {
           style: { fontSize: 12, color: '#F5A623', marginTop: 4 },
           'data-role': 'derive-countdown',
@@ -2226,6 +2265,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         hint,
         countdown,
         select,
+        olderDetails,
         h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, newSessionBtn, cancelBtn))
         const backdrop = h('div', {
           style: {
@@ -2261,8 +2301,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         }
         countdown.textContent = `${remaining} 秒内不选择将默认新建空会话`
         timer = setInterval(tick, 1000)
+        // 最近列表与「更早的会话」互斥：选一边就清掉另一边的选择。
+        if (olderSelect) {
+          select.addEventListener('change', () => { if (String(select.value || '') !== '') olderSelect.value = '' })
+          olderSelect.addEventListener('change', () => { if (String(olderSelect.value || '') !== '') select.value = '' })
+        }
         startBtn.addEventListener('click', () => {
-          const picked = String(select.value || '')
+          const picked = String((olderSelect && olderSelect.value) || select.value || '')
           if (!picked) { hint.textContent = '请选择一个会话（或等倒计时结束自动新建空会话）'; return }
           settle(picked)
         })
@@ -4893,15 +4938,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
     }
 
     // ── 页面装配 ─────────────────────────────────────────────────────────
-    function renderFooter(S, app) {
-      const version = S.status.data?.version ? 'v' + String(S.status.data.version).replace(/^v/, '') : 'v—'
-      return h('footer', { class: 'fang-foot' },
-        h('span', { class: 'hint' }, '双击「瓮城」图标或输入框徽标 = 快速派生；单击 = 打开本面板。两栏各自滚动；元主重命名只写本地别名。'),
-        h('span', { class: 'fang-foot-right' },
-          h('span', { class: 'hint' }, S.lastRefreshAt ? `刷新于 ${fmtClock(S.lastRefreshAt)}` : '等待首次刷新'),
-          h('span', { class: 'fh-version', title: '母体版本' }, version),
-          h('a', { class: 'fang-portal-link', href: '/fang/panel', target: '_blank', rel: 'noopener' }, '独立门户', icon('external', 11))))
-    }
+    // 2026-11-21：按用户要求删除底部提示行（提示语 + 刷新时间 + 版本 + 独立门户链接），
+    // 让两栏内容独占纵向空间；独立门户入口保留在顶部工具区（title=在新窗口打开 /fang/panel 独立门户）。
 
     function renderForkSupervision(S, app) {
       if (!serviceEnabled(S, 'forker')) return null
@@ -5066,7 +5104,6 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         })
         body.append(handle)
         frag.append(body)
-        frag.append(renderFooter(S, app))
       } else if (S.role.value === 'fork') {
         frag.append(renderHostNotice(S, app))
       } else {
