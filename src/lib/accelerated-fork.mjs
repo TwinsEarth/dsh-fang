@@ -18,7 +18,11 @@ export const ACCEL_BUNDLES = Object.freeze(['@twinsearth/dsh-base', '@twinsearth
 export const FANG_BUNDLE = '@local/dsh-fang'
 /** npm-installed fang bundle name (aliases @local/dsh-fang in production profiles). */
 export const FANG_NPM_BUNDLE = '@twinsearth/dsh-fang'
-function isFangBundle(bundle) { return bundle === FANG_BUNDLE || bundle === FANG_NPM_BUNDLE }
+/** Published npm package name of this repo's bundle (post-build name; not renamed by build). */
+export const FANG_PUBLISHED_BUNDLE = '@twinsearth/fang-dsh-plugin'
+function isFangBundle(bundle) {
+  return bundle === FANG_BUNDLE || bundle === FANG_NPM_BUNDLE || bundle === FANG_PUBLISHED_BUNDLE
+}
 export const ACCEL_BUNDLES_WITH_FANG = Object.freeze([...ACCEL_BUNDLES, FANG_BUNDLE])
 export const FANG_CHILD_PACKAGES = Object.freeze([
   '@twinsearth/dsh-fang-web-entry',
@@ -27,14 +31,30 @@ export const FANG_CHILD_PACKAGES = Object.freeze([
 export const OVERLAY_MARKER = '# dsh-Fang accelerated-fork model overlay (generated; do not edit by hand)'
 export const OVERLAY_FILE = 'cordis.patch.yml'
 
+/**
+ * 2026-11-22：fork profile 里 fang bundle 的**实际包名**以 fangRoot/package.json 为准。
+ * 发布构建会把源码里的 `@local/dsh-fang` 常量改名成发布名，而 junction 路径若写死
+ * `@local/dsh-fang` 就会与包名/bundle 行不一致 → 派生时报 fork-bundle-unavailable。
+ * 这里统一用包名（开发链 @local/dsh-fang / npm 安装 @twinsearth/fang-dsh-plugin）。
+ */
+export function fangBundleNameOf(fangRoot = '') {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(String(fangRoot ?? '').trim(), 'package.json'), 'utf8'))
+    const name = typeof pkg?.name === 'string' ? pkg.name.trim() : ''
+    if (/^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(name)) return name
+  } catch { /* fall back to dev alias */ }
+  return FANG_BUNDLE
+}
+
 /** @returns {{name:string, private:true, dsh:{profile:{bundles:string[]}}, dependencies:Record<string,string>}} */
 export function buildAcceleratedForkProfile({ profileName = 'fang-accelerated', fangRoot = '' } = {}) {
   const deps = {}
-  if (fangRoot) deps[FANG_BUNDLE] = `link:${String(fangRoot).replace(/\\/g, '/')}`
+  const fangBundle = fangRoot ? fangBundleNameOf(fangRoot) : FANG_BUNDLE
+  if (fangRoot) deps[fangBundle] = `link:${String(fangRoot).replace(/\\/g, '/')}`
   return {
     name: `dsh-profile-${String(profileName).replace(/[^a-z0-9._-]/gi, '-').toLowerCase()}`,
     private: true,
-    dsh: { profile: { bundles: [...ACCEL_BUNDLES_WITH_FANG] } },
+    dsh: { profile: { bundles: [...ACCEL_BUNDLES, fangBundle] } },
     dependencies: deps,
   }
 }
@@ -416,11 +436,12 @@ export function buildSyncedAcceleratedProfile({ sourceProfileDir = '', accelNode
     if (isFangBundle(name)) continue
     deps[name] = version
   }
-  if (fangRoot) deps[FANG_BUNDLE] = `link:${path.resolve(fangRoot).replace(/\\/g, '/')}`
+  if (fangRoot) deps[fangBundleNameOf(fangRoot)] = `link:${path.resolve(fangRoot).replace(/\\/g, '/')}`
+  const fangBundle = fangRoot ? fangBundleNameOf(fangRoot) : FANG_BUNDLE
   const pkg = {
     name: `dsh-profile-${String(profileName).replace(/[^a-z0-9._-]/gi, '-').toLowerCase()}`,
     private: true,
-    dsh: { profile: { bundles: [...translated.bundles, ...(fangRoot ? [FANG_BUNDLE] : [])] } },
+    dsh: { profile: { bundles: [...translated.bundles, ...(fangRoot ? [fangBundle] : [])] } },
     dependencies: deps,
   }
   const sourcePatchFile = path.join(source, OVERLAY_FILE)
@@ -543,7 +564,16 @@ export function writeAcceleratedForkProfile(options = {}) {
     alias = writeAliasStubs({ profileNodeModules: moduleDir, accelNodeModules, specs: [...specs] })
   }
   const junctions = []
-  junctions.push({ package: FANG_BUNDLE, ...makeEntryJunction(fangDir, path.join(moduleDir, '@local', 'dsh-fang')) })
+  // 2026-11-22: 用 package.json 的真实包名建 junction（发布包名与开发别名不同；
+  // 只写死 @local/dsh-fang 会让发布版在 orchestrator 的 bundle 探测里找不到 → fork-bundle-unavailable）。
+  const fangBundle = fangBundleNameOf(fangDir)
+  const fangTarget = path.join(moduleDir, ...fangBundle.split('/'))
+  fs.mkdirSync(path.dirname(fangTarget), { recursive: true })
+  junctions.push({ package: fangBundle, ...makeEntryJunction(fangDir, fangTarget) })
+  if (fangBundle !== FANG_BUNDLE) {
+    // 兼容旧检查/旧 profile：保留 @local/dsh-fang 开发别名 junction。
+    junctions.push({ package: FANG_BUNDLE, ...makeEntryJunction(fangDir, path.join(moduleDir, '@local', 'dsh-fang')) })
+  }
   for (const child of FANG_CHILD_PACKAGES) {
     const [scope, name] = child.split('/')
     junctions.push({
@@ -570,7 +600,7 @@ export function writeAcceleratedForkProfile(options = {}) {
       overlay = { ok: false, error: built.error }
     }
   }
-  const bundles = synced ? [...synced.bundles.translated, FANG_BUNDLE] : [...ACCEL_BUNDLES_WITH_FANG]
+  const bundles = synced ? [...synced.bundles.translated, fangBundleNameOf(fangDir)] : [...ACCEL_BUNDLES, fangBundleNameOf(fangDir)]
   return {
     ok: true,
     profileDir,
