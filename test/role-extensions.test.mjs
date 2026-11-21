@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+﻿// SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 // kernel v2: 角色矩阵与商用扩展位（Lead-owned）
 import test from 'node:test'
@@ -102,7 +102,7 @@ test('commercial: hooks are off by default and no-op without a provider', async 
 })
 
 test('vocabulary: v2 version, task lifecycle, adapter protocol and container states', () => {
-  assert.equal(FANG_VERSION, '3.5.9')
+  assert.equal(FANG_VERSION, '3.6.0')
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.version, FANG_VERSION, 'package.json version must match kernel FANG_VERSION')
   assert.deepEqual(Object.values(TASK_STATUS), ['provisioning', 'ready', 'running', 'archived', 'failed'])

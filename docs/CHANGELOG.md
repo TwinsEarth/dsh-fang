@@ -1,3 +1,37 @@
+## v3.6.0（2026-11-22）
+
+**Stable 稳定版：母体面板分身状态栏（4 态 + 启动/一键修复）；核心切回 stock 时清理加速别名桩；还原失败任务不再强制归档。**
+
+### 新增
+
+- **分身状态栏**：每张分身卡片显示 **运行中 / 等待启动 / 已停止 / 故障** 四态（折叠时也可见），并提供两个操作：**启动**、**一键修复**。
+- **一键修复**：`POST /fang/api/tasks/repair` —— 停残留进程 → 清加速别名桩 → 按来源原身重置 profile 配置 → 修复 node_modules mirror → 重新分配端口拉起；逐步返回 `steps[]`，不删除 home/会话/存档（运行中的分身会重启，面板二次确认）。
+- 路由契约：路由数 86 → 87（`DEFAULT_EXPECTED_ROUTE_COUNT` 同步）。
+
+### 修复
+
+- **核心切回 stock 后无法启动/还原**：fork profile 残留 `@deepseek-ai/*` 加速别名桩，stock CLI 会导入加速模块并因缺少子路径而启动失败（`2 required plugins did not activate` / `ERR_PACKAGE_PATH_NOT_EXPORTED`），还原报 `spawn-failed exited`。现在 stock spawn/provision 前自动 `pruneAliasStubs()`，旧 profile 也会被修复（只删 `0.0.0-fang-alias` 桩，不碰真实包）。
+- **不再强制归档**：`restoreTask` 直接接受 `failed` 与 `archived` 任务；客户端删除“先归档再还原”的 fallback，启动失败的任务点「启动/还原」不会再被自动归档。
+- 状态栏「故障」优先于「进程在跑」：进程在但适配器失联同样显示故障，并给出一键修复。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=1311 fail=0 skip=2（1322 tests）
+- e2e: 125/125
+- routes: 111（allowlist 0 findings） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+
+- 一键修复只做“进程/配置/模块”层修复，不动会话内容，不删除 home；不改变核心选择（仍按当前 fork-core 设置）。
+- 归档会话仍不能作为派生导入源（服务端校验不变）。
+- 不改变 FANG_HOME 运行数据布局（`D:\ToFuture` 仍在原位）。
+
+### 回滚锚点
+
+- 插件回滚：`npm i @twinsearth/fang-dsh-plugin@3.5.9`
+- 升级前快照/上一代目录：active-v3.6.0-pre（母体）；merged-v3.6.0-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.5.9（2026-11-21 已发布）
 
 **主题：修复加速分身派生失败「fork-bundle-unavailable」——加速 profile 的 fang bundle 链接名与发布包名对齐（发布构建改名后 junction 仍停在开发别名）。**
