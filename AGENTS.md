@@ -1,7 +1,18 @@
-﻿# 瓮城 dsh-fang 专属工作守则（AGENTS.md）
+# 瓮城 dsh-fang 专属工作守则（AGENTS.md）
 
 > 本文件是 **dsh-fang 仓库/工作树** 的唯一会话范围守则；任何 Agent 在本仓库或其工作树接手任务前必须先读本文件。
 > 本文件由用户 2026-11-12 指令确立，2026-11-14 从 `E:\GPT\AGENTS.md` 迁入本仓库，并补充版本发布纪律。
+> 2026-11-21 项目整体迁入 `E:\DSH\DS\Fang`（旧仓库 `E:/GPT/dsh-fang` 保留只读）；本文件仍是本仓库唯一会话范围守则。
+
+## 迁移后根目录（2026-11-21，硬性）
+
+1. **唯一根目录 = `E:\DSH\DS\Fang`**：所有代码、文档、脚本、构建产物、临时文件只写在这里；
+   禁止写回旧仓库 `E:/GPT/dsh-fang`，禁止写其它项目/会话目录（DSH 自身存储中本项目会话除外）。
+2. 本地目录（不入库、随文件夹复制带走）：`sessions/ scratch/ runtime/ archive/ .secrets/ tools/session/ contract/`。
+3. 临时文件只放 `scratch/`；会话恢复与官方 ZIP 导入见 [docs/SESSIONS.md](docs/SESSIONS.md)；
+   目录职责见 [docs/PROJECT-LAYOUT.md](docs/PROJECT-LAYOUT.md)；迁移记录见
+   [docs/MIGRATION-2026-11-21.md](docs/MIGRATION-2026-11-21.md)。
+4. 发布纪律不变：未经用户当次明确指令不发布（不 npm publish / 不打 tag / 不发 Release）。
 
 ---
 
@@ -76,3 +87,12 @@
 1. 守则从 `E:\GPT\AGENTS.md` 迁入本仓库根目录 `AGENTS.md`，对 dsh-fang 的所有工作树生效；
 2. 新增第 4 节「版本发布纪律」：不得自行跳号，跳版本必须二次确认；
 3. 当时已自动创建的 v3.4.0 PR 已关闭、分支已删除、确认未打 tag；按用户指定版本改回 v3.3.2 重发。
+
+### 2026-11-21 · 整体迁入 E:\DSH\DS\Fang
+
+- 迁移：`E:/GPT/dsh-fang` → `E:\DSH\DS\Fang`；robocopy 复制工作区 + 单独复制 `.git`；
+  HEAD/tree 一致、`fsck` 0、tracked 631、tag 67；旧仓库保留只读。
+- 会话：当前 Fang 开发会话 `session-a6b0ed16…` 复制为新 id `session-5460c1e7…`（workspace
+  `c4b73d36…`，path `E:\DSH\DS\Fang`）；瓮城重建会话复制为 `session-c0a6a6e0…`；原会话不动。
+- 工具/文档：`tools/session/`、`docs/SESSIONS.md`、`docs/PROJECT-LAYOUT.md`、`docs/WORK-RULES.md`、
+  `docs/MIGRATION-2026-11-21.md`；发布工具去掉旧根硬编码。

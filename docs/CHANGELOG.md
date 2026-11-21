@@ -1,3 +1,33 @@
+## v3.5.7（2026-11-21）
+
+**主题：项目迁入 E:\DSH\DS\Fang；派生弹窗三分组 + 7 秒倒计时 + 移除面板页脚提示行（跳过未发布的 3.5.6，用户明确指定 v3.5.7，见 `docs/RELEASE-WAIVER-v3.5.7.md`）。**
+
+### 新增与变更
+
+- **项目整体迁移（2026-11-21）**：从 `E:/GPT/dsh-fang` 迁入 `E:\DSH\DS\Fang`（完整 git 历史 68 tag、历史发布物、会话快照与官方 ZIP、契约子仓库 1.2.0、会话工具）；旧仓库保留只读。运行时行为不变；发布工具去掉旧根硬编码（allow-list 忽略本地目录、contract 默认 `<repo>/contract`、凭据读取顺序加仓库 `.secrets/`、LSP staging 改到 `scratch/`）。
+- **派生弹窗会话三分组**（互斥，优先级 1→2→3）：① 最近 7 天活跃（未归档，默认展开、可选）；② 已归档（归档优先于时间，单独折叠、灰色 disabled、不可选）；③ 更早（超过 7 天且未归档，折叠后可选）。两处派生入口改为 `?limit=500&includeArchived=1`，分类在弹窗内完成。
+- **派生倒计时 5 秒 → 7 秒**（`DERIVE_PICKER_TIMEOUT_MS = 7000`）；超时仍默认新建空会话。
+- **移除母体面板页脚提示行**（双击/单击提示 + 刷新时间 + 版本号 + 独立门户链接），两栏内容独占纵向空间；独立门户入口保留在顶部工具区。
+- 测试：`client-derive-picker-timeout.test.mjs` 更新为 7 秒 + 三分组 + 页脚移除断言；新增跳号豁免 `docs/RELEASE-WAIVER-v3.5.7.md`。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=1302 fail=0 skip=2
+- e2e: 125/125
+- routes: 110（allowlist 0 findings） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+
+- 不改 DSH 本体；不迁移 FANG_HOME 运行数据（`D:\ToFuture` 仍在原位，约 3.5 GB）；
+- 不改变派生/审批/安全语义（仅 UI 分类与展示）；
+- 不发布未存在的 3.5.6（跳号由用户当次明确指定 v3.5.7）。
+
+### 回滚锚点
+
+- 升级前快照/上一代目录：active-v3.5.7-pre（母体）；merged-v3.5.7-pre（原身）；plugin-snapshot-<ts>（插件层）
+- 插件回滚：`npm i @twinsearth/fang-dsh-plugin@3.5.5` 或恢复 profile 备份
+
 ## v3.5.5（2026-11-21 已发布）
 
 **安全与静默错误修复（R28 / R23 / R13 / R14 / R15，按优先级）。**

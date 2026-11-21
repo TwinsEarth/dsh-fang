@@ -1,0 +1,132 @@
+{
+  "kind": "dsh-fang migration audit",
+  "date": "2026-11-21",
+  "from": "E:/GPT/dsh-fang (old repo — left untouched, read-only)",
+  "to": "E:\\DSH\\DS\\Fang",
+  "repo": {
+    "headAtMigration": "f1f0506170ec76c04f6ffec15f9fbb721b3d2b14",
+    "branchAtMigration": "docs/v3.5.5-release-record",
+    "headTree": "d67094426815553725cfc762a1fa1a90ab80ce30",
+    "treeMatchedAfterCopy": true,
+    "mainAfterRemoteSync": "4c1df5d6078e3940e485d3625757c108670f0387",
+    "mainTree": "d67094426815553725cfc762a1fa1a90ab80ce30",
+    "trackedFilesBeforeMigrationCommit": 631,
+    "tagCountAtMigration": 67,
+    "tagCountAfterSync": 68,
+    "recreatedTag": {
+      "name": "v3.5.5",
+      "objectSha": "392c8470421abc59de81e26dfbdc45fd89327c82",
+      "targetCommit": "20cfe3bcc489f92b68cd62b01d8e9f9dd9ab8cce",
+      "remoteObjectSha": "392c8470421abc59de81e26dfbdc45fd89327c82",
+      "exactMatch": true
+    },
+    "fsck": "clean",
+    "worktreeAtMigration": "clean"
+  },
+  "qualityGate": {
+    "command": "node tools/release/preflight.mjs --e2e --json",
+    "green": true,
+    "node": "26.13.0",
+    "checksTotal": 16,
+    "checksFailed": 0,
+    "tests": { "pass": 1300, "fail": 0, "skip": 2, "ms": 230800 },
+    "e2e": { "status": 0, "passed": 125, "total": 125, "ms": 27900 },
+    "mainCitySourceGate": { "grade": "A", "blockers": 0 },
+    "allowList": { "routes": 110, "findings": 0 },
+    "artifactSha256Sidecar": "match",
+    "crashSafety": { "checks": 10, "failed": 0 },
+    "firstRun": {
+      "green": false,
+      "reason": "local tools/session/ (SESSION-MIGRATION-KIT, git info/exclude) was scanned by the licence-layering test",
+      "fix": "test/licensing.test.mjs skips the local-only tools/session/ directory; rerun green"
+    }
+  },
+  "releaseOrderCheck": {
+    "command": "node tools/release/release-order.mjs --json",
+    "ok": false,
+    "onlyFailure": "artifact built from current HEAD (not stale) — released dist/dsh-fang-3.5.5.tgz was built from 20cfe3b; expected after the release",
+    "contractChecks": "all pass (repo readable, vendored pin 1.2.0 == contract repo 1.2.0, tree clean)"
+  },
+  "sessions": {
+    "dshHome": "%USERPROFILE%\\.dsh",
+    "restored": [
+      {
+        "source": "session-a6b0ed16-c58c-430d-a911-e4fe9577fc56",
+        "sourceBytesAtCheck": 15572634,
+        "sourceEventsAtRestore": 31164,
+        "newId": "session-5460c1e7-523f-40d3-b35c-dcbfa7813dbf",
+        "role": "root",
+        "headerCwd": "E:\\DSH\\DS\\Fang",
+        "snapshot": "sessions/migrated-2026-11-21/current/"
+      },
+      {
+        "source": "session-0c36661d-182c-499c-964e-f663fc9edff6",
+        "newId": "session-c0a6a6e0-47fd-4324-bea5-ecf9155b5848",
+        "eventsAtRestore": 8925,
+        "role": "root",
+        "headerCwd": "E:\\DSH\\DS\\Fang",
+        "snapshot": "sessions/migrated-2026-11-21/legacy/session-0c36661d/"
+      }
+    ],
+    "snapshotOnly": [
+      {
+        "id": "session-fb8e6ae8-6037-46ae-9e95-cf47c0992c1c",
+        "bytes": 80882659,
+        "subagents": 64,
+        "snapshot": "sessions/migrated-2026-11-21/legacy/session-fb8e6ae8/",
+        "note": "original 瓮城 session; restore command in docs/SESSIONS.md"
+      }
+    ],
+    "workspace": {
+      "id": "c4b73d36-a36a-4c7c-bf40-6da944c6b0c5",
+      "path": "E:\\DSH\\DS\\Fang",
+      "title": "Fang",
+      "memberSessionIds": 2
+    },
+    "registryBackups": [
+      "%USERPROFILE%\\.dsh\\storages\\workspace.json.bak-preimport-20261120230147",
+      "%USERPROFILE%\\.dsh\\storages\\workspace.json.bak-preimport-20261120230154"
+    ]
+  },
+  "officialSessionZip": {
+    "file": "sessions/dsh-session-5460c1e7.zip",
+    "bytes": 9358555,
+    "sha256": "413cd154f1cc5ed5eb3e7df04d71483e3bff10f969c8a2d54599f6adf75ed821",
+    "entries": ["session.v4.jsonl"],
+    "rootPlaintextBytes": 48767105,
+    "events": 31164,
+    "importVerification": {
+      "command": "node tools/session/import-session.mjs --zip ... --workspace scratch/import-test-workspace --no-attach",
+      "ok": true,
+      "newId": "session-11bdf42e-6b9d-480a-91c7-83e5ee7dd59a",
+      "headerCwdRewritten": "E:\\DSH\\DS\\Fang\\scratch\\import-test-workspace",
+      "cleanup": "temporary session directory removed; temp workspace removed"
+    }
+  },
+  "contractSubRepo": {
+    "path": "contract/ (local, outer git info/exclude)",
+    "version": "1.2.0",
+    "head": "12d5a12",
+    "remote": "https://github.com/TwinsEarth/dsh-fang-contract.git",
+    "vendoredPin": "src/contract/VENDOR.json = 1.2.0",
+    "status": "clean"
+  },
+  "size": {
+    "projectFiles": 3695,
+    "projectMB": 192.65,
+    "sessionsMB": 137.03,
+    "archiveMB": 8.28,
+    "gitMB": 16.53,
+    "nodeModulesMB": 18.07,
+    "distMB": 5.54
+  },
+  "intentionalExclusions": [
+    "D:\\ToFuture FANG_HOME runtime data (~3.5 GB: forks/essence/accel/.tmp/sessions/mirror) — machine runtime, not project",
+    "E:/GPT/.tmp (~10.5 GB temp scripts/logs) and the repo's own .tmp/",
+    "E:/GPT/dsh-fang-main (stale work copy without .git)",
+    "E:/GPT/dsh-recovery bulk scan data (plan-one.json, provenance.json, staging-nov19)",
+    "E:/ToFuture/release/stage-v3.0.9 (rebuildable release staging)",
+    "other projects under E:/GPT and other DSH workspaces/sessions",
+    "credentials in E:/GPT/.secrets (tokens go to .secrets/ or env on demand)"
+  ]
+}

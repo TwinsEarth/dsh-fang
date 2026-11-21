@@ -56,6 +56,8 @@ test('licensing: every core source file carries the AGPL SPDX header', () => {
     ...walk(path.join(ROOT, 'tools'), isCode),
   ].filter((p) => !p.includes(`${path.sep}vendor${path.sep}`))
     .filter((p) => !p.endsWith('fangctl.mjs'))
+    // tools/session/ is a local-only import (SESSION-MIGRATION-KIT, git info/exclude): not repo/package code.
+    .filter((p) => !rel(p).startsWith('tools/session/'))
   for (const f of files) {
     const head = fs.readFileSync(f, 'utf8').split('\n').slice(0, 4).join('\n')
     assert.match(head, /SPDX-License-Identifier: AGPL-3\.0-or-later/, `${rel(f)} must declare AGPL`)

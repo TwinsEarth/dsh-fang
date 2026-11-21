@@ -52,7 +52,7 @@ if (!CLI) {
 // 路线 A 真实 LSP 模式：安装官方三件套 + typescript-language-server 后，用真实 provider
 // 替换 e2e 测试缝（默认仍走测试缝，保证 CI 确定性）。
 const LSP_MODE = process.argv.includes('--lsp') || process.env.FANG_E2E_LSP === '1'
-const LSP_STAGE = process.env.FANG_E2E_LSP_STAGE || 'E:\\GPT\\.tmp\\e2e-lsp-stage'
+const LSP_STAGE = process.env.FANG_E2E_LSP_STAGE || path.join(ROOT, 'scratch', 'e2e-lsp-stage')
 
 const results = []
 function check(id, ok, detail = '') {

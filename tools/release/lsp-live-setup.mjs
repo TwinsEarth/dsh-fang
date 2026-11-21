@@ -16,7 +16,8 @@ const arg = (name, fallback = '') => {
   const index = argv.indexOf(`--${name}`)
   return index >= 0 ? String(argv[index + 1] ?? '') : fallback
 }
-const STAGE = arg('stage', process.env.FANG_E2E_LSP_STAGE || 'E:\\GPT\\.tmp\\e2e-lsp-stage')
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..')
+const STAGE = arg('stage', process.env.FANG_E2E_LSP_STAGE || path.join(repoRoot, 'scratch', 'e2e-lsp-stage'))
 const PACKAGES = [
   '@deepseek-ai/dsh-lsp@0.2.2-rc.3',
   '@deepseek-ai/dsh-lsp-stdio@0.2.2-rc.3',
