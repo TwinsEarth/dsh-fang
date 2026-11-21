@@ -1,3 +1,29 @@
+## v3.6.2（2026-11-22）
+
+**版本快照：与 v3.6.1 无功能/代码差异（重新发布，便于分发与回滚锚点）。**
+
+### 说明
+
+- 本版**没有新增代码提交**：`main` 自 v3.6.1（`61a257b`）之后无任何变更，本版仅为版本号/发布记录。
+- v3.6.1 已包含：加速分身会话兼容 shim（catalog v3→v1、去 `name`、未知事件 `ignorable`）、还原强制 reprovision、「启动」按钮修正（非归档分身直接启动）。
+- 如果你期望 v3.6.2 修复某个具体问题（例如完全权限切换的界面表现），请把现象发我，我会在下一版补上；不会在没有代码变更时假装修了问题。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=1314 fail=0 skip=2（1326 tests）
+- e2e: 125/125
+- routes: 111（allowlist 0 findings） / plugins: 16
+- preflight: GREEN
+
+### 边界
+
+- 无代码变更；安装 v3.6.2 与安装 v3.6.1 行为完全一致（仅版本号不同）。
+- 不改变 FANG_HOME 布局；不改变既有会话/分身数据。
+
+### 回滚锚点
+
+- 插件回滚：`npm i @twinsearth/fang-dsh-plugin@3.6.1`
+- 升级前快照/上一代目录：active-v3.6.2-pre（母体）；merged-v3.6.2-pre（原身）；plugin-snapshot-<ts>（插件层）
 ## v3.6.1（2026-11-22 已发布）
 
 **主题：加速分身兼容 stock 新会话格式（catalog v3 / 未知事件），并修复还原时「stock 配置 + 加速 CLI」混搭导致的 timeout。**
