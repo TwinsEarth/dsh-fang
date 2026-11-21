@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 // 装载形状验收（v2）：十一行插件都存在、导出形状合规、角色矩阵正确。
 // 这是"能不能装进 profile"的离线等价物；任何一行缺失/形状不对/角色错位都会失败。
@@ -125,7 +125,7 @@ test('compose mode mounts every plugin of the current role through one row', asy
 test('package exports + bundle patch reference every row (install preflight)', async () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.name, '@local/dsh-fang')
-  assert.equal(pkg.version, '3.6.0')
+  assert.equal(pkg.version, '3.6.1')
   assert.ok(pkg.dsh?.bundle?.patch, 'dsh.bundle.patch is required to be a bundle')
   assert.ok(fs.existsSync(path.join(ROOT, pkg.dsh.bundle.patch)), 'bundle patch file exists')
   assert.equal(pkg.dsh?.client?.platform, 'web', '浏览器 client half 必须启用（插件可脱离桌面端使用）')
