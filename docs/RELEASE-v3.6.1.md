@@ -14,7 +14,7 @@
 
 - 加速分身无法打开 stock 会话：catalog v3→v1、删除 v1 禁用的 `name`、加速核不认识的 stock 新事件（如 `team/mode`）标 `ignorable`；在加速 spawn/provision/import 自动执行（帧保留 + 备份）。
 - 还原 timeout：`resetForkConfig` 后强制 reprovision，避免 stock 配置 + 加速 CLI 混搭。
-- 只改分身会话副本，母体会话不动。
+- 只改分身会话副本，母体会话不动；「启动」按钮不再误弹「还原存档」确认（非归档分身直接启动）。
 
 ## 2. 门禁（发布前实测）
 
