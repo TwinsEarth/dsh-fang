@@ -18,9 +18,9 @@
 ## 2. 验证（真实数字，发布前实测）
 
 - preflight --e2e：**GREEN**；全量 tests **1311 pass / 0 fail / 2 skip**（1322 tests）；e2e **125/125**；main-city source grade A；allow-list **0 findings**（111 routes）；artifact sha256 match。
-- 发布 PR CI：待回填。
-- release-order：待回填。
-- verify-release --remote / healthz --remote：待回填。
+- 发布 PR CI（#141）：**8/8 绿**（gate required / test node22+24 / compat node22+24 / hygiene / license；e2e self-hosted skipped）。
+- `release-order`：pre-tag / post-publish 均 **10/10 GREEN，warnings=0**。
+- `verify-release --remote`：**GREEN 16/16**；`healthz --remote`：**HEALTHY @twinsearth/fang-dsh-plugin@3.6.0**。
 
 ## 3. 风险与边界
 
@@ -28,7 +28,12 @@
 - 别名清理只删 fang 生成的加速桩；真实 `@deepseek-ai/*` 包不动。
 - 归档会话仍不能作为派生导入源（服务端校验不变）。
 
-## 4. 回滚演练
+## 4. 发布（2026-11-22 已完成）
+
+- 三方发布：annotated tag **v3.6.0**（`9f4c3b41…` → `21c5ddab`）、GitHub Release `453919931` 名称 **v3.6.0 Stable**（4 资产，tgz 696,934 B / sha256 `628f39f2…`）、npm `@twinsearth/fang-dsh-plugin@3.6.0`（`latest=3.6.0`，shasum `11af9b7c…`）；
+- 发布 PR #141 squash 合并，main 线性；`verify-release --remote` GREEN、`healthz --remote` HEALTHY。
+
+## 5. 回滚演练
 
 - 触发方式：插件层 `npm i @twinsearth/fang-dsh-plugin@3.5.9`；仓库层按需 reset 到 v3.5.9 发布提交。
 - 恢复耗时：分钟级（无数据格式迁移）。
