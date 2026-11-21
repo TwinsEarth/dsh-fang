@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -14,6 +15,7 @@ import {
   OVERLAY_MARKER,
   buildAcceleratedForkProfile,
   buildModelOverlay,
+  downgradeSubagentCatalogLog,
   normalizeCoreMode,
   pruneAliasStubs,
   rewriteScope,
@@ -136,6 +138,45 @@ test('normalizeCoreMode: unknown values fall back to stock', () => {
   assert.equal(normalizeCoreMode('ACCELERATED'), 'stock')
   assert.equal(normalizeCoreMode(''), 'stock')
   assert.equal(normalizeCoreMode(undefined), 'stock')
+})
+
+test('2026-11-22: downgradeSubagentCatalogLog converts catalog v3 to v1 frame-preserving', () => {
+  const dir = tmp('fang-catalog-downgrade-')
+  const file = path.join(dir, 'session.v4.jsonl.zstd')
+  const header = JSON.stringify({ type: 'session', version: 4, id: 'session-11111111-2222-4333-8444-555555555555', createdAt: 1, isSeeded: false, delegationDepth: 0 })
+  const plain = JSON.stringify({ type: 'user/message', seq: 1, data: { content: [{ type: 'text', text: 'hi' }] } })
+  const catalog = JSON.stringify({ type: 'subagent/catalog', seq: 2, data: { version: 3, childId: 'child-1', childCreatedAt: 2, mode: 'continuable', label: 'eval', name: 'eval-kernel' } })
+  const tail = JSON.stringify({ type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } })
+  const frames = [header, plain, catalog, tail].map((line) => zlib.zstdCompressSync(Buffer.from(`${line}\n`, 'utf8')))
+  fs.writeFileSync(file, Buffer.concat(frames))
+  const before = fs.readFileSync(file)
+
+  const out = downgradeSubagentCatalogLog(file, { backup: true })
+  assert.equal(out.ok, true)
+  assert.equal(out.changedEvents, 1)
+  assert.equal(out.changedFrames, 1)
+  assert.ok(out.backup && fs.existsSync(out.backup), 'backup written')
+
+  const after = fs.readFileSync(file)
+  const afterFrames = []
+  const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const offs = []
+  for (let i = 0; (i = after.indexOf(MAGIC, i)) !== -1; i += 4) offs.push(i)
+  for (let k = 0; k < offs.length; k++) afterFrames.push(after.subarray(offs[k], k + 1 < offs.length ? offs[k + 1] : after.length))
+  assert.equal(afterFrames.length, 4, 'frame count preserved')
+  assert.deepEqual(afterFrames[0], before.subarray(0, before.indexOf(MAGIC, 4) > 0 ? before.indexOf(MAGIC, 4) : before.length), 'header frame bytes unchanged')
+  const decoded = afterFrames.map((frame) => zlib.zstdDecompressSync(frame).toString('utf8')).join('')
+  assert.match(decoded, /"version":1/, 'catalog downgraded to version 1')
+  assert.doesNotMatch(decoded, /"version":3/, 'no version 3 catalog remains')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('2026-11-22: restore must force reprovision after config reset (accelerated profile shape)', () => {
+  const orchestrator = fs.readFileSync(path.join(REPO, 'src', 'plugins', 'orchestrator.mjs'), 'utf8')
+  assert.match(orchestrator, /syncForkCoreMode\(task, \{ force: true \}\)/)
+  assert.match(orchestrator, /sanitizeAcceleratedForkSessions\(homeDir\)/)
+  const forker = fs.readFileSync(path.join(REPO, 'src', 'plugins', 'forker.mjs'), 'utf8')
+  assert.match(forker, /sanitizeAcceleratedForkSessions\(homeDir\)/)
 })
 
 test('2026-11-22: pruneAliasStubs removes only accelerated alias stubs (stock restore after core switch)', () => {

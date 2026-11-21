@@ -96,7 +96,7 @@ test('routes and UI are wired (source guards)', () => {
   assert.match(orchestrator, /accelerated-new-session/)
   // 开关不是热更新：restore/autostart 在启动前按当前开关换核（重新 provision），并只用返回的 coreMode。
   assert.match(orchestrator, /const coreSync = await syncForkCoreMode\(task\)/)
-  assert.equal((orchestrator.match(/syncForkCoreMode\(task\)/g) ?? []).length, 2, 'restore + autostart are the only reopen paths that switch core')
+  assert.equal((orchestrator.match(/syncForkCoreMode\(task[,)]/g) ?? []).length, 2, 'restore + autostart are the only reopen paths that switch core')
   assert.match(orchestrator, /coreMode: coreSync\.coreMode/)
   assert.equal(/normalizeCoreMode\(task\.coreMode \?\? forkCoreSettings\(\)\.mode\)/.test(orchestrator), false)
   assert.match(orchestrator, /fang\/fork-core-switched/)

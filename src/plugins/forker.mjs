@@ -65,7 +65,7 @@ import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttp
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
-import { normalizeCoreMode, pruneAliasStubs, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
+import { normalizeCoreMode, pruneAliasStubs, sanitizeAcceleratedForkSessions, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 
 /** Repository root of this plugin (used as the @local/dsh-fang junction source). */
@@ -970,6 +970,15 @@ export function apply(ctx, config) {
       }
       warnings.push(...(Array.isArray(written.warning) ? written.warning : []))
       if (written.overlay?.ok !== true) warnings.push(`accelerated-model-overlay:${written.overlay?.error ?? 'unknown'}`)
+      // 2026-11-22: accelerated core 3.5.0 cannot read catalog v3 facts. Sessions copied from
+      // a stock mother are downgraded here (frame-preserving) so the fork's history opens.
+      try {
+        const sanitized = sanitizeAcceleratedForkSessions(homeDir)
+        if (sanitized.changedEvents > 0) warnings.push(`catalog-downgraded:${sanitized.changedEvents}`)
+        written.catalogSanitize = sanitized
+      } catch (error) {
+        warnings.push(`catalog-sanitize-failed:${msgOf(error)}`)
+      }
       accelerated = { bundles: written.bundles, overlay: written.overlay, junctions: written.junctions, sync: written.sync ?? null, forkLsp: written.forkLsp ?? null }
     } else if (useCleanTemplate) {
       // Forker-owned clean template: never written into the mother profile directory.

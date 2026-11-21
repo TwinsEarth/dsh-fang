@@ -56,7 +56,7 @@ import {
 import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
 import { LSP_PROVIDER_TEST, advertisedActionsFromSeam, checkWorkspaceRoot, collectForkWorkspaceRoots, describeLspProvider, lspAuditRecord, queryMotherLsp, resolveLspAllowedRoots } from '../lib/lsp-provider.mjs'
 import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
-import { detectForkLspSupport, normalizeCoreMode, pruneAliasStubs } from '../lib/accelerated-fork.mjs'
+import { detectForkLspSupport, normalizeCoreMode, pruneAliasStubs, sanitizeAcceleratedForkSessions } from '../lib/accelerated-fork.mjs'
 import { accelNodeModulesRoot, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
@@ -386,10 +386,11 @@ export function apply(ctx, config) {
    *   official ←→ accelerated 需要重新 provision（profile 形状不同），会话目录不动。
    * @returns {{ok:boolean, switched:boolean, coreMode:string, error?:string, detail?:string}}
    */
-  const syncForkCoreMode = async (task) => {
+  const syncForkCoreMode = async (task, options = {}) => {
+    const force = options?.force === true
     const desired = desiredForkCoreMode()
     const current = normalizeCoreMode(task?.coreMode)
-    if (!task || desired === current) return { ok: true, switched: false, coreMode: current || desired }
+    if (!task || (desired === current && !force)) return { ok: true, switched: false, coreMode: current || desired }
     const f = forker()
     if (!f || typeof f.provision !== 'function') return { ok: false, switched: false, coreMode: current, error: 'forker-unavailable' }
     let provisioned
@@ -1189,6 +1190,16 @@ export function apply(ctx, config) {
 
         // v3.1.35：分身会话下限 1 —— 没有导入会话时补一个空会话，
         // 让分身 Web 打开就有可用的会话（用户规格：默认不能为 0）。
+        if (coreMode === 'accelerated') {
+          // 2026-11-22: accelerated core 3.5.0 cannot read catalog v3 facts; sessions copied
+          // from a stock mother must be downgraded before the fork reads them.
+          try {
+            const sanitized = sanitizeAcceleratedForkSessions(homeDir)
+            if (sanitized.changedEvents > 0) audit(AUDIT.FORK_CREATED + '-catalog-downgraded', { taskId, ...sanitized })
+          } catch (error) {
+            audit(AUDIT.FORK_CREATED + '-catalog-sanitize-failed', { taskId, error: String(error?.message ?? error) })
+          }
+        }
         try {
           const floors = await ensureForkSessionFloor({ homeDir, task, cwd: input.cwd })
           task.sessionFloor = floors
@@ -1852,7 +1863,9 @@ export function apply(ctx, config) {
       let sessionGuard = null
       try { sessionGuard = applyForkSessionGuard(task) } catch { sessionGuard = { ok: false } }
       // 开关不是热更新：重新打开分身时按当前开关换核（重新 provision profile；会话目录不动）。
-      const coreSync = await syncForkCoreMode(task)
+      // resetForkConfig 刚把 profile 重置回 stock 形状；即使 coreMode 未变也必须强制 reprovision，
+      // 否则加速分身会以 stock 配置 + accelerated CLI 启动而永远不 ready（2026-11-22 实测 timeout）。
+      const coreSync = await syncForkCoreMode(task, { force: true })
       if (coreSync.ok !== true) {
         task.status = TASK_STATUS.FAILED
         persist()
