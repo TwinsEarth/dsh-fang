@@ -125,7 +125,7 @@ test('compose mode mounts every plugin of the current role through one row', asy
 test('package exports + bundle patch reference every row (install preflight)', async () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.name, '@local/dsh-fang')
-  assert.equal(pkg.version, '3.5.7')
+  assert.equal(pkg.version, '3.5.8')
   assert.ok(pkg.dsh?.bundle?.patch, 'dsh.bundle.patch is required to be a bundle')
   assert.ok(fs.existsSync(path.join(ROOT, pkg.dsh.bundle.patch)), 'bundle patch file exists')
   assert.equal(pkg.dsh?.client?.platform, 'web', '浏览器 client half 必须启用（插件可脱离桌面端使用）')
@@ -145,4 +145,6 @@ test('package exports + bundle patch reference every row (install preflight)', a
   }
   assert.ok(patch.includes('id: fang-adapter'), 'adapter row present')
   assert.ok(patch.includes('id: fang-orchestrator'), 'orchestrator row present')
+  // 2026-11-21（v3.5.8）：会话目录要能展示「已归档」分组（灰色只读），因此 allowArchived 必须开启。
+  assert.match(patch, /id: fang-session-catalog[\s\S]{0,240}allowArchived:\s*true/, 'session catalog must expose archived sessions for the UI group')
 })

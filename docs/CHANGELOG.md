@@ -1,3 +1,34 @@
+## v3.5.8（2026-11-21）
+
+**主题：母体会话目录与 DSH 宿主侧栏对齐（只列工作区注册根会话 + 投影缓存标题）；派生弹窗/母体面板按「活跃中（7 天）/ 已归档 / 旧会话（>7 天）」三分组，组内按最后活跃时间从新到旧。**
+
+### 修复
+
+- **会话目录三边不一致（宿主侧栏 / 母体面板 / 派生弹窗）**：`src/plugins/session-catalog.mjs` 原来直接扫 `$DSH_HOME/sessions` 目录，把**子代理会话（裸 UUID 目录）**与未登记目录也列出来（本机实测 193 条 vs 宿主 5 条），且标题因有界读取截断回退成工作区名/首条任务提示。现改为：
+  - 只列 `workspace.json` 工作区成员里的**根会话**（与宿主侧栏同源）；归档/置顶取 `global.archivedSessionIds / pinnedSessionIds`；
+  - 标题优先读 DSH 投影缓存 `storages/session_projcache/sessions/<id>.json`（宿主侧栏同一份数据），日志有界读取仅兜底；
+  - 注册表没有成员清单的旧 home 保持原目录扫描兼容行为。
+- **三分组 + 组内排序**：会话按互斥优先级 ① 活跃中（7 天内、未归档）② 已归档 ③ 旧会话（超过 7 天、未归档）分组，组内按最后活跃时间（`updatedAt`）从新到旧；母体面板新增分组小标题与计数；派生弹窗已归档组灰色只读、旧会话折叠可选；空会话（宿主侧栏也不显示）不再进入派生列表。
+- **归档分组可见**：`cordis.patch.yml` 中 `fang-session-catalog.allowArchived` 由 `false` 改为 `true`，使「已归档」分组可在面板/派生弹窗显示（灰色只读；仍不能作为派生导入源）。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=1306 fail=0 skip=2
+- e2e: 125/125
+- routes: 110（allowlist 0 findings） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+
+- 归档会话只用于展示/分组，仍不能作为派生导入源（服务端硬校验不变）；
+- 不改宿主侧栏行为；其它工作区/项目会话仍由宿主管理；
+- 不改变 FANG_HOME 运行数据布局（`D:\ToFuture` 仍在原位）。
+
+### 回滚锚点
+
+- 升级前快照/上一代目录：active-v3.5.8-pre（母体）；merged-v3.5.8-pre（原身）；plugin-snapshot-<ts>（插件层）
+- 插件回滚：`npm i @twinsearth/fang-dsh-plugin@3.5.7`
+
 ## v3.5.7（2026-11-21 已发布）
 
 **主题：项目迁入 E:\DSH\DS\Fang；派生弹窗三分组 + 7 秒倒计时 + 移除面板页脚提示行（跳过未发布的 3.5.6，用户明确指定 v3.5.7，见 `docs/RELEASE-WAIVER-v3.5.7.md`）。**
