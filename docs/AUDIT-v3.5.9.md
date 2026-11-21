@@ -22,7 +22,7 @@
 
 ## 风险与边界
 - 不改加速核 CLI 版本（`@twinsearth/dsh@3.5.0`）与母体/原身 core；
-- 不改数据目录布局（`FANG_HOME` 未设置，运行数据仍在 `C:\Users\fangw\.dsh\fang\desktop`；加速核在 `D:\ToFuture\accel`，由本机 profile 补丁 `fang-forker.acceleratedCliPath` 指向）；
+- 不改数据目录布局（`FANG_HOME` 未设置，运行数据仍在 `<DSH_HOME>/fang/desktop`；加速核在 `D:\ToFuture\accel`，由本机 profile 补丁 `fang-forker.acceleratedCliPath` 指向）；
 - 发布包内的 `@local/dsh-fang` 常量仍会被构建改名为发布名；本修复不再依赖该常量决定 junction 名。
 
 ## 回滚演练
