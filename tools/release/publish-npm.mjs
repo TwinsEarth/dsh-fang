@@ -67,7 +67,7 @@ console.log('PASS  main-city gate (publish)')
 
 const token = readSecret('NPM_TOKEN', 'npm-token.txt')
 if (!token) {
-  console.error('\nFAIL no npm token. Put an npm Automation token in E:\\GPT\\.secrets\\npm-token.txt')
+  console.error('\nFAIL no npm token. Put an npm Automation token in <repo>/.secrets/npm-token.txt (or user .secrets), or set NPM_TOKEN.')
   console.error('     (npmjs.com → Access Tokens → Generate New Token → Automation), or set NPM_TOKEN.')
   process.exit(2)
 }

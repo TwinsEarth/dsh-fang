@@ -32,6 +32,14 @@
 未恢复、仅快照的历史会话：`session-fb8e6ae8-6037-46ae-9e95-cf47c0992c1c`（原始「DSH：Fang“瓮城”」，77.1 MB，
 含 64 个后代会话）。需要时用 §4 的命令从快照恢复（默认换新 id，不动原会话）。
 
+### 2.1 当前 DSH 状态（2026-11-21 复核）
+
+迁移当时挂载的 `Fang` 工作区（`c4b73d36…`）已不在本机当前 `workspace.json` 中：DSH home 在 2026-11-21
+上午被重建为单一工作区 **DS**（path `E:\DSH\DS`），Fang 会话已重新导入该工作区（观察到的 id：
+`session-ac6d0217-…`「DSH：Fang“瓮城”」、`session-c179c627-…`「DSH：瓮城」、`session-65beee95-…`
+「DSH：瓮城Plus」，最后一个是当前会话）。若要把会话重新挂回 `E:\DSH\DS\Fang` 工作区，用 §4 从项目内
+快照恢复，或用 §5 的官方 ZIP 导入（都会分配新 id，不动现有会话）。
+
 ## 3. 打开与继续
 
 1. 刷新/重启 DSH 后，选择工作区 **Fang**（path `E:\DSH\DS\Fang`）；
@@ -74,7 +82,7 @@ attachments-missing.txt               可选
 ```
 
 本项目已把恢复后的会话导出为官方格式 ZIP：`sessions\dsh-session-5460c1e7.zip`（导出脚本见
-`scratch/export-official-zip.mjs` 的历史用法；重新导出时按同结构生成 `session.v4.jsonl` 即可）。
+`archive\migration-2026-11-21\export-official-zip.mjs`；重新导出时按同结构生成 `session.v4.jsonl` 即可）。
 
 导入有两种方式：
 

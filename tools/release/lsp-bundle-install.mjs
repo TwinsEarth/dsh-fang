@@ -25,6 +25,8 @@ const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace
 const STAGE = arg('stage', process.env.FANG_E2E_LSP_STAGE || path.join(os.tmpdir(), 'fang-lsp-stage'))
 const CLI_CANDIDATES = [
   process.env.DSH_CLI_PATH,
+  // 2026-11 安装位置迁移：新安装根在 D:\DSH（旧 E:\DSH\DS 保留为兼容候选）。
+  'D:\\DSH\\resources\\runtime\\cli\\bin\\dsh.cmd',
   'E:\\DSH\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd',
   'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
 ].filter(Boolean)

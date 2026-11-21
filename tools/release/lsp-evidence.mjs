@@ -21,9 +21,16 @@ function nth(process, args, timeout = 120000) {
   return { status: result.status, stdout: String(result.stdout ?? '').trim(), stderr: String(result.stderr ?? '').trim() }
 }
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..')
 
 // E1: 运行版本 = 0.2.2-rc.3（Desktop asar 安装的 CLI 版本）
-const CLI_CANDIDATES = [process.env.DSH_CLI_PATH, 'E:\\DSH\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd', 'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd'].filter(Boolean)
+const CLI_CANDIDATES = [
+  process.env.DSH_CLI_PATH,
+  // 2026-11 安装位置迁移：新安装根在 D:\DSH（旧 E:\DSH\DS 保留为兼容候选）。
+  'D:\\DSH\\resources\\runtime\\cli\\bin\\dsh.cmd',
+  'E:\\DSH\\DS\\resources\\runtime\\cli\\bin\\dsh.cmd',
+  'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd',
+].filter(Boolean)
 const CLI = CLI_CANDIDATES.find((candidate) => { try { return fs.existsSync(candidate) } catch { return false } })
 const version = CLI ? nth(CLI, ['--version']) : { status: -1, stdout: '', stderr: 'dsh CLI not found' }
 check('E1 installed DSH runtime = 0.2.2-rc.3', /^0\.2\.2-rc\.3$/.test(version.stdout), version.stdout || version.stderr)
@@ -50,7 +57,7 @@ check('E5 accelerated CLI does not ship LSP trio locally', accelLsp.length === 0
 // SKIP when the staging tree is absent — run `npm run setup:lsp-live` first for live verification).
 const stageCandidates = [
   process.env.FANG_E2E_LSP_STAGE,
-  'E:\\GPT\\.tmp\\e2e-lsp-stage',
+  path.join(repoRoot, 'scratch', 'e2e-lsp-stage'),
   path.join(os.tmpdir(), 'fang-lsp-stage'),
 ].filter(Boolean)
 const stage = stageCandidates.find((candidate) => { try { return fs.existsSync(path.join(candidate, 'node_modules', '@deepseek-ai', 'dsh-lsp', 'lib', 'types', 'index.d.ts')) } catch { return false } })
@@ -71,7 +78,7 @@ if (!stage) {
 // E10: model-facing lsp tool is 1-based and requires an Agent Session (workspaceRoot from session cwd).
 const toolCandidates = [
   process.env.FANG_E2E_LSP_STAGE,
-  'E:\\GPT\\.tmp\\e2e-lsp-stage',
+  path.join(repoRoot, 'scratch', 'e2e-lsp-stage'),
   path.join(os.tmpdir(), 'fang-lsp-stage'),
 ].filter(Boolean)
 const toolStage = toolCandidates.find((candidate) => { try { return fs.existsSync(path.join(candidate, 'node_modules', '@deepseek-ai', 'dsh-tool-lsp', 'README.md')) } catch { return false } })
@@ -93,7 +100,6 @@ check('E11 no local typescript-language-server on PATH (bundle/server source nee
 info('E11 other servers', 'clangd/pyright/gopls missing; rust-analyzer may exist for Rust only (not a TS fixture server)')
 
 // E12: delegation layer already has whitelist / validation / classification / approval gate / audit / e2e seam.
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', '..')
 const delegationSrc = fs.readFileSync(path.join(repoRoot, 'src', 'lib', 'lsp-delegation.mjs'), 'utf8')
 const orchestrationSrc = fs.readFileSync(path.join(repoRoot, 'src', 'plugins', 'orchestrator.mjs'), 'utf8')
 const e2eSrc = fs.readFileSync(path.join(repoRoot, 'tools', 'e2e.mjs'), 'utf8')

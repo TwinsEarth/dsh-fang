@@ -132,4 +132,29 @@
 5. **`release-order` 的 stale 检查**：迁移工作提交落在 `4c1df5d` 之上，`dist/dsh-fang-3.5.5.tgz`
    仍是已发布的 `20cfe3b` 构建品，因此 `npm run release:check` 会报 `artifact … STALE`（发布后
    的正常状态，不是迁移损坏；如要再发布需重新构建并走发布指令）。
-5. **`node_modules` 建议换机后 `npm ci` 刷新**；本机保持迁移时状态。
+6. **`node_modules` 建议换机后 `npm ci` 刷新**；本机保持迁移时状态。
+
+## 9. 独立完整性复核（2026-11-21）
+
+迁移完成后再做了一次独立只读复核（并复跑门禁）：
+
+| 检查 | 结果 |
+|---|---|
+| 旧仓库 refs（23 分支 + 67 tag）在新仓库 | 全部存在、tag sha 0 差异；旧仓库 `fsck` clean、工作树 clean、HEAD 仍 `f1f0506`（未改动） |
+| 新仓库 vs 旧仓库提交 | 仅多 `4c1df5d`（origin/main，PR #134，树与 `f1f0506` 同为 `d6709442`）+ `7b54731`（迁移提交）；`fsck --full` clean |
+| 全量门禁（新目录复跑） | `node tools/release/preflight.mjs --e2e` → **GREEN 16/16**，tests **1300 pass / 0 fail / 2 skip**，e2e **125/125**，main-city source grade A，allow-list 0 findings |
+| 项目内会话快照 | 67 个日志（3 root + 64 子代理）全部按 v4 多帧解码成功、0 损坏；事件数与 §5 一致（31164 / 8925 / 100604） |
+| 官方 ZIP | `session.v4.jsonl` 31,165 行（31,164 events）、0 条坏 JSON、header cwd=`E:\DSH\DS\Fang`、sha256 `413cd15…` 与记录一致；`restore-session --snapshot --dry-run` 与 `import-session --zip --dry-run` 均通过 |
+| 契约子仓库 | HEAD `12d5a12`、工作树 clean、版本 1.2.0 = `src/contract/VENDOR.json`；VENDOR `sourceCommit f5b7b05` 在子仓库存在；`release-order` 契约 6 项全过（唯一红是发布后的 artifact STALE，属预期） |
+| 构建产物 | `dist/dsh-fang-3.5.5.tgz` sha256 `7a4edc15…` 与 sidecar/旧仓库副本一致；`local-dsh-fang-3.1.19.tgz` 与旧仓库一致 |
+| 本地目录 | `sessions/ scratch/ runtime/ archive/ .secrets/ tools/session/ contract/` 就位并被 `.git/info/exclude` 排除；无 `.tmp`/备份快照混入（模式扫描 0 命中）；`node_modules` 18.07 MB（`jsdom` 可加载） |
+| 文件量 | 3742 文件 / 192.9 MB（`.git` 16.64 / `node_modules` 18.07 / `dist` 5.54 / `sessions` 137.03 / `archive` 8.43） |
+
+复核同时修正的残留：`tools/release/lsp-evidence.mjs`、`lsp-bundle-install.mjs` 的 DSH CLI/LSP staging
+候选仍指向旧安装/旧根（改为 `D:\DSH` 优先 + 本项目 `scratch/`）；`publish-npm` 的凭据提示改为
+仓库 `.secrets/`/环境变量；`docs/WORK-RULES.md` 的 tag/分支、`docs/SESSIONS.md` 的导出脚本路径与
+当前 DSH 状态同步更新。
+
+另：`npm run verify:lsp-evidence` 现为 11/12，唯一红是 E1 断言安装版 `0.2.2-rc.3`，而本机 DSH 已升级
+`0.2.2-rc.5`（环境版本漂移，不是迁移损坏；旧仓库同样不满足）。复核证据存于
+`archive\migration-2026-11-21\integrity\`（preflight / repo-parity / session-snapshots / release-order / lsp-evidence）。
