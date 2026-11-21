@@ -171,6 +171,30 @@ test('2026-11-22: downgradeSubagentCatalogLog converts catalog v3 to v1 frame-pr
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('2026-11-22: unknown stock event types are marked ignorable for the accelerated core', () => {
+  const dir = tmp('fang-catalog-unknown-')
+  const file = path.join(dir, 'session.v4.jsonl.zstd')
+  const header = JSON.stringify({ type: 'session', version: 4, id: 'session-11111111-2222-4333-8444-555555555555', createdAt: 1, isSeeded: false, delegationDepth: 0 })
+  const team = JSON.stringify({ type: 'team/mode', seq: 1, data: { mode: 'team' } })
+  const user = JSON.stringify({ type: 'user/message', seq: 2, data: { content: [{ type: 'text', text: 'hi' }] } })
+  fs.writeFileSync(file, Buffer.concat([header, team, user].map((line) => zlib.zstdCompressSync(Buffer.from(`${line}\n`, 'utf8')))))
+  const out = downgradeSubagentCatalogLog(file, { knownEventTypes: new Set(['session', 'user/message']) })
+  assert.equal(out.ok, true)
+  assert.equal(out.markedIgnorable, 1)
+  const decoded = fs.readFileSync(file).toString('binary')
+  assert.ok(decoded.includes('team/mode'))
+  const text = (() => {
+    const buf = fs.readFileSync(file)
+    const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+    const offs = []
+    for (let i = 0; (i = buf.indexOf(MAGIC, i)) !== -1; i += 4) offs.push(i)
+    return offs.map((s, k) => zlib.zstdDecompressSync(buf.subarray(s, k + 1 < offs.length ? offs[k + 1] : buf.length)).toString('utf8')).join('')
+  })()
+  const events = text.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+  assert.equal(events.find((event) => event.type === 'team/mode')?.ignorable, true)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('2026-11-22: restore must force reprovision after config reset (accelerated profile shape)', () => {
   const orchestrator = fs.readFileSync(path.join(REPO, 'src', 'plugins', 'orchestrator.mjs'), 'utf8')
   assert.match(orchestrator, /syncForkCoreMode\(task, \{ force: true \}\)/)

@@ -285,9 +285,12 @@ export function pruneAliasStubs(profileDir) {
  * only frames containing such events are re-compressed; every other frame keeps its exact bytes.
  * @returns {{ok:boolean, changedEvents:number, changedFrames:number, backup?:string, error?:string}}
  */
-export function downgradeSubagentCatalogLog(logFile, { backup = true } = {}) {
+export function downgradeSubagentCatalogLog(logFile, { backup = true, knownEventTypes = null } = {}) {
   const file = String(logFile ?? '').trim()
   if (!file) return { ok: false, changedEvents: 0, changedFrames: 0, error: 'no-log-file' }
+  const known = knownEventTypes instanceof Set
+    ? knownEventTypes
+    : new Set(Array.isArray(knownEventTypes) ? knownEventTypes : [])
   let buf
   try { buf = fs.readFileSync(file) } catch (error) { return { ok: false, changedEvents: 0, changedFrames: 0, error: String(error?.message ?? error) } }
   const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
@@ -297,6 +300,8 @@ export function downgradeSubagentCatalogLog(logFile, { backup = true } = {}) {
   const frames = []
   let changedFrames = 0
   let changedEvents = 0
+  let markedIgnorable = 0
+  let strippedFields = 0
   for (let k = 0; k < offsets.length; k++) {
     const raw = buf.subarray(offsets[k], k + 1 < offsets.length ? offsets[k + 1] : buf.length)
     const text = zlib.zstdDecompressSync(raw).toString('utf8')
@@ -307,22 +312,39 @@ export function downgradeSubagentCatalogLog(logFile, { backup = true } = {}) {
       if (!line.trim()) continue
       let event
       try { event = JSON.parse(line) } catch { continue }
-      if (event?.type !== 'subagent/catalog') continue
-      const version = Number(event?.data?.version)
-      if (!(version > 2)) continue
-      const mode = event.data.mode === 'external' ? 'external' : (event.data.mode === 'one-shot' ? 'one-shot' : 'continuable')
-      event.data.version = mode === 'external' ? 2 : 1
-      event.data.mode = mode
-      if (mode === 'continuable' && typeof event.data.label !== 'string') event.data.label = ''
-      lines[i] = JSON.stringify(event)
-      changed = true
-      changedEvents += 1
+      if (event?.type === 'subagent/catalog' && event.data && typeof event.data === 'object') {
+        const version = Number(event.data.version)
+        if (version > 2) {
+          const mode = event.data.mode === 'external' ? 'external' : (event.data.mode === 'one-shot' ? 'one-shot' : 'continuable')
+          event.data.version = mode === 'external' ? 2 : 1
+          event.data.mode = mode
+          if (mode === 'continuable' && typeof event.data.label !== 'string') event.data.label = ''
+          changed = true
+          changedEvents += 1
+        }
+        // v1/v2 schema is strict: `name` was introduced with v3 and is an unrecognized key
+        // for the accelerated core's projection (2026-11-22: unrecognized_keys "name").
+        if (event.data.name !== undefined) {
+          delete event.data.name
+          changed = true
+          strippedFields += 1
+        }
+      }
+      // The accelerated core refuses event types it does not know unless the writer marks
+      // them ignorable. Stock DSH adds new event types (e.g. team/mode) first; a fork must
+      // still be able to read the copied history, so mark only unknown-to-accelerated events.
+      if (known.size > 0 && !known.has(event.type) && event.ignorable !== true) {
+        event.ignorable = true
+        changed = true
+        markedIgnorable += 1
+      }
+      if (changed) lines[i] = JSON.stringify(event)
     }
     if (!changed) { frames.push(raw); continue }
     frames.push(zlib.zstdCompressSync(Buffer.from(lines.join('\n'), 'utf8')))
     changedFrames += 1
   }
-  if (changedEvents === 0) return { ok: true, changedEvents: 0, changedFrames: 0 }
+  if (changedEvents === 0 && markedIgnorable === 0 && strippedFields === 0) return { ok: true, changedEvents: 0, changedFrames: 0, markedIgnorable: 0, strippedFields: 0 }
   const backupFile = backup ? `${file}.bak-catalogv3-${Date.now()}` : ''
   if (backup) fs.copyFileSync(file, backupFile)
   const tmp = `${file}.tmp-catalogv3-${process.pid}`
@@ -343,7 +365,26 @@ export function downgradeSubagentCatalogLog(logFile, { backup = true } = {}) {
     return { ok: false, changedEvents: 0, changedFrames: 0, error: String(error?.message ?? error) }
   }
   fs.renameSync(tmp, file)
-  return { ok: true, changedEvents, changedFrames, ...(backupFile ? { backup: backupFile } : {}) }
+  return { ok: true, changedEvents, changedFrames, markedIgnorable, strippedFields, ...(backupFile ? { backup: backupFile } : {}) }
+}
+
+/**
+ * Resolve the accelerated core's supported event vocabulary from its installed
+ * `@twinsearth/dsh-session` package (dynamic import, cached by Node).
+ * @returns {Promise<Set<string>|null>}
+ */
+export async function loadAcceleratedKnownEventTypes(accelNodeModules) {
+  const root = String(accelNodeModules ?? '').trim()
+  if (!root) return null
+  const file = path.join(root, '@twinsearth', 'dsh-session', 'lib', 'index.js')
+  if (!fs.existsSync(file)) return null
+  try {
+    const mod = await import(pathToFileURL(file).href)
+    const value = mod?.KNOWN_SESSION_EVENT_TYPES
+    if (value instanceof Set) return value
+    if (Array.isArray(value)) return new Set(value)
+  } catch { /* accelerated core unavailable: caller falls back to catalog-only compat */ }
+  return null
 }
 
 /**
