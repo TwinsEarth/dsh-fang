@@ -17,9 +17,9 @@
 ## 2. 验证（真实数字，发布前实测）
 
 - preflight --e2e：**GREEN**；全量 tests **1314 pass / 0 fail / 2 skip**（1326 tests）；e2e **125/125**；main-city A；allow-list 0；artifact sha256 match。
-- 发布 PR CI：待回填。
-- release-order：待回填。
-- verify-release --remote / healthz --remote：待回填。
+- 发布 PR CI（#143）：**8/8 绿**（gate required / test node22+24 / compat node22+24 / hygiene / license）。
+- `release-order`：pre-tag / post-publish 均 **10/10 GREEN**。
+- `verify-release --remote`：**GREEN 16/16**；`healthz --remote`：**HEALTHY @3.6.1**。
 
 ## 3. 风险与边界
 
