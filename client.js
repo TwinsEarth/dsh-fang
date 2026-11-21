@@ -249,6 +249,40 @@ window.__ModuleLoader__.load({
       }
       return { active, archived, temporary }
     }
+
+    // 2026-11-21：会话统一分类（母体面板与会话选择弹窗共用）：
+    //   1) 活跃中（7 天内、未归档）
+    //   2) 已归档（归档优先于时间，一律归此组）
+    //   3) 旧会话（超过 7 天且未归档）
+    // 组内一律按「最后活跃时间」（updatedAt）从新到旧排序。
+    const SESSION_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+    const SESSION_GROUP_ORDER = ['active', 'archived', 'older']
+    const SESSION_GROUP_LABELS = {
+      active: '活跃中（7 天内）',
+      archived: '已归档',
+      older: '旧会话（超过 7 天）',
+    }
+    const byLastActiveDesc = (a, b) => (Number(b?.updatedAt) || 0) - (Number(a?.updatedAt) || 0)
+    function classifySessionsByRecency(items, now = Date.now()) {
+      const active = []
+      const archived = []
+      const older = []
+      for (const item of Array.isArray(items) ? items : []) {
+        if (item?.archived === true) { archived.push(item); continue }
+        const updatedAt = Number(item?.updatedAt)
+        if (Number.isFinite(updatedAt) && now - updatedAt <= SESSION_ACTIVE_WINDOW_MS) active.push(item)
+        else older.push(item)
+      }
+      active.sort(byLastActiveDesc)
+      archived.sort(byLastActiveDesc)
+      older.sort(byLastActiveDesc)
+      return { active, archived, older }
+    }
+    function sessionCategoryOf(session, now = Date.now()) {
+      if (session?.archived === true) return 'archived'
+      const updatedAt = Number(session?.updatedAt)
+      return Number.isFinite(updatedAt) && now - updatedAt <= SESSION_ACTIVE_WINDOW_MS ? 'active' : 'older'
+    }
     function classifyTasks(items) {
       const active = []
       const archived = []
@@ -1014,6 +1048,12 @@ window.__ModuleLoader__.load({
 .expand-btn[aria-expanded="true"] svg{transform:rotate(45deg)}
 .expand-btn svg{transition:transform .16s ease}
 .sessions{padding:0 10px 8px 31px;display:flex;flex-direction:column;gap:1px}
+.session-group-head{display:flex;align-items:center;gap:6px;margin:6px 0 2px;padding:0 2px;font-size:11px;line-height:15px;
+  color:var(--f-text-4);white-space:nowrap}
+.session-group-head:first-child{margin-top:2px}
+.session-group-head::after{content:"";flex:1 1 auto;height:1px;background:var(--f-border)}
+.session-group-head[data-category="archived"]{opacity:.75}
+.session-group-count{font-variant-numeric:tabular-nums;color:var(--f-text-4);opacity:.85}
 .session-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid transparent;border-radius:10px;
   background:transparent;cursor:pointer;text-align:left;width:100%;font-family:inherit}
 .session-row:hover{background:#fff;border-color:var(--f-border)}
@@ -2194,28 +2234,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       // 2026-11-21：按用户要求由 5000 调为 7000（5 秒太紧，7 秒足够看清列表）。
       const DERIVE_PICKER_TIMEOUT_MS = 7000
 
-      // 2026-11-21：派生列表三分组（互斥，分类优先级 1→2→3）：
-      //   1) 最近 7 天活跃（未归档）→ 默认展开、可选；
-      //   2) 已归档（归档优先于时间，一律归此组）→ 单独折叠、灰色、不可选；
-      //   3) 更早（超过 7 天且未归档）→ 折叠、可选。
-      // updatedAt 来自 /fang/api/sessions（毫秒时间戳）。
-      const DERIVE_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
-
+      // 派生列表复用统一分类：活跃中（7 天内）→ 已归档 → 旧会话（>7 天）；
+      // 组内一律按最后活跃时间从新到旧（与母体面板会话列表一致）。
       function splitSessionsForDerive(sessions, now = Date.now()) {
-        const recent = []
-        const archived = []
-        const older = []
-        for (const session of Array.isArray(sessions) ? sessions : []) {
-          if (session?.archived === true) { archived.push(session); continue }
-          const updatedAt = Number(session?.updatedAt)
-          if (Number.isFinite(updatedAt) && now - updatedAt <= DERIVE_ACTIVE_WINDOW_MS) recent.push(session)
-          else older.push(session)
-        }
-        const byUpdatedDesc = (a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)
-        recent.sort(byUpdatedDesc)
-        archived.sort(byUpdatedDesc)
-        older.sort(byUpdatedDesc)
-        return { recent, archived, older }
+        const { active, archived, older } = classifySessionsByRecency(sessions, now)
+        return { recent: active, archived, older }
       }
 
       function sessionOption(session) {
@@ -3706,6 +3729,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const visible = filtered.filter((session) => session?.empty !== true)
       const groups = groupMotherWorkspaces(visible, S.aliases)
       const split = classifyMotherSessions(visible)
+      const sessionGroups = classifySessionsByRecency(visible)
       const selected = all.find((session) => String(session.sessionId) === S.selectedSessionId) || null
       const countText = query
         ? `${visible.length}/${all.length}`
@@ -3771,7 +3795,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             onkeydown: (event) => { if (event.key === 'Escape' && S.query) { event.preventDefault(); S.query = ''; app.schedule(true) } },
           })),
         h('div', { class: 'panel-tools' },
-          h('span', null, `进行中 ${split.active.length}`),
+          h('span', null, `活跃中（7 天） ${sessionGroups.active.length}`),
           h('span', { class: 'spacer' }),
           h('span', { class: 'session-window', 'data-zone': 'session-window', style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('span', { class: 'hint' }, '显示'),
@@ -3792,7 +3816,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               }, label)
             })),
           h('span', { class: 'spacer' }),
-          h('span', null, `临时 ${split.temporary.length} · 归档 ${split.archived.length}`),
+          h('span', null, `已归档 ${sessionGroups.archived.length} · 旧会话 ${sessionGroups.older.length}`),
           h('span', { title: '没有写接口的动作会明确禁用并说明原因，不会假装成功' }, '只读')))
 
       const scroll = h('div', { class: 'panel-scroll', 'data-sk': 'left' })
@@ -3892,12 +3916,14 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           onClick: () => app.toggleSet('mother:' + group.key),
         }, icon('chevron', !open, 16)))
 
+      // 2026-11-21：分类先于排序（活跃中 7 天 / 已归档 / 旧会话），分类内按最后活跃时间倒序。
+      const categories = classifySessionsByRecency(sessions)
       const meta = h('div', { class: 'mother-meta' },
         h('span', null, `${group.count} 个会话`),
         h('span', { 'aria-hidden': 'true' }, '·'),
-        h('span', null, `更新 ${fmtShortClock(group.latestAt)}`),
-        group.archived ? h('span', null, `· 归档 ${group.archived}`) : null,
-        group.empty ? h('span', null, `· 空 ${group.empty}`) : null)
+        h('span', null, `活跃 ${categories.active.length} · 归档 ${categories.archived.length} · 旧 ${categories.older.length}`),
+        h('span', { 'aria-hidden': 'true' }, '·'),
+        h('span', null, `更新 ${fmtShortClock(group.latestAt)}`))
 
       const row = h('div', { class: 'mother-row' + (open ? ' is-open' : ''), role: 'listitem', 'data-mother': group.key },
         h('div', { class: 'mother-main' },
@@ -3912,8 +3938,21 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
     function renderMotherSessions(S, app, group, selectedSession) {
       const wrap = h('div', { class: 'sessions', id: 'mother-sessions-' + group.key, role: 'group', 'aria-label': `元主 ${group.title} 的会话` })
       const allOpen = S.expanded.has('mother-all:' + group.key)
-      const limit = allOpen ? group.sessions.length : Math.min(ACTIVE_SESSION_LIMIT, group.sessions.length)
-      for (const session of group.sessions.slice(0, limit)) {
+      // 2026-11-21：先分类（活跃中 7 天 / 已归档 / 旧会话 >7 天），分类内按最后活跃时间从新到旧。
+      const grouped = classifySessionsByRecency(group.sessions)
+      const ordered = []
+      for (const category of SESSION_GROUP_ORDER) {
+        for (const session of grouped[category]) ordered.push({ session, category })
+      }
+      const limit = allOpen ? ordered.length : Math.min(ACTIVE_SESSION_LIMIT, ordered.length)
+      let lastCategory = ''
+      for (const { session, category } of ordered.slice(0, limit)) {
+        if (category !== lastCategory) {
+          lastCategory = category
+          wrap.append(h('div', { class: 'session-group-head', 'data-category': category, role: 'presentation' },
+            h('span', null, SESSION_GROUP_LABELS[category]),
+            h('span', { class: 'session-group-count' }, `${grouped[category].length}`)))
+        }
         const info = sessionTitleInfo(session)
         const isSelected = String(session.sessionId) === String(selectedSession?.sessionId ?? '')
         wrap.append(h('button', {
@@ -3921,6 +3960,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           class: 'session-row' + (isSelected ? ' is-selected' : ''),
           title: sessionTooltip(session),
           'data-fk': 'session:' + session.sessionId,
+          'data-category': category,
           'aria-pressed': isSelected ? 'true' : 'false',
           onClick: () => app.selectSession(session),
         },
@@ -3935,11 +3975,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           isSelected ? chip('info', '已选', { dot: false }) : null)))
       }
 
-      if (!allOpen && group.sessions.length > limit) {
+      if (!allOpen && ordered.length > limit) {
         wrap.append(h('button', {
           type: 'button', class: 'text-action session-more',
           onClick: () => app.toggleSet('mother-all:' + group.key),
-        }, `显示其余 ${group.sessions.length - limit} 条会话`))
+        }, `显示其余 ${ordered.length - limit} 条会话`))
       }
 
       if (selectedSession && group.sessions.some((session) => session.sessionId === selectedSession.sessionId)) {
