@@ -2390,7 +2390,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         // includeArchived=1：第 2 组「已归档」也要展示（灰色只读），分类在弹窗内完成。
         const res = await api('/fang/api/sessions?limit=500&includeArchived=1')
         S.busy = ''
-        const sessions = Array.isArray(res.body?.sessions) ? res.body.sessions : []
+        // 空会话（无用户消息，宿主侧栏也不显示）不进派生列表。
+        const sessions = Array.isArray(res.body?.sessions) ? res.body.sessions.filter((session) => session?.empty !== true) : []
         if (sessions.length === 0) {
           setNotice({ tone: 'warn', title: '没有可导入的会话', message: '先在 DSH 里开一个对话，再派生分身。' })
           return
@@ -2430,10 +2431,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       async function deriveFromEssence(essence) {
         if (isBusy()) return
         S.busy = 'essence:derive:' + essence.id
-        // includeArchived=1：弹窗内三分组（最近活跃/已归档/更早），归档灰色只读。
+        // includeArchived=1：弹窗内三分组（最近活跃/已归档/更早），归档灰色只读；空会话不列。
         const res = await api('/fang/api/sessions?limit=500&includeArchived=1')
         S.busy = ''
-        const sessions = Array.isArray(res.body?.sessions) ? res.body.sessions : []
+        const sessions = Array.isArray(res.body?.sessions) ? res.body.sessions.filter((session) => session?.empty !== true) : []
         if (sessions.length === 0) {
           setNotice({ tone: 'warn', title: '没有可复制的会话', message: '先在 DSH 里有一个进行中的会话，再派生。' })
           return

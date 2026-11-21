@@ -207,23 +207,58 @@ export function apply(ctx, config) {
       pinnedSessionIds: index.global.pinnedSessionIds,
       fsApi,
     })
-    const sessions = rows.map((row) => {
-      const workspace = keyMap.get(row.workspaceId) ?? null
-      return {
-        sessionId: row.sessionId,
-        workspaceId: workspace ? workspace.id : null,
-        workspaceKey: row.workspaceId,
-        workspacePath: workspace ? workspace.path : null,
-        workspaceTitle: workspace ? workspace.title : row.workspaceId,
-        workspaceKnown: Boolean(workspace),
-        updatedAt: row.updatedAt,
-        bytes: row.bytes,
-        archived: row.archived,
-        pinned: row.pinned,
-        relPath: row.relPath,
+    // 2026-11-21：与 DSH 侧栏对齐 —— 母体会话目录 = 工作区注册表里的**根会话**。
+    // 目录扫描会把子代理会话（裸 UUID 目录）和未登记目录也扫出来，它们不是 DSH 会话，
+    // 不进入目录/派生弹窗；标题由 DSH 投影缓存提供，保证三方（宿主侧栏/母体面板/派生弹窗）一致。
+    const registry = new Map()
+    for (const workspace of index.workspaces) {
+      for (const sessionId of workspace.sessionIds) {
+        if (typeof sessionId === 'string' && !registry.has(sessionId)) registry.set(sessionId, workspace)
       }
-    })
-    return { ok: true, index, sessions, degraded: [...index.degraded] }
+    }
+    const degraded = [...index.degraded]
+    let sessions = []
+    if (registry.size > 0) {
+      // 注册表有成员清单 → 与 DSH 侧栏对齐：只列登记过的根会话（排除子代理/未登记目录）。
+      const archivedSet = new Set(index.global.archivedSessionIds)
+      const pinnedSet = new Set(index.global.pinnedSessionIds)
+      for (const row of rows) {
+        const workspace = registry.get(row.sessionId)
+        if (!workspace) continue // 子代理 / 未登记会话：不进入母体会话目录
+        sessions.push({
+          sessionId: row.sessionId,
+          workspaceId: workspace.id,
+          workspaceKey: row.workspaceId,
+          workspacePath: workspace.path,
+          workspaceTitle: workspace.title,
+          workspaceKnown: true,
+          updatedAt: row.updatedAt,
+          bytes: row.bytes,
+          archived: archivedSet.has(row.sessionId),
+          pinned: pinnedSet.has(row.sessionId),
+          relPath: row.relPath,
+        })
+      }
+    } else {
+      // 注册表没有成员清单（旧 home / 手搓测试）：保持目录扫描的兼容行为。
+      sessions = rows.map((row) => {
+        const workspace = keyMap.get(row.workspaceId) ?? null
+        return {
+          sessionId: row.sessionId,
+          workspaceId: workspace ? workspace.id : null,
+          workspaceKey: row.workspaceId,
+          workspacePath: workspace ? workspace.path : null,
+          workspaceTitle: workspace ? workspace.title : row.workspaceId,
+          workspaceKnown: Boolean(workspace),
+          updatedAt: row.updatedAt,
+          bytes: row.bytes,
+          archived: row.archived,
+          pinned: row.pinned,
+          relPath: row.relPath,
+        }
+      })
+    }
+    return { ok: true, index, sessions, degraded }
   }
 
   /** 对外视图：只给前端展示/选择所需字段（不暴露绝对日志路径）。 */
@@ -246,9 +281,36 @@ export function apply(ctx, config) {
     return isInside(sessionsRoot, file) ? file : null
   }
 
-  // ── 会话标题（有界多帧读 + mtime 缓存）──────────────────────────────
+  // ── 会话标题（DSH 投影缓存优先；日志有界读取兜底）────────────────────
   /** sessionId → { mtimeMs, size, value }；日志没变就不重复解帧。 */
   const titleCache = new Map()
+  const projectionCacheDir = path.join(storagesRoot, 'session_projcache', 'sessions')
+  const projectionCache = new Map()
+
+  /**
+   * 2026-11-21：DSH 宿主侧栏标题来自 storages/session_projcache；母体面板与派生弹窗
+   * 读同一份投影缓存，保证「宿主侧栏 / 母体面板 / 派生弹窗」三方标题一致。
+   */
+  const projectionTitleOf = (sessionId) => {
+    const file = path.join(projectionCacheDir, `${sessionId}.json`)
+    let stat = null
+    try { stat = fs.statSync(file) } catch { return null }
+    const cached = projectionCache.get(sessionId)
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.value
+    let value = null
+    try {
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8'))
+      const rows = doc?.record?.rows ?? {}
+      const title = typeof rows?.title?.val === 'string' ? rows.title.val.trim() : ''
+      const blank = rows?.sessionListMetadata?.val?.blank === true
+      const createdAt = Number(doc?.record?.identity?.createdAt)
+      value = { title: title || null, blank, createdAt: Number.isFinite(createdAt) ? createdAt : null }
+    } catch {
+      value = null
+    }
+    projectionCache.set(sessionId, { mtimeMs: stat.mtimeMs, size: stat.size, value })
+    return value
+  }
 
   const titleOf = (session) => {
     const file = logFileFor(session)
@@ -257,6 +319,7 @@ export function apply(ctx, config) {
     try { stat = fs.statSync(file) } catch { /* 读不到就走解帧降级 */ }
     const cached = titleCache.get(session.sessionId)
     if (cached && stat && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.value
+    const projection = projectionTitleOf(session.sessionId)
     const decoded = readBoundedEvents({
       file,
       maxFrames: titleMaxFrames,
@@ -268,13 +331,13 @@ export function apply(ctx, config) {
     const header = decoded.events.find((event) => event?.type === 'session')
     const userMessages = decoded.events.filter((event) => event?.type === 'user/message').length
     const value = {
-      title: extracted.title,
-      titleSource: extracted.titleSource,
+      title: projection?.title ?? extracted.title,
+      titleSource: projection?.title ? 'projection' : extracted.titleSource,
       preview: extracted.preview,
       messageSeq: extracted.messageSeq,
-      createdAt: Number.isFinite(header?.createdAt) ? header.createdAt : null,
+      createdAt: Number.isFinite(projection?.createdAt) ? projection.createdAt : (Number.isFinite(header?.createdAt) ? header.createdAt : null),
       userMessages,
-      empty: userMessages === 0,
+      empty: projection ? projection.blank : userMessages === 0,
       framesDecoded: decoded.framesDecoded,
       degraded: decoded.degraded,
     }

@@ -78,6 +78,23 @@ function addSession(home, workspacePath, sessionId, frames, mtimeMs = 1000) {
   return file
 }
 
+/** 写一条 DSH 投影缓存（宿主侧栏标题来源）：<home>/storages/session_projcache/sessions/<id>.json */
+function writeProjectionCache(home, sessionId, { title = '', blank = false, createdAt = HEADER_TIME } = {}) {
+  const file = path.join(home, 'storages', 'session_projcache', 'sessions', `${sessionId}.json`)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify({
+    version: 7,
+    record: {
+      identity: { formatVersion: 4, createdAt, cwd: 'E:\\workspace' },
+      rows: {
+        title: { ver: 1, seq: 1, val: title },
+        sessionListMetadata: { ver: 1, seq: 1, val: { blank } },
+      },
+    },
+  }, null, 2))
+  return file
+}
+
 /** 在 env 指定的 $DSH_HOME 下 apply（同步段内改 env，之后恢复）。 */
 function applyCatalog({ home, role = 'mother', config = {}, services = {}, webServer = true } = {}) {
   const childServices = { ...services }
@@ -691,6 +708,52 @@ test('workspace.json 缺失时：仍列出目录（unknown workspace），degrad
     assert.equal(out.sessions[0].workspaceKnown, false)
     assert.ok(out.degraded.includes('index-not-found'))
     assert.ok(service.status().degraded.includes('index-not-found'))
+    ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('2026-11-21：注册表有成员清单时，只列登记过的根会话（子代理/未登记目录不出现）', () => {
+  const home = makeHome()
+  try {
+    writeIndex(home, { workspaces: [{ ...WS_GPT, sessionIds: [SESSION_A] }], archived: [], pinned: [] })
+    const base = 1793500000000
+    addSession(home, WS_GPT.path, SESSION_A, [`${headerLine(SESSION_A)}\n`], base + 1000)
+    // 子代理会话（裸 UUID 目录）——即使落在同 workspace 目录，也不是 DSH 侧栏会话。
+    addSession(home, WS_GPT.path, UUID_B, [`${headerLine(UUID_B, { cwd: 'E:\\workspace' })}\n`], base + 2000)
+    // 未登记目录里的根会话——不在注册表成员里，不列。
+    addSession(home, WS_DSH.path, SESSION_C, [`${headerLine(SESSION_C, { cwd: 'E:\\DSH' })}\n`], base + 3000)
+    const { ctx, service } = applyCatalog({ home })
+    const out = service.listSessions({ includeArchived: true })
+    assert.equal(out.ok, true)
+    assert.deepEqual(out.sessions.map((s) => s.sessionId), [SESSION_A], '只有注册表登记的根会话')
+    assert.equal(out.sessions[0].workspaceId, WS_GPT.id)
+    assert.equal(out.sessions[0].workspaceTitle, WS_GPT.title)
+    assert.equal(service.listSessions({ includeArchived: true, limit: 100 }).total, 1)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('2026-11-21：标题优先读 DSH 投影缓存（宿主侧栏同源），并带 empty 标志', () => {
+  const home = makeHome()
+  try {
+    writeIndex(home, { workspaces: [{ ...WS_GPT, sessionIds: [SESSION_A, SESSION_B] }], archived: [], pinned: [] })
+    addSession(home, WS_GPT.path, SESSION_A, [`${headerLine(SESSION_A)}\n`], 3000)
+    addSession(home, WS_GPT.path, SESSION_B, [`${headerLine(SESSION_B)}\n`], 4000)
+    writeProjectionCache(home, SESSION_A, { title: 'DSH：瓮城Plus', blank: false })
+    writeProjectionCache(home, SESSION_B, { title: '', blank: true })
+    const { ctx, service } = applyCatalog({ home })
+    const out = service.listSessions({ includeArchived: true })
+    const a = out.sessions.find((s) => s.sessionId === SESSION_A)
+    const b = out.sessions.find((s) => s.sessionId === SESSION_B)
+    assert.equal(a.title, 'DSH：瓮城Plus')
+    assert.equal(a.titleSource, 'projection', '标题来源必须标明投影缓存（与宿主侧栏一致）')
+    assert.equal(a.empty, false)
+    // 投影缓存 blank=true（宿主侧栏隐藏的空会话）：目录照样标记 empty，由前端过滤。
+    assert.equal(b.empty, true)
     ctx.dispose()
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
