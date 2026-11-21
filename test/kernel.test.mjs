@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+﻿// SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 // kernel 单测：fsx（含 junction 安全删除）/ paths / rounds / ledger / bus。
 import test from 'node:test'
@@ -217,7 +217,7 @@ test('core: resource diff and shared vocabulary', () => {
   assert.equal(diff.leakedRefed, 2)
   assert.equal(totalResources({ a: 1, b: 2 }), 3)
   assert.equal(EXIT.RESTART, 75)
-  assert.equal(FANG_VERSION, '3.5.9')
+  assert.equal(FANG_VERSION, '3.6.0')
   assert.equal(SERVICE.orchestrator, 'fang')
   assert.equal(ROW.orchestrator, 'fang-orchestrator')
   assert.equal(FORK_STATUS.RUNNING, 'running')

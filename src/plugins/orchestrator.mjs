@@ -56,7 +56,7 @@ import {
 import { validateToolInvoke } from '../lib/lsp-delegation.mjs'
 import { LSP_PROVIDER_TEST, advertisedActionsFromSeam, checkWorkspaceRoot, collectForkWorkspaceRoots, describeLspProvider, lspAuditRecord, queryMotherLsp, resolveLspAllowedRoots } from '../lib/lsp-provider.mjs'
 import { buildChatImportDryRun, validateChatImport } from '../lib/chat-import-delegation.mjs'
-import { detectForkLspSupport, normalizeCoreMode } from '../lib/accelerated-fork.mjs'
+import { detectForkLspSupport, normalizeCoreMode, pruneAliasStubs } from '../lib/accelerated-fork.mjs'
 import { accelNodeModulesRoot, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 import { BranchStore } from '../lib/branch-store.mjs'
 import { ComposerJournal } from '../lib/composer-journal.mjs'
@@ -1825,7 +1825,9 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived', taskId: id }
+      // 已归档任务与「启动失败/崩溃」任务都可以从保留的 home 直接复位；
+      // 不再要求先归档（旧客户端曾因此把 failed 任务强制归档，见 2026-11-22 报告）。
+      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) return { ok: false, error: 'not-archived', taskId: id }
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }
@@ -1891,6 +1893,70 @@ export function apply(ctx, config) {
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
       return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard }
+    },
+
+    /**
+     * 一键修复（2026-11-22）：把「起不来」的常见原因逐项处理后再拉起，不删除 home/会话。
+     * 步骤：停残留进程 → 清加速别名桩 → 按来源原身重置 profile → 归位任务状态 → restore 重新 spawn
+     * （spawn 内部还会修复 node_modules mirror 并再次清理别名桩）。
+     * 每一步结果都返回给 UI，失败时给出具体 step。
+     */
+    async repairTask(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (!task.homeDir || !exists(task.homeDir)) return { ok: false, error: 'archive-home-missing', taskId: id }
+      if (!task.profile) return { ok: false, error: 'fork-profile-missing', taskId: id }
+      const f = forker()
+      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable' }
+      const steps = []
+      // 1) 停掉可能残留的半死进程（pid 在、adapter 失联）——不清 home。
+      let live = null
+      try { live = f.status?.(id) ?? null } catch { live = null }
+      if (live?.running === true || live?.pid) {
+        try {
+          f.stop?.(id)
+          steps.push({ step: 'stop-stale', ok: true })
+        } catch (error) {
+          steps.push({ step: 'stop-stale', ok: false, error: String(error?.message ?? error) })
+        }
+      } else {
+        steps.push({ step: 'stop-stale', ok: true, skipped: true })
+      }
+      // 2) 清 stock 下残留的加速别名桩（核心切换后它们会遮挡官方包，启动即崩）。
+      const profileDir = path.join(task.homeDir, 'profiles', task.profile)
+      const pruned = pruneAliasStubs(profileDir)
+      steps.push({ step: 'prune-alias-stubs', ok: pruned.ok !== false, removed: pruned.removed.length })
+      // 3) 有来源原身时，按源配置重置 profile（与 restore 的配置归位一致；无源则跳过）。
+      if (task.essenceId) {
+        let configReset = null
+        try { configReset = await service.resetForkConfig(id) } catch (error) {
+          configReset = { ok: false, error: String(error?.message ?? error) }
+        }
+        steps.push({ step: 'reset-profile-config', ok: configReset?.ok === true, error: configReset?.error ?? null })
+      } else {
+        steps.push({ step: 'reset-profile-config', ok: true, skipped: true })
+      }
+      // 4) 归位任务状态：restoreTask 只接受 archived/failed；运行中的先置 failed。
+      if (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.READY || task.status === TASK_STATUS.PROVISIONING) {
+        task.status = TASK_STATUS.FAILED
+      }
+      persist()
+      // 5) 重新拉起（新端口、新 token；spawn 会做 mirror 修复 + 再次 prune）。
+      const restored = await service.restoreTask(id)
+      steps.push({ step: 'spawn', ok: restored?.ok === true, error: restored?.error ?? null, detail: restored?.detail ?? null })
+      const ok = restored?.ok === true
+      audit('task-repaired', { taskId: id, ok, steps })
+      if (!ok) {
+        return {
+          ok: false,
+          taskId: id,
+          error: restored?.error ?? 'repair-failed',
+          detail: restored?.detail ?? null,
+          steps,
+        }
+      }
+      return { ok: true, taskId: id, steps, url: restored.url, port: restored.port, adapter: restored.adapter }
     },
 
     /**
@@ -4164,6 +4230,12 @@ export function apply(ctx, config) {
       route('POST', `${prefix}/api/tasks/restore`, async (req, res) => {
         const body = await readBody(req)
         const out = await service.restoreTask(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      // 2026-11-22：一键修复（停残留 → 清别名桩 → 重置配置 → 重新拉起；不删 home/会话）
+      route('POST', `${prefix}/api/tasks/repair`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.repairTask(String(body?.taskId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
       })
       // v3.0.9：强制单会话（运行中拒绝；停止/归档态把多余会话隔离到 quarantine-sessions/）

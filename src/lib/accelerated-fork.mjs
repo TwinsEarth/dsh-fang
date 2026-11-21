@@ -237,6 +237,44 @@ export function writeAliasStubs({ profileNodeModules = '', accelNodeModules = ''
 }
 
 /**
+ * Remove `@deepseek-ai/*` alias stubs written by writeAliasStubs().
+ *
+ * Why: a fork can switch core (`syncForkCoreMode`). An accelerated fork owns alias stubs
+ * that shadow the installation's real `@deepseek-ai/*` packages; switching it back to the
+ * stock CLI must delete those stubs, otherwise the stock host imports the accelerated
+ * modules (and any subpath the stub never mapped, e.g. `dsh-tool-subagent/model-selection-settings`,
+ * fails with ERR_PACKAGE_PATH_NOT_EXPORTED → startup-abort → "spawn-failed/exited" on restore).
+ *
+ * Only packages whose package.json carries ALIAS_STUB_VERSION are removed; real packages
+ * (including a user's own @deepseek-ai deps) are never touched.
+ * @returns {{ok:boolean, removed:string[]}}
+ */
+export function pruneAliasStubs(profileDir) {
+  const removed = []
+  const profile = String(profileDir ?? '').trim()
+  if (!profile) return { ok: false, removed }
+  const scopeDir = path.join(profile, 'node_modules', '@deepseek-ai')
+  let entries = []
+  try { entries = fs.readdirSync(scopeDir, { withFileTypes: true }) } catch { return { ok: true, removed } }
+  for (const entry of entries) {
+    if (!entry || typeof entry.isDirectory !== 'function' || !entry.isDirectory()) continue
+    const pkgDir = path.join(scopeDir, entry.name)
+    const pkg = readJsonFile(path.join(pkgDir, 'package.json'))
+    if (pkg?.version !== ALIAS_STUB_VERSION) continue
+    try {
+      fs.rmSync(pkgDir, { recursive: true, force: true })
+      removed.push(entry.name)
+    } catch { /* best-effort: a locked stub must not abort the start */ }
+  }
+  if (removed.length > 0) {
+    try {
+      if (fs.readdirSync(scopeDir).length === 0) fs.rmdirSync(scopeDir)
+    } catch { /* ignore */ }
+  }
+  return { ok: true, removed }
+}
+
+/**
  * Client halves resolved by the accelerated web shell as *static* modules (the shell's
  * `staticModules` table), not as `@twinsearth` packages. Kept explicit: the accelerated
  * client bundles require these exact names, so a third-party bundle rewritten to them works
