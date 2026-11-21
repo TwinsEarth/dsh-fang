@@ -23,7 +23,7 @@
 
 | 门禁 | 结果 | 证据 |
 |---|---|---|
-| preflight --e2e（发布提交） | **TBD** | tests pass=? / fail=0 / skip=?；e2e ?/?；allow-list ?；artifact sha256 match |
+| preflight --e2e（发布提交） | **GREEN 15/15** | tests **1307 pass / 0 fail / 2 skip**；e2e **125/125**；main-city A；allow-list **0**（110 路由）；artifact sha256 match |
 | 发布 PR CI（#?） | **TBD** | gate/test/compat/hygiene/license |
 | version-cut --check | **GREEN** | 3.5.8 → 3.5.9 = patch |
 | release-order（pre-tag / main 产物） | **TBD** | |

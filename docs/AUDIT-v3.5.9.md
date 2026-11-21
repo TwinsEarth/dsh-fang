@@ -15,9 +15,9 @@
 
 ## 验证（粘贴真实数字，不写“已测试”）
 - preflight --e2e：GREEN
-- 全量测试：pass=? fail=0 skip=?
-- e2e：?/?
-- 路由契约 / 插件行数：?/16
+- 全量测试：pass=1307 fail=0 skip=2
+- e2e：125/125
+- 路由契约 / 插件行数：110/16
 - 现场复现：修复后以本机真实插件（`@twinsearth/fang-dsh-plugin` 安装目录）生成加速 profile，探针输出 bundles=`[dsh-base, dsh-web-app, @twinsearth/fang-dsh-plugin]`、junction 存在可解析。
 
 ## 风险与边界

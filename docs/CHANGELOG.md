@@ -12,9 +12,9 @@
 
 ### 门禁（发布前必填，来自 dist/preflight.json）
 
-- tests: pass=? fail=0 skip=?
-- e2e: ?/?
-- routes: ?（allowlist ? findings） / plugins: 16
+- tests: pass=1307 fail=0 skip=2
+- e2e: 125/125
+- routes: 110（allowlist 0 findings） / plugins: 16
 - preflight: GREEN
 
 ### 边界（本版明确不做的事）
