@@ -2194,22 +2194,28 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       // 2026-11-21：按用户要求由 5000 调为 7000（5 秒太紧，7 秒足够看清列表）。
       const DERIVE_PICKER_TIMEOUT_MS = 7000
 
-      // 2026-11-21：派生列表默认只显示「最近 7 天活跃」的会话；更早的折叠到下方（默认收起）。
+      // 2026-11-21：派生列表三分组（互斥，分类优先级 1→2→3）：
+      //   1) 最近 7 天活跃（未归档）→ 默认展开、可选；
+      //   2) 已归档（归档优先于时间，一律归此组）→ 单独折叠、灰色、不可选；
+      //   3) 更早（超过 7 天且未归档）→ 折叠、可选。
       // updatedAt 来自 /fang/api/sessions（毫秒时间戳）。
       const DERIVE_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
-      function splitSessionsByRecency(sessions, now = Date.now()) {
+      function splitSessionsForDerive(sessions, now = Date.now()) {
         const recent = []
+        const archived = []
         const older = []
         for (const session of Array.isArray(sessions) ? sessions : []) {
+          if (session?.archived === true) { archived.push(session); continue }
           const updatedAt = Number(session?.updatedAt)
           if (Number.isFinite(updatedAt) && now - updatedAt <= DERIVE_ACTIVE_WINDOW_MS) recent.push(session)
           else older.push(session)
         }
         const byUpdatedDesc = (a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0)
         recent.sort(byUpdatedDesc)
+        archived.sort(byUpdatedDesc)
         older.sort(byUpdatedDesc)
-        return { recent, older }
+        return { recent, archived, older }
       }
 
       function sessionOption(session) {
@@ -2219,13 +2225,28 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
       function showDerivePicker(sessions, essenceName, onPick) {
         const doc = document
-        const { recent, older } = splitSessionsByRecency(sessions)
+        const { recent, archived, older } = splitSessionsForDerive(sessions)
+        // 第 1 组：最近 7 天活跃（未归档）→ 默认展开、可选。
         const select = h('select', {
           size: Math.min(8, Math.max(4, recent.length)),
           style: { width: '100%', minHeight: 150, marginTop: 10, font: '12px/1.4 inherit', borderRadius: 8, padding: 6 },
         }, ...(recent.length
           ? recent.map(sessionOption)
-          : [h('option', { value: '', disabled: true }, '最近 7 天没有活跃会话（可在下方展开更早的会话）')]))
+          : [h('option', { value: '', disabled: true }, '最近 7 天没有活跃会话（可展开下方分组查看）')]))
+        // 第 2 组：已归档（归档优先于时间）→ 单独折叠、灰色、不可选。
+        const archivedDetails = archived.length
+          ? h('details', { 'data-role': 'derive-archived-sessions', style: { marginTop: 8 } },
+            h('summary', { style: { cursor: 'pointer', fontSize: 12, opacity: .55, userSelect: 'none' } },
+              `已归档会话（${archived.length} 个，灰色显示，不可选择）`),
+            h('select', {
+              size: Math.min(6, Math.max(3, archived.length)),
+              disabled: true,
+              'aria-label': '已归档会话（不可选择）',
+              style: { width: '100%', minHeight: 100, marginTop: 8, font: '12px/1.4 inherit', borderRadius: 8, padding: 6, opacity: .55 },
+            }, ...archived.map((session) => h('option', { value: session.sessionId },
+              `${session.title || session.sessionId}${session.workspaceTitle ? ' · ' + session.workspaceTitle : ''} · 已归档`))))
+          : null
+        // 第 3 组：更早（超过 7 天且未归档）→ 折叠、可选。
         let olderSelect = null
         const olderDetails = older.length
           ? h('details', { 'data-role': 'derive-older-sessions', style: { marginTop: 8 } },
@@ -2238,9 +2259,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             }, ...older.map(sessionOption))))
           : null
         const hint = h('div', { style: { fontSize: 12, opacity: .7, marginTop: 6 } },
-          older.length
-            ? '默认只列最近 7 天活跃的会话；更早的会话折叠在下方，展开后可选择。整目录复制进新分身的沙箱（归档会话不列出）。'
-            : '选择一个进行中的 DSH 会话，整目录复制进新分身的沙箱（归档会话不列出）。')
+          '三分组互斥：最近 7 天活跃（可选）→ 已归档（灰色只读）→ 更早（超过 7 天，折叠）。整目录复制进新分身的沙箱。')
         // 2026-11-21：7 秒内不选择 → 默认新建空会话继续派生（不再卡住或报 session-required）。
         const countdown = h('div', {
           style: { fontSize: 12, color: '#F5A623', marginTop: 4 },
@@ -2265,6 +2284,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         hint,
         countdown,
         select,
+        archivedDetails,
         olderDetails,
         h('div', { style: { display: 'flex', gap: 8, marginTop: 14 } }, startBtn, newSessionBtn, cancelBtn))
         const backdrop = h('div', {
@@ -2344,11 +2364,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           return
         }
         S.busy = 'derive:quick:sessions'
-        const res = await api('/fang/api/sessions?limit=200')
+        // includeArchived=1：第 2 组「已归档」也要展示（灰色只读），分类在弹窗内完成。
+        const res = await api('/fang/api/sessions?limit=500&includeArchived=1')
         S.busy = ''
-        const sessions = Array.isArray(res.body?.sessions)
-          ? res.body.sessions.filter((session) => session.archived !== true)
-          : []
+        const sessions = Array.isArray(res.body?.sessions) ? res.body.sessions : []
         if (sessions.length === 0) {
           setNotice({ tone: 'warn', title: '没有可导入的会话', message: '先在 DSH 里开一个对话，再派生分身。' })
           return
@@ -2388,11 +2407,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       async function deriveFromEssence(essence) {
         if (isBusy()) return
         S.busy = 'essence:derive:' + essence.id
-        const res = await api('/fang/api/sessions?limit=200')
+        // includeArchived=1：弹窗内三分组（最近活跃/已归档/更早），归档灰色只读。
+        const res = await api('/fang/api/sessions?limit=500&includeArchived=1')
         S.busy = ''
-        const sessions = Array.isArray(res.body?.sessions)
-          ? res.body.sessions.filter((session) => session.archived !== true)
-          : []
+        const sessions = Array.isArray(res.body?.sessions) ? res.body.sessions : []
         if (sessions.length === 0) {
           setNotice({ tone: 'warn', title: '没有可复制的会话', message: '先在 DSH 里有一个进行中的会话，再派生。' })
           return
