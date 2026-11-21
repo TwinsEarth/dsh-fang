@@ -1825,7 +1825,9 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived', taskId: id }
+      // 已归档任务与「启动失败/崩溃」任务都可以从保留的 home 直接复位；
+      // 不再要求先归档（旧客户端曾因此把 failed 任务强制归档，见 2026-11-22 报告）。
+      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) return { ok: false, error: 'not-archived', taskId: id }
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }

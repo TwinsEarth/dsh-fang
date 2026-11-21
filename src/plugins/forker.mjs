@@ -65,7 +65,7 @@ import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttp
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
-import { normalizeCoreMode, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
+import { normalizeCoreMode, pruneAliasStubs, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 
 /** Repository root of this plugin (used as the @local/dsh-fang junction source). */
@@ -1009,6 +1009,10 @@ export function apply(ctx, config) {
     // every request: "Invalid schema for function 'w2m_report'", v3.1.7 report).
     let nodeModules = null
     if (coreMode !== 'accelerated' && exists(nodeModulesSource)) {
+      // Switching accelerated → stock: drop the accelerated alias stubs first, otherwise
+      // the stock CLI keeps importing accelerated modules through them (startup abort).
+      const pruned = pruneAliasStubs(profileDir)
+      if (pruned.removed.length > 0) warnings.push(`alias-stubs-pruned:${pruned.removed.length}`)
       try {
         const mirrored = mirrorModuleTree(nodeModulesSource, path.join(profileDir, 'node_modules'))
         if (mirrored.ok === true) nodeModules = nodeModulesSource
@@ -1177,6 +1181,10 @@ export function apply(ctx, config) {
     if (rec.coreMode === 'accelerated') {
       rec.nodeModulesMirror = { ok: true, skipped: 'accelerated-core', changed: false, source: null, links: 0, error: null }
     } else {
+      // A stock fork must never resolve the accelerated alias stubs. Repair stale stubs left
+      // by an earlier accelerated run before the mirror repair, so restore/open works after a
+      // core switch (2026-11-22: spawn-failed/exited on restore).
+      try { rec.aliasPrune = pruneAliasStubs(rec.profileDir) } catch { rec.aliasPrune = { ok: false, removed: [] } }
       try {
         const repaired = ensureModuleMirror(path.join(rec.profileDir, 'node_modules'))
         rec.nodeModulesMirror = {

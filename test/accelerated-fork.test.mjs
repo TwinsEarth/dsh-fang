@@ -10,10 +10,12 @@ import { fileURLToPath } from 'node:url'
 
 import {
   ACCEL_BUNDLES_WITH_FANG,
+  ALIAS_STUB_VERSION,
   OVERLAY_MARKER,
   buildAcceleratedForkProfile,
   buildModelOverlay,
   normalizeCoreMode,
+  pruneAliasStubs,
   rewriteScope,
   writeAcceleratedForkProfile,
 } from '../src/lib/accelerated-fork.mjs'
@@ -136,6 +138,37 @@ test('normalizeCoreMode: unknown values fall back to stock', () => {
   assert.equal(normalizeCoreMode(undefined), 'stock')
 })
 
+test('2026-11-22: pruneAliasStubs removes only accelerated alias stubs (stock restore after core switch)', () => {
+  const profile = tmp('fang-prune-alias-')
+  const scope = path.join(profile, 'node_modules', '@deepseek-ai')
+  const stub = path.join(scope, 'dsh-session')
+  fs.mkdirSync(stub, { recursive: true })
+  fs.writeFileSync(path.join(stub, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-session', version: ALIAS_STUB_VERSION }))
+  fs.writeFileSync(path.join(stub, 'index.js'), 'export * from "file:///accel/dsh-session.js"\n')
+  const real = path.join(scope, 'real-package')
+  fs.mkdirSync(real, { recursive: true })
+  fs.writeFileSync(path.join(real, 'package.json'), JSON.stringify({ name: '@deepseek-ai/real-package', version: '1.2.3' }))
+
+  const pruned = pruneAliasStubs(profile)
+  assert.equal(pruned.ok, true)
+  assert.deepEqual(pruned.removed, ['dsh-session'], 'only fang alias stubs are removed')
+  assert.equal(fs.existsSync(stub), false)
+  assert.equal(fs.existsSync(real), true, 'real @deepseek-ai packages are never touched')
+
+  // After the last stub disappears the empty @deepseek-ai scope dir is removed as well
+  // (fresh profile: a real package elsewhere must not be involved).
+  const onlyStub = tmp('fang-prune-alias-empty-')
+  const onlyScope = path.join(onlyStub, 'node_modules', '@deepseek-ai')
+  fs.mkdirSync(path.join(onlyScope, 'dsh-tools'), { recursive: true })
+  fs.writeFileSync(path.join(onlyScope, 'dsh-tools', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-tools', version: ALIAS_STUB_VERSION }))
+  const second = pruneAliasStubs(onlyStub)
+  assert.equal(second.ok, true)
+  assert.deepEqual(second.removed, ['dsh-tools'])
+  assert.equal(fs.existsSync(onlyScope), false)
+  fs.rmSync(profile, { recursive: true, force: true })
+  fs.rmSync(onlyStub, { recursive: true, force: true })
+})
+
 test('route contract: fork-core is required and the sidecar routes retired (86 total)', () => {
   assert.equal(DEFAULT_EXPECTED_ROUTE_COUNT, 86)
   assert.ok(REQUIRED_ROUTE_PATHS.includes('/fang/api/fork-core'))
@@ -150,4 +183,11 @@ test('source guards: essence is pinned to stock and forker has no silent stock f
   const forkerSource = fs.readFileSync(path.join(REPO, 'src', 'plugins', 'forker.mjs'), 'utf8')
   assert.equal(/cfg\.coreMode === 'accelerated' && cfg\.acceleratedCliPath \?/.test(forkerSource), false, 'old silent fallback removed')
   assert.match(forkerSource, /error: 'accelerated-cli-missing'/)
+  // 2026-11-22: a stock spawn must prune accelerated alias stubs BEFORE the child starts,
+  // otherwise a failed core-switch makes restore fail with spawn-failed/exited.
+  assert.match(forkerSource, /pruneAliasStubs\(rec\.profileDir\)/)
+  // 2026-11-22: the client must not auto-archive a failed task just to "restore" it.
+  const clientSource = fs.readFileSync(path.join(REPO, 'client.js'), 'utf8')
+  assert.equal(clientSource.includes('A stopped (but not archived) fork cannot be restored directly'), false)
+  assert.equal(/restored\.body\?\.error === 'not-archived'/.test(clientSource), false)
 })
