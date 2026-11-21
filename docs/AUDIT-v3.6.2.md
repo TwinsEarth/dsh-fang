@@ -14,16 +14,20 @@
 ## 2. 验证（真实数字，发布前实测）
 
 - preflight --e2e：**GREEN**；全量 tests **1314 pass / 0 fail / 2 skip**（1326 tests）；e2e **125/125**；allow-list 0（111 路由）；artifact sha256 match。
-- 发布 PR CI：待回填。
-- release-order：待回填。
-- verify-release --remote / healthz --remote：待回填。
+- 发布 PR CI（#145）：**8/8 绿**。
+- `release-order`：pre-tag / post-publish 均 **10/10 GREEN**。
+- `verify-release --remote`：**GREEN 16/16**；`healthz --remote`：**HEALTHY @3.6.2**。
 
 ## 3. 风险与边界
 
 - 无代码变更，不存在新行为风险；安装 v3.6.2 与 v3.6.1 等价。
 - 不改变数据布局、不触碰用户会话/分身。
 
-## 4. 回滚演练
+## 4. 发布（2026-11-22 已完成）
+
+- annotated tag **v3.6.2**（`20eec5c7…` → `87d9f1ed`）、GitHub Release `454049597`（4 资产，tgz 700,180 B / sha256 `7657a65e…`）、npm `@twinsearth/fang-dsh-plugin@3.6.2`（`latest=3.6.2`，shasum `dbbd5397…`）。
+
+## 5. 回滚演练
 
 - 触发方式：插件层 `npm i @twinsearth/fang-dsh-plugin@3.6.1`。
 - 恢复耗时：分钟级。
