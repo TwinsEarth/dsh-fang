@@ -25,9 +25,9 @@ function tmp(prefix = 'fang-accel-fork-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
 }
 
-function fakeFangRoot() {
+function fakeFangRoot(name = '@local/dsh-fang') {
   const root = tmp('fang-accel-fangroot-')
-  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: '@local/dsh-fang', version: '0.0.0-test' }))
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name, version: '0.0.0-test' }))
   fs.writeFileSync(path.join(root, 'client.js'), '// client\n')
   for (const child of ['dsh-fang-web-entry', 'dsh-fang-queue-journal']) {
     const dir = path.join(root, 'node_modules', '@twinsearth', child)
@@ -87,6 +87,25 @@ test('writeAcceleratedForkProfile: minimal profile + junctions + overlay', () =>
   assert.match(overlay, /@twinsearth\/dsh-agent-default-model/)
   assert.equal(written.junctions.length, 3)
   for (const junction of written.junctions) assert.equal(junction.ok, true, JSON.stringify(junction))
+})
+
+test('writeAcceleratedForkProfile: published package name gets a resolvable junction (v3.5.9 fork-bundle fix)', () => {
+  const root = tmp()
+  // 发布构建后的真实包名：build 会把源码常量 @local/dsh-fang 改名，junction 必须跟包名一致。
+  const fangRoot = fakeFangRoot('@twinsearth/fang-dsh-plugin')
+  const profileDir = path.join(root, 'home', 'profiles', 'fang-accel-pub')
+  const written = writeAcceleratedForkProfile({ profileDir, fangRoot, homeDir: path.join(root, 'home'), motherHome: '', profileName: 'fang-accel-pub' })
+  assert.equal(written.ok, true)
+  const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dsh.profile.bundles, ['@twinsearth/dsh-base', '@twinsearth/dsh-web-app', '@twinsearth/fang-dsh-plugin'])
+  assert.equal(pkg.dependencies['@twinsearth/fang-dsh-plugin'], `link:${fangRoot.replace(/\\/g, '/')}`)
+  const moduleDir = path.join(profileDir, 'node_modules')
+  const linked = path.join(moduleDir, '@twinsearth', 'fang-dsh-plugin')
+  assert.equal(fs.existsSync(linked), true, 'published bundle must be resolvable in the fork profile')
+  assert.equal(fs.lstatSync(linked).isSymbolicLink(), true)
+  assert.equal(fs.existsSync(path.join(moduleDir, '@local', 'dsh-fang')), true, 'legacy dev alias stays compatible')
+  const packageJunction = written.junctions.find((entry) => entry.package === '@twinsearth/fang-dsh-plugin')
+  assert.ok(packageJunction && packageJunction.ok === true, JSON.stringify(written.junctions))
 })
 
 test('writeAcceleratedForkProfile: never overwrites an unmanaged home patch', () => {

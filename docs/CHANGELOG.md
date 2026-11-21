@@ -1,3 +1,33 @@
+## v3.5.9（2026-11-21 已发布）
+
+**主题：修复加速分身派生失败「fork-bundle-unavailable」——加速 profile 的 fang bundle 链接名与发布包名对齐（发布构建改名后 junction 仍停在开发别名）。**
+
+### 修复
+
+- **加速分身派生失败 `fork-bundle-unavailable`**：`src/lib/accelerated-fork.mjs` 在生成加速分身 profile 时，把 fang bundle 的 junction 写死在 `node_modules/@local/dsh-fang`；而发布构建会把源码常量 `@local/dsh-fang` 改名为 `@twinsearth/fang-dsh-plugin`。orchestrator 的 bundle 探测按发布名查找 → 找不到 → 判定 `fork-bundle-unavailable` 并回收任务（现场：`task_mwqlvcejfego`）。现改为：
+  - junction 与 profile 的 `bundles / dependencies` 一律以 `fangRoot/package.json` 的真实包名为准（开发链 `@local/dsh-fang`，npm 安装 `@twinsearth/fang-dsh-plugin`）；
+  - 两套名字不同时额外保留 `@local/dsh-fang` 兼容别名 junction；
+  - `isFangBundle` 识别发布名，避免同步路径把本体当第三方插件复制。
+- 新增回归测试：以「发布名 fixture」生成加速 profile，断言 profile bundles/dependencies 使用发布名、`node_modules/@twinsearth/fang-dsh-plugin` junction 存在且可解析。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=1307 fail=0 skip=2
+- e2e: 125/125
+- routes: 110（allowlist 0 findings） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+
+- 不改加速核版本（仍 `@twinsearth/dsh@3.5.0`）；不改母体/原身 core；
+- 不改 FANG_HOME / 三区数据布局（`D:\ToFuture` 原地保留）；
+- 本机 `fang-forker.acceleratedCliPath` 属运行配置（profile 补丁），不随 npm 包分发；新机器需先安装加速核或配置该路径。
+
+### 回滚锚点
+
+- 插件回滚：`npm i @twinsearth/fang-dsh-plugin@3.5.8`
+- 升级前快照/上一代目录：active-v3.5.9-pre（母体）；merged-v3.5.9-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.5.8（2026-11-21 已发布）
 
 **主题：母体会话目录与 DSH 宿主侧栏对齐（只列工作区注册根会话 + 投影缓存标题）；派生弹窗/母体面板按「活跃中（7 天）/ 已归档 / 旧会话（>7 天）」三分组，组内按最后活跃时间从新到旧。**
