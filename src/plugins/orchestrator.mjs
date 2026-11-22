@@ -1875,9 +1875,23 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      // 已归档任务与「启动失败/崩溃」任务都可以从保留的 home 直接复位；
-      // 不再要求先归档（旧客户端曾因此把 failed 任务强制归档，见 2026-11-22 报告）。
-      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) return { ok: false, error: 'not-archived', taskId: id }
+      const f = forker()
+      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      // 2026-11-22：任务可能停在 ready/running，但子进程已经死了（宿主重启、手动 kill、
+      // 端口丢失）。客户端「启动」仍会调用 restore；旧逻辑返回 not-archived，导致
+      // 真机界面一直显示“启动失败”。这里允许恢复 stale 的 ready/running。
+      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) {
+        const live = f.status?.(id) ?? null
+        if (live?.running === true && task.adapter?.ok === true) {
+          return { ok: true, alreadyRunning: true, taskId: id, url: task.url, port: task.port, adapter: task.adapter }
+        }
+        try { f.stop?.(id) } catch { /* stale process already gone */ }
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        persist()
+      }
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }
@@ -1889,8 +1903,6 @@ export function apply(ctx, config) {
       if (!forkBundle) {
         return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
       }
-      const f = forker()
-      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
       // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
       // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。
       if (task.essenceId) {

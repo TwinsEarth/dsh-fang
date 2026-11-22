@@ -1195,6 +1195,29 @@ test('orchestrator: 部署 API 在宿主存活时返回 409（拒绝热替换）
   }
 })
 
+test('orchestrator: ready 但子进程已死的分身再次启动不再报 not-archived', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-restale-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const made = await svc.createTask({ title: 'stale-ready' })
+    assert.equal(made.ok, true)
+    await forker.stop(made.taskId)
+    const out = await svc.restoreTask(made.taskId)
+    assert.notEqual(out.error, 'not-archived', 'ready 但进程已死的任务必须允许重新拉起')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归：no-home-dir）', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-guard-'))
