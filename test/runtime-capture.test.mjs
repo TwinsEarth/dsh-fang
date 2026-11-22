@@ -175,6 +175,12 @@ test('planRuntimeModuleChanges copies touched packages and removes dropped ones'
   }
 })
 
+test('serializePatchEntries emits a top-level YAML array required by DSH', () => {
+  const text = serializePatchEntries([{ id: 'a', name: 'a', disabled: true }])
+  assert.equal(text.trimStart().startsWith('['), true, 'DSH app-boot rejects { insert: [...] }')
+  assert.deepEqual(parsePatchEntries(text).entries, [{ id: 'a', name: 'a', disabled: true }])
+})
+
 test('captureRuntimeProfileIntoEssence persists config, pnpm graph files and modules', () => {
   const fixture = makeFixture()
   try {
