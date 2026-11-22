@@ -15,10 +15,10 @@
 
 ## 验证（待回填）
 
-- 全量 tests：
-- preflight --e2e：
-- 发布 PR CI：
-- release-order：
+- 全量 tests：**1330 pass / 0 fail / 2 skip**；
+- preflight --e2e：**GREEN；e2e 125/125**；
+- 发布 PR CI：**#159 8/8 绿**；
+- release-order：**10/10**；
 
 ## 边界
 
