@@ -390,6 +390,8 @@ export function apply(ctx, config) {
     const force = options?.force === true
     const desired = desiredForkCoreMode()
     const current = normalizeCoreMode(task?.coreMode)
+    // 2026-11-22：重新打开/换核前先捕获元主 Web 的最新插件设置，保证分身与元主同步。
+    if (task?.essenceId) captureEssenceRuntimeIfPresent(task.essenceId)
     if (!task || (desired === current && !force)) return { ok: true, switched: false, coreMode: current || desired }
     const f = forker()
     if (!f || typeof f.provision !== 'function') return { ok: false, switched: false, coreMode: current, error: 'forker-unavailable' }
@@ -915,6 +917,12 @@ export function apply(ctx, config) {
   const refreshStaleDefaultEssenceIfNeeded = () => {
     if (autoRefreshPromise) return autoRefreshPromise
     autoRefreshPromise = (async () => {
+      // 2026-11-22：官方「开发者推荐（官方）」存在时它就是默认底座，不再自动捕获
+      // “默认元宝 · 自动同步”快照（旧逻辑每次宿主重启都会新增一个，永不收敛）。
+      const official = essenceManager.getMeta(OFFICIAL_ESSENCE_ID)
+      if (official?.id && official.archived !== true) {
+        return (lastAutoRefresh = { ok: true, skipped: 'official-essence-default' })
+      }
       // Two defaults exist: default-essence.json (quick derive) and the mirror
       // default used by the essence list/UI. Accept either; capture({setDefault})
       // writes only the mirror default, so reading the file alone would skip.
@@ -1043,6 +1051,7 @@ export function apply(ctx, config) {
           return { ok: false, error: isTombstoned(essenceId) ? 'essence-deleted' : 'unknown-essence' }
         }
         if (meta.archived === true) return { ok: false, error: 'essence-archived' }
+        captureEssenceRuntimeIfPresent(essenceId)
         await essenceManager.ensureFresh(essenceId)
         const fresh = essenceManager.getMeta(essenceId)
         const mergedDir = essenceManager.mergedProfileDir(essenceId)
@@ -1853,6 +1862,8 @@ export function apply(ctx, config) {
       const f = forker()
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
       // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
+      // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。
+      if (task.essenceId) captureEssenceRuntimeIfPresent(task.essenceId)
       let configReset = null
       if (task.essenceId) {
         try { configReset = await service.resetForkConfig(id) } catch (error) {
@@ -2657,6 +2668,54 @@ export function apply(ctx, config) {
   const runtimeForkId = (essenceId) => 'rt-' + String(essenceId).replace(/^essence-/, '').replace(/[^A-Za-z0-9-]/g, '-')
   // v3.0.9 三区口径：运行态 home 统一在 runtimeRoot（FANG_HOME 下是 sessions/<essenceId>/home）。
   const runtimeHomeFor = (essenceId) => path.join(layout.runtimeRoot, String(essenceId), 'home')
+  /**
+   * 2026-11-22：元主/运行态 profile 声明了插件，但 node_modules 可能是旧快照，
+   * 缺包时 DSH 会报 cannot resolve profile bundle。这里只补**缺失**的顶层包。
+   */
+  const syncProfileModulesFromMother = (profileDir, motherProfileDir) => {
+    const copied = []
+    const missing = []
+    const pkg = readJson(path.join(String(profileDir ?? ''), 'package.json'), {}) ?? {}
+    const names = new Set([
+      ...(Array.isArray(pkg?.dsh?.profile?.bundles) ? pkg.dsh.profile.bundles : []),
+      ...Object.keys(pkg?.dependencies ?? {}),
+      ...Object.keys(pkg?.optionalDependencies ?? {}),
+    ])
+    const motherModules = path.join(String(motherProfileDir ?? ''), 'node_modules')
+    for (const name of names) {
+      if (typeof name !== 'string' || !name || name.startsWith('@local/')) continue
+      const target = path.join(String(profileDir), 'node_modules', ...name.split('/'))
+      if (exists(target)) continue
+      const source = path.join(motherModules, ...name.split('/'))
+      if (!exists(source)) { missing.push(name); continue }
+      try {
+        ensureDir(path.dirname(target))
+        copyTree(source, target)
+        copied.push(name)
+      } catch { missing.push(name) }
+    }
+    return { copied, missing }
+  }
+  /**
+   * 2026-11-22：元主 Web 里改的插件设置必须先捕获回元宝，分身下一次打开才会拿到。
+   * 以前只在元主运行时停止/再次启动时捕获；运行中直接开分身会读到旧 merged 快照。
+   */
+  const captureEssenceRuntimeIfPresent = (essenceId) => {
+    const id = String(essenceId ?? '').trim()
+    if (!id) return null
+    const runtimeProfileDir = path.join(runtimeHomeFor(id), 'profiles', 'essence-runtime')
+    if (!exists(runtimeProfileDir)) return null
+    try {
+      const out = captureRuntimeProfileIntoEssence({
+        essenceManager, essenceId: id, runtimeProfileDir, logger: ctx.logger,
+      })
+      if (out?.captured) audit('essence-runtime-captured-on-open', { essenceId: id, packageChanged: out.packageChanged === true, patchChanged: out.patchChanged ?? 0 })
+      return out
+    } catch (error) {
+      audit('essence-runtime-capture-on-open-failed', { essenceId: id, error: String(error?.message ?? error) })
+      return { ok: false, captured: false, error: String(error?.message ?? error) }
+    }
+  }
   // 路径守卫：任何拼接出来的目标必须落在给定根内（拒绝 .. / 绝对路径逃逸）。
   const assertInside = (root, target, label) => {
     const resolvedRoot = path.resolve(String(root))
@@ -2849,7 +2908,41 @@ export function apply(ctx, config) {
     ensureDefaultEssence: async ({ apply = false, force = false, mode = 'copy-local' } = {}) => {
       const existingId = readDefaultEssenceId()
       const existing = existingId ? essenceManager.getMeta(existingId) : null
-      if (existing?.id) return { ok: true, existed: true, created: false, essenceId: existingId, mode }
+      const isAutoDefault = (meta) => Boolean(meta) && meta.official !== true
+        && String(meta.name ?? '').startsWith(DEFAULT_ESSENCE_NAME)
+      // 用户自己选的默认元宝（非自动“默认元宝”快照）保持不动。
+      if (existing?.id && !isAutoDefault(existing)) {
+        return { ok: true, existed: true, created: false, official: existing.official === true, essenceId: existingId, mode }
+      }
+      // 2026-11-22：保底一个「开发者推荐（官方）」，不再无限新增“默认元宝”快照。
+      const official = essenceManager.getMeta(OFFICIAL_ESSENCE_ID)
+      if (official?.id && official.archived !== true) {
+        if (apply !== true) {
+          return { ok: true, dryRun: true, official: true, existed: true, created: false, essenceId: OFFICIAL_ESSENCE_ID, mode }
+        }
+        // 2026-11-22：官方推荐 = 固定推荐清单 + 全部已安装实验性插件默认开启；
+        // 依赖/bundles 跟随当前母体（修复旧快照缺 2xray 等包的问题）。
+        let repaired = null
+        try {
+          repaired = essenceManager.repairOfficialEssence({
+            installed: (await listInstalledPlugins()) ?? [],
+            motherProfileDir: templateDir(),
+          })
+        } catch (error) {
+          repaired = { ok: false, error: String(error?.message ?? error) }
+        }
+        let modulesSync = { copied: [], missing: [] }
+        try { modulesSync = syncProfileModulesFromMother(essenceManager.mergedProfileDir(OFFICIAL_ESSENCE_ID), templateDir()) } catch { /* best effort */ }
+        essenceManager.setDefault(OFFICIAL_ESSENCE_ID)
+        writeDefaultEssenceId(OFFICIAL_ESSENCE_ID)
+        const archivedDuplicates = []
+        for (const meta of essenceManager.list()) {
+          if (!isAutoDefault(meta) || meta.archived === true) continue
+          try { essenceManager.archive(meta.id, true); archivedDuplicates.push(meta.id) } catch { /* best effort */ }
+        }
+        audit('default-essence-official', { essenceId: OFFICIAL_ESSENCE_ID, archivedDuplicates, repaired, modulesSync })
+        return { ok: true, existed: true, created: false, official: true, essenceId: OFFICIAL_ESSENCE_ID, mode, archivedDuplicates, repaired, modulesSync }
+      }
       const entries = await listInstalledPlugins()
       const plan = planDefaultEssence(entries ?? [])
       const userEssences = essenceManager.list().filter((meta) => meta.official !== true)
@@ -3037,6 +3130,10 @@ export function apply(ctx, config) {
           throw new Error(`essence-node-modules-copy-failed: ${String(error?.message ?? error)}`)
         }
       }
+      // 旧元主的模块树是旧快照：只补它 package.json 声明但 node_modules 缺失的包
+      // （2026-11-22：@twinsearth/dsh-2xray 缺失导致元主 Web 报 cannot resolve bundle）。
+      const modulesSync = syncProfileModulesFromMother(merged, templateDir())
+      if (modulesSync.copied.length > 0) audit('essence-modules-synced', { essenceId: id, copied: modulesSync.copied })
       // 复制来的模块树记录了母体 store；元主/运行态的 pnpm 必须显式用同一个 store，
       // 否则项目在 D: 盘、模块来自 C: store 时会报 ERR_PNPM_UNEXPECTED_STORE。
       // v3.1.8：pnpm 11 只从 pnpm-workspace.yaml 读取非鉴权设置（.npmrc 只剩鉴权/网络键），
@@ -3088,6 +3185,9 @@ export function apply(ctx, config) {
       } catch (error) {
         throw new Error(`runtime-node-modules-mirror-failed: ${String(error?.message ?? error)}`)
       }
+      // 补运行态 profile 里仍缺的包（mirror 只处理已登记条目）。
+      const runtimeModulesSync = syncProfileModulesFromMother(runtimeProfileDir, templateDir())
+      if (runtimeModulesSync.copied.length > 0) audit('essence-runtime-modules-synced', { essenceId: id, copied: runtimeModulesSync.copied })
       // v3.1.8：让运行态内的 pnpm 真正可用（元宝「插件」页更新/卸载插件走 DSH plugin manager）。
       // 失败不阻塞实例启动（实例仍可跑会话），但要把原因带回给调用方/面板。
       let pnpmConfig = null

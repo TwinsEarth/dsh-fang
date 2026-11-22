@@ -38,16 +38,19 @@ export const OFFICIAL_ESSENCE_NAME = '开发者推荐（官方）'
 export const OFFICIAL_ESSENCE_MIN_TIER = 'vip100'
 /** 官方推荐原身预装的默认插件条目（v3.0.7：自定义清单，安装≠激活）。 */
 export const DEFAULT_OFFICIAL_PATCH_ENTRIES = Object.freeze([
-  // 安装但不激活
-  Object.freeze({ id: 'official-2xray', name: '@twinsearth/dsh-2xray', disabled: true }),
-  Object.freeze({ id: 'official-agency-agents', name: '@michengai/dsh-agency-agents', disabled: true }),
+  // 安装但不激活（用户 2026-11-22 更新清单）
   Object.freeze({ id: 'official-better-sidebar', name: 'dsh-better-sidebar', disabled: true }),
   Object.freeze({ id: 'official-context', name: 'dsh-context', disabled: true }),
+  Object.freeze({ id: 'official-dshmarket', name: 'dshmarket', disabled: true }),
+  Object.freeze({ id: 'official-xmanrui-im', name: '@xmanrui/dsh-im', disabled: true }),
+  Object.freeze({ id: 'official-2xray', name: '@twinsearth/dsh-2xray', disabled: true }),
+  Object.freeze({ id: 'official-master', name: '@twinsearth/dsh-master', disabled: true }),
+  Object.freeze({ id: 'official-agency-agents', name: '@michengai/dsh-agency-agents', disabled: true }),
+  Object.freeze({ id: 'official-im2a', name: '@twinsearth/dsh-im2a-plugin', disabled: true }),
   Object.freeze({ id: 'official-modlens', name: '@liustack/modlens', disabled: true }),
   Object.freeze({ id: 'official-modsearch', name: '@liustack/modsearch', disabled: true }),
   // 安装并激活
-  Object.freeze({ id: 'official-dshmarket', name: 'dshmarket', disabled: false }),
-  Object.freeze({ id: 'official-im2a', name: '@twinsearth/dsh-im2a-plugin', disabled: false }),
+  Object.freeze({ id: 'official-ai-prison', name: '@twinsearth/ai-prison-dsh-plugin', disabled: false }),
   Object.freeze({ id: 'official-openviking-memory', name: '@openviking/dsh-memory-plugin', disabled: false }),
   Object.freeze({ id: 'official-w2m', name: '@twinsearth/w2m-dsh-plugin', disabled: false }),
 ])
@@ -565,6 +568,47 @@ export class EssenceManager {
       skipQuota: true,
       defaultPatchEntries: options?.defaultPatchEntries ?? DEFAULT_OFFICIAL_PATCH_ENTRIES,
     })
+  }
+
+  /**
+   * 2026-11-22: 修复/刷新「开发者推荐（官方）」：
+   * - 依赖与 bundles 跟随当前母体 profile（新的 fang/2xray 等不再缺失）；
+   * - 推荐插件按固定清单 install/enable；
+   * - 所有已安装的实验性插件默认开启（`@deepseek-ai/dsh-experimental-*`）。
+   * 官方原身是锁定底座，这里直接改 overlay 后 recompute（不走 update() 的 locked 拒绝）。
+   */
+  repairOfficialEssence({ installed = [], motherProfileDir = '' } = {}) {
+    const root = this.essenceRoot(OFFICIAL_ESSENCE_ID)
+    const meta = this.getMeta(OFFICIAL_ESSENCE_ID)
+    if (!meta?.id) return { ok: false, error: 'official-missing' }
+    const overlay = this.loadOverlay(root)
+    if (motherProfileDir) {
+      const motherPkg = readJson(path.join(String(motherProfileDir), 'package.json'), null)
+      if (motherPkg) overlay.packageJson = { ...overlay.packageJson, ...this.selectProfilePackage(motherPkg) }
+    }
+    const recommended = DEFAULT_OFFICIAL_PATCH_ENTRIES.map((entry) => ({ ...entry }))
+    const experimentalNames = [...new Set((installed ?? [])
+      .map((entry) => String(entry?.name ?? entry?.spec ?? entry?.id ?? ''))
+      .filter((name) => /^@deepseek-ai\/dsh-experimental-/.test(name)))]
+    const experimental = experimentalNames.map((name) => ({
+      id: `official-exp-${sha256(name).slice(0, 8)}`,
+      name,
+      disabled: false,
+    }))
+    const managedNames = new Set([...recommended, ...experimental].map((entry) => String(entry.name)))
+    const preserved = (Array.isArray(overlay.patchEntries) ? overlay.patchEntries : [])
+      .filter((entry) => !String(entry?.id ?? '').startsWith('official-'))
+      .filter((entry) => !managedNames.has(String(entry?.name ?? '')))
+    overlay.patchEntries = [...recommended, ...experimental, ...preserved]
+    this.saveOverlay(root, overlay)
+    const merge = this.recompute(OFFICIAL_ESSENCE_ID)
+    return {
+      ok: true,
+      essenceId: OFFICIAL_ESSENCE_ID,
+      recommended: recommended.length,
+      experimental: experimental.length,
+      status: merge.status,
+    }
   }
 
   /**

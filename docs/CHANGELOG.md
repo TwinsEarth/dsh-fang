@@ -1,3 +1,34 @@
+## v3.7.0（2026-11-22）
+
+**主题：元主插件同步 + 开发者推荐默认元宝 + 运行态缺包修复**
+
+### 修复
+
+- **元主 Web 插件设置同步到分身**：分身创建/还原/换核前，先把运行中的 `essence-runtime` profile（内置、实验性、第三方插件开关）捕获回元宝 overlay 并重算 merged，分身下一次打开即可拿到最新开关（不再只在停止元主时捕获）。
+- **宿主重启不再无限增加「默认元宝」**：默认优先使用「开发者推荐（官方）」；自动捕获快照只在没有官方元宝时兜底，官方存在时不再每次启动捕获一个；历史自动生成的「默认元宝」在切换时归档（不删除数据）。
+- **元主运行态缺包**：merged/runtime profile 中声明但 `node_modules` 缺失的顶层依赖，启动时从母体补齐（修复 `@twinsearth/dsh-2xray` 的 `cannot resolve profile bundle`）。
+
+### 功能
+
+- **开发者推荐（官方）**：安装不开启 10 项（`dsh-better-sidebar`、`dsh-context`、`dshmarket`、`@xmanrui/dsh-im`、`@twinsearth/dsh-2xray`、`@twinsearth/dsh-master`、`@michengai/dsh-agency-agents`、`@twinsearth/dsh-im2a-plugin`、`@liustack/modlens`、`@liustack/modsearch`）；安装并开启 3 项（`@twinsearth/ai-prison-dsh-plugin`、`@openviking/dsh-memory-plugin`、`@twinsearth/w2m-dsh-plugin`）；所有已安装的 `@deepseek-ai/dsh-experimental-*` 默认开启。
+- **queue-journal 默认关闭**：父 bundle 与子包 patch 都写入 `disabled: true`，需要用户在插件管理里手动开启；queue-journal 子包版本 0.1.8。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=1318 fail=0 skip=2（1330 tests）
+- e2e: 125/125
+- routes: 111（allowlist 0） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+
+- 推荐清单中**本机尚未安装**的第三方包不会由本版自动执行 pnpm 安装（只对已安装项写入启用/禁用行；未安装项留给插件管理/后续版本处理）。
+- 官方元主锁定，不支持改设置/重命名/归档；这是既有边界。
+- 不改变 FANG_HOME 布局、不复制凭据/会话到新元宝。
+
+### 回滚锚点
+
+- 升级前快照/上一代目录：active-v3.7.0-pre（母体）；merged-v3.7.0-pre（原身）；plugin-snapshot-<ts>（插件层）
 ## v3.6.2（2026-11-22 已发布）
 
 **版本快照：与 v3.6.1 无功能/代码差异（重新发布，便于分发与回滚锚点）。**
@@ -40,7 +71,7 @@
 
 ### 门禁（发布前必填，来自 dist/preflight.json）
 
-- tests: pass=? fail=0 skip=?（全量）
+- tests: pass=1314 fail=0 skip=2（1326 tests）（全量）
 - e2e: 125/125
 - routes: 111（allowlist 0 findings） / plugins: 16
 - preflight: GREEN
