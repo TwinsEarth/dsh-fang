@@ -586,20 +586,34 @@ export class EssenceManager {
       const motherPkg = readJson(path.join(String(motherProfileDir), 'package.json'), null)
       if (motherPkg) overlay.packageJson = { ...overlay.packageJson, ...this.selectProfilePackage(motherPkg) }
     }
+    const mirror = this.loadMirror()
     const recommended = DEFAULT_OFFICIAL_PATCH_ENTRIES.map((entry) => ({ ...entry }))
+    // 同名镜像行会与推荐行并存；用镜像 id 的 disabled 影子条目删掉镜像行，
+    // 推荐行自己仍保留（否则 dsh-context 这类包会因为行被删掉而回到 bundle 默认开启）。
+    const shadows = []
+    for (const entry of recommended) {
+      const mirrorId = (mirror.patchEntries ?? []).find((candidate) => candidate.name === entry.name)?.id
+      if (mirrorId && String(mirrorId) !== entry.id && !mirror.lockedPluginIds?.has?.(String(mirrorId))) {
+        shadows.push({ id: String(mirrorId), name: entry.name, disabled: true })
+      }
+    }
     const experimentalNames = [...new Set((installed ?? [])
       .map((entry) => String(entry?.name ?? entry?.spec ?? entry?.id ?? ''))
       .filter((name) => /^@deepseek-ai\/dsh-experimental-/.test(name)))]
-    const experimental = experimentalNames.map((name) => ({
-      id: `official-exp-${sha256(name).slice(0, 8)}`,
-      name,
-      disabled: false,
-    }))
+    const mirrorEntries = mirror.patchEntries ?? []
+    const experimental = experimentalNames.map((name) => {
+      const mirrorId = mirrorEntries.find((candidate) => candidate.name === name)?.id
+      return {
+        id: mirrorId ? String(mirrorId) : `official-exp-${sha256(name).slice(0, 8)}`,
+        name,
+        disabled: false,
+      }
+    })
     const managedNames = new Set([...recommended, ...experimental].map((entry) => String(entry.name)))
     const preserved = (Array.isArray(overlay.patchEntries) ? overlay.patchEntries : [])
       .filter((entry) => !String(entry?.id ?? '').startsWith('official-'))
       .filter((entry) => !managedNames.has(String(entry?.name ?? '')))
-    overlay.patchEntries = [...recommended, ...experimental, ...preserved]
+    overlay.patchEntries = [...recommended, ...experimental, ...shadows, ...preserved]
     this.saveOverlay(root, overlay)
     const merge = this.recompute(OFFICIAL_ESSENCE_ID)
     return {
