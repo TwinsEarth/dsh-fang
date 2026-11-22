@@ -28,7 +28,7 @@
 | 12:20:46 | **宿主崩溃 #1**（host exit 1） | `crash-2026-11-22T04-20-46-235Z-host.log`；报 `cannot resolve profile bundle "@twinsearth/fang-dsh-plugin"` + `EPERM watch` |
 | 13:01:52 | 构建 v3.7.1 产物 | `dist/dsh-fang-3.7.1.tgz` mtime |
 | **13:06:26** | **宿主崩溃 #2**（host exit 1） | `crash-2026-11-22T05-06-26-412Z-host.log`；报 `fatal uncaught exception: EPERM: operation not permitted, watch` |
-| **13:06:26** | 母体 fang 插件目录完成替换 | `C:\Users\fangw\.dsh\profiles\desktop\node_modules\@twinsearth\fang-dsh-plugin` 的 LastWriteTime = 13:06:26，**与崩溃秒级重合** |
+| **13:06:26** | 母体 fang 插件目录完成替换 | `%USERPROFILE%\.dsh\profiles\desktop\node_modules\@twinsearth\fang-dsh-plugin` 的 LastWriteTime = 13:06:26，**与崩溃秒级重合** |
 | 13:10:49 | 用户重启 Desktop | 新 Desktop main PID 7724 / host PID 10808 |
 
 崩溃日志关键行（05:06:26）：

@@ -1,3 +1,38 @@
+## v3.7.2（2026-11-22）
+
+**主题：元主插件状态/配置同步 + 官方实验性全量启用 + patch 格式修复**
+
+### 修复
+
+- **官方元宝被误判 stale，导致分身全部回退 clean template（根因）**：`ensureDefaultEssence` 在官方已是默认时直接 return，不再 repair；official merged profile 长期停在 fang 3.6.2。分身派生时 `profileUsesCurrentFangBundle` 判 false，静默回退干净模板，实验性插件/第三方插件全部丢失。现在每次 create/restore/repair/打开元主都会 repair 官方，并按版本补齐 node_modules（不再只补“缺失”）。
+- **官方实验性插件只匹配了前缀**：DSH 的「实验性插件」实际是固定的 15 个官方 bundle（含 `@deepseek-ai/dsh-personalized-recommendations`、`dsh-cua-bundle`、`dsh-deepseek-chat-import` 等不带 experimental 前缀的包）。现在官方与所有分身都写入完整 15 个 bundle + 启用行；Windows 上 `dsh-cua-bundle` 由 DSH 自身按 darwin 平台跳过。
+- **`cordis.patch.yml` 格式错误**：DSH app-boot 要求 profile 的 `cordis.patch.yml` 是**顶层 YAML 数组**；essence 之前序列化成 `{ insert: [...] }`，会导致 profile 加载失败/包不可解析（2xray 等报错的重要来源）。serializer 与 fork patch 写入统一改为顶层数组，旧的 official/runtime profile 重算时自动归一。
+- **设置/配置参数未捕获**：运行态 capture 现在同时捕获 `settings/*`（插件配置参数）、patch entries（开关/配置）、package.json（安装/卸载/更新后的 bundles+dependencies）和 node_modules（被更新/卸载的包）。分身创建/还原/修复前都会先捕获元主 Web 的最新状态。
+
+### 功能
+
+- 开发者推荐（官方）保持 v3.7.1 清单：安装不开启 10 项、安装并开启 3 项；所有官方实验性 bundle 默认开启。
+- 任何由官方/模板派生的分身，创建或重新打开时都会补齐官方实验性表面（bundles + enabled patch 行）。
+- queue-journal 仍默认关闭（父/子 `disabled: true`，子包 0.1.8）。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=1320 fail=0 skip=2（ tests）
+- e2e: 125/125
+- routes: 111（allowlist 0） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+
+- 已经在运行的旧分身不会热改 profile；必须重新启动/重建该分身才会套用新状态（DSH 的插件组合在启动时读取）。
+- 推荐清单中本机未安装的第三方包仍不自动 pnpm 安装；只对已安装项落启用/禁用行。
+- Windows 上 `@deepseek-ai/dsh-cua-bundle` 是 darwin-only，DSH 会跳过；其余 14 个实验性 bundle 正常。
+- 官方元主锁定；不改变 FANG_HOME 布局。
+
+### 回滚锚点
+
+- 升级前快照/上一代目录：active-v3.7.2-pre（母体）；merged-v3.7.2-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.7.1（2026-11-22 已发布）
 
 **主题：官方推荐行去重（dsh-context 安装不开启仍被开启）**
