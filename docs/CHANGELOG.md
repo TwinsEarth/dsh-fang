@@ -1,3 +1,40 @@
+## v3.7.5（2026-11-22）
+
+**主题：全局红线 + Vault 导出导入 + 会话状态/同步修复**
+
+### 新增
+
+- **Vault 独立子插件** `vault/`（`@twinsearth/dsh-fang-vault`）：按会话仓库结构导出/导入分身。
+  - `00_MANIFEST`、`10_SESSIONS`、`20_ATTACHMENTS`、`40_FORK_PROFILE`、`50_RUNTIME_DATA`、`60_LOGS`、`70_SECRETS`、可选 `30_WORKSPACES`。
+  - 默认导出会话原始日志、元数据、派生索引、协作数据、fork 配置、血缘、日志、凭据；**工作区项目快照默认不勾选**，显式确认后才复制。
+  - 导入校验 `dsh-fang-vault/v1`，会话平铺目录还原为 `sessions/<workspaceKey>/<sessionId>`，profile 重命名，重建 node_modules 后以 `preserveProfile` 启动并完成 Adapter 握手。
+- **全局红线**：所有 fork 进程安装 fs 写守卫，只能写自己的 DSH_HOME；写母体 profile、DSH 安装目录、官方元主/runtime、其他 fork、tasks/auth/audit 等一律 `EPERM + fangRedline`，并记录到自己的 `fang/global-redline.log`。
+- **等待启动**：分身 `failed` 状态由红色「启动失败」改为黄色「等待启动」；`crashed` 保留红色「已崩溃」。
+
+### 修复
+
+- `restoreTask` 不再自动搬移会话（EB-01/EB-07）；超额只在面板显示 warn chip。
+- `restore-session.mjs --attach-only` 真正进入分支，并校验 session 存在、宿主运行需 `--force-running`（EB-04/EB-08）。
+- `open-url` GET 只读；显式打开走 `POST /fang/api/tasks/open`，避免 GET 触发 stop/rebuild（EB-10）。
+- 存量分身补 `syncSourceId`；无 fingerprint 视为 changed，首次打开主动同步（EB-12）。
+- 来源插件面默认对齐（bundles + dependencies + patch rows），修复“已同步”假阳性（EB-14）。
+- node-compat 作为第一个 bundle，写 dependencies；修复被 pnpm 剪到 `.ignored`（EB-06）。
+- 失败/停止任务不再显示僵尸 PID/端口；面板“进行中”排除 failed/stopped；超额会话有提示（EB-13）。
+- open-url/repair 错误码按 400/404 契约返回。
+
+### 隔离/部署（沿用 3.7.3）
+
+- 宿主存活时 deploy API 409；deploy-profile 原子部署/回滚；watcher EPERM 降级。
+- 安装快照默认关闭，`DSH_FANG_INSTALL_SNAPSHOT=1` 显式启用。
+- 母体安装红线：必须完全退出宿主后部署；热替换 profile 禁止（EB-03/EB-15）。
+
+### 门禁（发布前回填）
+
+- tests: pass=1330 fail=0 skip=2
+- e2e: 125/125
+- routes: 89（allowlist 0） / plugins: 16
+- preflight: GREEN
+
 ## v3.7.3（2026-11-22 已发布）
 
 **主题：分身每次打开主动同步元主插件 + 实验性永久固化**
