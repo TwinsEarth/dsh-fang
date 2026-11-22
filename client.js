@@ -2835,8 +2835,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const fallback = localStorage.getItem('fang.exportDir') || ''
         const destDir = window.prompt('导出到文件夹（绝对路径；不存在会自动创建）', fallback)
         if (!destDir) return
+        const workspace = window.confirm('是否同时打包工作区项目文件？\n\n默认「取消」= 只导出会话/附件/配置/日志。\n项目很大时会明显变慢。')
         localStorage.setItem('fang.exportDir', destDir)
-        const result = await api('/fang/api/tasks/export', { method: 'POST', body: JSON.stringify({ taskId, destDir }) })
+        const result = await api('/fang/api/vault/export', { method: 'POST', body: JSON.stringify({ taskId, destDir, options: { workspace, workspaceSnapshot: workspace } }) })
         if (result.status === 200 && result.body?.ok) {
           notify('ok', `已导出到 ${result.body.dir}`, `文件 ${result.body.files} 个 · ${result.body.bytes} 字节`)
         } else {
@@ -2848,7 +2849,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const sourceDir = window.prompt('选择分身导出包文件夹（包含 manifest.json 的那一层）', localStorage.getItem('fang.importDir') || '')
         if (!sourceDir) return
         localStorage.setItem('fang.importDir', sourceDir)
-        const result = await api('/fang/api/tasks/import', { method: 'POST', body: JSON.stringify({ sourceDir }) })
+        const result = await api('/fang/api/vault/import', { method: 'POST', body: JSON.stringify({ sourceDir }) })
         if (result.status === 200 && result.body?.ok) {
           notify('ok', `已导入分身 ${result.body.title || result.body.taskId}`, `端口 ${result.body.restored?.port ?? '—'}`)
           await refresh()
@@ -2856,6 +2857,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           notify('bad', `导入失败：${result.body?.error || 'import-failed'}`, result.body?.detail || '')
         }
       }
+
+      // 独立 Vault 子插件通过此桥触发导出/导入（按钮由 vault/client.js 注入）。
+      try { window.__fangVaultBridge = { exportTask, importTask } } catch { /* ignore */ }
 
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
@@ -4475,13 +4479,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             }),
             button('导出', {
               size: 'sm', variant: 'ghost', dataBtnId: 'C-08',
-              title: '把该分身全部文件/会话/配置导出到指定文件夹（不含可再生的 node_modules/tmp）',
+              title: '导出该分身为 Vault 文件夹（可选工作区快照）',
               onClick: () => void exportTask(task),
               fk: 'export:' + taskId,
             }),
             button('导入', {
               size: 'sm', variant: 'ghost', dataBtnId: 'C-09',
-              title: '从导出包文件夹导入为一个新分身，并重新移植依赖/启动握手',
+              title: '从 Vault 文件夹导入为新分身，并重新移植依赖',
               onClick: () => void importTask(),
               fk: 'import:' + taskId,
             }),

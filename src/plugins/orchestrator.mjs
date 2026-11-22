@@ -24,7 +24,7 @@ import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-stor
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
 import { installWatchGuard } from '../lib/watch-guard.mjs'
 import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
-import { exportForkHome, readForkExport } from '../lib/fork-export.mjs'
+import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
@@ -1397,31 +1397,32 @@ export function apply(ctx, config) {
     },
 
     /** 2026-11-22：一键导出分身完整 home（不含可再生的 node_modules/tmp）。 */
-    async exportTask(taskId, destDir) {
+    async exportTask(taskId, destDir, options = {}) {
       const task = tasks.get(String(taskId ?? '').trim())
       if (!task) return { ok: false, error: 'unknown-task' }
       if (!destDir || !path.isAbsolute(String(destDir))) return { ok: false, error: 'dest-dir-required' }
-      const out = exportForkHome({ homeDir: task.homeDir, destDir: String(destDir), task })
+      let workspacePath = ''
+      try {
+        const ws = readJson(path.join(task.homeDir, 'storages', 'workspace.json'), {})
+        workspacePath = Object.values(ws?.tables?.workspaces ?? {}).map((item) => String(item?.path ?? '')).find(Boolean) ?? ''
+      } catch { /* optional */ }
+      const out = exportVault({ homeDir: task.homeDir, destDir: String(destDir), task: { ...task, workspacePath }, options })
       if (out.ok) audit('fork-exported', { taskId: task.taskId, dir: out.dir, files: out.files, bytes: out.bytes })
       return out
     },
 
     /** 2026-11-22：一键导入分身导出包，复制 home/profile 后重新拉起并握手。 */
     async importTask(sourceDir, title) {
-      const parsed = readForkExport(sourceDir)
+      const parsed = readVault(sourceDir)
       if (!parsed.ok) return parsed
       const id = newId('task')
       const profile = `fang-${id.slice(-12)}`
       const homeDir = path.join(layout.forkHomesDir, id)
       if (exists(homeDir)) return { ok: false, error: 'task-exists', taskId: id }
       ensureDir(path.dirname(homeDir))
-      fs.cpSync(parsed.homeDir, homeDir, { recursive: true, force: true, dereference: false })
-      const oldProfile = String(parsed.manifest?.profile ?? '')
-      const sourceProfileDir = oldProfile ? path.join(homeDir, 'profiles', oldProfile) : ''
+      const imported = importVault({ sourceDir, homeDir, profile })
+      if (imported.ok !== true) return imported
       const targetProfileDir = path.join(homeDir, 'profiles', profile)
-      if (sourceProfileDir && exists(sourceProfileDir) && sourceProfileDir !== targetProfileDir) {
-        fs.renameSync(sourceProfileDir, targetProfileDir)
-      }
       // 导出包不含 node_modules：从母体/官方 merged 重新移植依赖树，再拉起。
       const importedModules = path.join(targetProfileDir, 'node_modules')
       if (!exists(importedModules)) {
@@ -4668,7 +4669,7 @@ export function apply(ctx, config) {
         return json(res, out.ok ? 200 : 409, out)
       })
       // 2026-11-22：一键修复（停残留 → 清别名桩 → 重置配置 → 重新拉起；不删 home/会话）
-      route('POST', `${prefix}/api/tasks/export`, async (req, res) => {
+      route('POST', `${prefix}/api/vault/export`, async (req, res) => {
         const body = await readBody(req)
         const taskId = String(body?.taskId ?? '').trim()
         if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
@@ -4676,13 +4677,13 @@ export function apply(ctx, config) {
         const destDir = String(body?.destDir ?? '').trim()
         if (!destDir) return json(res, 400, { ok: false, error: 'dest-dir-required' })
         try {
-          const out = await service.exportTask(taskId, destDir)
+          const out = await service.exportTask(taskId, destDir, body?.options ?? {})
           return json(res, out.ok ? 200 : 500, out)
         } catch (error) {
           return json(res, 500, { ok: false, error: 'export-failed', detail: String(error?.message ?? error) })
         }
       })
-      route('POST', `${prefix}/api/tasks/import`, async (req, res) => {
+      route('POST', `${prefix}/api/vault/import`, async (req, res) => {
         const body = await readBody(req)
         const sourceDir = String(body?.sourceDir ?? '').trim()
         if (!sourceDir) return json(res, 400, { ok: false, error: 'source-dir-required' })

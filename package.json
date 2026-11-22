@@ -73,7 +73,11 @@
     "CLA.md",
     "LICENSES/**",
     "sdk/**",
-    "defaults/**"
+    "defaults/**",
+    "vault/**/*.mjs",
+    "vault/package.json",
+    "vault/client.js",
+    "vault/cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {
