@@ -2829,6 +2829,34 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         void loadEssenceDetail()
       }
 
+      async function exportTask(task) {
+        const taskId = String(task?.taskId ?? '')
+        if (!taskId) return
+        const fallback = localStorage.getItem('fang.exportDir') || ''
+        const destDir = window.prompt('导出到文件夹（绝对路径；不存在会自动创建）', fallback)
+        if (!destDir) return
+        localStorage.setItem('fang.exportDir', destDir)
+        const result = await api('/fang/api/tasks/export', { method: 'POST', body: JSON.stringify({ taskId, destDir }) })
+        if (result.status === 200 && result.body?.ok) {
+          notify('ok', `已导出到 ${result.body.dir}`, `文件 ${result.body.files} 个 · ${result.body.bytes} 字节`)
+        } else {
+          notify('bad', `导出失败：${result.body?.error || 'export-failed'}`, result.body?.detail || '')
+        }
+      }
+
+      async function importTask() {
+        const sourceDir = window.prompt('选择分身导出包文件夹（包含 manifest.json 的那一层）', localStorage.getItem('fang.importDir') || '')
+        if (!sourceDir) return
+        localStorage.setItem('fang.importDir', sourceDir)
+        const result = await api('/fang/api/tasks/import', { method: 'POST', body: JSON.stringify({ sourceDir }) })
+        if (result.status === 200 && result.body?.ok) {
+          notify('ok', `已导入分身 ${result.body.title || result.body.taskId}`, `端口 ${result.body.restored?.port ?? '—'}`)
+          await refresh()
+        } else {
+          notify('bad', `导入失败：${result.body?.error || 'import-failed'}`, result.body?.detail || '')
+        }
+      }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
@@ -4444,6 +4472,18 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               title: '物理分支：在分身内 fork 当前会话，挂回同一分身（可多分支、可激活）',
               onClick: () => void app.openBranches(task),
               fk: 'branches:' + taskId,
+            }),
+            button('导出', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-08',
+              title: '把该分身全部文件/会话/配置导出到指定文件夹（不含可再生的 node_modules/tmp）',
+              onClick: () => void exportTask(task),
+              fk: 'export:' + taskId,
+            }),
+            button('导入', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-09',
+              title: '从导出包文件夹导入为一个新分身，并重新移植依赖/启动握手',
+              onClick: () => void importTask(),
+              fk: 'import:' + taskId,
             }),
             textAction('提升插件', {              title: '把分身里验证过的插件目录提升到母体（需目录名）', dataBtnId: 'C-02',
               softDisabled: busyPromote, busy: busyPromote,
