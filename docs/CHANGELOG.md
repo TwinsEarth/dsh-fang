@@ -1,3 +1,28 @@
+## v3.7.3（2026-11-22）
+
+**主题：分身每次打开主动同步元主插件 + 实验性永久固化**
+
+### 修复
+
+- **每次打开分身都主动同步元主**：`GET /fang/api/tasks/open-url` 现在先捕获来源元主运行态（settings、patch entries、bundles/dependencies、node_modules），修官方元宝，比较 merged fingerprint；源变化则停止旧分身、按新 merged profile 重新 provision + spawn，再返回新 URL。打开动作不再只是取 URL。
+- **实验性插件永久固化**：不再依赖 orchestrator 的 post-provision 步骤。forker 在**每次 spawn 前**无条件把官方 15 个实验性 bundle + enabled patch 行写入 fork profile（accelerated 除外），修复 repair/restore 重新 provision 后实验性全关。
+- **ready 但进程已死**：`restoreTask` 不再返回 `not-archived`，会清理 stale 状态后重新拉起；解决真机反复「启动失败」。
+- **所有分身（含空白/模板）默认同步源 = 开发者推荐（官方）**，不再因为没有 essenceId 而跳过同步。
+
+### 同时包含的隔离加固
+
+- P1：宿主存活时部署 API 409；`deploy-profile.mjs` 原子部署/回滚；watcher EPERM 降级；fork 私有 fang 视图。
+- P2-A：每版本不可变 DSH 安装快照（hardlink），stock 分身使用自己的快照 CLI；独立 TEMP/TMP。
+- queue-journal 默认关闭（父/子 patch，子包 0.1.8）。
+- 边界：Job Object/per-fork 防火墙未实现，当前不是 VM 级隔离；运行中旧分身需重新打开。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+
+- tests: pass=? fail=0 skip=?
+- e2e: ?/?
+- routes: ?（allowlist） / plugins: 16
+- preflight: GREEN
+
 ## v3.7.2（2026-11-22 已发布）
 
 **主题：元主插件状态/配置同步 + 官方实验性全量启用 + patch 格式修复**
