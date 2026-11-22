@@ -1175,6 +1175,7 @@ export function apply(ctx, config) {
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
         // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @local/dsh-fang 继续兼容。
         const forkProfileDir = path.join(homeDir, 'profiles', profile)
+        if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-fork-profile')) } catch { /* debug best effort */ } }
         const forkBundle = forkBundlePath(forkProfileDir)
         if (!forkBundle) {
           task.status = TASK_STATUS.FAILED

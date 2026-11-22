@@ -18,9 +18,9 @@
 
 ### 门禁（发布前必填，来自 dist/preflight.json）
 
-- tests: pass=? fail=0 skip=?
-- e2e: ?/?
-- routes: ?（allowlist） / plugins: 16
+- tests: pass=1325 fail=0 skip=2（ tests）
+- e2e: 125/125
+- routes: 113（allowlist 0） / plugins: 16
 - preflight: GREEN
 
 ## v3.7.2（2026-11-22 已发布）

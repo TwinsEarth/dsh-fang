@@ -9,7 +9,7 @@
 |---|---|---|
 | 每版本不可变 DSH 安装快照 | `src/lib/install-snapshot.mjs`：在安装卷 `.fang-installs/dsh-<version>-<hash>/` 对 `DeepSeek Harness.exe`/`resources` 做 hardlink（同卷零拷贝）；安装升级替换文件后旧快照仍是旧 inode | `install-snapshot.test.mjs` 模拟源文件替换，快照仍读 v1 |
 | fork 使用自己的安装视图 | orchestrator `forkCliPath()` 为 stock 分身返回快照内 `resources/runtime/cli/bin/dsh.cmd`；create/restore/repair 三条 spawn 路径都使用它 | 代码路径 + 单测 |
-| fork 私有 fang bundle | forker provision 把 fang bundle 从母体 mirror 复制为 fork 真实目录 | forker 代码 |
+| fork 安装视图 | 保持 per-entry mirror；复制 fang 会经 @local symlink 误写母体，已回退 | e2e 125/125 |
 | 独立 TEMP/TMP | 每个 fork spawn 注入 `<fork>/tmp`，不再共用用户临时目录 | 代码路径 |
 | 部署边界 | `deploy-profile.mjs` 宿主存活拒绝；FANG deploy API 409；watcher 降级 | P1 记录 |
 | 安装快照失败回退 | 快照创建失败时显式 audit `fork-install-snapshot-failed` 并回退共享 CLI，不静默假成功 | 代码 |

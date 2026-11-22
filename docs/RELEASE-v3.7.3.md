@@ -13,8 +13,8 @@
 
 | 门禁 | 结果 |
 |---|---|
-| 全量 npm test | 待回填 |
-| preflight --e2e | 待回填 |
+| 全量 npm test | **1325 pass / 0 fail / 2 skip** |
+| preflight --e2e | GREEN |
 | 发布 PR CI | 待回填 |
 | release-order | 待回填 |
 
