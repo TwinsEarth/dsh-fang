@@ -167,6 +167,7 @@ test('module surface + pure helpers (Config defaults / buildSpawnArgs / classify
   const cleanPkg = forker.buildTemplatePackageJson({})
   assert.equal(cleanPkg.private, true)
   assert.deepEqual(cleanPkg.dsh.profile.bundles, [
+    '@twinsearth/dsh-fang-node-compat',
     '@deepseek-ai/dsh-base',
     '@deepseek-ai/dsh-web-app',
     '@local/dsh-fang',
@@ -424,6 +425,7 @@ test('provision in cleanTemplate mode builds the fork profile from a forker-owne
     assert.equal(pkg.private, true)
     assert.equal(typeof pkg.name, 'string')
     assert.deepEqual(pkg.dsh.profile.bundles, [
+      '@twinsearth/dsh-fang-node-compat',
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
       '@local/dsh-fang',
@@ -540,7 +542,7 @@ test('provision failure paths + node_modules degradation in both template modes'
     assert.equal(isLink(path.join(degraded.profileDir, 'node_modules')), false)
     assert.deepEqual(
       JSON.parse(readFile(path.join(degraded.profileDir, 'package.json'))).dsh.profile.bundles,
-      ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@local/dsh-fang'],
+      ['@twinsearth/dsh-fang-node-compat', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@local/dsh-fang'],
     )
   } finally {
     clean.ctx.dispose()
@@ -567,6 +569,7 @@ test('ensureTemplate writes the clean profile contract and is idempotent', () =>
     assert.equal(pkg.private, true)
     assert.equal(typeof pkg.name, 'string')
     assert.deepEqual(pkg.dsh.profile.bundles, [
+      '@twinsearth/dsh-fang-node-compat',
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
       '@local/custom-bundle',

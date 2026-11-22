@@ -638,6 +638,8 @@ export function apply(ctx, config) {
       template: f.template ?? '',
       essenceId: f.essenceId ?? null,
       sourceEssence: f.sourceEssence ?? null,
+      syncSourceId: f.syncSourceId ?? f.essenceId ?? OFFICIAL_ESSENCE_ID,
+      configSourceFingerprint: f.configSourceFingerprint ?? null,
     }
   }
 
@@ -783,9 +785,9 @@ export function apply(ctx, config) {
           return { activeBranchId: t.activeBranchId ?? null, sessionId: null, count: 0 }
         }
       })(),
-      pid: live?.pid ?? t.pid ?? null,
-      port: t.port ?? null,
-      url: stripUrlToken(t.url),
+      pid: running ? (live?.pid ?? t.pid ?? null) : null,
+      port: running ? (t.port ?? null) : null,
+      url: running ? stripUrlToken(t.url) : null,
       homeDir: t.homeDir,
       profile: t.profile,
       createdAt: t.createdAt,
@@ -1938,13 +1940,19 @@ export function apply(ctx, config) {
       // resetForkConfig 刚把 profile 重置回 stock 形状；即使 coreMode 未变也必须强制 reprovision，
       // 否则加速分身会以 stock 配置 + accelerated CLI 启动而永远不 ready（2026-11-22 实测 timeout）。
       const coreSync = await syncForkCoreMode(task, { force: true })
-      if (coreSync.ok !== true) {
-        task.status = TASK_STATUS.FAILED
+      if (coreSync.ok !== true) {        task.status = TASK_STATUS.FAILED
         persist()
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: coreSync.error })
         return { ok: false, error: coreSync.error, detail: coreSync.detail ?? null, taskId: id }
       }
-      // 老/空白分身重新打开时补齐官方实验性插件表面。
+      // 老/空白分身重新打开时补齐官方实验性插件表面；先整体对齐来源元主的完整插件面。
+      // 完整来源插件面对齐默认关闭：e2e 证明它会破坏 derive 的 fork bundle 解析。
+      // 待独立分支验证后再默认开启（BUG-4 仍未结案）。
+      const sourceSurface = process.env.DSH_FANG_SOURCE_SURFACE === '1'
+        ? applySourcePluginSurface(task, forkProfileDir)
+        : { ok: true, skipped: 'source-surface-default-off' }
+      if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-restore-profile')) } catch { /* debug */ } }
+      if (sourceSurface.ok === false) audit('fork-source-surface-failed', { taskId: id, error: sourceSurface.error })
       const experimentalSurface = applyOfficialExperimentalSurface(forkProfileDir, { coreMode: coreSync.coreMode })
       if (experimentalSurface.ok === false) audit('fork-experimental-surface-failed', { taskId: id, error: experimentalSurface.error })
       const started = await f.spawn({
@@ -1997,7 +2005,7 @@ export function apply(ctx, config) {
       if (sourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
       await essenceManager.ensureFresh(sourceId)
       const fingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
-      const changed = Boolean(task.configSourceFingerprint && fingerprint && fingerprint !== task.configSourceFingerprint)
+      const changed = Boolean(fingerprint && task.configSourceFingerprint !== fingerprint)
       const live = forker()?.status?.(id) ?? null
       if (changed) {
         if (live?.running === true) {
@@ -2834,6 +2842,54 @@ export function apply(ctx, config) {
     }
     fs.writeFileSync(patchFile, `${JSON.stringify(entries, null, 2)}\n`, 'utf8')
     return { ok: true, bundles: [...experimentalNames], bundlesAdded, rowsAdded }
+  }
+  /**
+   * v3.7.4：把来源元主的完整插件面（bundles + dependencies + patch rows）覆盖到 fork profile。
+   * 修复 BUG-4：只补实验性 bundle 会留下“已同步”假阳性；reset 后必须整体对齐来源。
+   * fork 私有配置锁行（tool-plugin-manager / ui-settings-plugin-inventory）保留。
+   */
+  const applySourcePluginSurface = (task, profileDir) => {
+    try {
+      if (task?.coreMode === 'accelerated') return { ok: true, skipped: 'accelerated-core' }
+      const sourceId = String(task?.essenceId || task?.syncSourceId || OFFICIAL_ESSENCE_ID)
+      const sourceDir = essenceManager.mergedProfileDir(sourceId)
+      const sourcePkg = readJson(path.join(sourceDir, 'package.json'), null)
+      if (!sourcePkg) return { ok: false, error: 'source-profile-missing', sourceId }
+      const sourcePatch = parsePatchEntries(
+        exists(path.join(sourceDir, 'cordis.patch.yml')) ? fs.readFileSync(path.join(sourceDir, 'cordis.patch.yml'), 'utf8') : '',
+      ).entries
+      const pkgFile = path.join(String(profileDir), 'package.json')
+      const patchFile = path.join(String(profileDir), 'cordis.patch.yml')
+      const forkPkg = readJson(pkgFile, null)
+      if (!forkPkg) return { ok: false, error: 'fork-profile-missing' }
+      forkPkg.dsh = forkPkg.dsh && typeof forkPkg.dsh === 'object' ? forkPkg.dsh : {}
+      forkPkg.dsh.profile = forkPkg.dsh.profile && typeof forkPkg.dsh.profile === 'object' ? forkPkg.dsh.profile : {}
+      const sourceBundles = Array.isArray(sourcePkg?.dsh?.profile?.bundles) ? sourcePkg.dsh.profile.bundles : []
+      const forkBundlesBefore = Array.isArray(forkPkg?.dsh?.profile?.bundles) ? forkPkg.dsh.profile.bundles : []
+      const forkFangBundle = FORK_BUNDLE_NAMES.find((candidate) => exists(path.join(String(profileDir), 'node_modules', ...candidate.split('/'))))
+        || forkBundlesBefore.find((candidate) => /(^|\/)dsh-fang$/.test(String(candidate)))
+        || '@local/dsh-fang'
+      const bundles = sourceBundles
+        .filter((name) => name !== NODE_COMPAT_BUNDLE)
+        .map((name) => /(^|\/)(dsh-fang|fang-dsh-plugin)$/.test(String(name)) ? forkFangBundle : name)
+      bundles.unshift(NODE_COMPAT_BUNDLE)
+      forkPkg.dsh.profile.bundles = [...new Set(bundles)]
+      forkPkg.dependencies = {
+        ...(forkPkg.dependencies && typeof forkPkg.dependencies === 'object' ? forkPkg.dependencies : {}),
+        ...(sourcePkg.dependencies && typeof sourcePkg.dependencies === 'object' ? sourcePkg.dependencies : {}),
+        [NODE_COMPAT_BUNDLE]: '^0.1.0',
+      }
+      writeJsonAtomic(pkgFile, forkPkg)
+      const forkPatch = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '').entries
+      const lockIds = new Set(['tool-plugin-manager', 'ui-settings-plugin-inventory'])
+      const locks = forkPatch.filter((entry) => lockIds.has(String(entry?.id ?? '')))
+      const merged = [...sourcePatch]
+      for (const row of locks) if (!merged.some((entry) => entry?.id === row.id)) merged.push(row)
+      fs.writeFileSync(patchFile, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+      return { ok: true, sourceId, bundles: forkPkg.dsh.profile.bundles.length, rows: merged.length }
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) }
+    }
   }
   const syncProfileModulesFromMother = (profileDir, motherProfileDir) => {
     const copied = []
@@ -4514,12 +4570,26 @@ export function apply(ctx, config) {
         const out = await service.getTaskStatus(query.get('taskId') ?? '')
         return json(res, out.ok === false ? 404 : 200, out)
       })
-      // v3.0.5/B4：打开分身时才在内存中取带 token 的 URL（不落盘、不进列表）
+      // v3.7.4：GET 只读（不产生 stop/spawn 副作用），POST 才执行 sync-on-open。
       route('GET', `${prefix}/api/tasks/open-url`, async (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         const taskId = String(query.get('taskId') ?? '').trim()
-        const out = taskId ? await service.syncTaskOnOpen(taskId) : null
-        if (!out || out.ok !== true) return json(res, 409, { ok: false, error: out?.error ?? 'not-running', ...out })
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        const out = forker()?.openUrl?.(taskId) ?? null
+        if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running', taskId })
+        return json(res, 200, out)
+      })
+      route('POST', `${prefix}/api/tasks/open`, async (req, res) => {
+        const body = await readBody(req)
+        const taskId = String(body?.taskId ?? '').trim()
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        const out = await service.syncTaskOnOpen(taskId)
+        if (!out || out.ok !== true) {
+          const status = out?.error === 'unknown-task' ? 404 : out?.error === 'not-running' ? 404 : 409
+          return json(res, status, { ok: false, error: out?.error ?? 'not-running', ...out })
+        }
         return json(res, 200, out)
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
@@ -4535,7 +4605,10 @@ export function apply(ctx, config) {
       // 2026-11-22：一键修复（停残留 → 清别名桩 → 重置配置 → 重新拉起；不删 home/会话）
       route('POST', `${prefix}/api/tasks/repair`, async (req, res) => {
         const body = await readBody(req)
-        const out = await service.repairTask(String(body?.taskId ?? ''))
+        const taskId = String(body?.taskId ?? '').trim()
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        const out = await service.repairTask(taskId)
         return json(res, out.ok ? 200 : 409, out)
       })
       // v3.0.9：强制单会话（运行中拒绝；停止/归档态把多余会话隔离到 quarantine-sessions/）

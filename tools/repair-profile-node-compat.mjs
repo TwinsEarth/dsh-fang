@@ -14,6 +14,27 @@ const opt = (name, fallback = '') => {
   return i >= 0 ? String(args[i + 1] ?? '') : fallback
 }
 const profile = path.resolve(opt('--profile', path.join(process.env.USERPROFILE ?? '', '.dsh', 'profiles', 'desktop')))
+if (args.includes('--all')) {
+  const home = process.env.USERPROFILE ?? ''
+  const candidates = [path.join(home, '.dsh', 'profiles', 'desktop')]
+  const fangDesktop = path.join(home, '.dsh', 'fang', 'desktop')
+  candidates.push(path.join(fangDesktop, 'essences', 'essence-official-dev', 'merged', 'profile'))
+  candidates.push(path.join(fangDesktop, 'runtime', 'essence-official-dev', 'home', 'profiles', 'essence-runtime'))
+  try {
+    for (const task of fs.readdirSync(path.join(fangDesktop, 'forks'))) {
+      const profiles = path.join(fangDesktop, 'forks', task, 'profiles')
+      if (!fs.existsSync(profiles)) continue
+      for (const name of fs.readdirSync(profiles)) candidates.push(path.join(profiles, name))
+    }
+  } catch { /* no forks */ }
+  let failed = 0
+  for (const candidate of [...new Set(candidates)]) {
+    if (!fs.existsSync(path.join(candidate, 'package.json'))) continue
+    try { execFileSync(process.execPath, [fileURLToPath(import.meta.url), '--profile', candidate], { stdio: 'inherit' }) }
+    catch { failed += 1 }
+  }
+  process.exit(failed === 0 ? 0 : 1)
+}
 if (!fs.existsSync(path.join(profile, 'package.json'))) {
   console.error(`not a profile: ${profile}`)
   process.exit(2)

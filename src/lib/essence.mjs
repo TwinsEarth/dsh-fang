@@ -652,9 +652,9 @@ export class EssenceManager {
     overlay.packageJson.dependencies[NODE_COMPAT_BUNDLE] = '^0.1.0'
     if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     const fangIndex = bundles.indexOf('@twinsearth/fang-dsh-plugin')
-    if (fangIndex > 2) {
+    if (fangIndex > 3) {
       bundles.splice(fangIndex, 1)
-      bundles.splice(2, 0, '@twinsearth/fang-dsh-plugin')
+      bundles.splice(3, 0, '@twinsearth/fang-dsh-plugin')
     }
     overlay.packageJson.dsh.profile.bundles = bundles
     const managedNames = new Set([...recommended, ...experimental].map((entry) => String(entry.name)))

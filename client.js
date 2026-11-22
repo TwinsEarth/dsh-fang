@@ -2832,7 +2832,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
-        const result = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+        // v3.7.4：打开是显式用户动作，用 POST 触发同步；GET 只读，避免副作用。
+        const result = await api('/fang/api/tasks/open', { method: 'POST', body: JSON.stringify({ taskId }) })
         if (result.status === 200 && result.body?.url) {
           try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
         }
@@ -4282,7 +4283,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             },
           }, icon('arrowUp', 15))),
         h('div', { class: 'panel-tools' },
-          h('span', null, `进行中 ${active.length}`),
+          h('span', null, `进行中 ${active.filter((item) => !['failed', 'stopped', 'archived'].includes(String(item.status))).length}`),
           h('span', { class: 'spacer' }),
           h('span', null, `临时 ${temporary.length} · 存档 ${archived.length}`),
           h('span', { class: 'spacer' }),
@@ -4418,6 +4419,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
             task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
+            task.sessions?.violation ? chip('warn', `会话 ${task.sessions.count}/${task.sessions.max} 超限`, { title: '分身会话超过上限；打开/修复不会再自动搬移，需手动归档或 enforce' }) : null,
             task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
           archived

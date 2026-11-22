@@ -1103,6 +1103,19 @@ function applyForkExperimentalSurface(profileDir) {
     for (const name of OFFICIAL_EXPERIMENTAL_BUNDLES) if (!bundles.includes(name)) bundles.push(name)
     pkg.dsh.profile.bundles = bundles
     writeJsonAtomic(pkgFile, pkg)
+    // 把 node-compat 实际安装到 fork profile；否则 DSH 会跳过第一个 bundle。
+    // 安装态：FANG_ROOT/../dsh-fang-node-compat；仓库态：FANG_ROOT/node_modules/... 或 node-compat/。
+    const compatCandidates = [
+      path.resolve(FANG_ROOT, '..', 'dsh-fang-node-compat'),
+      path.join(FANG_ROOT, 'node_modules', '@twinsearth', 'dsh-fang-node-compat'),
+      path.join(FANG_ROOT, 'node-compat'),
+    ]
+    const compatSource = compatCandidates.find((candidate) => exists(path.join(candidate, 'package.json')))
+    const compatTarget = path.join(String(profileDir), 'node_modules', '@twinsearth', 'dsh-fang-node-compat')
+    if (compatSource && process.env.DSH_FANG_NODE_COMPAT_COPY === '1' && !exists(path.join(compatTarget, 'package.json'))) {
+      ensureDir(path.dirname(compatTarget))
+      copyTree(compatSource, compatTarget)
+    }
     const entries = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '').entries
     const kept = entries.filter((entry) => !OFFICIAL_EXPERIMENTAL_BUNDLES.includes(String(entry?.name ?? '')))
     for (const name of OFFICIAL_EXPERIMENTAL_BUNDLES) kept.push({ id: `official-exp-${name.slice(-8)}`, name, disabled: false })
