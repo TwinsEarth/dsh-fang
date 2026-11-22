@@ -1109,6 +1109,10 @@ export function apply(ctx, config) {
         templateFallback,
         essenceId: sourceEssence?.id ?? null,
         sourceEssence,
+        // 2026-11-22：所有分身（含模板/空白）都以官方推荐为默认同步源；每次打开都会
+        // 对比源 fingerprint，源变化则重启并重新 provision，而不是等用户手动修复。
+        syncSourceId: sourceEssence?.id ?? OFFICIAL_ESSENCE_ID,
+        configSourceFingerprint: null,
         adapter: { ok: false, error: 'handshaking' },
       })
       tasks.set(taskId, task)
@@ -1121,6 +1125,7 @@ export function apply(ctx, config) {
       const allowSessionImport = coreMode !== 'accelerated' || coreSettings.sessionMode === 'copy'
       task.coreMode = coreMode
       task.sessionMode = coreSettings.sessionMode
+      task.configSourceFingerprint = essenceManager.getMeta(sourceEssence?.id ?? OFFICIAL_ESSENCE_ID)?.lastMergedFingerprint ?? null
 
       try {
         const provisioned = await f.provision({
@@ -1824,12 +1829,13 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      if (!task.essenceId) return { ok: false, error: 'no-source-essence' }
-      const meta = essenceManager.getMeta(task.essenceId)
+      const sourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
+      if (!task.essenceId && !task.syncSourceId) return { ok: false, error: 'no-source-essence' }
+      const meta = essenceManager.getMeta(sourceId)
       if (!meta || typeof meta.id !== 'string') return { ok: false, error: 'source-essence-missing' }
       if (meta.archived === true) return { ok: false, error: 'source-essence-archived' }
-      await essenceManager.ensureFresh(task.essenceId)
-      const source = essenceManager.mergedProfileDir(task.essenceId)
+      await essenceManager.ensureFresh(sourceId)
+      const source = essenceManager.mergedProfileDir(sourceId)
       const target = path.join(task.homeDir, 'profiles', task.profile)
       if (!exists(target)) return { ok: false, error: 'fork-profile-missing' }
       setProfileConfigReadonly(target, false)
@@ -1851,9 +1857,11 @@ export function apply(ctx, config) {
       const configLock = applyForkConfigLock(target)
       const profileReadonly = setProfileConfigReadonly(target, true)
       task.configSyncedAt = nowMs()
-      task.configSyncedFrom = task.essenceId
+      task.configSyncedFrom = sourceId
+      task.syncSourceId = sourceId
+      task.configSourceFingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
       persist()
-      audit('fork-config-reset', { taskId: id, essenceId: task.essenceId, files: picked, configLock, profileReadonly })
+      audit('fork-config-reset', { taskId: id, essenceId: sourceId, files: picked, configLock, profileReadonly })
       return { ok: true, taskId: id, essenceId: task.essenceId, files: picked, configLock, profileReadonly }
     },
 
@@ -1904,16 +1912,14 @@ export function apply(ctx, config) {
         return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
       }
       // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
-      // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。
-      if (task.essenceId) {
-        captureEssenceRuntimeIfPresent(task.essenceId)
-        if (task.essenceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
-      }
+      // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。所有分身（含模板）
+      // 默认同步源为官方推荐。
+      const syncSourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
+      captureEssenceRuntimeIfPresent(syncSourceId)
+      if (syncSourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
       let configReset = null
-      if (task.essenceId) {
-        try { configReset = await service.resetForkConfig(id) } catch (error) {
-          configReset = { ok: false, error: String(error?.message ?? error) }
-        }
+      try { configReset = await service.resetForkConfig(id) } catch (error) {
+        configReset = { ok: false, error: String(error?.message ?? error) }
       }
       // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
       let sessionGuard = null
@@ -1965,6 +1971,43 @@ export function apply(ctx, config) {
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
       return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard }
+    },
+
+    /**
+     * 2026-11-22：每次打开分身都主动同步来源元主的插件状态。
+     * 读取运行中元主的 settings/patch/bundles/modules → 更新元宝 fingerprint；
+     * fingerprint 变化时停止旧分身并按新 merged profile 重新 provision + spawn。
+     */
+    async syncTaskOnOpen(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      const sourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
+      captureEssenceRuntimeIfPresent(sourceId)
+      if (sourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+      await essenceManager.ensureFresh(sourceId)
+      const fingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
+      const changed = Boolean(task.configSourceFingerprint && fingerprint && fingerprint !== task.configSourceFingerprint)
+      const live = forker()?.status?.(id) ?? null
+      if (changed) {
+        if (live?.running === true) {
+          try { forker().stop?.(id) } catch { /* best effort */ }
+        }
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        persist()
+        const restored = await service.restoreTask(id)
+        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint }
+      }
+      if (task.status === TASK_STATUS.FAILED) {
+        const restored = await service.restoreTask(id)
+        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint }
+      }
+      const out = forker()?.openUrl?.(id) ?? null
+      if (!out || out.ok !== true) return { ok: false, error: out?.error ?? 'not-running' }
+      return { ...out, synced: true, restarted: false, sourceFingerprint: fingerprint }
     },
 
     /**
@@ -4458,11 +4501,11 @@ export function apply(ctx, config) {
         return json(res, out.ok === false ? 404 : 200, out)
       })
       // v3.0.5/B4：打开分身时才在内存中取带 token 的 URL（不落盘、不进列表）
-      route('GET', `${prefix}/api/tasks/open-url`, (req, res) => {
+      route('GET', `${prefix}/api/tasks/open-url`, async (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         const taskId = String(query.get('taskId') ?? '').trim()
-        const out = taskId ? forker()?.openUrl?.(taskId) : null
-        if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running' })
+        const out = taskId ? await service.syncTaskOnOpen(taskId) : null
+        if (!out || out.ok !== true) return json(res, 409, { ok: false, error: out?.error ?? 'not-running', ...out })
         return json(res, 200, out)
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
