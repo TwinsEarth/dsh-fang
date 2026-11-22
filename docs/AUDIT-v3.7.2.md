@@ -20,9 +20,9 @@
 ## 验证
 
 - 全量 `npm test`：**1319 pass / 0 fail / 2 skip**（1331 tests）。
-- preflight --e2e：待回填。
-- CI：待回填。
-- 真机：fork 18002 profile 已修复并重启，DSH 启动仅提示 cua darwin-only 跳过。
+- preflight --e2e：**GREEN**；tests 1320/0/2；e2e 125/125；routes 111 / allowlist 0。
+- 发布 PR CI（#152）：**8/8 绿**。
+- 真机：fork 18002 profile 已修复并重启，DSH 启动仅提示 cua darwin-only 跳过；3.7.2 已发布。
 
 ## 边界
 
