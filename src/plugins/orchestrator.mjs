@@ -25,6 +25,7 @@ import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
 import { installWatchGuard } from '../lib/watch-guard.mjs'
 import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
+import { installGlobalRedline } from '../lib/global-redline.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
@@ -376,6 +377,16 @@ export function normalizeSeed(seed) {
 export function apply(ctx, config) {
   // 必须在 roleGate 之前：fork 角色也要执行（experimental-inspector 在 fork/元主都可能加载）。
   try { normalizeFetchDescriptor(globalThis) } catch { /* best effort */ }
+  // EB-03 全局红线：所有 fork 进程只能写自己的 DSH_HOME；母体/客户端/其他分身写入即 EPERM。
+  if (String(process.env.DSH_FANG_ROLE ?? '').toLowerCase() === 'fork') {
+    try {
+      installGlobalRedline({
+        ownHome: process.env.DSH_HOME,
+        motherData: process.env.DSH_FANG_MOTHER,
+        logger: ctx.logger,
+      })
+    } catch { /* guard must never prevent fork boot; failures are audited by caller */ }
+  }
   const cfg = { ...Config({}), ...(config ?? {}) }
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return

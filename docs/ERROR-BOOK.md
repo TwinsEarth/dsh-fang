@@ -197,3 +197,12 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 **根因**：把 node-compat 复制与来源面复制混为一谈；关闭前者后 derive 已恢复，来源面不必关闭。
 **防线**：来源面默认开启（`DSH_FANG_SOURCE_SURFACE=0` 才跳过）；e2e 125/125、orchestrator 73/73。
 **教训**：回归隔离要精确到被测因子，不要因一个 copy 失败关掉整条同步链。
+
+## EB-15 · 2026-11-22 · 装母体/profile 必须宿主停止（热替换 = 红线）
+
+**红线**：宿主进程存活时，禁止写 `C:\Users\<user>\.dsh\profiles\desktop`、`node_modules/@twinsearth/fang-dsh-plugin`、`client.js`、任何 profile；热替换 100% 触发 fs.watch EPERM 崩溃（EB-03）。
+**强制**：
+- `tools/release/deploy-profile.mjs` 宿主存活返回 409；
+- `tools/repair-profile-node-compat.mjs` 用 `tasklist` 检测 `DeepSeek Harness.exe`，存活直接 REFUSED；
+- 任何手工验收都先 `Get-Process 'DeepSeek Harness'`，确认无进程才写。
+**教训**：安装态是共享层；只允许「停宿主 → 部署 → 启动」。
