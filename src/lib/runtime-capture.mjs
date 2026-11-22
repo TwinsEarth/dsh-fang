@@ -211,7 +211,9 @@ export function runtimeCaptureSignature(runtimeProfileDir) {
   const patchText = readText(path.join(String(runtimeProfileDir ?? ''), 'cordis.patch.yml'))
   let modulesMtime = 0
   try { modulesMtime = fs.statSync(path.join(String(runtimeProfileDir ?? ''), 'node_modules', '.modules.yaml')).mtimeMs } catch { modulesMtime = 0 }
-  return `${packageText.length}:${patchText.length}:${modulesMtime}`
+  let settingsMtime = 0
+  try { settingsMtime = fs.statSync(path.join(String(runtimeProfileDir ?? ''), 'settings')).mtimeMs } catch { settingsMtime = 0 }
+  return `${packageText.length}:${patchText.length}:${modulesMtime}:${settingsMtime}`
 }
 
 function readCaptureMarker(runtimeProfileDir) {
@@ -249,23 +251,29 @@ export function captureRuntimeProfileIntoEssence({ essenceManager, essenceId, ru
   const mergedPatchText = readText(path.join(mergedProfile, 'cordis.patch.yml'))
   const runtimeEntries = parsePatchEntries(runtimePatchText).entries
   const mergedEntries = parsePatchEntries(mergedPatchText).entries
+  const readSettings = (dir) => (typeof essenceManager.readProfileSettings === 'function'
+    ? essenceManager.readProfileSettings(dir) : {})
+  const runtimeSettings = readSettings(profileDir)
+  const mergedSettings = readSettings(mergedProfile)
+  const settingsChanged = stableStringify(runtimeSettings) !== stableStringify(mergedSettings)
   const packageChanged = stableStringify(pickProfilePackage(runtimePkg)) !== stableStringify(pickProfilePackage(mergedPkg))
   const { changed, removedIds } = diffPatchEntries(mergedEntries, runtimeEntries)
   const runtimeModules = path.join(profileDir, 'node_modules')
   const essenceModules = path.join(mergedProfile, 'node_modules')
   const modulePlan = planRuntimeModuleChanges(runtimeModules, essenceModules)
   const moduleChanges = modulePlan.copy.length + modulePlan.remove.length
-  if (!packageChanged && changed.length === 0 && removedIds.length === 0 && moduleChanges === 0) {
+  if (!packageChanged && changed.length === 0 && removedIds.length === 0 && moduleChanges === 0 && !settingsChanged) {
     writeCaptureMarker(profileDir, { at: Date.now(), signature, captured: false })
     return { ok: true, captured: false, skipped: 'no-plugin-changes' }
   }
 
-  // 1) overlay: package.json (deps + bundles + profile metadata) and changed patch entries
+  // 1) overlay: package.json (deps + bundles + profile metadata), changed patch entries, settings
   const overlay = essenceManager.loadOverlay(root)
   if (packageChanged) overlay.packageJson = { ...overlay.packageJson, ...pickProfilePackage(runtimePkg) }
   if (changed.length > 0 || removedIds.length > 0) {
     overlay.patchEntries = mergeOverlayPatchEntries(overlay.patchEntries ?? [], { changed, removedIds }, mergedEntries)
   }
+  if (settingsChanged) overlay.settings = { ...runtimeSettings }
   essenceManager.saveOverlay(root, overlay)
   // 2) pnpm dependency graph files ride with the overlay so every rematerialization keeps them
   const overlayRoot = path.join(root, 'overlay')

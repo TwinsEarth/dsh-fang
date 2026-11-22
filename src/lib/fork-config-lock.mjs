@@ -73,8 +73,8 @@ function jsonPatchEntries(text) {
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
   let value
   try { value = JSON.parse(trimmed) } catch { return null }
-  if (Array.isArray(value)) return value.length === 0 ? null : value
-  if (value !== null && typeof value === 'object' && Array.isArray(value.insert)) return [value]
+  if (Array.isArray(value)) return value
+  if (value !== null && typeof value === 'object' && Array.isArray(value.insert)) return value.insert
   return null
 }
 

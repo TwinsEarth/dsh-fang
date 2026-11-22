@@ -36,6 +36,28 @@ export const ESSENCE_VERSION = '1.0.0'
 export const OFFICIAL_ESSENCE_ID = 'essence-official-dev'
 export const OFFICIAL_ESSENCE_NAME = '开发者推荐（官方）'
 export const OFFICIAL_ESSENCE_MIN_TIER = 'vip100'
+/**
+ * 2026-11-22：DSH 插件页「实验性插件」的完整官方包集合（来自 DSH client 的
+ * EXPERIMENTAL_BUNDLES，含不带 experimental 前缀的 personalized/cua/chat-import）。
+ * 官方/分身都必须启用这整组，而不是只匹配 `@deepseek-ai/dsh-experimental-*`。
+ */
+export const OFFICIAL_EXPERIMENTAL_BUNDLES = Object.freeze([
+  '@deepseek-ai/dsh-personalized-recommendations',
+  '@deepseek-ai/dsh-cua-bundle',
+  '@deepseek-ai/dsh-experimental-voice-input-bundle',
+  '@deepseek-ai/dsh-experimental-auto-review',
+  '@deepseek-ai/dsh-experimental-inspector-profile',
+  '@deepseek-ai/dsh-experimental-forge-bundle',
+  '@deepseek-ai/dsh-experimental-tool-worktree',
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle',
+  '@deepseek-ai/dsh-experimental-session-search',
+  '@deepseek-ai/dsh-experimental-session-titles-bundle',
+  '@deepseek-ai/dsh-experimental-badge-skill-bundle',
+  '@deepseek-ai/dsh-experimental-ralph-bundle',
+  '@deepseek-ai/dsh-experimental-plugin-market-bundle',
+  '@deepseek-ai/dsh-experimental-liveshare',
+  '@deepseek-ai/dsh-deepseek-chat-import',
+])
 /** 官方推荐原身预装的默认插件条目（v3.0.7：自定义清单，安装≠激活）。 */
 export const DEFAULT_OFFICIAL_PATCH_ENTRIES = Object.freeze([
   // 安装但不激活（用户 2026-11-22 更新清单）
@@ -212,7 +234,10 @@ export function parsePatchEntries(text) {
  * @returns {string}
  */
 export function serializePatchEntries(entries) {
-  return `${JSON.stringify({ insert: entries }, null, 2)}\n`
+  // DSH app-boot requires `<profile>/cordis.patch.yml` to be a top-level YAML array
+  // of loader patch entries. The old `{ insert: [...] }` wrapper made every
+  // essence/official runtime fail with "must be a top-level YAML array".
+  return `${JSON.stringify(entries, null, 2)}\n`
 }
 
 // ===========================================================================
@@ -597,18 +622,29 @@ export class EssenceManager {
         shadows.push({ id: String(mirrorId), name: entry.name, disabled: true })
       }
     }
-    const experimentalNames = [...new Set((installed ?? [])
-      .map((entry) => String(entry?.name ?? entry?.spec ?? entry?.id ?? ''))
-      .filter((name) => /^@deepseek-ai\/dsh-experimental-/.test(name)))]
+    const experimentalNames = [...new Set([
+      ...OFFICIAL_EXPERIMENTAL_BUNDLES,
+      ...(installed ?? [])
+        .map((entry) => String(entry?.name ?? entry?.spec ?? entry?.id ?? ''))
+        .filter((name) => /^@deepseek-ai\/dsh-experimental-/.test(name)),
+    ])]
     const mirrorEntries = mirror.patchEntries ?? []
     const experimental = experimentalNames.map((name) => {
-      const mirrorId = mirrorEntries.find((candidate) => candidate.name === name)?.id
+      const mirrorEntry = mirrorEntries.find((candidate) => candidate.name === name)
       return {
-        id: mirrorId ? String(mirrorId) : `official-exp-${sha256(name).slice(0, 8)}`,
+        id: mirrorEntry?.id ? String(mirrorEntry.id) : `official-exp-${sha256(name).slice(0, 8)}`,
         name,
         disabled: false,
       }
     })
+    // 官方 profile 的 bundles 必须显式包含所有实验性包；仅写 patch 行不够
+    // （插件页按 dsh.profile.bundles/EXPERIMENTAL_BUNDLES 判断是否已启用）。
+    const expBundles = new Set(OFFICIAL_EXPERIMENTAL_BUNDLES)
+    overlay.packageJson.dsh = overlay.packageJson.dsh && typeof overlay.packageJson.dsh === 'object' ? overlay.packageJson.dsh : {}
+    overlay.packageJson.dsh.profile = overlay.packageJson.dsh.profile && typeof overlay.packageJson.dsh.profile === 'object' ? overlay.packageJson.dsh.profile : {}
+    const bundles = Array.isArray(overlay.packageJson.dsh.profile.bundles) ? [...overlay.packageJson.dsh.profile.bundles] : []
+    for (const name of expBundles) if (!bundles.includes(name)) bundles.push(name)
+    overlay.packageJson.dsh.profile.bundles = bundles
     const managedNames = new Set([...recommended, ...experimental].map((entry) => String(entry.name)))
     const preserved = (Array.isArray(overlay.patchEntries) ? overlay.patchEntries : [])
       .filter((entry) => !String(entry?.id ?? '').startsWith('official-'))
