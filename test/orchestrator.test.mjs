@@ -60,11 +60,17 @@ function makeFakeForker(overrides = {}) {
     calls,
     async provision(args) {
       calls.provision.push(args)
-      fs.mkdirSync(path.join(args.homeDir, 'profiles', args.profile), { recursive: true })
+      const profileDir = path.join(args.homeDir, 'profiles', args.profile)
+      fs.mkdirSync(profileDir, { recursive: true })
+      // 真实 forker 会把模板 profile 的 package.json/patch 复制到运行态；测试桩也照做，
+      // 否则“元主运行态补包”类回归测不到真实路径。
+      for (const name of ['package.json', 'cordis.patch.yml']) {
+        try { fs.copyFileSync(path.join(args.profileTemplate, name), path.join(profileDir, name)) } catch { /* optional */ }
+      }
       // The orchestrator now refuses forks whose profile cannot resolve this bundle,
       // so the fake forker must materialize the marker (real forker junctions it).
       fs.mkdirSync(path.join(args.homeDir, 'profiles', args.profile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
-      return { ok: true, homeDir: args.homeDir, profileDir: path.join(args.homeDir, 'profiles', args.profile) }
+      return { ok: true, homeDir: args.homeDir, profileDir }
     },
     async spawn(args) {
       calls.spawn.push(args)
@@ -1045,6 +1051,78 @@ test('orchestrator: 删除原身不删会话；分身保留且不能再派生；
   }
 })
 
+test('orchestrator: 元主 Web 的插件设置在下一次开分身时被捕获（回归：分身不同步实验性开关）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-capture-open-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  const motherProfile = path.join(dataRoot, 'mother-profile')
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({ name: 'mother-probe', private: true }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'), '- insert: []\n', 'utf8')
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    const essence = mirror.createEssence({ name: '运行中改插件' })
+    const runtimeProfile = path.join(dataRoot, 'runtime', essence.id, 'home', 'profiles', 'essence-runtime')
+    fs.mkdirSync(runtimeProfile, { recursive: true })
+    fs.writeFileSync(path.join(runtimeProfile, 'package.json'), JSON.stringify({ name: 'essence-runtime', private: true, dependencies: {} }), 'utf8')
+    fs.writeFileSync(path.join(runtimeProfile, 'cordis.patch.yml'), [
+      '- id: fang-experimental-flag',
+      '  name: "@deepseek-ai/dsh-experimental-auto-review"',
+      '  disabled: false',
+      '',
+    ].join('\n'), 'utf8')
+
+    const task = await svc.createTask({ title: '开分身', essenceId: essence.id })
+    assert.equal(task.ok, true)
+    const mergedPatch = fs.readFileSync(path.join(dataRoot, 'essences', essence.id, 'merged', 'profile', 'cordis.patch.yml'), 'utf8')
+    assert.match(mergedPatch, /fang-experimental-flag/, '开分身之前必须把元主 Web 的最新插件开关捕获进元宝')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: 元主运行态缺包时从母体补 node_modules（回归：dsh-2xray 不可用）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-modules-'))
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  const motherProfile = path.join(dataRoot, 'mother-profile')
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@twinsearth', 'dsh-2xray'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'node_modules', '@twinsearth', 'dsh-2xray', 'package.json'), JSON.stringify({ name: '@twinsearth/dsh-2xray', version: '1.0.0' }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({
+    name: 'mother-probe', private: true, dependencies: { '@twinsearth/dsh-2xray': '^1.0.0' },
+    dsh: { profile: { bundles: ['@twinsearth/dsh-2xray'] } },
+  }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'), '- insert: []\n', 'utf8')
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    await mirror.ensureDefaultEssence({ apply: true })
+    await mirror.startEssenceRuntime('essence-official-dev')
+    const mergedModules = path.join(dataRoot, 'essences', 'essence-official-dev', 'merged', 'profile', 'node_modules', '@twinsearth', 'dsh-2xray')
+    assert.equal(fs.existsSync(mergedModules), true, '官方元主的 merged profile 必须补齐缺失的 2xray')
+    const runtimeModules = path.join(dataRoot, 'runtime', 'essence-official-dev', 'home', 'profiles', 'essence-runtime', 'node_modules', '@twinsearth', 'dsh-2xray')
+    assert.equal(fs.existsSync(runtimeModules), true, '元主运行态 profile 必须可解析 2xray')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归：no-home-dir）', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-guard-'))
@@ -1156,25 +1234,17 @@ test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）'
 
     const dry = await mirror.ensureDefaultEssence({ apply: false })
     assert.equal(dry.dryRun, true)
+    assert.equal(dry.official, true, '已有开发者推荐（官方）时默认元宝直接指向它，不再新建')
     const made = await mirror.ensureDefaultEssence({ apply: true })
-    assert.equal(made.created, true)
-    const meta = mirror.listEssences().essences.find((item) => item.id === made.essenceId)
-    assert.equal(meta.name, '默认元宝')
-    assert.equal(made.mode, 'copy-local', '默认走“复制本机插件&设置”，不安装/不改母体')
-    const marker = JSON.parse(fs.readFileSync(path.join(dataRoot, 'essences', made.essenceId, 'default-preset.json'), 'utf8'))
-    assert.equal(marker.mode, 'copy-local')
-    assert.equal(marker.source, motherProfile)
-    const overlay = fs.readFileSync(path.join(dataRoot, 'essences', made.essenceId, 'overlay', 'cordis.patch.yml'), 'utf8')
-    assert.match(overlay, /ui-settings/, '本机插件/设置状态必须被复制进默认元宝')
-    const credDir = path.join(dataRoot, 'essences', made.essenceId, 'overlay', 'credentials')
-    const credFiles = fs.existsSync(credDir) ? fs.readdirSync(credDir).length : 0
-    assert.equal(credFiles, 0, '不得复制任何凭据/Token 文件（允许空目录）')
-    assert.equal(fs.existsSync(path.join(dataRoot, 'essences', made.essenceId, 'runtime')), false, '不得复制运行数据/会话')
-
+    assert.equal(made.created, false)
+    assert.equal(made.official, true)
+    assert.equal(made.essenceId, 'essence-official-dev')
+    const list = mirror.listEssences().essences
+    assert.equal(list.filter((item) => item.name === '默认元宝').length, 0, '不得再自动新增“默认元宝”')
     const task = await svc.createTask({ title: '小白快速分身' })
     assert.equal(task.ok, true)
     const provision = forker.calls.provision.at(-1)
-    assert.match(String(provision.profileTemplate), /merged[\\/]profile$/s, '快速派生必须用默认元宝作模板')
+    assert.match(String(provision.profileTemplate), /essence-official-dev[\\/]merged[\\/]profile$/s, '快速派生必须用开发者推荐（官方）作模板')
   } finally {
     cleanup(ctx, dataRoot)
   }
