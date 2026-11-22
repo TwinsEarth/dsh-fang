@@ -10,9 +10,9 @@
 ## 验证
 
 - 全量 `npm test`：1318 pass / 0 fail / 2 skip（本地）。
-- preflight --e2e：待回填。
-- CI：待回填。
-- verify-release：待回填。
+- preflight --e2e：**GREEN 10/10**；tests 1318/0/2；e2e 125/125；routes 111 / allowlist 0。
+- 发布 PR CI（#149）：**8/8 绿**。
+- `verify-release --remote`：**GREEN**；`healthz --remote`：**HEALTHY @3.7.1**。
 
 ## 风险与边界
 
