@@ -348,7 +348,8 @@ window.__ModuleLoader__.load({
       const base = TASK_PROJECTION[status] || { label: '状态未知', tone: 'neutral' }
       let tone = base.tone
       let label = base.label
-      if (phase === 'failed' || phase === 'crashed') { tone = 'bad'; label = phase === 'crashed' ? '已崩溃' : '启动失败' }
+      if (phase === 'failed') { tone = 'warn'; label = '等待启动' }
+      else if (phase === 'crashed') { tone = 'bad'; label = '已崩溃' }
       else if (anomaly) { tone = 'bad'; label = '运行中 · 适配器失联' }
       else if (phase === 'archived') { tone = 'info'; label = '已归档' }
       else if (phase === 'paused' || phase === 'stopping' || phase === 'pausing' || phase === 'completed') { tone = 'info'; label = phase === 'paused' ? '已暂停' : phase === 'stopping' ? '停止中' : phase === 'completed' ? '已完成' : '暂停中' }
