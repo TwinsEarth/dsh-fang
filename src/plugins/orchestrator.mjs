@@ -24,6 +24,7 @@ import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-stor
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
 import { installWatchGuard } from '../lib/watch-guard.mjs'
 import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
+import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
@@ -372,14 +373,18 @@ export function normalizeSeed(seed) {
 }
 
 export function apply(ctx, config) {
+  // 必须在 roleGate 之前：fork 角色也要执行（experimental-inspector 在 fork/元主都可能加载）。
+  try { normalizeFetchDescriptor(globalThis) } catch { /* best effort */ }
   const cfg = { ...Config({}), ...(config ?? {}) }
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
   // 2026-11-22：宿主 watcher EPERM 不应杀死整个 DSH host。在加载业务插件前安装
   // fs.watch error 降级层（止损；上游仍应修复 watcher error 处理）。
   try {
-    const watchGuard = installWatchGuard({ logger: ctx.logger })
-    if (watchGuard.ok === true && watchGuard.already !== true) ctx.logger?.info?.('[fang] fs.watch error guard installed')
+    if (process.env.DSH_FANG_WATCH_GUARD === '1') {
+      const watchGuard = installWatchGuard({ logger: ctx.logger })
+      if (watchGuard.ok === true && watchGuard.already !== true) ctx.logger?.info?.('[fang] fs.watch error guard installed')
+    }
   } catch { /* guard 失败不阻塞插件加载 */ }
   const role = gate.role
 
@@ -581,6 +586,10 @@ export function apply(ctx, config) {
   // 不会改变运行中分身解析到的 app.asar/runtime。快照创建失败时显式回退共享安装。
   let installSnapshotMemo = null
   const forkCliPath = () => {
+    // P2-A 安装快照默认关闭：首次创建需对约 1.1GB/7,884 文件的安装树做 hardlink，
+    // 在部分卷/目录结构上会退化为复制并超过 fork spawn 的 60s 预算，导致“启动失败”。
+    // 验证通过后可显式 DSH_FANG_INSTALL_SNAPSHOT=1 启用（启动前预热快照）。
+    if (process.env.DSH_FANG_INSTALL_SNAPSHOT !== '1') return cliPath()
     if (installSnapshotMemo) return installSnapshotMemo.cliPath
     const result = ensureInstallSnapshot({ cliPath: cliPath(), version: FANG_VERSION })
     installSnapshotMemo = result
@@ -2780,6 +2789,7 @@ export function apply(ctx, config) {
     return { repaired, modulesSync }
   }
   const applyOfficialExperimentalSurface = (profileDir, options = {}) => {
+    if (process.env.DSH_FANG_EXPERIMENTAL_SURFACE === '0') return { ok: true, skipped: 'disabled' }
     if (options.coreMode === 'accelerated') return { ok: true, skipped: 'accelerated-core' }
     const dir = String(profileDir ?? '')
     const pkgFile = path.join(dir, 'package.json')

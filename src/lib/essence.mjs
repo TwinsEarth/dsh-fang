@@ -644,6 +644,14 @@ export class EssenceManager {
     overlay.packageJson.dsh.profile = overlay.packageJson.dsh.profile && typeof overlay.packageJson.dsh.profile === 'object' ? overlay.packageJson.dsh.profile : {}
     const bundles = Array.isArray(overlay.packageJson.dsh.profile.bundles) ? [...overlay.packageJson.dsh.profile.bundles] : []
     for (const name of expBundles) if (!bundles.includes(name)) bundles.push(name)
+    // 2026-11-22：把 fang 放到 base/web 之后、实验性 bundle 之前。experimental-inspector
+    // 会在加载时观察 globalThis.fetch；fang 的 node-compat 必须先运行，否则 Node 26 直接报
+    // "fetch is an accessor and cannot be observed safely"。
+    const fangIndex = bundles.indexOf('@twinsearth/fang-dsh-plugin')
+    if (fangIndex > 2) {
+      bundles.splice(fangIndex, 1)
+      bundles.splice(2, 0, '@twinsearth/fang-dsh-plugin')
+    }
     overlay.packageJson.dsh.profile.bundles = bundles
     const managedNames = new Set([...recommended, ...experimental].map((entry) => String(entry.name)))
     const preserved = (Array.isArray(overlay.patchEntries) ? overlay.patchEntries : [])
