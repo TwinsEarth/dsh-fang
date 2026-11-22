@@ -1,3 +1,24 @@
+## v3.7.6（2026-11-22）
+
+**主题：加速核 team/mode 历史兼容**
+
+### 修复
+
+- **切到“分身 Core 加速引擎”后历史会话加载失败**：加速核 3.5.0 不识别 stock DSH 的 `team/mode` 事件，报 `unknown ... not marked ignorable`，会话看似丢失。
+  - 旧 sanitizer 会把加速核不认识的**所有**事件标 `ignorable`，包括会话 header 帧里的 `session`；
+  - 随后 header 字节校验失败返回 `header-frame-changed`，整个修复被静默放弃，`team/mode` 始终没有标记。
+  - 现改为**只标记明确的新事件类型**：`team/mode`、`team/task`、`team/status`、`deliverables/presented`；绝不再修改 header/已知事件。
+  - 修复结果会正确计入 `markedIgnorable`，不再出现“改了但不上报”的情况。
+- 现有受损会话已按新规则修复：2 条 `team/mode` 标 `ignorable:true`，header 字节不变，原日志备份保留 `.bak-catalogv3-*`。
+- 回归测试：把 header 类型故意从 known 集合移除，sanitizer 仍必须成功且只标 1 条 team/mode；`accelerated-fork` 15/15。
+
+### 门禁（发布前回填）
+
+- tests: pass=1330 fail=0 skip=2
+- e2e: 125/125
+- routes: 89（allowlist 0） / plugins: 16
+- preflight: GREEN
+
 ## v3.7.5（2026-11-22）
 
 **主题：全局红线 + Vault 导出导入 + 会话状态/同步修复**
