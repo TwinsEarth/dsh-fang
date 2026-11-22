@@ -333,7 +333,8 @@ export function downgradeSubagentCatalogLog(logFile, { backup = true, knownEvent
       // The accelerated core refuses event types it does not know unless the writer marks
       // them ignorable. Stock DSH adds new event types (e.g. team/mode) first; a fork must
       // still be able to read the copied history, so mark only unknown-to-accelerated events.
-      if (known.size > 0 && !known.has(event.type) && event.ignorable !== true) {
+      const fallbackIgnorable = new Set(['team/mode', 'team/task', 'team/status', 'deliverables/presented'])
+      if (fallbackIgnorable.has(event.type) && (known.size === 0 || !known.has(event.type)) && event.ignorable !== true) {
         event.ignorable = true
         changed = true
         markedIgnorable += 1
@@ -405,7 +406,7 @@ export function sanitizeAcceleratedForkSessions(homeDir, options = {}) {
       const logFile = path.join(root, workspace.name, session.name, 'session.v4.jsonl.zstd')
       if (!fs.existsSync(logFile)) continue
       const downgraded = downgradeSubagentCatalogLog(logFile, options)
-      if (downgraded.changedEvents > 0) {
+      if (downgraded.changedEvents > 0 || downgraded.markedIgnorable > 0 || downgraded.strippedFields > 0) {
         result.files.push({ sessionId: session.name, workspace: workspace.name, ...downgraded })
         result.changedEvents += downgraded.changedEvents
         result.changedFrames += downgraded.changedFrames
