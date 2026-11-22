@@ -66,7 +66,7 @@ import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-confi
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
 import { loadAcceleratedKnownEventTypes, normalizeCoreMode, pruneAliasStubs, sanitizeAcceleratedForkSessions, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
-import { OFFICIAL_EXPERIMENTAL_BUNDLES, parsePatchEntries } from '../lib/essence.mjs'
+import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } from '../lib/essence.mjs'
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 
 /** Repository root of this plugin (used as the @local/dsh-fang junction source). */
@@ -97,7 +97,7 @@ const PORT_HOST = '127.0.0.1'
 /** A bind probe that does not answer by then counts as "not usable" (fail-closed, try next). */
 const PORT_PROBE_TIMEOUT_MS = 5000
 /** Bundle list of the clean fork profile: base + web app + this bundle (Cordis patch). */
-const CLEAN_TEMPLATE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+const CLEAN_TEMPLATE_BUNDLES = ['@twinsearth/dsh-fang-node-compat', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 
 // v3.1.0: DSH's first-run preview notice persists ui-settings-general.welcomeNoticeVersion.
 // A clean profile that omits the row leaves the config form unavailable, so 「继续」 always
@@ -1097,6 +1097,7 @@ function applyForkExperimentalSurface(profileDir) {
     pkg.dsh = pkg.dsh && typeof pkg.dsh === 'object' ? pkg.dsh : {}
     pkg.dsh.profile = pkg.dsh.profile && typeof pkg.dsh.profile === 'object' ? pkg.dsh.profile : {}
     const bundles = Array.isArray(pkg.dsh.profile.bundles) ? [...pkg.dsh.profile.bundles] : []
+    if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     for (const name of OFFICIAL_EXPERIMENTAL_BUNDLES) if (!bundles.includes(name)) bundles.push(name)
     pkg.dsh.profile.bundles = bundles
     writeJsonAtomic(pkgFile, pkg)

@@ -31,7 +31,7 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
-import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, VIP_QUOTAS, parsePatchEntries } from '../lib/essence.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, VIP_QUOTAS, parsePatchEntries } from '../lib/essence.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
@@ -2819,6 +2819,7 @@ export function apply(ctx, config) {
       bundles.push(name)
       bundlesAdded += 1
     }
+    if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     pkg.dsh.profile.bundles = bundles
     writeJsonAtomic(pkgFile, pkg)
     const parsed = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '')
