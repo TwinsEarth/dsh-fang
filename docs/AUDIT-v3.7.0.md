@@ -16,10 +16,10 @@
 ## 2. 验证（真实数字，发布前实测）
 
 - 全量 `npm test`：**1318 pass / 0 fail / 2 skip**（1330 tests）。
-- preflight --e2e：待回填。
-- 发布 PR CI：待回填。
-- release-order：待回填。
-- verify-release --remote：待回填。
+- preflight --e2e：**GREEN 10/10**；tests **1318 pass / 0 fail / 2 skip**；e2e **125/125**；routes 111 / allowlist 0；plugins 16。
+- 发布 PR CI（#147）：**8/8 绿**。
+- `release-order`：pre-tag / post-publish 均 **10/10 GREEN**。
+- `verify-release --remote`：**GREEN 16/16**；`healthz --remote`：**HEALTHY @3.7.0**。
 
 ## 3. 风险与边界
 
