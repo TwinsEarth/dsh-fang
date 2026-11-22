@@ -22,6 +22,8 @@ import {
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-store.mjs'
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
+import { installWatchGuard } from '../lib/watch-guard.mjs'
+import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
@@ -373,6 +375,12 @@ export function apply(ctx, config) {
   const cfg = { ...Config({}), ...(config ?? {}) }
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
+  // 2026-11-22：宿主 watcher EPERM 不应杀死整个 DSH host。在加载业务插件前安装
+  // fs.watch error 降级层（止损；上游仍应修复 watcher error 处理）。
+  try {
+    const watchGuard = installWatchGuard({ logger: ctx.logger })
+    if (watchGuard.ok === true && watchGuard.already !== true) ctx.logger?.info?.('[fang] fs.watch error guard installed')
+  } catch { /* guard 失败不阻塞插件加载 */ }
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
@@ -564,6 +572,22 @@ export function apply(ctx, config) {
   }
   const forker = () => safeGet(SERVICE.forker)
   const cliPath = () => (cfg.cliPath ? cfg.cliPath : resolveCliPath('', process.env))
+  const forkTempEnv = (taskId) => {
+    const tmp = path.join(layout.forkHomesDir, String(taskId), 'tmp')
+    try { ensureDir(tmp) } catch { /* best effort */ }
+    return { TEMP: tmp, TMP: tmp }
+  }
+  // P2：每个版本一份不可变安装快照；stock 分身使用自己的快照 CLI，母体安装升级/替换
+  // 不会改变运行中分身解析到的 app.asar/runtime。快照创建失败时显式回退共享安装。
+  let installSnapshotMemo = null
+  const forkCliPath = () => {
+    if (installSnapshotMemo) return installSnapshotMemo.cliPath
+    const result = ensureInstallSnapshot({ cliPath: cliPath(), version: FANG_VERSION })
+    installSnapshotMemo = result
+    if (result.ok !== true) audit('fork-install-snapshot-failed', { error: result.error ?? 'unknown' })
+    else audit('fork-install-snapshot-ready', { root: result.root, created: result.created })
+    return result.ok === true ? result.cliPath : cliPath()
+  }
   // The booted profile's own directory is authoritative (launcher sets DSH_PROFILE_DIR);
   // resolving "$DSH_HOME/profiles/<tag>" from argv can point at a template that never existed.
   // 分身模板必须来自一个**真的装了本 bundle** 的 profile；否则分身的 node_modules junction
@@ -1231,9 +1255,9 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           // 加速档只解析加速核入口；stock 母体 CLI 绝不能传入（v3.5.2 起会误判/失败）。
-          ...(coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+          ...(coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
           coreMode,
-          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir },
+          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(taskId) },
         })
         if (!started || started.ok === false) {
           task.status = TASK_STATUS.FAILED
@@ -1851,9 +1875,23 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      // 已归档任务与「启动失败/崩溃」任务都可以从保留的 home 直接复位；
-      // 不再要求先归档（旧客户端曾因此把 failed 任务强制归档，见 2026-11-22 报告）。
-      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) return { ok: false, error: 'not-archived', taskId: id }
+      const f = forker()
+      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      // 2026-11-22：任务可能停在 ready/running，但子进程已经死了（宿主重启、手动 kill、
+      // 端口丢失）。客户端「启动」仍会调用 restore；旧逻辑返回 not-archived，导致
+      // 真机界面一直显示“启动失败”。这里允许恢复 stale 的 ready/running。
+      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) {
+        const live = f.status?.(id) ?? null
+        if (live?.running === true && task.adapter?.ok === true) {
+          return { ok: true, alreadyRunning: true, taskId: id, url: task.url, port: task.port, adapter: task.adapter }
+        }
+        try { f.stop?.(id) } catch { /* stale process already gone */ }
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        persist()
+      }
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }
@@ -1865,8 +1903,6 @@ export function apply(ctx, config) {
       if (!forkBundle) {
         return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
       }
-      const f = forker()
-      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
       // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
       // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。
       if (task.essenceId) {
@@ -1899,9 +1935,9 @@ export function apply(ctx, config) {
         forkId: id,
         homeDir: task.homeDir,
         profile: task.profile,
-        ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+        ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
         coreMode: coreSync.coreMode,
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
       })
       if (!started || started.ok === false) {
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
@@ -2049,9 +2085,9 @@ export function apply(ctx, config) {
             forkId: id,
             homeDir: task.homeDir,
             profile: task.profile,
-            ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+            ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
             coreMode: coreSync.coreMode,
-            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
           })
         } catch (error) {
           started = { ok: false, error: String(error?.message ?? error) }
@@ -3296,7 +3332,7 @@ export function apply(ctx, config) {
         coreMode: 'stock',
         // v3.1.16：原身运行态同样需要母体 dataDir，房主 Router 才能零配置推导
         // 契约 file 桥（contract-outbox）；普通分身在 846/1461/1534 行已有同名注入。
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir },
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(forkId) },
       })
       if (!started.ok) {
         // v3.1.33：把真实 errno 与启动规格带进错误信息，避免只剩一个笼统的 spawn-error。
@@ -4396,6 +4432,17 @@ export function apply(ctx, config) {
         return json(res, 400, { ok: false, error: 'bad-source', allowed: ['mother', 'fork'] })
       })
 
+      route('POST', `${prefix}/api/deploy`, async (_req, res) => json(res, 409, {
+        ok: false,
+        error: 'host-running',
+        detail: '宿主存活时禁止部署/热替换母体 profile；请先退出 DSH Desktop，使用 tools/release/deploy-profile.mjs。',
+      }))
+      route('GET', `${prefix}/api/deploy/guard`, async (_req, res) => json(res, 409, {
+        ok: false,
+        error: 'host-running',
+        detail: '当前进程就是 DSH host；任何部署请求都必须由外部工具在 host 停止后执行。',
+        pid: process.pid,
+      }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
         try {

@@ -1035,6 +1035,25 @@ export function apply(ctx, config) {
       warnings.push('node-modules-missing')
     }
 
+    // 2026-11-22：fork 的核心插件必须拥有**私有安装视图**。node_modules mirror 默认是
+    // 指向母体的 junction，母体升级 fang 会改变 fork 解析到的代码，破坏“发版不热改运行中
+    // 分身”。这里把 fang bundle 复制成 fork 自己的真实目录（其余官方包仍由 DSH 安装提供）。
+    if (coreMode !== 'accelerated' && exists(nodeModulesSource)) {
+      for (const bundle of ['@twinsearth/fang-dsh-plugin', '@local/dsh-fang', '@twinsearth/dsh-fang']) {
+        const from = path.join(nodeModulesSource, ...bundle.split('/'))
+        if (!exists(from)) continue
+        const to = path.join(profileDir, 'node_modules', ...bundle.split('/'))
+        try {
+          if (exists(to)) removeTree(to)
+          copyTree(from, to)
+          warnings.push(`fork-private-fang:${bundle}`)
+        } catch (error) {
+          warnings.push(`fork-private-fang-failed:${msgOf(error)}`)
+        }
+        break
+      }
+    }
+
     const bufferDir = path.join(homeDir, 'fang', profile, 'buffer')
     ensureDir(bufferDir)
 
