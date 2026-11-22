@@ -15,7 +15,9 @@
 
 - tag：**v3.7.6**（annotated `7a7c24d4…` → `d66da5b1…`）
 - GitHub Release：**https://github.com/TwinsEarth/dsh-fang/releases/tag/v3.7.6**（id `454562784`）
-- npm：**@twinsearth/fang-dsh-plugin@3.7.6**（latest，shasum `1be71da9…`）
+- npm（新名）：**@twinsearth/fang-dsh-plugin@3.7.6**（latest，shasum 1be71da9…）
+- npm（旧名同步）：**@twinsearth/dsh-fang@3.7.6**（latest，shasum 67b19e90…）
+- 市场：awesome-dsh-plugin PR **#17879** 已更新旧页到 v3.7.6（待维护者合并；旧 URL 保留）
 - artifact：`dsh-fang-3.7.6.tgz` 721,369 B，sha256 `e79014b0…`
 
 ## 边界
