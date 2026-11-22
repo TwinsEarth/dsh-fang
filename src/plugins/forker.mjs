@@ -66,6 +66,7 @@ import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-confi
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
 import { loadAcceleratedKnownEventTypes, normalizeCoreMode, pruneAliasStubs, sanitizeAcceleratedForkSessions, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
+import { OFFICIAL_EXPERIMENTAL_BUNDLES, parsePatchEntries } from '../lib/essence.mjs'
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 
 /** Repository root of this plugin (used as the @local/dsh-fang junction source). */
@@ -1085,6 +1086,29 @@ export function apply(ctx, config) {
     })
   }
 
+/** 2026-11-22：任何 stock 分身启动前都补齐官方 15 个实验性 bundle（不依赖 orchestrator 的
+ * post-provision 步骤；修复 repair/restore 重新 provision 后实验性全关的回归）。 */
+function applyForkExperimentalSurface(profileDir) {
+  try {
+    const pkgFile = path.join(String(profileDir), 'package.json')
+    const patchFile = path.join(String(profileDir), 'cordis.patch.yml')
+    const pkg = readJson(pkgFile, null)
+    if (!pkg) return { ok: false, error: 'profile-package-missing' }
+    pkg.dsh = pkg.dsh && typeof pkg.dsh === 'object' ? pkg.dsh : {}
+    pkg.dsh.profile = pkg.dsh.profile && typeof pkg.dsh.profile === 'object' ? pkg.dsh.profile : {}
+    const bundles = Array.isArray(pkg.dsh.profile.bundles) ? [...pkg.dsh.profile.bundles] : []
+    for (const name of OFFICIAL_EXPERIMENTAL_BUNDLES) if (!bundles.includes(name)) bundles.push(name)
+    pkg.dsh.profile.bundles = bundles
+    writeJsonAtomic(pkgFile, pkg)
+    const entries = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '').entries
+    const kept = entries.filter((entry) => !OFFICIAL_EXPERIMENTAL_BUNDLES.includes(String(entry?.name ?? '')))
+    for (const name of OFFICIAL_EXPERIMENTAL_BUNDLES) kept.push({ id: `official-exp-${name.slice(-8)}`, name, disabled: false })
+    fs.writeFileSync(patchFile, `${JSON.stringify(kept, null, 2)}\n`, 'utf8')
+    return { ok: true, bundles: OFFICIAL_EXPERIMENTAL_BUNDLES.length }
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) }
+  }
+}
   const spawn = async (opts = {}) => {
     ensureRegistry()
     ensurePorts()
@@ -1241,6 +1265,12 @@ export function apply(ctx, config) {
       if (rec.forkSeed?.ok === false) {
         audit(AUDIT.FORK_CREATED, { forkId, forkSeedError: rec.forkSeed.error, forkSeedDetail: String(rec.forkSeed.detail ?? '').slice(0, 600) })
       }
+    }
+    // 2026-11-22：provision / repair / restore 可能把 profile 重置成干净模板；启动前
+    // 无条件补齐官方 15 个实验性 bundle，避免实验性页面全关（不依赖 orchestrator 后置步骤）。
+    if (rec.coreMode !== 'accelerated') {
+      rec.experimentalSurface = applyForkExperimentalSurface(rec.profileDir)
+      if (rec.experimentalSurface.ok !== true) audit(AUDIT.FORK_CREATED, { forkId, experimentalSurfaceError: rec.experimentalSurface.error })
     }
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，

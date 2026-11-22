@@ -22,6 +22,9 @@ import {
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-store.mjs'
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
+import { installWatchGuard } from '../lib/watch-guard.mjs'
+import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
+import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
@@ -370,9 +373,19 @@ export function normalizeSeed(seed) {
 }
 
 export function apply(ctx, config) {
+  // 必须在 roleGate 之前：fork 角色也要执行（experimental-inspector 在 fork/元主都可能加载）。
+  try { normalizeFetchDescriptor(globalThis) } catch { /* best effort */ }
   const cfg = { ...Config({}), ...(config ?? {}) }
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
+  // 2026-11-22：宿主 watcher EPERM 不应杀死整个 DSH host。在加载业务插件前安装
+  // fs.watch error 降级层（止损；上游仍应修复 watcher error 处理）。
+  try {
+    if (process.env.DSH_FANG_WATCH_GUARD === '1') {
+      const watchGuard = installWatchGuard({ logger: ctx.logger })
+      if (watchGuard.ok === true && watchGuard.already !== true) ctx.logger?.info?.('[fang] fs.watch error guard installed')
+    }
+  } catch { /* guard 失败不阻塞插件加载 */ }
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
@@ -564,6 +577,26 @@ export function apply(ctx, config) {
   }
   const forker = () => safeGet(SERVICE.forker)
   const cliPath = () => (cfg.cliPath ? cfg.cliPath : resolveCliPath('', process.env))
+  const forkTempEnv = (taskId) => {
+    const tmp = path.join(layout.forkHomesDir, String(taskId), 'tmp')
+    try { ensureDir(tmp) } catch { /* best effort */ }
+    return { TEMP: tmp, TMP: tmp }
+  }
+  // P2：每个版本一份不可变安装快照；stock 分身使用自己的快照 CLI，母体安装升级/替换
+  // 不会改变运行中分身解析到的 app.asar/runtime。快照创建失败时显式回退共享安装。
+  let installSnapshotMemo = null
+  const forkCliPath = () => {
+    // P2-A 安装快照默认关闭：首次创建需对约 1.1GB/7,884 文件的安装树做 hardlink，
+    // 在部分卷/目录结构上会退化为复制并超过 fork spawn 的 60s 预算，导致“启动失败”。
+    // 验证通过后可显式 DSH_FANG_INSTALL_SNAPSHOT=1 启用（启动前预热快照）。
+    if (process.env.DSH_FANG_INSTALL_SNAPSHOT !== '1') return cliPath()
+    if (installSnapshotMemo) return installSnapshotMemo.cliPath
+    const result = ensureInstallSnapshot({ cliPath: cliPath(), version: FANG_VERSION })
+    installSnapshotMemo = result
+    if (result.ok !== true) audit('fork-install-snapshot-failed', { error: result.error ?? 'unknown' })
+    else audit('fork-install-snapshot-ready', { root: result.root, created: result.created })
+    return result.ok === true ? result.cliPath : cliPath()
+  }
   // The booted profile's own directory is authoritative (launcher sets DSH_PROFILE_DIR);
   // resolving "$DSH_HOME/profiles/<tag>" from argv can point at a template that never existed.
   // 分身模板必须来自一个**真的装了本 bundle** 的 profile；否则分身的 node_modules junction
@@ -1085,6 +1118,10 @@ export function apply(ctx, config) {
         templateFallback,
         essenceId: sourceEssence?.id ?? null,
         sourceEssence,
+        // 2026-11-22：所有分身（含模板/空白）都以官方推荐为默认同步源；每次打开都会
+        // 对比源 fingerprint，源变化则重启并重新 provision，而不是等用户手动修复。
+        syncSourceId: sourceEssence?.id ?? OFFICIAL_ESSENCE_ID,
+        configSourceFingerprint: null,
         adapter: { ok: false, error: 'handshaking' },
       })
       tasks.set(taskId, task)
@@ -1097,6 +1134,7 @@ export function apply(ctx, config) {
       const allowSessionImport = coreMode !== 'accelerated' || coreSettings.sessionMode === 'copy'
       task.coreMode = coreMode
       task.sessionMode = coreSettings.sessionMode
+      task.configSourceFingerprint = essenceManager.getMeta(sourceEssence?.id ?? OFFICIAL_ESSENCE_ID)?.lastMergedFingerprint ?? null
 
       try {
         const provisioned = await f.provision({
@@ -1137,6 +1175,7 @@ export function apply(ctx, config) {
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
         // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @local/dsh-fang 继续兼容。
         const forkProfileDir = path.join(homeDir, 'profiles', profile)
+        if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-fork-profile')) } catch { /* debug best effort */ } }
         const forkBundle = forkBundlePath(forkProfileDir)
         if (!forkBundle) {
           task.status = TASK_STATUS.FAILED
@@ -1231,9 +1270,9 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           // 加速档只解析加速核入口；stock 母体 CLI 绝不能传入（v3.5.2 起会误判/失败）。
-          ...(coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+          ...(coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
           coreMode,
-          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir },
+          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(taskId) },
         })
         if (!started || started.ok === false) {
           task.status = TASK_STATUS.FAILED
@@ -1800,12 +1839,13 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      if (!task.essenceId) return { ok: false, error: 'no-source-essence' }
-      const meta = essenceManager.getMeta(task.essenceId)
+      const sourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
+      if (!task.essenceId && !task.syncSourceId) return { ok: false, error: 'no-source-essence' }
+      const meta = essenceManager.getMeta(sourceId)
       if (!meta || typeof meta.id !== 'string') return { ok: false, error: 'source-essence-missing' }
       if (meta.archived === true) return { ok: false, error: 'source-essence-archived' }
-      await essenceManager.ensureFresh(task.essenceId)
-      const source = essenceManager.mergedProfileDir(task.essenceId)
+      await essenceManager.ensureFresh(sourceId)
+      const source = essenceManager.mergedProfileDir(sourceId)
       const target = path.join(task.homeDir, 'profiles', task.profile)
       if (!exists(target)) return { ok: false, error: 'fork-profile-missing' }
       setProfileConfigReadonly(target, false)
@@ -1827,9 +1867,11 @@ export function apply(ctx, config) {
       const configLock = applyForkConfigLock(target)
       const profileReadonly = setProfileConfigReadonly(target, true)
       task.configSyncedAt = nowMs()
-      task.configSyncedFrom = task.essenceId
+      task.configSyncedFrom = sourceId
+      task.syncSourceId = sourceId
+      task.configSourceFingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
       persist()
-      audit('fork-config-reset', { taskId: id, essenceId: task.essenceId, files: picked, configLock, profileReadonly })
+      audit('fork-config-reset', { taskId: id, essenceId: sourceId, files: picked, configLock, profileReadonly })
       return { ok: true, taskId: id, essenceId: task.essenceId, files: picked, configLock, profileReadonly }
     },
 
@@ -1851,9 +1893,23 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      // 已归档任务与「启动失败/崩溃」任务都可以从保留的 home 直接复位；
-      // 不再要求先归档（旧客户端曾因此把 failed 任务强制归档，见 2026-11-22 报告）。
-      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) return { ok: false, error: 'not-archived', taskId: id }
+      const f = forker()
+      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      // 2026-11-22：任务可能停在 ready/running，但子进程已经死了（宿主重启、手动 kill、
+      // 端口丢失）。客户端「启动」仍会调用 restore；旧逻辑返回 not-archived，导致
+      // 真机界面一直显示“启动失败”。这里允许恢复 stale 的 ready/running。
+      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) {
+        const live = f.status?.(id) ?? null
+        if (live?.running === true && task.adapter?.ok === true) {
+          return { ok: true, alreadyRunning: true, taskId: id, url: task.url, port: task.port, adapter: task.adapter }
+        }
+        try { f.stop?.(id) } catch { /* stale process already gone */ }
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        persist()
+      }
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }
@@ -1865,19 +1921,15 @@ export function apply(ctx, config) {
       if (!forkBundle) {
         return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
       }
-      const f = forker()
-      if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
       // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
-      // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。
-      if (task.essenceId) {
-        captureEssenceRuntimeIfPresent(task.essenceId)
-        if (task.essenceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
-      }
+      // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。所有分身（含模板）
+      // 默认同步源为官方推荐。
+      const syncSourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
+      captureEssenceRuntimeIfPresent(syncSourceId)
+      if (syncSourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
       let configReset = null
-      if (task.essenceId) {
-        try { configReset = await service.resetForkConfig(id) } catch (error) {
-          configReset = { ok: false, error: String(error?.message ?? error) }
-        }
+      try { configReset = await service.resetForkConfig(id) } catch (error) {
+        configReset = { ok: false, error: String(error?.message ?? error) }
       }
       // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
       let sessionGuard = null
@@ -1899,9 +1951,9 @@ export function apply(ctx, config) {
         forkId: id,
         homeDir: task.homeDir,
         profile: task.profile,
-        ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+        ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
         coreMode: coreSync.coreMode,
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
       })
       if (!started || started.ok === false) {
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
@@ -1929,6 +1981,43 @@ export function apply(ctx, config) {
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
       return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard }
+    },
+
+    /**
+     * 2026-11-22：每次打开分身都主动同步来源元主的插件状态。
+     * 读取运行中元主的 settings/patch/bundles/modules → 更新元宝 fingerprint；
+     * fingerprint 变化时停止旧分身并按新 merged profile 重新 provision + spawn。
+     */
+    async syncTaskOnOpen(taskId) {
+      const id = String(taskId ?? '')
+      const task = tasks.get(id)
+      if (!task) return { ok: false, error: 'unknown-task' }
+      const sourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
+      captureEssenceRuntimeIfPresent(sourceId)
+      if (sourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+      await essenceManager.ensureFresh(sourceId)
+      const fingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
+      const changed = Boolean(task.configSourceFingerprint && fingerprint && fingerprint !== task.configSourceFingerprint)
+      const live = forker()?.status?.(id) ?? null
+      if (changed) {
+        if (live?.running === true) {
+          try { forker().stop?.(id) } catch { /* best effort */ }
+        }
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        persist()
+        const restored = await service.restoreTask(id)
+        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint }
+      }
+      if (task.status === TASK_STATUS.FAILED) {
+        const restored = await service.restoreTask(id)
+        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint }
+      }
+      const out = forker()?.openUrl?.(id) ?? null
+      if (!out || out.ok !== true) return { ok: false, error: out?.error ?? 'not-running' }
+      return { ...out, synced: true, restarted: false, sourceFingerprint: fingerprint }
     },
 
     /**
@@ -2049,9 +2138,9 @@ export function apply(ctx, config) {
             forkId: id,
             homeDir: task.homeDir,
             profile: task.profile,
-            ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+            ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
             coreMode: coreSync.coreMode,
-            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
           })
         } catch (error) {
           started = { ok: false, error: String(error?.message ?? error) }
@@ -2701,6 +2790,7 @@ export function apply(ctx, config) {
     return { repaired, modulesSync }
   }
   const applyOfficialExperimentalSurface = (profileDir, options = {}) => {
+    if (process.env.DSH_FANG_EXPERIMENTAL_SURFACE === '0') return { ok: true, skipped: 'disabled' }
     if (options.coreMode === 'accelerated') return { ok: true, skipped: 'accelerated-core' }
     const dir = String(profileDir ?? '')
     const pkgFile = path.join(dir, 'package.json')
@@ -3296,7 +3386,7 @@ export function apply(ctx, config) {
         coreMode: 'stock',
         // v3.1.16：原身运行态同样需要母体 dataDir，房主 Router 才能零配置推导
         // 契约 file 桥（contract-outbox）；普通分身在 846/1461/1534 行已有同名注入。
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir },
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(forkId) },
       })
       if (!started.ok) {
         // v3.1.33：把真实 errno 与启动规格带进错误信息，避免只剩一个笼统的 spawn-error。
@@ -4396,6 +4486,17 @@ export function apply(ctx, config) {
         return json(res, 400, { ok: false, error: 'bad-source', allowed: ['mother', 'fork'] })
       })
 
+      route('POST', `${prefix}/api/deploy`, async (_req, res) => json(res, 409, {
+        ok: false,
+        error: 'host-running',
+        detail: '宿主存活时禁止部署/热替换母体 profile；请先退出 DSH Desktop，使用 tools/release/deploy-profile.mjs。',
+      }))
+      route('GET', `${prefix}/api/deploy/guard`, async (_req, res) => json(res, 409, {
+        ok: false,
+        error: 'host-running',
+        detail: '当前进程就是 DSH host；任何部署请求都必须由外部工具在 host 停止后执行。',
+        pid: process.pid,
+      }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
         try {
@@ -4411,11 +4512,11 @@ export function apply(ctx, config) {
         return json(res, out.ok === false ? 404 : 200, out)
       })
       // v3.0.5/B4：打开分身时才在内存中取带 token 的 URL（不落盘、不进列表）
-      route('GET', `${prefix}/api/tasks/open-url`, (req, res) => {
+      route('GET', `${prefix}/api/tasks/open-url`, async (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         const taskId = String(query.get('taskId') ?? '').trim()
-        const out = taskId ? forker()?.openUrl?.(taskId) : null
-        if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running' })
+        const out = taskId ? await service.syncTaskOnOpen(taskId) : null
+        if (!out || out.ok !== true) return json(res, 409, { ok: false, error: out?.error ?? 'not-running', ...out })
         return json(res, 200, out)
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
