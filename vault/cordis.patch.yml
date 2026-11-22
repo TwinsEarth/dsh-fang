@@ -1,0 +1,3 @@
+- insert:
+    - id: fang-vault
+      name: '@twinsearth/dsh-fang-vault'

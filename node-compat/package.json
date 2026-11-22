@@ -1,0 +1,20 @@
+{
+  "name": "@twinsearth/dsh-fang-node-compat",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "First-layer Node compatibility bundle for dsh-Fang: normalize globalThis.fetch before experimental-inspector observes it.",
+  "license": "AGPL-3.0-or-later",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -24,6 +24,8 @@ import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-stor
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
 import { installWatchGuard } from '../lib/watch-guard.mjs'
 import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
+import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
+import { installGlobalRedline } from '../lib/global-redline.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
@@ -31,7 +33,7 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
-import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, VIP_QUOTAS, parsePatchEntries } from '../lib/essence.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, VIP_QUOTAS, parsePatchEntries } from '../lib/essence.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
@@ -375,6 +377,16 @@ export function normalizeSeed(seed) {
 export function apply(ctx, config) {
   // 必须在 roleGate 之前：fork 角色也要执行（experimental-inspector 在 fork/元主都可能加载）。
   try { normalizeFetchDescriptor(globalThis) } catch { /* best effort */ }
+  // EB-03 全局红线：所有 fork 进程只能写自己的 DSH_HOME；母体/客户端/其他分身写入即 EPERM。
+  if (String(process.env.DSH_FANG_ROLE ?? '').toLowerCase() === 'fork') {
+    try {
+      installGlobalRedline({
+        ownHome: process.env.DSH_HOME,
+        motherData: process.env.DSH_FANG_MOTHER,
+        logger: ctx.logger,
+      })
+    } catch { /* guard must never prevent fork boot; failures are audited by caller */ }
+  }
   const cfg = { ...Config({}), ...(config ?? {}) }
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
@@ -638,6 +650,8 @@ export function apply(ctx, config) {
       template: f.template ?? '',
       essenceId: f.essenceId ?? null,
       sourceEssence: f.sourceEssence ?? null,
+      syncSourceId: f.syncSourceId ?? f.essenceId ?? OFFICIAL_ESSENCE_ID,
+      configSourceFingerprint: f.configSourceFingerprint ?? null,
     }
   }
 
@@ -783,9 +797,9 @@ export function apply(ctx, config) {
           return { activeBranchId: t.activeBranchId ?? null, sessionId: null, count: 0 }
         }
       })(),
-      pid: live?.pid ?? t.pid ?? null,
-      port: t.port ?? null,
-      url: stripUrlToken(t.url),
+      pid: running ? (live?.pid ?? t.pid ?? null) : null,
+      port: running ? (t.port ?? null) : null,
+      url: running ? stripUrlToken(t.url) : null,
       homeDir: t.homeDir,
       profile: t.profile,
       createdAt: t.createdAt,
@@ -1393,6 +1407,61 @@ export function apply(ctx, config) {
       }
     },
 
+    /** 2026-11-22：一键导出分身完整 home（不含可再生的 node_modules/tmp）。 */
+    async exportTask(taskId, destDir, options = {}) {
+      const task = tasks.get(String(taskId ?? '').trim())
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (!destDir || !path.isAbsolute(String(destDir))) return { ok: false, error: 'dest-dir-required' }
+      let workspacePath = ''
+      try {
+        const ws = readJson(path.join(task.homeDir, 'storages', 'workspace.json'), {})
+        workspacePath = Object.values(ws?.tables?.workspaces ?? {}).map((item) => String(item?.path ?? '')).find(Boolean) ?? ''
+      } catch { /* optional */ }
+      const out = exportVault({ homeDir: task.homeDir, destDir: String(destDir), task: { ...task, workspacePath }, options })
+      if (out.ok) audit('fork-exported', { taskId: task.taskId, dir: out.dir, files: out.files, bytes: out.bytes })
+      return out
+    },
+
+    /** 2026-11-22：一键导入分身导出包，复制 home/profile 后重新拉起并握手。 */
+    async importTask(sourceDir, title) {
+      const parsed = readVault(sourceDir)
+      if (!parsed.ok) return parsed
+      const id = newId('task')
+      const profile = `fang-${id.slice(-12)}`
+      const homeDir = path.join(layout.forkHomesDir, id)
+      if (exists(homeDir)) return { ok: false, error: 'task-exists', taskId: id }
+      ensureDir(path.dirname(homeDir))
+      const imported = importVault({ sourceDir, homeDir, profile })
+      if (imported.ok !== true) return imported
+      const targetProfileDir = path.join(homeDir, 'profiles', profile)
+      // 导出包不含 node_modules：从母体/官方 merged 重新移植依赖树，再拉起。
+      const importedModules = path.join(targetProfileDir, 'node_modules')
+      if (!exists(importedModules)) {
+        const motherModules = path.join(linkProfileDir() || essenceManager.mergedProfileDir(OFFICIAL_ESSENCE_ID), 'node_modules')
+        if (exists(motherModules)) {
+          try { fs.symlinkSync(motherModules, importedModules, 'junction') } catch { /* mirror repair will retry */ }
+        }
+      }
+      try { syncProfileModulesFromMother(targetProfileDir, linkProfileDir() || essenceManager.mergedProfileDir(OFFICIAL_ESSENCE_ID)) } catch { /* best effort */ }
+      const task = normalizeTask({
+        taskId: id,
+        title: String(title ?? '').trim() || String(parsed.manifest?.title ?? '').trim() || `导入的分身 ${id.slice(-6)}`,
+        profile,
+        homeDir,
+        status: TASK_STATUS.FAILED,
+        coreMode: parsed.manifest?.coreMode === 'accelerated' ? 'accelerated' : 'stock',
+        essenceId: null,
+        syncSourceId: OFFICIAL_ESSENCE_ID,
+        configSourceFingerprint: essenceManager.getMeta(OFFICIAL_ESSENCE_ID)?.lastMergedFingerprint ?? null,
+        importedSnapshot: true,
+      })
+      tasks.set(id, task)
+      persist()
+      audit('fork-imported', { taskId: id, sourceDir: parsed.dir, files: parsed.manifest?.files ?? 0, profile })
+      const restored = await service.restoreTask(id, { preserveProfile: true })
+      return { ok: restored.ok === true, taskId: id, title: task.title, restored, dir: parsed.dir }
+    },
+
     listForks() {
       return service.listTasks()
     },
@@ -1889,7 +1958,8 @@ export function apply(ctx, config) {
       return { ...applyForkSessionGuard(task), taskId: id }
     },
 
-    async restoreTask(taskId) {
+    async restoreTask(taskId, options = {}) {
+      const preserveProfile = options?.preserveProfile === true
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
@@ -1925,27 +1995,42 @@ export function apply(ctx, config) {
       // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。所有分身（含模板）
       // 默认同步源为官方推荐。
       const syncSourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
-      captureEssenceRuntimeIfPresent(syncSourceId)
-      if (syncSourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
       let configReset = null
-      try { configReset = await service.resetForkConfig(id) } catch (error) {
-        configReset = { ok: false, error: String(error?.message ?? error) }
+      if (!preserveProfile) {
+        captureEssenceRuntimeIfPresent(syncSourceId)
+        if (syncSourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+        try { configReset = await service.resetForkConfig(id) } catch (error) {
+          configReset = { ok: false, error: String(error?.message ?? error) }
+        }
+      } else {
+        configReset = { ok: true, skipped: 'preserve-imported-profile' }
       }
-      // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
-      let sessionGuard = null
-      try { sessionGuard = applyForkSessionGuard(task) } catch { sessionGuard = { ok: false } }
+      // EB-01 防线：restore 绝不再搬移用户会话。超额只保留 violation 警告；
+      // 只有用户显式 enforce/归档动作才允许移动（见 docs/ERROR-BOOK.md EB-01）。
+      const sessionGuard = { ok: true, skipped: 'restore-never-moves-sessions', violation: Boolean(task.sessions?.violation) }
       // 开关不是热更新：重新打开分身时按当前开关换核（重新 provision profile；会话目录不动）。
       // resetForkConfig 刚把 profile 重置回 stock 形状；即使 coreMode 未变也必须强制 reprovision，
       // 否则加速分身会以 stock 配置 + accelerated CLI 启动而永远不 ready（2026-11-22 实测 timeout）。
-      const coreSync = await syncForkCoreMode(task, { force: true })
-      if (coreSync.ok !== true) {
-        task.status = TASK_STATUS.FAILED
+      const coreSync = preserveProfile
+        ? { ok: true, switched: false, coreMode: task.coreMode === 'accelerated' ? 'accelerated' : 'stock' }
+        : await syncForkCoreMode(task, { force: true })
+      if (coreSync.ok !== true) {        task.status = TASK_STATUS.FAILED
         persist()
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: coreSync.error })
         return { ok: false, error: coreSync.error, detail: coreSync.detail ?? null, taskId: id }
       }
-      // 老/空白分身重新打开时补齐官方实验性插件表面。
-      const experimentalSurface = applyOfficialExperimentalSurface(forkProfileDir, { coreMode: coreSync.coreMode })
+      // 老/空白分身重新打开时补齐官方实验性插件表面；先整体对齐来源元主的完整插件面。
+      // 完整来源插件面对齐：默认开启；e2e 已证 125/125（node-compat 复制关闭后）。
+      const sourceSurface = preserveProfile
+        ? { ok: true, skipped: 'preserve-imported-profile' }
+        : process.env.DSH_FANG_SOURCE_SURFACE === '0'
+          ? { ok: true, skipped: 'disabled' }
+          : applySourcePluginSurface(task, forkProfileDir)
+      if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-restore-profile')) } catch { /* debug */ } }
+      if (sourceSurface.ok === false) audit('fork-source-surface-failed', { taskId: id, error: sourceSurface.error })
+      const experimentalSurface = preserveProfile
+        ? { ok: true, skipped: 'preserve-imported-profile' }
+        : applyOfficialExperimentalSurface(forkProfileDir, { coreMode: coreSync.coreMode })
       if (experimentalSurface.ok === false) audit('fork-experimental-surface-failed', { taskId: id, error: experimentalSurface.error })
       const started = await f.spawn({
         forkId: id,
@@ -1997,7 +2082,7 @@ export function apply(ctx, config) {
       if (sourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
       await essenceManager.ensureFresh(sourceId)
       const fingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
-      const changed = Boolean(task.configSourceFingerprint && fingerprint && fingerprint !== task.configSourceFingerprint)
+      const changed = Boolean(fingerprint && task.configSourceFingerprint !== fingerprint)
       const live = forker()?.status?.(id) ?? null
       if (changed) {
         if (live?.running === true) {
@@ -2819,6 +2904,9 @@ export function apply(ctx, config) {
       bundles.push(name)
       bundlesAdded += 1
     }
+    pkg.dependencies = pkg.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
+    pkg.dependencies[NODE_COMPAT_BUNDLE] = '^0.1.0'
+    if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     pkg.dsh.profile.bundles = bundles
     writeJsonAtomic(pkgFile, pkg)
     const parsed = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '')
@@ -2831,6 +2919,54 @@ export function apply(ctx, config) {
     }
     fs.writeFileSync(patchFile, `${JSON.stringify(entries, null, 2)}\n`, 'utf8')
     return { ok: true, bundles: [...experimentalNames], bundlesAdded, rowsAdded }
+  }
+  /**
+   * v3.7.4：把来源元主的完整插件面（bundles + dependencies + patch rows）覆盖到 fork profile。
+   * 修复 BUG-4：只补实验性 bundle 会留下“已同步”假阳性；reset 后必须整体对齐来源。
+   * fork 私有配置锁行（tool-plugin-manager / ui-settings-plugin-inventory）保留。
+   */
+  const applySourcePluginSurface = (task, profileDir) => {
+    try {
+      if (task?.coreMode === 'accelerated') return { ok: true, skipped: 'accelerated-core' }
+      const sourceId = String(task?.essenceId || task?.syncSourceId || OFFICIAL_ESSENCE_ID)
+      const sourceDir = essenceManager.mergedProfileDir(sourceId)
+      const sourcePkg = readJson(path.join(sourceDir, 'package.json'), null)
+      if (!sourcePkg) return { ok: false, error: 'source-profile-missing', sourceId }
+      const sourcePatch = parsePatchEntries(
+        exists(path.join(sourceDir, 'cordis.patch.yml')) ? fs.readFileSync(path.join(sourceDir, 'cordis.patch.yml'), 'utf8') : '',
+      ).entries
+      const pkgFile = path.join(String(profileDir), 'package.json')
+      const patchFile = path.join(String(profileDir), 'cordis.patch.yml')
+      const forkPkg = readJson(pkgFile, null)
+      if (!forkPkg) return { ok: false, error: 'fork-profile-missing' }
+      forkPkg.dsh = forkPkg.dsh && typeof forkPkg.dsh === 'object' ? forkPkg.dsh : {}
+      forkPkg.dsh.profile = forkPkg.dsh.profile && typeof forkPkg.dsh.profile === 'object' ? forkPkg.dsh.profile : {}
+      const sourceBundles = Array.isArray(sourcePkg?.dsh?.profile?.bundles) ? sourcePkg.dsh.profile.bundles : []
+      const forkBundlesBefore = Array.isArray(forkPkg?.dsh?.profile?.bundles) ? forkPkg.dsh.profile.bundles : []
+      const forkFangBundle = FORK_BUNDLE_NAMES.find((candidate) => exists(path.join(String(profileDir), 'node_modules', ...candidate.split('/'))))
+        || forkBundlesBefore.find((candidate) => /(^|\/)dsh-fang$/.test(String(candidate)))
+        || '@local/dsh-fang'
+      const bundles = sourceBundles
+        .filter((name) => name !== NODE_COMPAT_BUNDLE)
+        .map((name) => /(^|\/)(dsh-fang|fang-dsh-plugin)$/.test(String(name)) ? forkFangBundle : name)
+      bundles.unshift(NODE_COMPAT_BUNDLE)
+      forkPkg.dsh.profile.bundles = [...new Set(bundles)]
+      forkPkg.dependencies = {
+        ...(forkPkg.dependencies && typeof forkPkg.dependencies === 'object' ? forkPkg.dependencies : {}),
+        ...(sourcePkg.dependencies && typeof sourcePkg.dependencies === 'object' ? sourcePkg.dependencies : {}),
+        [NODE_COMPAT_BUNDLE]: '^0.1.0',
+      }
+      writeJsonAtomic(pkgFile, forkPkg)
+      const forkPatch = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '').entries
+      const lockIds = new Set(['tool-plugin-manager', 'ui-settings-plugin-inventory'])
+      const locks = forkPatch.filter((entry) => lockIds.has(String(entry?.id ?? '')))
+      const merged = [...sourcePatch]
+      for (const row of locks) if (!merged.some((entry) => entry?.id === row.id)) merged.push(row)
+      fs.writeFileSync(patchFile, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+      return { ok: true, sourceId, bundles: forkPkg.dsh.profile.bundles.length, rows: merged.length }
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) }
+    }
   }
   const syncProfileModulesFromMother = (profileDir, motherProfileDir) => {
     const copied = []
@@ -4511,12 +4647,26 @@ export function apply(ctx, config) {
         const out = await service.getTaskStatus(query.get('taskId') ?? '')
         return json(res, out.ok === false ? 404 : 200, out)
       })
-      // v3.0.5/B4：打开分身时才在内存中取带 token 的 URL（不落盘、不进列表）
+      // v3.7.4：GET 只读（不产生 stop/spawn 副作用），POST 才执行 sync-on-open。
       route('GET', `${prefix}/api/tasks/open-url`, async (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
         const taskId = String(query.get('taskId') ?? '').trim()
-        const out = taskId ? await service.syncTaskOnOpen(taskId) : null
-        if (!out || out.ok !== true) return json(res, 409, { ok: false, error: out?.error ?? 'not-running', ...out })
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        const out = forker()?.openUrl?.(taskId) ?? null
+        if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running', taskId })
+        return json(res, 200, out)
+      })
+      route('POST', `${prefix}/api/tasks/open`, async (req, res) => {
+        const body = await readBody(req)
+        const taskId = String(body?.taskId ?? '').trim()
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        const out = await service.syncTaskOnOpen(taskId)
+        if (!out || out.ok !== true) {
+          const status = out?.error === 'unknown-task' ? 404 : out?.error === 'not-running' ? 404 : 409
+          return json(res, status, { ok: false, error: out?.error ?? 'not-running', ...out })
+        }
         return json(res, 200, out)
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
@@ -4530,9 +4680,37 @@ export function apply(ctx, config) {
         return json(res, out.ok ? 200 : 409, out)
       })
       // 2026-11-22：一键修复（停残留 → 清别名桩 → 重置配置 → 重新拉起；不删 home/会话）
+      route('POST', `${prefix}/api/vault/export`, async (req, res) => {
+        const body = await readBody(req)
+        const taskId = String(body?.taskId ?? '').trim()
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        const destDir = String(body?.destDir ?? '').trim()
+        if (!destDir) return json(res, 400, { ok: false, error: 'dest-dir-required' })
+        try {
+          const out = await service.exportTask(taskId, destDir, body?.options ?? {})
+          return json(res, out.ok ? 200 : 500, out)
+        } catch (error) {
+          return json(res, 500, { ok: false, error: 'export-failed', detail: String(error?.message ?? error) })
+        }
+      })
+      route('POST', `${prefix}/api/vault/import`, async (req, res) => {
+        const body = await readBody(req)
+        const sourceDir = String(body?.sourceDir ?? '').trim()
+        if (!sourceDir) return json(res, 400, { ok: false, error: 'source-dir-required' })
+        try {
+          const out = await service.importTask(sourceDir, body?.title)
+          return json(res, out.ok ? 200 : 409, out)
+        } catch (error) {
+          return json(res, 409, { ok: false, error: 'import-failed', detail: String(error?.message ?? error) })
+        }
+      })
       route('POST', `${prefix}/api/tasks/repair`, async (req, res) => {
         const body = await readBody(req)
-        const out = await service.repairTask(String(body?.taskId ?? ''))
+        const taskId = String(body?.taskId ?? '').trim()
+        if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
+        if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        const out = await service.repairTask(taskId)
         return json(res, out.ok ? 200 : 409, out)
       })
       // v3.0.9：强制单会话（运行中拒绝；停止/归档态把多余会话隔离到 quarantine-sessions/）

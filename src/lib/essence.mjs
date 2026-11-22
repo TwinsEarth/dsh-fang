@@ -41,6 +41,7 @@ export const OFFICIAL_ESSENCE_MIN_TIER = 'vip100'
  * EXPERIMENTAL_BUNDLES，含不带 experimental 前缀的 personalized/cua/chat-import）。
  * 官方/分身都必须启用这整组，而不是只匹配 `@deepseek-ai/dsh-experimental-*`。
  */
+export const NODE_COMPAT_BUNDLE = '@twinsearth/dsh-fang-node-compat'
 export const OFFICIAL_EXPERIMENTAL_BUNDLES = Object.freeze([
   '@deepseek-ai/dsh-personalized-recommendations',
   '@deepseek-ai/dsh-cua-bundle',
@@ -647,10 +648,13 @@ export class EssenceManager {
     // 2026-11-22：把 fang 放到 base/web 之后、实验性 bundle 之前。experimental-inspector
     // 会在加载时观察 globalThis.fetch；fang 的 node-compat 必须先运行，否则 Node 26 直接报
     // "fetch is an accessor and cannot be observed safely"。
+    overlay.packageJson.dependencies = overlay.packageJson.dependencies && typeof overlay.packageJson.dependencies === 'object' ? overlay.packageJson.dependencies : {}
+    overlay.packageJson.dependencies[NODE_COMPAT_BUNDLE] = '^0.1.0'
+    if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     const fangIndex = bundles.indexOf('@twinsearth/fang-dsh-plugin')
-    if (fangIndex > 2) {
+    if (fangIndex > 3) {
       bundles.splice(fangIndex, 1)
-      bundles.splice(2, 0, '@twinsearth/fang-dsh-plugin')
+      bundles.splice(3, 0, '@twinsearth/fang-dsh-plugin')
     }
     overlay.packageJson.dsh.profile.bundles = bundles
     const managedNames = new Set([...recommended, ...experimental].map((entry) => String(entry.name)))

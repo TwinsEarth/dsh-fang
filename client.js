@@ -348,7 +348,8 @@ window.__ModuleLoader__.load({
       const base = TASK_PROJECTION[status] || { label: '状态未知', tone: 'neutral' }
       let tone = base.tone
       let label = base.label
-      if (phase === 'failed' || phase === 'crashed') { tone = 'bad'; label = phase === 'crashed' ? '已崩溃' : '启动失败' }
+      if (phase === 'failed') { tone = 'warn'; label = '等待启动' }
+      else if (phase === 'crashed') { tone = 'bad'; label = '已崩溃' }
       else if (anomaly) { tone = 'bad'; label = '运行中 · 适配器失联' }
       else if (phase === 'archived') { tone = 'info'; label = '已归档' }
       else if (phase === 'paused' || phase === 'stopping' || phase === 'pausing' || phase === 'completed') { tone = 'info'; label = phase === 'paused' ? '已暂停' : phase === 'stopping' ? '停止中' : phase === 'completed' ? '已完成' : '暂停中' }
@@ -2828,10 +2829,43 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         void loadEssenceDetail()
       }
 
+      async function exportTask(task) {
+        const taskId = String(task?.taskId ?? '')
+        if (!taskId) return
+        const fallback = localStorage.getItem('fang.exportDir') || ''
+        const destDir = window.prompt('导出到文件夹（绝对路径；不存在会自动创建）', fallback)
+        if (!destDir) return
+        const workspace = window.confirm('是否同时打包工作区项目文件？\n\n默认「取消」= 只导出会话/附件/配置/日志。\n项目很大时会明显变慢。')
+        localStorage.setItem('fang.exportDir', destDir)
+        const result = await api('/fang/api/vault/export', { method: 'POST', body: JSON.stringify({ taskId, destDir, options: { workspace, workspaceSnapshot: workspace } }) })
+        if (result.status === 200 && result.body?.ok) {
+          notify('ok', `已导出到 ${result.body.dir}`, `文件 ${result.body.files} 个 · ${result.body.bytes} 字节`)
+        } else {
+          notify('bad', `导出失败：${result.body?.error || 'export-failed'}`, result.body?.detail || '')
+        }
+      }
+
+      async function importTask() {
+        const sourceDir = window.prompt('选择分身导出包文件夹（包含 manifest.json 的那一层）', localStorage.getItem('fang.importDir') || '')
+        if (!sourceDir) return
+        localStorage.setItem('fang.importDir', sourceDir)
+        const result = await api('/fang/api/vault/import', { method: 'POST', body: JSON.stringify({ sourceDir }) })
+        if (result.status === 200 && result.body?.ok) {
+          notify('ok', `已导入分身 ${result.body.title || result.body.taskId}`, `端口 ${result.body.restored?.port ?? '—'}`)
+          await refresh()
+        } else {
+          notify('bad', `导入失败：${result.body?.error || 'import-failed'}`, result.body?.detail || '')
+        }
+      }
+
+      // 独立 Vault 子插件通过此桥触发导出/导入（按钮由 vault/client.js 注入）。
+      try { window.__fangVaultBridge = { exportTask, importTask } } catch { /* ignore */ }
+
       async function openTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
-        const result = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
+        // v3.7.4：打开是显式用户动作，用 POST 触发同步；GET 只读，避免副作用。
+        const result = await api('/fang/api/tasks/open', { method: 'POST', body: JSON.stringify({ taskId }) })
         if (result.status === 200 && result.body?.url) {
           try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
         }
@@ -4281,7 +4315,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             },
           }, icon('arrowUp', 15))),
         h('div', { class: 'panel-tools' },
-          h('span', null, `进行中 ${active.length}`),
+          h('span', null, `进行中 ${active.filter((item) => !['failed', 'stopped', 'archived'].includes(String(item.status))).length}`),
           h('span', { class: 'spacer' }),
           h('span', null, `临时 ${temporary.length} · 存档 ${archived.length}`),
           h('span', { class: 'spacer' }),
@@ -4417,6 +4451,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
             task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
+            task.sessions?.violation ? chip('warn', `会话 ${task.sessions.count}/${task.sessions.max} 超限`, { title: '分身会话超过上限；打开/修复不会再自动搬移，需手动归档或 enforce' }) : null,
             task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
           archived
@@ -4441,6 +4476,18 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               title: '物理分支：在分身内 fork 当前会话，挂回同一分身（可多分支、可激活）',
               onClick: () => void app.openBranches(task),
               fk: 'branches:' + taskId,
+            }),
+            button('导出', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-08',
+              title: '导出该分身为 Vault 文件夹（可选工作区快照）',
+              onClick: () => void exportTask(task),
+              fk: 'export:' + taskId,
+            }),
+            button('导入', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-09',
+              title: '从 Vault 文件夹导入为新分身，并重新移植依赖',
+              onClick: () => void importTask(),
+              fk: 'import:' + taskId,
             }),
             textAction('提升插件', {              title: '把分身里验证过的插件目录提升到母体（需目录名）', dataBtnId: 'C-02',
               softDisabled: busyPromote, busy: busyPromote,
