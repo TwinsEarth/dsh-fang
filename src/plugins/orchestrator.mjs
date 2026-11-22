@@ -1946,11 +1946,10 @@ export function apply(ctx, config) {
         return { ok: false, error: coreSync.error, detail: coreSync.detail ?? null, taskId: id }
       }
       // 老/空白分身重新打开时补齐官方实验性插件表面；先整体对齐来源元主的完整插件面。
-      // 完整来源插件面对齐默认关闭：e2e 证明它会破坏 derive 的 fork bundle 解析。
-      // 待独立分支验证后再默认开启（BUG-4 仍未结案）。
-      const sourceSurface = process.env.DSH_FANG_SOURCE_SURFACE === '1'
-        ? applySourcePluginSurface(task, forkProfileDir)
-        : { ok: true, skipped: 'source-surface-default-off' }
+      // 完整来源插件面对齐：默认开启；e2e 已证 125/125（node-compat 复制关闭后）。
+      const sourceSurface = process.env.DSH_FANG_SOURCE_SURFACE === '0'
+        ? { ok: true, skipped: 'disabled' }
+        : applySourcePluginSurface(task, forkProfileDir)
       if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-restore-profile')) } catch { /* debug */ } }
       if (sourceSurface.ok === false) audit('fork-source-surface-failed', { taskId: id, error: sourceSurface.error })
       const experimentalSurface = applyOfficialExperimentalSurface(forkProfileDir, { coreMode: coreSync.coreMode })

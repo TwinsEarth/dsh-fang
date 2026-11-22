@@ -190,3 +190,10 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 **根因**：taskView 无 running 判定；active 统计只排除 archived；client 不读 `sessions.violation`。
 **防线**：非 running 的 pid/port/url 置 null；进行中只数非 failed/stopped/archived；卡片显示 `会话 N/M 超限` warn chip。orchestrator 73/73。
 **教训**：状态投影必须服从真实进程，不服从持久化字段。
+
+## EB-14 · 2026-11-22 · 来源插件面默认关闭导致“已同步”假阳性
+
+**现象**：`applySourcePluginSurface` 因 derive 回归被 env 默认关闭，存量分身打开仍只补 15 实验性，不复制元主 bundles/dependencies；标记 fingerprint 却显示已同步。
+**根因**：把 node-compat 复制与来源面复制混为一谈；关闭前者后 derive 已恢复，来源面不必关闭。
+**防线**：来源面默认开启（`DSH_FANG_SOURCE_SURFACE=0` 才跳过）；e2e 125/125、orchestrator 73/73。
+**教训**：回归隔离要精确到被测因子，不要因一个 copy 失败关掉整条同步链。
