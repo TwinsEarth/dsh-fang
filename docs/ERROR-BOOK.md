@@ -162,3 +162,31 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 **防线**：client 标签必须走源码 + 版本发布/部署；宿主运行中不热改 profile；完整重启后再验收。
 
 **教训**：UI 修复不能靠热替换 profile 文件，必须按 EB-03 的部署路径。
+
+## EB-10 · 2026-11-22 · open-url GET 有副作用，点「打开」会 stop/rebuild 分身
+
+**现象**：GET `/fang/api/tasks/open-url` 触发 `syncTaskOnOpen`，12s 超时；分身 failed→ready、端口 18000→18002，客户端只看到失败。
+**根因**：把同步/重建塞进 GET；客户端超时后服务端仍在执行。
+**防线**：GET 只读返回 URL；新增 `POST /fang/api/tasks/open` 执行显式同步；客户端打开改 POST。e2e 125/125，routes 无重复。
+**教训**：GET 永远不能产生重启/写盘副作用。
+
+## EB-11 · 2026-11-22 · fork 内复制 node-compat 包破坏 derive（fork-bundle-unavailable）
+
+**现象**：在 forker spawn 前把 node-compat 复制到 fork profile node_modules，e2e derive 报 `fork-bundle-unavailable`，121/122。
+**根因**：fork 的 `node_modules/@twinsearth` 是指向母体的 symlink；复制写穿/扰乱解析，`forkBundlePath()` 找不到 fang。关闭复制后 e2e 125/125。
+**防线**：复制默认关闭（仅 `DSH_FANG_NODE_COMPAT_COPY=1` 显式开启）；node-compat 通过 profile `dependencies` + `tools/repair-profile-node-compat.mjs` 安装；不再在 spawn 热复制。
+**教训**：symlink 共享层禁止 copyTree 写入；安装态由依赖/部署工具负责。
+
+## EB-12 · 2026-11-22 · 存量分身没有 fingerprint → 永远不同步
+
+**现象**：18000/18001 无 `essenceId/syncSourceId/configSourceFingerprint`，`changed=false`，每次打开只取 URL。
+**根因**：`syncTaskOnOpen` 要求旧 fingerprint 存在；`normalizeTask` 没补默认同步源。
+**防线**：`normalizeTask` 补 `syncSourceId=OFFICIAL_ESSENCE_ID`；无旧 fingerprint 视为 changed，首次打开重建并写入新指纹。`orchestrator` 73/73。
+**教训**：旧数据迁移必须显式，不要用“字段为空=不变”。
+
+## EB-13 · 2026-11-22 · 失败任务僵尸端口/PID，面板「进行中」把 failed 算进去，超额会话无提示
+
+**现象**：failed 任务保留 port 18000/pid 6276（已死），与运行中的 18000 撞车；面板进行中=3（实际 running=2）；10/3 会话无警告。
+**根因**：taskView 无 running 判定；active 统计只排除 archived；client 不读 `sessions.violation`。
+**防线**：非 running 的 pid/port/url 置 null；进行中只数非 failed/stopped/archived；卡片显示 `会话 N/M 超限` warn chip。orchestrator 73/73。
+**教训**：状态投影必须服从真实进程，不服从持久化字段。
