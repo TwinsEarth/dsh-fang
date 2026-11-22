@@ -8,15 +8,15 @@
 |---|---|
 | 全量 npm test | **1330 pass / 0 fail / 2 skip** |
 | preflight --e2e | **GREEN（e2e 125/125）** |
-| 发布 PR CI | 待回填 |
-| release-order | 待回填 |
+| 发布 PR CI | **8/8 绿**（#159） |
+| release-order | **10/10 GREEN** |
 
 ## 发布结果
 
-- tag：待回填
-- GitHub Release：待回填
-- npm：待回填
-- artifact sha256：待回填
+- tag：**v3.7.6**（annotated `7a7c24d4…` → `d66da5b1…`）
+- GitHub Release：**https://github.com/TwinsEarth/dsh-fang/releases/tag/v3.7.6**（id `454562784`）
+- npm：**@twinsearth/fang-dsh-plugin@3.7.6**（latest，shasum `1be71da9…`）
+- artifact：`dsh-fang-3.7.6.tgz` 721,369 B，sha256 `e79014b0…`
 
 ## 边界
 
