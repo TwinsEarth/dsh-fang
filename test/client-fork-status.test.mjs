@@ -24,6 +24,12 @@ test('fork status bar: four states and two actions are present', () => {
   assert.ok(client.includes('一键修复'), 'one-click repair action must be rendered')
 })
 
+test('failed fork renders waiting, crashed stays red', () => {
+  assert.match(client, /if \(phase === 'failed'\) \{ tone = 'warn'; label = '等待启动' \}/)
+  assert.match(client, /else if \(phase === 'crashed'\) \{ tone = 'bad'; label = '已崩溃' \}/)
+  assert.doesNotMatch(client, /phase === 'failed' \|\| phase === 'crashed'\) \{ tone = 'bad'/)
+})
+
 test('repair endpoint + service are wired (no new dependency)', () => {
   assert.match(client, /\/fang\/api\/tasks\/repair/)
   assert.match(orchestrator, /async repairTask\(taskId\)/)
