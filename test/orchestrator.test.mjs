@@ -1123,6 +1123,57 @@ test('orchestrator: 元主运行态缺包时从母体补 node_modules（回归�
   }
 })
 
+test('orchestrator: 官方实验性插件同步进官方派生与模板分身（回归：实验性页面全关）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-exp-surface-'))
+  const pluginManager = {
+    async listPlugins() {
+      return [
+        { id: 'p-exp', name: '@deepseek-ai/dsh-experimental-auto-review' },
+        { id: 'p-market', name: 'dshmarket' },
+      ]
+    },
+  }
+  const forker = makeFakeForker()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer, pluginManager } })
+  const motherProfile = path.join(dataRoot, 'mother-profile')
+  fs.mkdirSync(path.join(motherProfile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+  fs.writeFileSync(path.join(motherProfile, 'package.json'), JSON.stringify({ name: 'mother-probe', private: true }), 'utf8')
+  fs.writeFileSync(path.join(motherProfile, 'cordis.patch.yml'), '- insert: []\n', 'utf8')
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      profileTemplate: motherProfile,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const mirror = ctx.get(SERVICE.mirror)
+    const svc = ctx.get(SERVICE.orchestrator)
+    await mirror.ensureDefaultEssence({ apply: true })
+    const officialMerge = path.join(dataRoot, 'essences', 'essence-official-dev', 'merged', 'profile')
+    assert.match(fs.readFileSync(path.join(officialMerge, 'cordis.patch.yml'), 'utf8'), /dsh-experimental-auto-review/)
+
+    const fromOfficial = await svc.createTask({ title: '官方派生', essenceId: 'essence-official-dev' })
+    assert.equal(fromOfficial.ok, true)
+    const provision = forker.calls.provision.at(-1)
+    const forkProfile = path.join(provision.homeDir, 'profiles', provision.profile)
+    const forkPkg = JSON.parse(fs.readFileSync(path.join(forkProfile, 'package.json'), 'utf8'))
+    assert.ok(forkPkg.dsh.profile.bundles.includes('@deepseek-ai/dsh-experimental-auto-review'), '官方派生必须带实验性 bundle')
+    assert.match(fs.readFileSync(path.join(forkProfile, 'cordis.patch.yml'), 'utf8'), /dsh-experimental-auto-review[\s\S]*?disabled": false/)
+
+    const fromTemplate = await svc.createTask({ title: '模板派生', template: motherProfile })
+    assert.equal(fromTemplate.ok, true)
+    const provision2 = forker.calls.provision.at(-1)
+    const forkProfile2 = path.join(provision2.homeDir, 'profiles', provision2.profile)
+    const forkPkg2 = JSON.parse(fs.readFileSync(path.join(forkProfile2, 'package.json'), 'utf8'))
+    assert.ok(forkPkg2.dsh.profile.bundles.includes('@deepseek-ai/dsh-experimental-auto-review'), '空白/模板分身也必须带实验性 bundle')
+    assert.match(fs.readFileSync(path.join(forkProfile2, 'cordis.patch.yml'), 'utf8'), /dsh-experimental-auto-review[\s\S]*?disabled": false/)
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归：no-home-dir）', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-guard-'))

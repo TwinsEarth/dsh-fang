@@ -28,7 +28,7 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
-import { EssenceManager, OFFICIAL_ESSENCE_ID, VIP_QUOTAS } from '../lib/essence.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, VIP_QUOTAS, parsePatchEntries } from '../lib/essence.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
@@ -391,7 +391,10 @@ export function apply(ctx, config) {
     const desired = desiredForkCoreMode()
     const current = normalizeCoreMode(task?.coreMode)
     // 2026-11-22：重新打开/换核前先捕获元主 Web 的最新插件设置，保证分身与元主同步。
-    if (task?.essenceId) captureEssenceRuntimeIfPresent(task.essenceId)
+    if (task?.essenceId) {
+      captureEssenceRuntimeIfPresent(task.essenceId)
+      if (task.essenceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+    }
     if (!task || (desired === current && !force)) return { ok: true, switched: false, coreMode: current || desired }
     const f = forker()
     if (!f || typeof f.provision !== 'function') return { ok: false, switched: false, coreMode: current, error: 'forker-unavailable' }
@@ -1052,6 +1055,7 @@ export function apply(ctx, config) {
         }
         if (meta.archived === true) return { ok: false, error: 'essence-archived' }
         captureEssenceRuntimeIfPresent(essenceId)
+        if (essenceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
         await essenceManager.ensureFresh(essenceId)
         const fresh = essenceManager.getMeta(essenceId)
         const mergedDir = essenceManager.mergedProfileDir(essenceId)
@@ -1120,6 +1124,8 @@ export function apply(ctx, config) {
           persist()
           return { ok: false, error: 'provision-failed', detail: provisioned.error }
         }
+        const experimentalSurface = applyOfficialExperimentalSurface(path.join(homeDir, 'profiles', profile), { coreMode })
+        if (experimentalSurface.ok === false) audit('fork-experimental-surface-failed', { taskId, error: experimentalSurface.error })
         // D2：记录加速分身的插件面同步结果（哪些映射成功、哪些不支持、哪些插件被复制）。
         if (provisioned?.accelerated?.sync) {
           task.acceleratedSync = provisioned.accelerated.sync
@@ -1863,7 +1869,10 @@ export function apply(ctx, config) {
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
       // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
       // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。
-      if (task.essenceId) captureEssenceRuntimeIfPresent(task.essenceId)
+      if (task.essenceId) {
+        captureEssenceRuntimeIfPresent(task.essenceId)
+        if (task.essenceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+      }
       let configReset = null
       if (task.essenceId) {
         try { configReset = await service.resetForkConfig(id) } catch (error) {
@@ -1883,6 +1892,9 @@ export function apply(ctx, config) {
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: coreSync.error })
         return { ok: false, error: coreSync.error, detail: coreSync.detail ?? null, taskId: id }
       }
+      // 老/空白分身重新打开时补齐官方实验性插件表面。
+      const experimentalSurface = applyOfficialExperimentalSurface(forkProfileDir, { coreMode: coreSync.coreMode })
+      if (experimentalSurface.ok === false) audit('fork-experimental-surface-failed', { taskId: id, error: experimentalSurface.error })
       const started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
@@ -2669,9 +2681,67 @@ export function apply(ctx, config) {
   // v3.0.9 三区口径：运行态 home 统一在 runtimeRoot（FANG_HOME 下是 sessions/<essenceId>/home）。
   const runtimeHomeFor = (essenceId) => path.join(layout.runtimeRoot, String(essenceId), 'home')
   /**
-   * 2026-11-22：元主/运行态 profile 声明了插件，但 node_modules 可能是旧快照，
-   * 缺包时 DSH 会报 cannot resolve profile bundle。这里只补**缺失**的顶层包。
+   * 2026-11-22：官方推荐是默认底座，任何打开/派生都必须先把它修到当前母体版本，
+   * 否则 profileUsesCurrentFangBundle 判 stale，分身会静默回退到 clean template，
+   * 实验性插件就全丢（真机截图复现）。
    */
+  const repairOfficialEssenceNow = async () => {
+    let repaired = null
+    try {
+      repaired = essenceManager.repairOfficialEssence({
+        installed: (await listInstalledPlugins()) ?? [],
+        motherProfileDir: templateDir(),
+      })
+    } catch (error) {
+      repaired = { ok: false, error: String(error?.message ?? error) }
+    }
+    let modulesSync = { copied: [], missing: [] }
+    try { modulesSync = syncProfileModulesFromMother(essenceManager.mergedProfileDir(OFFICIAL_ESSENCE_ID), templateDir()) } catch { /* best effort */ }
+    if (repaired?.ok !== true) audit('official-essence-repair-failed', { repaired })
+    return { repaired, modulesSync }
+  }
+  const applyOfficialExperimentalSurface = (profileDir, options = {}) => {
+    if (options.coreMode === 'accelerated') return { ok: true, skipped: 'accelerated-core' }
+    const dir = String(profileDir ?? '')
+    const pkgFile = path.join(dir, 'package.json')
+    const patchFile = path.join(dir, 'cordis.patch.yml')
+    if (!exists(pkgFile)) return { ok: false, error: 'profile-package-missing' }
+    const officialMerged = essenceManager.mergedProfileDir(OFFICIAL_ESSENCE_ID)
+    const officialPkg = readJson(path.join(officialMerged, 'package.json'), null)
+    if (!officialPkg) return { ok: false, error: 'official-profile-missing' }
+    const officialPatch = parsePatchEntries(
+      exists(path.join(officialMerged, 'cordis.patch.yml')) ? fs.readFileSync(path.join(officialMerged, 'cordis.patch.yml'), 'utf8') : '',
+    ).entries
+    const experimentalNames = new Set([
+      ...OFFICIAL_EXPERIMENTAL_BUNDLES,
+      ...(Array.isArray(officialPkg?.dsh?.profile?.bundles) ? officialPkg.dsh.profile.bundles : []),
+      ...officialPatch.map((entry) => String(entry?.name ?? '')),
+    ].filter((name) => /^@deepseek-ai\/(dsh-experimental-|dsh-personalized|dsh-cua-|dsh-deepseek-chat-import)/.test(name)))
+    if (experimentalNames.size === 0) return { ok: true, skipped: 'official-has-no-experimental' }
+    const pkg = readJson(pkgFile, null)
+    if (!pkg) return { ok: false, error: 'profile-package-invalid' }
+    pkg.dsh = pkg.dsh && typeof pkg.dsh === 'object' ? pkg.dsh : {}
+    pkg.dsh.profile = pkg.dsh.profile && typeof pkg.dsh.profile === 'object' ? pkg.dsh.profile : {}
+    const bundles = Array.isArray(pkg.dsh.profile.bundles) ? [...pkg.dsh.profile.bundles] : []
+    let bundlesAdded = 0
+    for (const name of experimentalNames) {
+      if (bundles.includes(name)) continue
+      bundles.push(name)
+      bundlesAdded += 1
+    }
+    pkg.dsh.profile.bundles = bundles
+    writeJsonAtomic(pkgFile, pkg)
+    const parsed = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '')
+    const entries = parsed.entries.filter((entry) => !experimentalNames.has(String(entry?.name ?? '')))
+    let rowsAdded = 0
+    for (const name of experimentalNames) {
+      const officialEntry = officialPatch.find((entry) => entry?.name === name)
+      entries.push({ id: officialEntry?.id ?? `fork-exp-${sha256(name).slice(0, 8)}`, name, disabled: false })
+      rowsAdded += 1
+    }
+    fs.writeFileSync(patchFile, `${JSON.stringify(entries, null, 2)}\n`, 'utf8')
+    return { ok: true, bundles: [...experimentalNames], bundlesAdded, rowsAdded }
+  }
   const syncProfileModulesFromMother = (profileDir, motherProfileDir) => {
     const copied = []
     const missing = []
@@ -2685,10 +2755,19 @@ export function apply(ctx, config) {
     for (const name of names) {
       if (typeof name !== 'string' || !name || name.startsWith('@local/')) continue
       const target = path.join(String(profileDir), 'node_modules', ...name.split('/'))
-      if (exists(target)) continue
       const source = path.join(motherModules, ...name.split('/'))
-      if (!exists(source)) { missing.push(name); continue }
+      if (!exists(source)) { if (!exists(target)) missing.push(name); continue }
+      // 同名包已存在时不能只看“有没有”：旧 official/fork 可能停留在旧 fang/子包版本，
+      // 必须按 package.json version 比较后替换，否则 stale bundle 永远修不好。
+      let sameVersion = false
+      if (exists(target)) {
+        const targetPkg = readJson(path.join(target, 'package.json'), {}) ?? {}
+        const sourcePkg = readJson(path.join(source, 'package.json'), {}) ?? {}
+        sameVersion = Boolean(sourcePkg.version) && sourcePkg.version === targetPkg.version
+        if (sameVersion) continue
+      }
       try {
+        if (exists(target)) removeTree(target)
         ensureDir(path.dirname(target))
         copyTree(source, target)
         copied.push(name)
@@ -2910,18 +2989,13 @@ export function apply(ctx, config) {
       const existing = existingId ? essenceManager.getMeta(existingId) : null
       const isAutoDefault = (meta) => Boolean(meta) && meta.official !== true
         && String(meta.name ?? '').startsWith(DEFAULT_ESSENCE_NAME)
-      // 用户自己选的默认元宝（非自动“默认元宝”快照）保持不动。
-      if (existing?.id && !isAutoDefault(existing)) {
-        return { ok: true, existed: true, created: false, official: existing.official === true, essenceId: existingId, mode }
-      }
-      // 2026-11-22：保底一个「开发者推荐（官方）」，不再无限新增“默认元宝”快照。
-      const official = essenceManager.getMeta(OFFICIAL_ESSENCE_ID)
-      if (official?.id && official.archived !== true) {
+      // 2026-11-22：官方推荐是唯一保底默认元宝；即使它已经是 default，也要每次启动重算
+      // （否则旧 official overlay 会停在旧 fang 版本，分身派生时被判 stale 回退到 clean template，
+      //  实验性插件就全部丢失）。
+      const repairOfficialDefault = async () => {
         if (apply !== true) {
           return { ok: true, dryRun: true, official: true, existed: true, created: false, essenceId: OFFICIAL_ESSENCE_ID, mode }
         }
-        // 2026-11-22：官方推荐 = 固定推荐清单 + 全部已安装实验性插件默认开启；
-        // 依赖/bundles 跟随当前母体（修复旧快照缺 2xray 等包的问题）。
         let repaired = null
         try {
           repaired = essenceManager.repairOfficialEssence({
@@ -2943,6 +3017,14 @@ export function apply(ctx, config) {
         audit('default-essence-official', { essenceId: OFFICIAL_ESSENCE_ID, archivedDuplicates, repaired, modulesSync })
         return { ok: true, existed: true, created: false, official: true, essenceId: OFFICIAL_ESSENCE_ID, mode, archivedDuplicates, repaired, modulesSync }
       }
+      if (existing?.official === true) return repairOfficialDefault()
+      // 用户自己选的默认元宝（非官方、非自动快照）保持不动。
+      if (existing?.id && !isAutoDefault(existing)) {
+        return { ok: true, existed: true, created: false, official: false, essenceId: existingId, mode }
+      }
+      // 2026-11-22：保底一个「开发者推荐（官方）」，不再无限新增“默认元宝”快照。
+      const official = essenceManager.getMeta(OFFICIAL_ESSENCE_ID)
+      if (official?.id && official.archived !== true) return repairOfficialDefault()
       const entries = await listInstalledPlugins()
       const plan = planDefaultEssence(entries ?? [])
       const userEssences = essenceManager.list().filter((meta) => meta.official !== true)
@@ -3114,6 +3196,7 @@ export function apply(ctx, config) {
       } catch (error) {
         capture = { ok: false, captured: false, error: 'capture-threw', detail: String(error?.message ?? error) }
       }
+      if (id === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
       await essenceManager.ensureFresh(id)
       const merged = essenceManager.mergedProfileDir(id)
       if (!exists(merged)) throw new Error('merged-profile-missing')

@@ -82,10 +82,12 @@ test('official essence: 推荐清单 install/enable 与实验性插件默认开�
     ],
   })
   assert.equal(repaired.ok, true)
-  assert.equal(repaired.experimental, 2)
+  assert.equal(repaired.experimental, 15)
   const merged = parsePatchEntries(fs.readFileSync(path.join(manager.mergedProfileDir(OFFICIAL_ESSENCE_ID), 'cordis.patch.yml'), 'utf8')).entries
   assert.ok(merged.some(entry => entry.name === '@deepseek-ai/dsh-experimental-forge-bundle' && entry.disabled !== true))
-  assert.ok(merged.some(entry => entry.name === '@deepseek-ai/dsh-experimental-auto-review' && entry.disabled !== true))
+  assert.ok(merged.some(entry => entry.name === '@deepseek-ai/dsh-personalized-recommendations' && entry.disabled !== true))
+  assert.ok(merged.some(entry => entry.name === '@deepseek-ai/dsh-cua-bundle' && entry.disabled !== true))
+  assert.ok(merged.some(entry => entry.name === '@deepseek-ai/dsh-deepseek-chat-import' && entry.disabled !== true))
   assert.ok(merged.some(entry => entry.name === 'dshmarket' && entry.disabled === true))
   assert.ok(merged.some(entry => entry.name === '@twinsearth/dsh-im2a-plugin' && entry.disabled === true))
   assert.ok(merged.some(entry => entry.name === '@openviking/dsh-memory-plugin' && entry.disabled !== true))
