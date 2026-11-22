@@ -1097,6 +1097,8 @@ function applyForkExperimentalSurface(profileDir) {
     pkg.dsh = pkg.dsh && typeof pkg.dsh === 'object' ? pkg.dsh : {}
     pkg.dsh.profile = pkg.dsh.profile && typeof pkg.dsh.profile === 'object' ? pkg.dsh.profile : {}
     const bundles = Array.isArray(pkg.dsh.profile.bundles) ? [...pkg.dsh.profile.bundles] : []
+    pkg.dependencies = pkg.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
+    pkg.dependencies[NODE_COMPAT_BUNDLE] = '^0.1.0'
     if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     for (const name of OFFICIAL_EXPERIMENTAL_BUNDLES) if (!bundles.includes(name)) bundles.push(name)
     pkg.dsh.profile.bundles = bundles

@@ -648,6 +648,8 @@ export class EssenceManager {
     // 2026-11-22：把 fang 放到 base/web 之后、实验性 bundle 之前。experimental-inspector
     // 会在加载时观察 globalThis.fetch；fang 的 node-compat 必须先运行，否则 Node 26 直接报
     // "fetch is an accessor and cannot be observed safely"。
+    overlay.packageJson.dependencies = overlay.packageJson.dependencies && typeof overlay.packageJson.dependencies === 'object' ? overlay.packageJson.dependencies : {}
+    overlay.packageJson.dependencies[NODE_COMPAT_BUNDLE] = '^0.1.0'
     if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     const fangIndex = bundles.indexOf('@twinsearth/fang-dsh-plugin')
     if (fangIndex > 2) {

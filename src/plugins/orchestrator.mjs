@@ -1931,9 +1931,9 @@ export function apply(ctx, config) {
       try { configReset = await service.resetForkConfig(id) } catch (error) {
         configReset = { ok: false, error: String(error?.message ?? error) }
       }
-      // 还原前强制单会话（多余会话移到 quarantine，不删除），再做配置重置后的启动。
-      let sessionGuard = null
-      try { sessionGuard = applyForkSessionGuard(task) } catch { sessionGuard = { ok: false } }
+      // EB-01 防线：restore 绝不再搬移用户会话。超额只保留 violation 警告；
+      // 只有用户显式 enforce/归档动作才允许移动（见 docs/ERROR-BOOK.md EB-01）。
+      const sessionGuard = { ok: true, skipped: 'restore-never-moves-sessions', violation: Boolean(task.sessions?.violation) }
       // 开关不是热更新：重新打开分身时按当前开关换核（重新 provision profile；会话目录不动）。
       // resetForkConfig 刚把 profile 重置回 stock 形状；即使 coreMode 未变也必须强制 reprovision，
       // 否则加速分身会以 stock 配置 + accelerated CLI 启动而永远不 ready（2026-11-22 实测 timeout）。
@@ -2819,6 +2819,8 @@ export function apply(ctx, config) {
       bundles.push(name)
       bundlesAdded += 1
     }
+    pkg.dependencies = pkg.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
+    pkg.dependencies[NODE_COMPAT_BUNDLE] = '^0.1.0'
     if (!bundles.includes(NODE_COMPAT_BUNDLE)) bundles.unshift(NODE_COMPAT_BUNDLE)
     pkg.dsh.profile.bundles = bundles
     writeJsonAtomic(pkgFile, pkg)
