@@ -53,11 +53,14 @@ test('official essence: 默认插件条目写入 overlay 并出现在 merged pro
   )
   const mergedPatch = fs.readFileSync(path.join(manager.mergedProfileDir(OFFICIAL_ESSENCE_ID), 'cordis.patch.yml'), 'utf8')
   const merged = parsePatchEntries(mergedPatch)
-  assert.ok(merged.entries.some(entry => entry.name === 'dshmarket' && entry.disabled !== true))
-  assert.ok(merged.entries.some(entry => entry.name === '@twinsearth/dsh-fang' && entry.disabled === true), 'dsh-fang 只安装不激活')
+  assert.ok(merged.entries.some(entry => entry.name === 'dshmarket' && entry.disabled === true), 'dshmarket 只安装不激活')
+  assert.ok(merged.entries.some(entry => entry.name === '@xmanrui/dsh-im' && entry.disabled === true))
+  assert.ok(merged.entries.some(entry => entry.name === '@twinsearth/dsh-master' && entry.disabled === true))
   assert.ok(merged.entries.some(entry => entry.name === '@twinsearth/dsh-2xray' && entry.disabled === true))
   assert.ok(merged.entries.some(entry => entry.name === '@twinsearth/dsh-im2a-plugin' && entry.disabled === true), 'im2a 只安装不激活')
   assert.ok(merged.entries.some(entry => entry.name === '@liustack/modsearch' && entry.disabled === true))
+  assert.ok(merged.entries.some(entry => entry.name === '@twinsearth/ai-prison-dsh-plugin' && entry.disabled !== true))
+  assert.ok(merged.entries.some(entry => entry.name === '@openviking/dsh-memory-plugin' && entry.disabled !== true))
   assert.equal(
     merged.entries.filter(entry => entry.disabled === true).length,
     DEFAULT_OFFICIAL_PATCH_ENTRIES.filter(entry => entry.disabled === true).length,
@@ -83,7 +86,7 @@ test('official essence: 推荐清单 install/enable 与实验性插件默认开�
   const merged = parsePatchEntries(fs.readFileSync(path.join(manager.mergedProfileDir(OFFICIAL_ESSENCE_ID), 'cordis.patch.yml'), 'utf8')).entries
   assert.ok(merged.some(entry => entry.name === '@deepseek-ai/dsh-experimental-forge-bundle' && entry.disabled !== true))
   assert.ok(merged.some(entry => entry.name === '@deepseek-ai/dsh-experimental-auto-review' && entry.disabled !== true))
-  assert.ok(merged.some(entry => entry.name === '@twinsearth/dsh-fang' && entry.disabled === true))
+  assert.ok(merged.some(entry => entry.name === 'dshmarket' && entry.disabled === true))
   assert.ok(merged.some(entry => entry.name === '@twinsearth/dsh-im2a-plugin' && entry.disabled === true))
   assert.ok(merged.some(entry => entry.name === '@openviking/dsh-memory-plugin' && entry.disabled !== true))
   // 再修一次幂等：不应重复插入实验性/推荐条目

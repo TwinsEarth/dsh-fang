@@ -1202,6 +1202,8 @@ test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）'
       return [
         { id: 'p-2xray', name: '@twinsearth/dsh-2xray' },
         { id: 'p-market', name: 'dshmarket' },
+        { id: 'p-ai-prison', name: '@twinsearth/ai-prison-dsh-plugin' },
+        { id: 'p-w2m', name: '@twinsearth/w2m-dsh-plugin' },
       ]
     },
   }
@@ -1230,7 +1232,8 @@ test('orchestrator: 默认元宝（计划/创建/快速派生默认使用它）'
     const preset = await mirror.defaultPreset()
     assert.equal(preset.plan.groups.length, 2)
     assert.equal(preset.plan.groups[0].plugins.find((item) => item.spec === '@twinsearth/dsh-2xray').installed, true)
-    assert.equal(preset.plan.groups[1].plugins.find((item) => item.spec === 'dshmarket').installed, true)
+    assert.equal(preset.plan.groups[0].plugins.find((item) => item.spec === 'dshmarket').installed, true)
+    assert.equal(preset.plan.groups[1].plugins.find((item) => item.spec === '@twinsearth/ai-prison-dsh-plugin').installed, true)
 
     const dry = await mirror.ensureDefaultEssence({ apply: false })
     assert.equal(dry.dryRun, true)

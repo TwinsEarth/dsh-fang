@@ -38,17 +38,19 @@ export const OFFICIAL_ESSENCE_NAME = '开发者推荐（官方）'
 export const OFFICIAL_ESSENCE_MIN_TIER = 'vip100'
 /** 官方推荐原身预装的默认插件条目（v3.0.7：自定义清单，安装≠激活）。 */
 export const DEFAULT_OFFICIAL_PATCH_ENTRIES = Object.freeze([
-  // 安装但不激活
-  Object.freeze({ id: 'official-2xray', name: '@twinsearth/dsh-2xray', disabled: true }),
-  Object.freeze({ id: 'official-fang', name: '@twinsearth/dsh-fang', disabled: true }),
-  Object.freeze({ id: 'official-agency-agents', name: '@michengai/dsh-agency-agents', disabled: true }),
+  // 安装但不激活（用户 2026-11-22 更新清单）
   Object.freeze({ id: 'official-better-sidebar', name: 'dsh-better-sidebar', disabled: true }),
   Object.freeze({ id: 'official-context', name: 'dsh-context', disabled: true }),
+  Object.freeze({ id: 'official-dshmarket', name: 'dshmarket', disabled: true }),
+  Object.freeze({ id: 'official-xmanrui-im', name: '@xmanrui/dsh-im', disabled: true }),
+  Object.freeze({ id: 'official-2xray', name: '@twinsearth/dsh-2xray', disabled: true }),
+  Object.freeze({ id: 'official-master', name: '@twinsearth/dsh-master', disabled: true }),
+  Object.freeze({ id: 'official-agency-agents', name: '@michengai/dsh-agency-agents', disabled: true }),
   Object.freeze({ id: 'official-im2a', name: '@twinsearth/dsh-im2a-plugin', disabled: true }),
   Object.freeze({ id: 'official-modlens', name: '@liustack/modlens', disabled: true }),
   Object.freeze({ id: 'official-modsearch', name: '@liustack/modsearch', disabled: true }),
   // 安装并激活
-  Object.freeze({ id: 'official-dshmarket', name: 'dshmarket', disabled: false }),
+  Object.freeze({ id: 'official-ai-prison', name: '@twinsearth/ai-prison-dsh-plugin', disabled: false }),
   Object.freeze({ id: 'official-openviking-memory', name: '@openviking/dsh-memory-plugin', disabled: false }),
   Object.freeze({ id: 'official-w2m', name: '@twinsearth/w2m-dsh-plugin', disabled: false }),
 ])
