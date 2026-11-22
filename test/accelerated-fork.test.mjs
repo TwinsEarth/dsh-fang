@@ -178,7 +178,9 @@ test('2026-11-22: unknown stock event types are marked ignorable for the acceler
   const team = JSON.stringify({ type: 'team/mode', seq: 1, data: { mode: 'team' } })
   const user = JSON.stringify({ type: 'user/message', seq: 2, data: { content: [{ type: 'text', text: 'hi' }] } })
   fs.writeFileSync(file, Buffer.concat([header, team, user].map((line) => zlib.zstdCompressSync(Buffer.from(`${line}\n`, 'utf8')))))
-  const out = downgradeSubagentCatalogLog(file, { knownEventTypes: new Set(['session', 'user/message']) })
+  // Header event type is deliberately absent from `known`: the old sanitizer marked it
+  // ignorable too, changed the protected header frame, and aborted every repair.
+  const out = downgradeSubagentCatalogLog(file, { knownEventTypes: new Set(['user/message']) })
   assert.equal(out.ok, true)
   assert.equal(out.markedIgnorable, 1)
   const decoded = fs.readFileSync(file).toString('binary')

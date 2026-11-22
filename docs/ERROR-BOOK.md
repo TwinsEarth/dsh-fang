@@ -206,3 +206,14 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 - `tools/repair-profile-node-compat.mjs` 用 `tasklist` 检测 `DeepSeek Harness.exe`，存活直接 REFUSED；
 - 任何手工验收都先 `Get-Process 'DeepSeek Harness'`，确认无进程才写。
 **教训**：安装态是共享层；只允许「停宿主 → 部署 → 启动」。
+
+## EB-16 · 2026-11-22 · 加速核 team/mode 修复被“header-frame-changed”静默中止
+
+**现象**：切到“分身 Core 加速引擎”后历史加载失败：`team/mode (seq 9220) unknown ... not marked ignorable`；会话看似丢失。
+**根因**：加速核 3.5.0 不识别 stock DSH 的 `team/mode`；旧 sanitizer 把**所有** unknown（包括 header 帧里的 `session`）都标 `ignorable`，随后 header 校验失败返回 `header-frame-changed`，整个修复被放弃，日志保持未标记。
+**证据**：`accelerated-fork.mjs` sanitize 结果 `changedEvents:0, files:[...error:header-frame-changed]`；原始日志 2 条 `team/mode` 未带 ignorable。
+**修复**：
+- 只标记明确的新事件类型（`team/mode`、`team/task`、`team/status`、`deliverables/presented`），绝不改 header/已知事件；
+- 修复后对现有会话执行：2 条 `team/mode` → `ignorable:true`，header 字节不变，备份 `.bak-catalogv3-*`；
+- 回归测试把 header 类型从 known 集合移除，仍必须 `ok:true` 且只标 1 条 team/mode。
+**教训**：修复“未知事件”不能碰 header 帧；sanitize 的 header 校验失败必须升级为错误，而不是静默返回。
