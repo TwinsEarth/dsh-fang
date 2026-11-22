@@ -1174,6 +1174,27 @@ test('orchestrator: 官方实验性插件同步进官方派生与模板分身（
   }
 })
 
+test('orchestrator: 部署 API 在宿主存活时返回 409（拒绝热替换）', async () => {
+  const webServer = makeWebServerStub()
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-deploy-guard-'))
+  const ctx = makeCtx({ services: { [SERVICE.forker]: makeFakeForker(), webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const res = makeRes()
+    const route = webServer.find('GET', '/fang/api/deploy/guard')
+    await route.handler(makeReq(undefined, 'GET'), res)
+    assert.equal(res.statusCode, 409)
+    assert.equal(res.json().error, 'host-running')
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
 test('orchestrator: 打开元主必须带着 homeDir/profile 调 spawn（回归：no-home-dir）', async () => {
   const webServer = makeWebServerStub()
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-rt-guard-'))

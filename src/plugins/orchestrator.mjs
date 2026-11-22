@@ -22,6 +22,7 @@ import {
 import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSessionTitle, encodeWorkspaceKey } from '../lib/session-format.mjs'
 import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-store.mjs'
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
+import { installWatchGuard } from '../lib/watch-guard.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
@@ -373,6 +374,12 @@ export function apply(ctx, config) {
   const cfg = { ...Config({}), ...(config ?? {}) }
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
+  // 2026-11-22：宿主 watcher EPERM 不应杀死整个 DSH host。在加载业务插件前安装
+  // fs.watch error 降级层（止损；上游仍应修复 watcher error 处理）。
+  try {
+    const watchGuard = installWatchGuard({ logger: ctx.logger })
+    if (watchGuard.ok === true && watchGuard.already !== true) ctx.logger?.info?.('[fang] fs.watch error guard installed')
+  } catch { /* guard 失败不阻塞插件加载 */ }
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
@@ -4396,6 +4403,17 @@ export function apply(ctx, config) {
         return json(res, 400, { ok: false, error: 'bad-source', allowed: ['mother', 'fork'] })
       })
 
+      route('POST', `${prefix}/api/deploy`, async (_req, res) => json(res, 409, {
+        ok: false,
+        error: 'host-running',
+        detail: '宿主存活时禁止部署/热替换母体 profile；请先退出 DSH Desktop，使用 tools/release/deploy-profile.mjs。',
+      }))
+      route('GET', `${prefix}/api/deploy/guard`, async (_req, res) => json(res, 409, {
+        ok: false,
+        error: 'host-running',
+        detail: '当前进程就是 DSH host；任何部署请求都必须由外部工具在 host 停止后执行。',
+        pid: process.pid,
+      }))
       route('POST', `${prefix}/api/tasks/create`, async (req, res) => {
         const body = await readBody(req)
         try {
