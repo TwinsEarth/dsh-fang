@@ -23,6 +23,7 @@ import { parseWorkspaceIndex, scanSessionDirs, readBoundedEvents, extractSession
 import { ensureEssenceRuntimePnpmConfig, readNodeLinker } from '../lib/pnpm-store.mjs'
 import { captureRuntimeProfileIntoEssence } from '../lib/runtime-capture.mjs'
 import { installWatchGuard } from '../lib/watch-guard.mjs'
+import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
 import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/mother-link.mjs'
@@ -571,6 +572,22 @@ export function apply(ctx, config) {
   }
   const forker = () => safeGet(SERVICE.forker)
   const cliPath = () => (cfg.cliPath ? cfg.cliPath : resolveCliPath('', process.env))
+  const forkTempEnv = (taskId) => {
+    const tmp = path.join(layout.forkHomesDir, String(taskId), 'tmp')
+    try { ensureDir(tmp) } catch { /* best effort */ }
+    return { TEMP: tmp, TMP: tmp }
+  }
+  // P2：每个版本一份不可变安装快照；stock 分身使用自己的快照 CLI，母体安装升级/替换
+  // 不会改变运行中分身解析到的 app.asar/runtime。快照创建失败时显式回退共享安装。
+  let installSnapshotMemo = null
+  const forkCliPath = () => {
+    if (installSnapshotMemo) return installSnapshotMemo.cliPath
+    const result = ensureInstallSnapshot({ cliPath: cliPath(), version: FANG_VERSION })
+    installSnapshotMemo = result
+    if (result.ok !== true) audit('fork-install-snapshot-failed', { error: result.error ?? 'unknown' })
+    else audit('fork-install-snapshot-ready', { root: result.root, created: result.created })
+    return result.ok === true ? result.cliPath : cliPath()
+  }
   // The booted profile's own directory is authoritative (launcher sets DSH_PROFILE_DIR);
   // resolving "$DSH_HOME/profiles/<tag>" from argv can point at a template that never existed.
   // 分身模板必须来自一个**真的装了本 bundle** 的 profile；否则分身的 node_modules junction
@@ -1238,9 +1255,9 @@ export function apply(ctx, config) {
           homeDir,
           profile,
           // 加速档只解析加速核入口；stock 母体 CLI 绝不能传入（v3.5.2 起会误判/失败）。
-          ...(coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+          ...(coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
           coreMode,
-          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir },
+          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(taskId) },
         })
         if (!started || started.ok === false) {
           task.status = TASK_STATUS.FAILED
@@ -1906,9 +1923,9 @@ export function apply(ctx, config) {
         forkId: id,
         homeDir: task.homeDir,
         profile: task.profile,
-        ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+        ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
         coreMode: coreSync.coreMode,
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
       })
       if (!started || started.ok === false) {
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
@@ -2056,9 +2073,9 @@ export function apply(ctx, config) {
             forkId: id,
             homeDir: task.homeDir,
             profile: task.profile,
-            ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: cliPath() }),
+            ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
             coreMode: coreSync.coreMode,
-            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir },
+            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
           })
         } catch (error) {
           started = { ok: false, error: String(error?.message ?? error) }
@@ -3303,7 +3320,7 @@ export function apply(ctx, config) {
         coreMode: 'stock',
         // v3.1.16：原身运行态同样需要母体 dataDir，房主 Router 才能零配置推导
         // 契约 file 桥（contract-outbox）；普通分身在 846/1461/1534 行已有同名注入。
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir },
+        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: forkId, DSH_FANG_ESSENCE: '1', DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(forkId) },
       })
       if (!started.ok) {
         // v3.1.33：把真实 errno 与启动规格带进错误信息，避免只剩一个笼统的 spawn-error。
