@@ -1,3 +1,28 @@
+## v3.7.7（2026-11-23）
+
+**主题：仓库改名 + Vault 对话框修复**
+
+### 修复
+
+- **分身标签栏「导入/导出」点击无反应**：DSH Desktop 的 Electron webview 不实现 `window.prompt()`；旧代码拿到 `null` 后直接 return，用户看不到任何弹窗。改为应用内对话框：
+  - 导出：目标文件夹输入 + 「同时打包工作区项目文件」复选框（默认不勾）；
+  - 导入：导出包文件夹输入；
+  - 支持 Enter/Esc/遮罩取消。
+- 新增回归：禁止 `window.prompt`，必须存在 `vaultDialog` 与 `/fang/api/vault/*` 调用。
+
+### 仓库改名
+
+- GitHub：`TwinsEarth/dsh-fang` → **`TwinsEarth/fang-dsh-plugin`**（旧地址 301 重定向）。
+- `package.json` / `build.mjs` / `healthz` / release 工具 / Docker / README / AGENTS 的 canonical URL 已更新。
+- 插件市场目录另提交：新条目 `TwinsEarth/fang-dsh-plugin`，旧条目移除（外部审核）。
+
+### 门禁（发布前回填）
+
+- tests: pass=1331 fail=0 skip=2
+- e2e: 125/125
+- routes: 89（allowlist 0） / plugins: 16
+- preflight: GREEN
+
 ## v3.7.6（2026-11-22）
 
 **主题：加速核 team/mode 历史兼容**

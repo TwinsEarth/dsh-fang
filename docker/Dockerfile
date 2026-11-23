@@ -4,7 +4,7 @@ FROM node:24-alpine
 
 LABEL org.opencontainers.image.title="dsh-fang-healthz" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
-      org.opencontainers.image.source="https://github.com/TwinsEarth/dsh-fang"
+      org.opencontainers.image.source="https://github.com/TwinsEarth/fang-dsh-plugin"
 
 WORKDIR /app
 ENV NODE_ENV=production PORT=8080

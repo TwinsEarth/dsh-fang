@@ -84,7 +84,7 @@ tools/** 必要 CLI, docs 选定文档, locale, icon, licenses, sdk, defaults ..
 ## 6. 复核命令（任何人可重跑）
 
 ```powershell
-git clone https://github.com/TwinsEarth/dsh-fang.git
+git clone https://github.com/TwinsEarth/fang-dsh-plugin.git
 cd dsh-fang
 git checkout v3.7.6
 node tools/release/build.mjs --skip-preflight

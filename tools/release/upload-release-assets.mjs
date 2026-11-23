@@ -11,7 +11,7 @@
 //
 // 用法：
 //   GH_TOKEN=xxx node tools/release/upload-release-assets.mjs --tag v3.1.25
-//   （可选）--repo owner/name   默认取 GH_REPOSITORY 或 TwinsEarth/dsh-fang
+//   （可选）--repo owner/name   默认取 GH_REPOSITORY 或 TwinsEarth/fang-dsh-plugin
 //   （可选）--dist dist         默认 dist
 //   （可选）--dry-run           只打印将要做的事
 import fs from 'node:fs'
@@ -25,7 +25,7 @@ const flag = (name, fallback = '') => {
 const has = (name) => args.includes(name)
 
 const TAG = flag('--tag', String(process.env.RELEASE_TAG ?? '').trim())
-const REPO = flag('--repo', String(process.env.GH_REPOSITORY ?? 'TwinsEarth/dsh-fang').trim())
+const REPO = flag('--repo', String(process.env.GH_REPOSITORY ?? 'TwinsEarth/fang-dsh-plugin').trim())
 const DIST = flag('--dist', 'dist')
 const DRY = has('--dry-run')
 const TOKEN = String(process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? '').trim()
