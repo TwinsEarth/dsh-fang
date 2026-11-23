@@ -2829,13 +2829,82 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         void loadEssenceDetail()
       }
 
+      /**
+       * Electron webview does not implement the native prompt(); using it makes
+       * 导出/导入 look completely dead. Use an in-app dialog instead.
+       */
+      function vaultDialog({ title, label, defaultValue = '', withWorkspace = false }) {
+        return new Promise((resolve) => {
+          const overlay = document.createElement('div')
+          overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px'
+          const box = document.createElement('div')
+          box.style.cssText = 'width:min(560px,100%);background:var(--f-surface,#fff);color:var(--f-text,#111);border:1px solid var(--f-line,#d0d7de);border-radius:12px;padding:18px;box-shadow:0 18px 60px rgba(0,0,0,.25);font:14px/1.5 system-ui,sans-serif'
+          const heading = document.createElement('div')
+          heading.textContent = title
+          heading.style.cssText = 'font-weight:700;font-size:16px;margin-bottom:12px'
+          const hint = document.createElement('div')
+          hint.textContent = label
+          hint.style.cssText = 'font-size:12.5px;opacity:.8;margin-bottom:8px'
+          const input = document.createElement('input')
+          input.type = 'text'
+          input.value = defaultValue
+          input.placeholder = 'D:\\backup\\fang'
+          input.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--f-line,#d0d7de);border-radius:8px;background:transparent;color:inherit;font:inherit'
+          const workspaceLine = document.createElement('label')
+          workspaceLine.style.cssText = 'display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:12.5px'
+          const workspace = document.createElement('input')
+          workspace.type = 'checkbox'
+          workspace.checked = false
+          const workspaceText = document.createElement('span')
+          workspaceText.textContent = '同时打包工作区项目文件（默认不勾选；项目很大时会明显变慢）'
+          workspaceLine.append(workspace, workspaceText)
+          const actions = document.createElement('div')
+          actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:16px'
+          const cancel = document.createElement('button')
+          cancel.type = 'button'
+          cancel.textContent = '取消'
+          cancel.style.cssText = 'padding:7px 14px;border:1px solid var(--f-line,#d0d7de);border-radius:7px;background:transparent;color:inherit;cursor:pointer'
+          const ok = document.createElement('button')
+          ok.type = 'button'
+          ok.textContent = '确定'
+          ok.style.cssText = 'padding:7px 14px;border:0;border-radius:7px;background:#2563eb;color:#fff;cursor:pointer'
+          actions.append(cancel, ok)
+          box.append(heading, hint, input)
+          if (withWorkspace) box.append(workspaceLine)
+          box.append(actions)
+          overlay.append(box)
+          const close = (value) => {
+            overlay.remove()
+            document.removeEventListener('keydown', onKey)
+            resolve(value)
+          }
+          const onKey = (event) => {
+            if (event.key === 'Escape') close(null)
+            if (event.key === 'Enter' && document.activeElement === input) close({ value: input.value.trim(), workspace: workspace.checked })
+          }
+          cancel.addEventListener('click', () => close(null))
+          ok.addEventListener('click', () => close({ value: input.value.trim(), workspace: workspace.checked }))
+          overlay.addEventListener('click', (event) => { if (event.target === overlay) close(null) })
+          document.addEventListener('keydown', onKey)
+          document.body.appendChild(overlay)
+          input.focus()
+          input.select()
+        })
+      }
+
       async function exportTask(task) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) return
         const fallback = localStorage.getItem('fang.exportDir') || ''
-        const destDir = window.prompt('导出到文件夹（绝对路径；不存在会自动创建）', fallback)
-        if (!destDir) return
-        const workspace = window.confirm('是否同时打包工作区项目文件？\n\n默认「取消」= 只导出会话/附件/配置/日志。\n项目很大时会明显变慢。')
+        const answer = await vaultDialog({
+          title: '导出分身',
+          label: '导出到文件夹（绝对路径；不存在会自动创建）',
+          defaultValue: fallback,
+          withWorkspace: true,
+        })
+        if (!answer?.value) return
+        const destDir = answer.value
+        const workspace = answer.workspace === true
         localStorage.setItem('fang.exportDir', destDir)
         const result = await api('/fang/api/vault/export', { method: 'POST', body: JSON.stringify({ taskId, destDir, options: { workspace, workspaceSnapshot: workspace } }) })
         if (result.status === 200 && result.body?.ok) {
@@ -2846,8 +2915,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       }
 
       async function importTask() {
-        const sourceDir = window.prompt('选择分身导出包文件夹（包含 manifest.json 的那一层）', localStorage.getItem('fang.importDir') || '')
-        if (!sourceDir) return
+        const answer = await vaultDialog({
+          title: '导入分身',
+          label: '选择导出包文件夹（包含 manifest.json 的那一层）',
+          defaultValue: localStorage.getItem('fang.importDir') || '',
+        })
+        if (!answer?.value) return
+        const sourceDir = answer.value
         localStorage.setItem('fang.importDir', sourceDir)
         const result = await api('/fang/api/vault/import', { method: 'POST', body: JSON.stringify({ sourceDir }) })
         if (result.status === 200 && result.body?.ok) {

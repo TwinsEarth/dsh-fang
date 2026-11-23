@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 // 2026-11-22：母体面板「分身状态栏」= 4 态（运行中/等待启动/已停止/故障）+ 2 操作（启动/一键修复）。
 import test from 'node:test'
@@ -28,6 +28,13 @@ test('failed fork renders waiting, crashed stays red', () => {
   assert.match(client, /if \(phase === 'failed'\) \{ tone = 'warn'; label = '等待启动' \}/)
   assert.match(client, /else if \(phase === 'crashed'\) \{ tone = 'bad'; label = '已崩溃' \}/)
   assert.doesNotMatch(client, /phase === 'failed' \|\| phase === 'crashed'\) \{ tone = 'bad'/)
+})
+
+test('Vault actions use an in-app dialog, not Electron-unsupported window.prompt', () => {
+  assert.match(client, /function vaultDialog\(/)
+  assert.doesNotMatch(client, /window\.prompt\(/)
+  assert.match(client, /\/fang\/api\/vault\/export/)
+  assert.match(client, /\/fang\/api\/vault\/import/)
 })
 
 test('repair endpoint + service are wired (no new dependency)', () => {

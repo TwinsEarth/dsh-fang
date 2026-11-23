@@ -1,4 +1,4 @@
-[![CI](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml/badge.svg)](https://github.com/TwinsEarth/dsh-fang/actions/workflows/ci.yml)
+[![CI](https://github.com/TwinsEarth/fang-dsh-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/TwinsEarth/fang-dsh-plugin/actions/workflows/ci.yml)
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1-4D6BFE?logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE-CORE)
 [![SDK: MIT](https://img.shields.io/badge/SDK-MIT-green.svg)](LICENSE-SDK)
@@ -71,7 +71,7 @@
 ## 快速开始
 
 ```powershell
-git clone https://github.com/TwinsEarth/dsh-fang.git && cd dsh-fang
+git clone https://github.com/TwinsEarth/fang-dsh-plugin.git && cd dsh-fang
 
 # 1. 离线自检（不修改任何东西）
 node tools/fangctl.mjs doctor

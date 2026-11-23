@@ -4,7 +4,7 @@
   "generated_at": "2026-11-05",
   "status": "planning-only（未提交、未推 main、未打 tag、未发布）",
   "baseline": {
-    "repo": "TwinsEarth/dsh-fang",
+    "repo": "TwinsEarth/fang-dsh-plugin",
     "head": "d3e2989",
     "branch": "feat/upgrade-coordinator",
     "describe": "v3.0.7-8-gd3e2989",

@@ -66,7 +66,7 @@ if (remote) {
   add('remote: npm package published', npm.status === 200 && npm.data?.version === manifest.version,
     `status=${npm.status} version=${npm.data?.version ?? '(none)'} attempts=${npm.attempts}`)
 
-  const gh = await retryHttpJson('https://api.github.com/repos/TwinsEarth/dsh-fang/releases/tags/v' + manifest.version, {
+  const gh = await retryHttpJson('https://api.github.com/repos/TwinsEarth/fang-dsh-plugin/releases/tags/v' + manifest.version, {
     ...backoff,
     predicate: (r) => r.status === 200,
   })
