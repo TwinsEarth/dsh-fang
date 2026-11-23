@@ -23,7 +23,7 @@
 
 ### 1. 唯一项目：瓮城 dsh-fang
 
-- 仓库：`TwinsEarth/dsh-fang`
+- 仓库：`TwinsEarth/fang-dsh-plugin`
 - 主检出目录：本文件所在目录（`dsh-fang` 仓库根）
 - 开发工作树：仓库的 `.tmp/fang-*` 临时检出（以实际任务为准；工作树不是另一个项目）
 - 允许：开发、测试、修缺陷、构建、三方发布（npm / GitHub Release / tag / PR）、子插件
