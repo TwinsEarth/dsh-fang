@@ -3657,7 +3657,15 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
                 else notify('bad', '解除 Safe Mode 失败', out.body?.error || '')
               }, fk: 'safe-mode-reset',
             })
-            : null,
+            : button('释放全部内存', {
+              variant: 'danger-quiet', size: 'sm',
+              title: '全局 Panic：关闭所有托管浏览器 → 停所有分身 → 清 PID/token → 全部隔离 → Safe Mode',
+              onClick: async () => {
+                const out = await api('/fang/api/panic', { method: 'POST', body: '{}' })
+                if (out.status === 200) { notify('warn', '已触发全局 Panic', '浏览器与分身已关闭；当前处于 Safe Mode。'); void refresh() }
+                else notify('bad', 'Panic 失败', out.body?.error || '')
+              }, fk: 'host-panic',
+            }),
           restart?.available && restart.redLineAutoAllowed
             ? chip('warn', '红灯自动放行', {
               title: 'strictRedLine=false：auto 授权模式下红灯可被策略自动放行。这只到决策层；execution.executed 恒为 false，真正重启仍由外部 supervisor 的 armed 清单决定。',
@@ -4563,6 +4571,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
             task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
+            task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）；只有重启该分身或 DSH 母体才能恢复` }) : null,
+            task.memoryGuard ? chip('warn', '内存保护关闭', { title: `关闭原因：${task.memoryGuard.reason || 'guard'}；PID ${task.memoryGuard.pid ?? '—'}；会话 home 保留，可重新打开` }) : null,
             task.sessions?.violation ? chip('warn', `会话 ${task.sessions.count}/${task.sessions.max} 超限`, { title: '分身会话超过上限；打开/修复不会再自动搬移，需手动归档或 enforce' }) : null,
             task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },

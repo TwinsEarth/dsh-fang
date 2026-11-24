@@ -1,3 +1,45 @@
+## v3.8.1（2026-11-24）
+**主题：修复 v3.8.0 sidecar 拉起第二宿主；关闭链路与宿主红线加固**
+
+### 紧急修复
+
+- **v3.8.0 严重回归**：看门狗用 `process.execPath` 启动 sidecar；打包宿主是 `DeepSeek Harness.exe`，RunAsNode 被关闭时会拉起第二个 DSH 宿主，导致母体 `Failed to load plugins`、客户端全部 pending waiting theme/layout、分身打开 `handler-threw`。
+- 现在只使用 DSH 自带 Node：`resources/runtime/primary-runtime/dependencies/node/bin/node.exe`；找不到就**不启动 sidecar**，绝不回退到 `process.execPath`。
+- `/fang/api/tasks/open` 的托管浏览器调用加 try/catch，浏览器异常返回 JSON，不再让路由抛 `handler-threw`。
+- 回归测试：`test/watchdog-safety.test.mjs` 断言源码不得出现 `spawn(process.execPath`。
+
+### 关闭链路
+
+- CDP `Browser.close` → 等待 `gracefulBrowserCloseMs=3000` → 仍在才 `taskkill /T /F`。
+- 新增 `browserHeapLimitMB=1536`：JS heap 超 1.5GB 关闭并隔离。
+- 空闲关闭只对确认空闲的 fork 生效（`idleCloseOnlyWhenIdle=true`）；无法确认活跃状态时不自动关，避免误杀长任务。
+- 关闭原因统一写入 `task.memoryGuard = {reason, at, pid, metrics, graceful, forkFlush}`；UI 显示「内存保护关闭」。
+- 孤儿清理默认每 5 分钟一次。
+- `forkFlushPath` 可配置正式落盘端点；未配置时显式记录 `unsupported`，不伪造保存成功。
+
+### 宿主红线
+
+- 母体自身 RSS/Private 采样进入警告/熔断审计。
+- 10 分钟内宿主崩溃 2 次才进入 Safe Mode（`host-crashes.json`），单次崩溃不直接锁死。
+- 新增 `POST /fang/api/panic` 与顶部「释放全部内存」按钮。
+- fork/browser 根进程设 BelowNormal。
+- fork+browser PID 树 commit 总和超过 `forkCommitShareLimit=0.4` 时熔断。
+- sidecar 在 create/restore spawn 成功后立即登记 PID。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+- tests: pass=1338 fail=0 skip=2
+- e2e: 125/125
+- routes: ?（allowlist） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+- **Windows Job Object 仍未实现**：当前是 detached sidecar + `taskkill`；宿主被冻结时不如内核 Job 可靠。
+- **官方 DSH Web client 的会话事件限流/懒加载未做**：仍靠 DOM/Commit 上限 + 关闭/隔离。
+- `maxForks=8` 是任务/归档容量；实际同时运行由 `singleActiveFork` 限制为 1，不是字面 maxForks=1。
+
+### 回滚锚点
+- 升级前快照/上一代目录：active-v3.8.1-pre（母体）；merged-v3.8.1-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.8.0（2026-11-24）
 **主题：托管浏览器 + 宿主熔断 + 隔离闩锁 + Safe Mode**
 
