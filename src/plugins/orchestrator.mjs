@@ -27,6 +27,7 @@ import { installWatchGuard } from '../lib/watch-guard.mjs'
 import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
 import { installGlobalRedline } from '../lib/global-redline.mjs'
+import { DEFAULT_FORBIDDEN_ROOTS, DEFAULT_FANG_DATA_ROOT, assertDataPath, isPathInside, workspaceForFork } from '../lib/data-isolation.mjs'
 import { evaluateMemoryGuard, killProcessTree, memoryGuardDefaults, readProcessTable, readSystemMemory, selectProcessTree, sumProcessTree } from '../lib/memory-guard.mjs'
 import { closeManagedBrowser, findBrowserPath, flushManagedBrowser, freePort, isPidAlive, launchManagedBrowser, lowerProcessPriority, sampleManagedBrowser } from '../lib/browser-guard.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
@@ -248,7 +249,11 @@ export const Config = z.object({
   profileTemplate: z.string().default('')
     .description('分身 profile 模板目录；留空 = 当前 profile 目录（Forker 的 cleanTemplate 会覆盖）'),
   fangHome: z.string().default('')
-    .description('三区数据根（相当于 FANG_HOME）；留空 = 自动（新装默认 D:\\ToFuture，已有旧数据沿用旧布局）'),
+    .description('三区数据根（相当于 FANG_HOME）；留空 = D:\\ToFuture\\FangData（旧数据需显式迁移）'),
+  enforceDataIsolation: z.boolean().default(true)
+    .description('拒绝把 Fang 数据/分身 home 写进宿主或工程目录（如 E:\\DSH\\DS）'),
+  forbiddenDataRoots: z.array(z.string()).default(DEFAULT_FORBIDDEN_ROOTS)
+    .description('禁止作为 Fang 数据根的目录前缀'),
   defaultEssenceAuto: z.boolean().default(true)
     .description('新用户自动生成“默认元宝”（仅当没有任何用户元主、且默认插件已有安装时；失败不影响启动）'),
   cliPath: z.string().default('')
@@ -454,6 +459,20 @@ export function apply(ctx, config) {
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
+  const isolationChecks = [
+    ['dataDir', layout.dataDir],
+    ['essenceRoot', layout.essenceRoot],
+    ['forksRoot', layout.forkHomesDir],
+    ['sessionsRoot', layout.sessionsRoot],
+    ['runtimeRoot', layout.runtimeRoot],
+  ].map(([name, target]) => ({ name, ...assertDataPath(target, { fangHome: layout.fangHome, forbiddenRoots: cfg.forbiddenDataRoots }) })).filter((item) => item.ok !== true)
+  const isolationBlocked = cfg.enforceDataIsolation === true
+    && !process.env.NODE_TEST_CONTEXT
+    && !/e2e/i.test(String(process.argv[1] ?? ''))
+    && isolationChecks.length > 0
+  if (isolationBlocked) {
+    try { ctx.logger?.error?.(`[fang] data isolation blocked: ${isolationChecks.map((item) => `${item.name}=${item.error}`).join(', ')}`) } catch { /* logger optional */ }
+  }
   // P1：分身核心开关（只影响新派生/重启的分身；母体与元主不读它）。
   const forkCoreSettings = () => readForkCoreSettings(layout.dataDir)
   /** 当前开关期望的分身核心。 */
@@ -1396,12 +1415,17 @@ export function apply(ctx, config) {
   const ensureForkSessionFloor = async ({ homeDir, task, cwd }) => {
     const existing = summarizeForkSessions(homeDir)
     if (!existing.belowFloor) return { ok: true, created: false, count: existing.count }
-    const workspacePath = String(cwd ?? '').trim()
-      || String(task?.importedSession?.workspacePath ?? '').trim()
-      || layout.forkHomesDir
+    const requested = String(cwd ?? '').trim()
+    const safeRequested = requested && assertDataPath(requested, { forbiddenRoots: cfg.forbiddenDataRoots }).ok === true ? requested : ''
+    // v3.8.2: never default a fork workspace to the mother/client project tree.
+    // Each fork gets its own workspace inside its own home; imported E:\DSH\DS
+    // workspace is intentionally ignored unless explicitly outside forbidden roots.
+    const workspacePath = safeRequested || String(task?.importedSession?.workspacePath ?? '').trim()
+      || workspaceForFork(homeDir)
+    const finalWorkspace = assertDataPath(workspacePath, { forbiddenRoots: cfg.forbiddenDataRoots }).ok === true ? workspacePath : workspaceForFork(homeDir)
     const created = ensureForkEmptySession(homeDir, {
-      workspacePath,
-      workspaceTitle: path.basename(workspacePath) || '新会话',
+      workspacePath: finalWorkspace,
+      workspaceTitle: path.basename(finalWorkspace) || '新会话',
     })
     // 补完空会话后立刻套用上限，避免越界。
     try { enforceForkSessionCap(homeDir, { max: FORK_SESSION_MAX }) } catch { /* 上限失败不阻塞派生 */ }
@@ -1538,6 +1562,7 @@ export function apply(ctx, config) {
     /** v2 主入口：派生一个任务（= 一个分身）。 */
     async createTask(input = {}) {
       if (safeMode) return { ok: false, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
+      if (isolationBlocked) return { ok: false, error: 'data-root-forbidden', detail: isolationChecks }
       const title = String(input.title ?? input.taskTitle ?? '').trim() || `任务 ${tasks.size + 1}`
       const running = [...tasks.values()].filter(t => {
         const s = taskView(t).status
@@ -2818,6 +2843,11 @@ export function apply(ctx, config) {
         // 三区路径（无需 D: 访问即可在面板/接口核对目录是否已迁移）
         layout: {
           fangHome: layout.fangHome || '',
+          canonicalFangHome: layout.canonicalFangHome || DEFAULT_FANG_DATA_ROOT,
+          legacyDataDetected: layout.legacyDataDetected === true,
+          legacyDataDir: layout.legacyDataDir || '',
+          dataIsolationBlocked: isolationBlocked,
+          dataIsolationErrors: isolationChecks,
           dataDir: layout.dataDir,
           essenceRoot: layout.essenceRoot,
           forkHomesDir: layout.forkHomesDir,
@@ -3912,6 +3942,7 @@ export function apply(ctx, config) {
       const meta = essenceManager.getMeta(id)
       if (!meta || typeof meta.id !== 'string') throw new Error('unknown-essence')
       if (meta.archived === true) throw new Error('essence-archived')
+      if (isolationBlocked) throw new Error('data-root-forbidden')
       // 进行中会话配额（默认 10；归档不限；达到上限拒绝再开实例）。
       const sessionQuota = countEssenceSessions(id, meta)
       if (sessionQuota.over) throw new Error(`session-quota-exceeded: ${sessionQuota.used}/${sessionQuota.limit}`)

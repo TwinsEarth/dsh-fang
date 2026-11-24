@@ -3643,6 +3643,12 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             h('h1', { class: 'fh-title' }, '瓮城'),
             h('span', { class: 'fh-sub' }, '母体 × 分身 · 三区控制台'))),
         renderStats(S),
+        S.status?.data?.layout?.legacyDataDetected
+          ? chip('warn', '旧数据待迁移', { title: `当前仍在使用旧布局 ${S.status.data.layout.legacyDataDir || ''}；请停宿主后运行 node tools/migrate-fang-home.mjs --apply，迁入 ${S.status.data.layout.canonicalFangHome || 'D:\\ToFuture\\FangData'}` })
+          : null,
+        S.status?.data?.layout?.dataIsolationBlocked
+          ? chip('bad', '数据目录越界', { title: 'Fang 数据根落在宿主/工程目录，已拒绝新建分身；请修正 fangHome 或迁移。' })
+          : null,
         h('div', { class: 'fh-actions' },
           S.safeMode?.data?.safeMode
             ? chip('warn', 'Safe Mode', { title: `宿主上次非正常退出或触发内存熔断：${S.safeMode.data.reason || 'guard'}；已禁止自动恢复分身。`, state: 'safe-mode' })

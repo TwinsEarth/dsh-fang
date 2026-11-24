@@ -58,15 +58,19 @@ export function resolveFangHome(env = process.env) {
       }
     }
   } catch { /* ignore */ }
-  // 兼容：已有 $DSH_HOME/fang/<tag> 数据的安装不搬家，继续旧布局。
-  try {
-    if (fs.existsSync(path.join(resolveDshHome(env), 'fang'))) return ''
-  } catch { /* ignore */ }
-  // 新装默认主文件夹（Windows：D:\ToFuture）——只对“真正的默认安装”生效：
-  // 显式设置 DSH_HOME（e2e/测试/便携安装）时不得跳盘，否则会写进真实 D: 数据根。
-  const explicitDshHome = Boolean(env && String(env.DSH_HOME ?? '').trim())
-  if (!explicitDshHome && process.platform === 'win32') {
-    try { if (fs.existsSync('D:\\')) return 'D:\\ToFuture' } catch { /* ignore */ }
+  // 兼容：旧布局不再作为默认落点。v3.8.2 起默认数据根固定到 D:\ToFuture\FangData，
+  // 避免与宿主/客户端/工程目录（尤其 E:\DSH\DS）混用。迁移指针存在时优先使用指针。
+  // v3.8.2: real installs must use the isolated root even when the DSH launcher
+  // sets DSH_HOME explicitly (it normally does). Only test/temp/portable homes
+  // are allowed to stay local, otherwise every real host would keep writing
+  // into C:\Users\...\.dsh\fang or E:\DSH\DS.
+  const dshHomeText = resolveDshHome(env)
+  const testOrPortableHome = Boolean(env && env.NODE_TEST_CONTEXT)
+    || /(?:[\\/](?:tmp|temp|scratch|test|tests|\.tmp)(?:[\\/]|$))/i.test(dshHomeText)
+    || /(?:[\\/]AppData[\\/]Local[\\/]Temp[\\/])/i.test(dshHomeText)
+  const explicitDisableCanonical = Boolean(env && String(env.DSH_FANG_DISABLE_CANONICAL ?? '') === '1')
+  if (!testOrPortableHome && !explicitDisableCanonical && process.platform === 'win32') {
+    try { if (fs.existsSync('D:\\')) return 'D:\\ToFuture\\FangData' } catch { /* ignore */ }
   }
   return ''
 }
@@ -95,21 +99,41 @@ export function resolveFangLayout(options = {}) {
   const resolvedFangHome = fangHome
     ? path.resolve(fangHome)
     : (explicitRoots && !hasEnvFangHome ? '' : resolveFangHome(env))
+  // v3.8.2: canonical root is D:\ToFuture\FangData. If a legacy install still
+  // has tasks under <DSH_HOME>/fang/<tag> and the canonical root is empty, keep
+  // serving the legacy data (never silently show an empty profile) and mark it
+  // for explicit migration. New installs without legacy data use the canonical root.
+  let effectiveFangHome = resolvedFangHome
+  let legacyDataDetected = false
+  try {
+    if (resolvedFangHome && !hasEnvFangHome && !String(fangHome ?? '').trim() && profileTag) {
+      const canonicalTasks = path.join(resolvedFangHome, 'mirror', profileTag, 'tasks.json')
+      const legacyTasks = path.join(dshHome, 'fang', profileTag, 'tasks.json')
+      if (!fs.existsSync(canonicalTasks) && fs.existsSync(legacyTasks)) {
+        effectiveFangHome = ''
+        legacyDataDetected = true
+      }
+    }
+  } catch { /* ignore */ }
+  const activeFangHome = effectiveFangHome
   const dataDir = dataRoot
     ? path.resolve(dataRoot)
-    : (resolvedFangHome ? path.join(resolvedFangHome, 'mirror', profileTag) : path.join(dshHome, 'fang', profileTag))
+    : (activeFangHome ? path.join(activeFangHome, 'mirror', profileTag) : path.join(dshHome, 'fang', profileTag))
   // 三区分离：母体=mirror/<tag>，原身=essence/，分身=forks/，会话/运行态=sessions/。
-  const essenceRoot = resolvedFangHome ? path.join(resolvedFangHome, 'essence') : path.join(dataDir, 'essences')
+  const essenceRoot = activeFangHome ? path.join(activeFangHome, 'essence') : path.join(dataDir, 'essences')
   const forkHomesDir = forksRoot
     ? path.resolve(forksRoot)
-    : (resolvedFangHome ? path.join(resolvedFangHome, 'forks') : path.join(dataDir, 'forks'))
-  const sessionsRoot = resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : ''
-  const runtimeRoot = resolvedFangHome ? path.join(resolvedFangHome, 'sessions') : path.join(dataDir, 'runtime')
+    : (activeFangHome ? path.join(activeFangHome, 'forks') : path.join(dataDir, 'forks'))
+  const sessionsRoot = activeFangHome ? path.join(activeFangHome, 'sessions') : ''
+  const runtimeRoot = activeFangHome ? path.join(activeFangHome, 'sessions') : path.join(dataDir, 'runtime')
   return {
     dataDir,
     profileTag,
     dshHome,
-    fangHome: resolvedFangHome,
+    fangHome: activeFangHome,
+    canonicalFangHome: resolvedFangHome,
+    legacyDataDetected,
+    legacyDataDir: legacyDataDetected ? path.join(dshHome, 'fang', profileTag) : '',
     ledgerFile: path.join(dataDir, 'audit.jsonl'),
     stateFile: path.join(dataDir, 'state.json'),
     forksFile: path.join(dataDir, 'forks.json'),
