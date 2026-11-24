@@ -1,3 +1,33 @@
+## v3.7.8（2026-11-24）
+
+**主题：提交内存护栏 + 单活跃分身 + 孤儿清理**
+
+### 新增
+
+- **打开/创建/还原分身前的 CommitFree 护栏**：读取 Windows `CommitLimit / CommitFree`，低于 `memoryMinFreeMB`（默认 4096MB）直接返回 `memory-low`，不再拉起新 renderer。
+- **单活跃分身策略**（默认开启）：启动或打开一个分身时，暂停其他运行中的分身，母体面板只保留当前任务；被暂停的分身保留 home/会话，可随时「还原」，不自动归档、不删除。
+- **内存看门狗**：每 30 秒采样每个运行中分身的 PID 树（含子进程）的 Working Set / Commit，写入 `fang/memory-samples.jsonl`；单树 Commit 超过 2GB 且相对低点增长超过 768MB 时只杀该分身的进程树，不拖死母体。
+- **孤儿进程清理**：启动时和归档/失败任务中，按任务 PID + 命令行中的 taskId/profile 双重校验后清理残留进程，避免旧分身继续跑。
+
+### 配置
+
+```yaml
+memoryGuard: true
+memoryMinFreeMB: 4096
+memoryWatchdog: true
+memoryWatchIntervalMs: 30000
+memoryKillCommitMB: 2048
+memoryGrowCommitMB: 768
+singleActiveFork: true
+```
+
+### 门禁（发布前回填）
+
+- tests: pass=1334 fail=0 skip=2
+- e2e: 125/125
+- routes: 89（allowlist 0） / plugins: 16
+- preflight: GREEN
+
 ## v3.7.7（2026-11-23）
 
 **主题：仓库改名 + Vault 对话框修复**
