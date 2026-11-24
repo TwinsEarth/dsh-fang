@@ -1,3 +1,50 @@
+## v3.8.0（2026-11-24）
+**主题：托管浏览器 + 宿主熔断 + 隔离闩锁 + Safe Mode**
+
+### 新增
+
+- **托管浏览器**：Fang 后端以独立 profile 启动 Edge/Chrome（`--app` + `--remote-debugging-port`），记录 browser/renderer PID 树；不再依赖系统默认浏览器裸开。支持 `browserPath` 覆盖。
+- **浏览器内存看门狗**：每 30 秒采样托管浏览器 PID 树 Commit、CDP DOM 节点数、JS heap、visibility；超过 `browserMemoryLimitMB` / `browserDomNodeLimit` 时关闭浏览器并隔离任务；隐藏超过 `autoCloseIdleMinutes` 自动关闭。
+- **宿主紧急熔断**：每 5 秒检查 CommitFree；低于 `hostCriticalFreeMB` 时**先关托管浏览器，再停/隔离所有运行中分身**；低于 `hostEmergencyFreeMB` 时额外进入 Safe Mode。
+- **隔离闩锁**：任务写入 `quarantined`，吊销 token、清空 URL、关闭端口；`/fang/api/tasks/open` 返回 **423**；只有显式还原（新 PID/token）或母体重启才能清除。
+- **Safe Mode**：宿主非正常退出时写 `host-state.json`，下次启动进入 Safe Mode，禁止创建/打开/自动恢复；提供 `GET/POST /fang/api/safe-mode` 与顶部「解除 Safe Mode」按钮。
+- **独立看门狗**：detached sidecar 监控宿主 PID 与 `watchdog.json`；宿主被强杀时清理已登记的浏览器/fork PID 树。
+- **浏览器崩溃留证**：`--enable-logging --log-file`、`--enable-crash-reporter --crash-dumps-dir`；日志/转储在任务 home 的 `browser-logs/`。
+- **单活跃 + 浏览器上限**：`singleActiveFork=true`、`maxOpenForkBrowsers=1`；启动新分身会关闭其他托管浏览器并暂停其他 fork。
+
+### 默认配置
+
+```yaml
+memoryGuard: true
+memoryMinFreeMB: 6144
+hostWarnFreeMB: 8192
+hostCriticalFreeMB: 4096
+hostEmergencyFreeMB: 2048
+singleActiveFork: true
+maxOpenForkBrowsers: 1
+managedBrowser: true
+browserMemoryLimitMB: 2048
+browserDomNodeLimit: 200000
+autoCloseIdleMinutes: 10
+quarantineOnGuard: true
+safeModeAfterCrash: true
+autoRestoreForks: false
+```
+
+### 门禁（发布前回填）
+- tests: pass=? fail=0 skip=?
+- e2e: ?/?
+- routes: ?（allowlist） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+- **会话事件限流/懒加载未改官方 DSH Web client**：本轮用托管浏览器 DOM/Commit 上限 + 隔离/关闭保护；真正的历史事件分页需要改官方 client，留待下一版。
+- **Job Object 原生 `KILL_ON_JOB_CLOSE` 未在本版启用**：当前由 detached sidecar + `taskkill /T /F` 完成宿主死亡后的清理；Job Object 作为下一版原生加固项。
+- 托管浏览器默认使用 Edge 独立 profile；首次打开不继承用户日常浏览器登录态，这是内存/崩溃隔离的代价。
+
+### 回滚锚点
+- 升级前快照/上一代目录：active-v3.8.0-pre（母体）；merged-v3.8.0-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.7.8（2026-11-24）
 
 **主题：提交内存护栏 + 单活跃分身 + 孤儿清理**

@@ -217,3 +217,25 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 - 修复后对现有会话执行：2 条 `team/mode` → `ignorable:true`，header 字节不变，备份 `.bak-catalogv3-*`；
 - 回归测试把 header 类型从 known 集合移除，仍必须 `ok:true` 且只标 1 条 team/mode。
 **教训**：修复“未知事件”不能碰 header 帧；sanitize 的 header 校验失败必须升级为错误，而不是静默返回。
+
+## EB-17 · 2026-11-24 · 用 write 覆盖 CHANGELOG 导致 3000 行历史丢失
+
+**现象**：写 v3.8.0 变更时直接用 `write` 覆盖 `docs/CHANGELOG.md`，文件从 3142 行缩成 30 行。
+**根因**：把“新增一节”误当成“替换全文”；写前没有先读目标文件。
+**修复**：用 `git show HEAD:docs/CHANGELOG.md` 取回字节，与新的 v3.8.0 节拼接恢复；已核对 3190 行。
+**防线**：改任何历史文档前必须先 `read`；只允许 `edit`/定点插入，禁止整文件 `write`，除非确认是新建文件或用户明确要求重建。
+**教训**：文档不是草稿；覆盖前先证明目标内容。
+
+## EB-18 · 2026-11-24 · 看门狗 sidecar 被测试/预检反复拉起，泄漏 178 个 node 进程
+
+**现象**：`npm test`/preflight/e2e 后残留 178 个 `node.exe watchdog-sidecar.mjs`，每个约 50MB；共享同一个 `watchdog.json`，旧 sidecar 一直看到“新宿主还活着”，永不退出。
+**根因**：sidecar 在每次插件 apply 时无条件 spawn；测试/预检每个进程都 apply，且所有 sidecar 共用一个 hostPid 文件，互相覆盖导致无法判定宿主死亡。
+**修复**：
+- sidecar 文件名改为 `watchdog-<hostPid>.json`，每个宿主独立；
+- 测试/预检环境（`NODE_TEST_CONTEXT`、`DSH_FANG_E2E=1`、argv 含 test/e2e）不 spawn；
+- `globalThis.__fangWatchdogSidecar` 单例，防同进程重载重复 spawn；
+- 已清理 178 个泄漏进程，e2e 后 sidecars=0。
+**防线**：任何后台守护进程必须有单例锁 + 每宿主唯一状态文件 + 测试门禁；每次 e2e 后检查残留进程数。
+**教训**：防崩溃进程本身不能变成崩溃源。
+
+

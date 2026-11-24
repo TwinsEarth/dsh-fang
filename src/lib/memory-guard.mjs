@@ -36,6 +36,7 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
     '  CommitFreeMB = [math]::Round($o.FreeVirtualMemory / 1024)',
     '  PhysicalTotalMB = [math]::Round($o.TotalVisibleMemorySize / 1024)',
     '  PhysicalFreeMB = [math]::Round($o.FreePhysicalMemory / 1024)',
+    '  PageFileMB = [math]::Round((Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue | Measure-Object AllocatedBaseSize -Sum).Sum)',
     '}',
     '$p | ConvertTo-Json -Compress',
   ].join('\n')
@@ -54,6 +55,8 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
         commitFreeMB: Number(data.CommitFreeMB) || 0,
         physicalTotalMB: Number(data.PhysicalTotalMB) || 0,
         physicalFreeMB: Number(data.PhysicalFreeMB) || 0,
+        pageFileMB: Number(data.PageFileMB) || 0,
+        hasPageFile: Number(data.PageFileMB) > 0,
         at: now,
       }
       cache = { at: now, value, pending: null }
