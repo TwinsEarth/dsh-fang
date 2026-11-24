@@ -612,15 +612,29 @@ export function apply(ctx, config) {
   if (process.platform === 'win32' && process.env.DSH_FANG_DISABLE_SIDECAR !== '1' && !testLike && !sidecarAlready) {
     globalThis.__fangWatchdogSidecar = true
     try {
-      const sidecar = fileURLToPath(new URL('../lib/watchdog-sidecar.mjs', import.meta.url))
-      const child = spawn(process.execPath, [sidecar, watchdogFile], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-      })
-      child.on('error', () => {})
-      child.unref()
+      // IMPORTANT: never spawn process.execPath here. In a packaged DSH host that
+      // is DeepSeek Harness.exe, and ELECTRON_RUN_AS_NODE may be fused off; it
+      // would boot a second host, corrupt the profile, and trigger the exact
+      // "Failed to load plugins" / handler-threw failure seen in v3.8.0.
+      const nodeCandidates = [
+        process.env.DSH_FANG_NODE_EXE,
+        path.join(path.dirname(process.execPath), 'resources', 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', 'node.exe'),
+        'D:\\DSH\\resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node.exe',
+      ].filter(Boolean)
+      const nodeExe = nodeCandidates.find((candidate) => exists(candidate))
+      if (!nodeExe) {
+        audit('watchdog-sidecar-unavailable', { reason: 'bundled-node-not-found' })
+      } else {
+        const sidecar = fileURLToPath(new URL('../lib/watchdog-sidecar.mjs', import.meta.url))
+        const child = spawn(nodeExe, [sidecar, watchdogFile], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        })
+        child.on('error', () => {})
+        child.unref()
+      }
     } catch { /* sidecar is best effort; host watchdog remains */ }
   }
 
@@ -5192,9 +5206,14 @@ export function apply(ctx, config) {
         }
         let managed = { ok: true, managed: false }
         if (out.url) {
-          const browser = await service.openManagedBrowser(taskId, out.url)
-          if (browser?.ok === true) managed = browser
-          else managed = { ok: true, managed: false, browserError: browser?.error ?? 'browser-unavailable' }
+          try {
+            const browser = await service.openManagedBrowser(taskId, out.url)
+            if (browser?.ok === true) managed = browser
+            else managed = { ok: true, managed: false, browserError: browser?.error ?? 'browser-unavailable' }
+          } catch (error) {
+            managed = { ok: true, managed: false, browserError: String(error?.message ?? error) }
+            audit('fork-browser-open-handler-failed', { taskId, error: String(error?.message ?? error) })
+          }
         }
         return json(res, 200, { ...out, ...managed })
       })
