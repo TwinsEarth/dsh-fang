@@ -1623,6 +1623,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         role: { value: 'unknown', error: '', at: 0 },
         status: { state: 'loading', data: null, error: '', diagnostic: null, at: 0 },
         tasks: { state: 'loading', items: [], error: '', diagnostic: null, at: 0 },
+        safeMode: { state: 'loading', data: null, error: '', at: 0 },
         sessions: { state: 'loading', items: [], total: 0, degraded: [], error: '', diagnostic: null, at: 0 },
         forkSessions: new Map(),
         query: '',
@@ -1820,7 +1821,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const seq = ++refreshSeq
         if (options.manual) { S.refreshing = true; schedule() }
         try {
-          const [statusRes, tasksRes, sessionsRes, essenceRes, approvalsRes, supervisionRes, forkCoreRes] = await Promise.all([
+          const [statusRes, tasksRes, sessionsRes, essenceRes, approvalsRes, supervisionRes, forkCoreRes, safeModeRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? 1000 : S.sessionWindow}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
@@ -1828,6 +1829,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             api('/fang/api/approvals').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/forks/supervision').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/fork-core').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api('/fang/api/safe-mode').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
           ])
           if (!alive || seq !== refreshSeq) return
           if (supervisionRes.status === 200 && supervisionRes.body?.ok) {
@@ -1878,6 +1880,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             S.tasks = { ...S.tasks, state: 'error', error: code, diagnostic: tasksRes.diagnostic || null }
           }
 
+          if (safeModeRes.status === 200 && safeModeRes.body) S.safeMode = { state: 'ready', data: safeModeRes.body, error: '', at: Date.now() }
+          else S.safeMode = { state: 'error', data: null, error: safeModeRes.body?.error || (safeModeRes.status ? 'http-' + safeModeRes.status : 'network'), at: Date.now() }
           if (forkCoreRes.status === 200 && forkCoreRes.body && forkCoreRes.body.ok !== false) {
             S.forkCore = { state: 'ready', data: forkCoreRes.body, error: '', at: Date.now() }
           } else {
@@ -2943,9 +2947,22 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         if (result.status === 200 && result.body?.url) {
           const paused = Array.isArray(result.body?.paused) ? result.body.paused : []
           if (paused.length) notify('warn', `为释放内存，已暂停其他 ${paused.length} 个运行中的分身`, '母体只保留当前任务；其他分身可用“还原”重新启动。')
+          if (result.body?.managed === true) {
+            notify('ok', '已在受控浏览器中打开分身', `PID ${result.body.pid ?? '?'}；内存/空闲/崩溃由瓮城看门狗接管。`)
+            void refresh()
+            return
+          }
           try { window.open(result.body.url, '_blank', 'noopener'); void refresh(); return } catch { /* 弹层被拦 */ }
         }
         const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
+        if (code === 'safe-mode') {
+          notify('bad', '宿主处于 Safe Mode，已拒绝自动打开', result.body?.detail || '请先解除 Safe Mode 或重启宿主。')
+          return
+        }
+        if (code === 'fork-quarantined') {
+          notify('bad', '该分身已隔离，通信已断开', '只有重启该分身 Web 或重启 DSH 母体才能恢复。')
+          return
+        }
         if (code === 'memory-low') {
           const free = Number(result.body?.commitFreeMB)
           notify('bad', '系统提交内存不足，已拒绝打开分身', `CommitFree ${Number.isFinite(free) ? free : '?'} MB，低于阈值。请先启用页面文件或关闭其他分身/应用。`)
@@ -3627,6 +3644,20 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             h('span', { class: 'fh-sub' }, '母体 × 分身 · 三区控制台'))),
         renderStats(S),
         h('div', { class: 'fh-actions' },
+          S.safeMode?.data?.safeMode
+            ? chip('warn', 'Safe Mode', { title: `宿主上次非正常退出或触发内存熔断：${S.safeMode.data.reason || 'guard'}；已禁止自动恢复分身。`, state: 'safe-mode' })
+            : null,
+          S.safeMode?.data?.safeMode
+            ? button('解除 Safe Mode', {
+              variant: 'danger-quiet', size: 'sm',
+              title: '仅解除“禁止自动恢复”闩锁；不会自动启动任何分身。请确认内存和 pagefile 已修好。',
+              onClick: async () => {
+                const out = await api('/fang/api/safe-mode/reset', { method: 'POST', body: '{}' })
+                if (out.status === 200) { notify('warn', 'Safe Mode 已解除', '不会自动恢复分身；请手动打开需要的任务。'); void refresh() }
+                else notify('bad', '解除 Safe Mode 失败', out.body?.error || '')
+              }, fk: 'safe-mode-reset',
+            })
+            : null,
           restart?.available && restart.redLineAutoAllowed
             ? chip('warn', '红灯自动放行', {
               title: 'strictRedLine=false：auto 授权模式下红灯可被策略自动放行。这只到决策层；execution.executed 恒为 false，真正重启仍由外部 supervisor 的 armed 清单决定。',

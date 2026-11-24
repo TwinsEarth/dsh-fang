@@ -11,6 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { spawn } from 'node:child_process'
 
 import {
   z, roleGate, resolveFangLayout, resolveProfileDir, resolveSessionsLayout,
@@ -27,6 +28,7 @@ import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
 import { installGlobalRedline } from '../lib/global-redline.mjs'
 import { evaluateMemoryGuard, killProcessTree, memoryGuardDefaults, readProcessTable, readSystemMemory, selectProcessTree, sumProcessTree } from '../lib/memory-guard.mjs'
+import { closeManagedBrowser, findBrowserPath, flushManagedBrowser, freePort, isPidAlive, launchManagedBrowser, sampleManagedBrowser } from '../lib/browser-guard.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
@@ -193,8 +195,14 @@ export const Config = z.object({
     .description('同时存活的任务/分身上限'),
   memoryGuard: z.boolean().default(true)
     .description('创建/打开/还原分身前检查 Windows CommitFree 余量'),
-  memoryMinFreeMB: z.number().min(0).max(1048576).default(4096)
+  memoryMinFreeMB: z.number().min(0).max(1048576).default(6144)
     .description('CommitFree 低于该值（MB）时拒绝启动新分身'),
+  hostWarnFreeMB: z.number().min(0).max(1048576).default(8192)
+    .description('宿主内存警告阈值（MB，仅提示）'),
+  hostCriticalFreeMB: z.number().min(0).max(1048576).default(4096)
+    .description('宿主紧急阈值（MB）：先杀托管浏览器，再停所有分身'),
+  hostEmergencyFreeMB: z.number().min(0).max(1048576).default(2048)
+    .description('宿主最低保留（MB）；低于此值进入 Safe Mode 并隔离'),
   memoryWatchdog: z.boolean().default(true)
     .description('定时采样每个分身的 PID 树/Commit，异常增长时只杀该分身'),
   memoryWatchIntervalMs: z.number().min(5000).max(600000).default(30000)
@@ -205,6 +213,24 @@ export const Config = z.object({
     .description('相对该分身低点增长超过该值（MB）才杀，避免误杀启动峰值'),
   singleActiveFork: z.boolean().default(true)
     .description('启动新分身时暂停其他运行中的分身，避免同时打开多个 Electron renderer'),
+  managedBrowser: z.boolean().default(true)
+    .description('由 Fang 启动独立 Chromium 窗口并纳入 PID/CDP 监控'),
+  browserPath: z.string().default('')
+    .description('托管浏览器 exe；留空自动找 Edge/Chrome'),
+  maxOpenForkBrowsers: z.number().min(1).max(16).default(1)
+    .description('同时存活的托管浏览器窗口上限'),
+  browserMemoryLimitMB: z.number().min(256).max(1048576).default(2048)
+    .description('单个托管浏览器 PID 树 Commit 上限（MB），超过即关闭'),
+  browserDomNodeLimit: z.number().min(1000).max(10000000).default(200000)
+    .description('托管浏览器 DOM 节点上限，超过即关闭'),
+  autoCloseIdleMinutes: z.number().min(0).max(1440).default(10)
+    .description('浏览器页面隐藏超过该分钟数自动关闭（0=不关）'),
+  quarantineOnGuard: z.boolean().default(true)
+    .description('内存护栏触发后隔离任务，禁止自动重连'),
+  safeModeAfterCrash: z.boolean().default(true)
+    .description('上次宿主非正常退出时启动 Safe Mode，禁止自动恢复分身'),
+  autoRestoreForks: z.boolean().default(false)
+    .description('宿主启动时自动恢复上次运行的分身（默认关闭）'),
   motherProfile: z.string().default('')
     .description('母体 profile 名；留空 = 当前 profile（分身模板来源）'),
   profileTemplate: z.string().default('')
@@ -499,6 +525,85 @@ export function apply(ctx, config) {
     }
   }
 
+  // v3.8.0: host crash latch. A previous host that did not write cleanShutdown
+  // means the last run died; enter Safe Mode unless explicitly disabled.
+  const safeModeFile = path.join(layout.dataDir, 'safe-mode.json')
+  const hostStateFile = path.join(layout.dataDir, 'host-state.json')
+  const readJsonFile = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null } }
+  const previousHost = readJsonFile(hostStateFile)
+  const previousSafeMode = readJsonFile(safeModeFile)
+  const unclean = Boolean(previousHost && previousHost.clean !== true && Number(previousHost.pid) !== process.pid)
+  let safeMode = Boolean(previousSafeMode?.safeMode)
+  let safeModeReason = String(previousSafeMode?.reason ?? '')
+  if (unclean && cfg.safeModeAfterCrash === true && !safeMode) {
+    safeMode = true
+    safeModeReason = 'unclean-shutdown'
+  }
+  // A fresh host process is an explicit recovery boundary: clear per-task
+  // quarantine latches, but keep tokens revoked so the old page cannot reconnect.
+  let quarantineReset = 0
+  if (previousHost?.pid !== process.pid) {
+    for (const task of tasks.values()) {
+      if (!task.quarantined) continue
+      task.quarantineCleared = { at: nowMs(), reason: 'host-restart' }
+      task.quarantined = null
+      task.token = ''
+      task.url = ''
+      task.status = TASK_STATUS.FAILED
+      task.pid = null
+      task.port = null
+      quarantineReset += 1
+    }
+    if (quarantineReset) {
+      try { saveRegistry(layout.tasksFile, [...tasks.values()].map(task => ({ ...task, token: '', url: stripUrlToken(task.url) }))) } catch { /* best effort */ }
+    }
+  }
+  const persistSafeMode = () => {
+    try { fs.writeFileSync(safeModeFile, JSON.stringify({ safeMode, reason: safeModeReason, at: new Date().toISOString() }, null, 2)) } catch { /* best effort */ }
+  }
+  persistSafeMode()
+  try { fs.writeFileSync(hostStateFile, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), clean: false }, null, 2)) } catch { /* best effort */ }
+  try {
+    ctx.effect(() => () => {
+      try { fs.writeFileSync(hostStateFile, JSON.stringify({ pid: process.pid, exitedAt: new Date().toISOString(), clean: true }, null, 2)) } catch { /* best effort */ }
+      try {
+        const prior = JSON.parse(fs.readFileSync(watchdogFile, 'utf8'))
+        fs.writeFileSync(watchdogFile, JSON.stringify({ ...prior, hostPid: process.pid, clean: true, at: new Date().toISOString() }, null, 2))
+      } catch { /* best effort */ }
+    })
+  } catch { /* fake ctx */ }
+
+  // v3.8.0 independent watchdog: a detached Node/Electron process cleans up
+  // managed browsers/fork trees if this host is force-killed. It never reads
+  // user data and acts only on PIDs written here.
+  const watchdogFile = path.join(layout.dataDir, `watchdog-${process.pid}.json`)
+  const writeWatchdog = () => {
+    const targets = []
+    for (const task of tasks.values()) {
+      if (task.browser?.pid) targets.push({ pid: Number(task.browser.pid), kind: 'browser', taskId: task.taskId })
+      if (task.pid && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)) targets.push({ pid: Number(task.pid), kind: 'fork', taskId: task.taskId })
+    }
+    try { fs.writeFileSync(watchdogFile, JSON.stringify({ hostPid: process.pid, clean: false, at: new Date().toISOString(), targets }, null, 2)) } catch { /* best effort */ }
+  }
+  writeWatchdog()
+  const testLike = Boolean(process.env.NODE_TEST_CONTEXT) || process.env.DSH_FANG_E2E === '1' || /(?:test|e2e)/i.test(String(process.argv[1] ?? ''))
+  const sidecarAlready = globalThis.__fangWatchdogSidecar === true
+  if (process.platform === 'win32' && process.env.DSH_FANG_DISABLE_SIDECAR !== '1' && !testLike && !sidecarAlready) {
+    globalThis.__fangWatchdogSidecar = true
+    try {
+      const sidecar = fileURLToPath(new URL('../lib/watchdog-sidecar.mjs', import.meta.url))
+      const child = spawn(process.execPath, [sidecar, watchdogFile], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      })
+      child.on('error', () => {})
+      child.unref()
+    } catch { /* sidecar is best effort; host watchdog remains */ }
+  }
+
+
   const safeGet = (key) => { try { return ctx.get(key) } catch { return undefined } }
   // v3.3.3: queue journal is an optional sub-plugin. Its host half provides
   // SERVICE.queueJournal; without it the journal/queue routes must fail closed
@@ -605,16 +710,21 @@ export function apply(ctx, config) {
   const forker = () => safeGet(SERVICE.forker)
 
   /** 2026-11-24: commit-memory guard before any new renderer/spawn. */
+  let pagefileWarned = false
   const memoryGate = async (action) => {
     if (cfg.memoryGuard !== true) return { ok: true, skipped: 'disabled' }
     const memory = await readSystemMemory()
+    if (memory.ok === true && memory.hasPageFile === false && !pagefileWarned) {
+      pagefileWarned = true
+      audit('pagefile-missing', { action, commitLimitMB: memory.commitLimitMB, commitFreeMB: memory.commitFreeMB })
+    }
     const decision = evaluateMemoryGuard(memory, { minFreeMB: cfg.memoryMinFreeMB })
     if (decision.ok !== true) audit('fork-memory-low', { action, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
     return decision
   }
 
   /** Single-active-fork policy: stop other running forks before starting/opening one. */
-  const pauseOtherForks = (currentId, reason = 'single-active-fork') => {
+  const pauseOtherForks = async (currentId, reason = 'single-active-fork') => {
     if (cfg.singleActiveFork !== true) return { ok: true, paused: [] }
     const f = forker()
     const paused = []
@@ -623,6 +733,7 @@ export function apply(ctx, config) {
       if (task.status !== TASK_STATUS.READY && task.status !== TASK_STATUS.RUNNING) continue
       const live = f?.status?.(id)
       if (!live?.running) continue
+      await closeTaskBrowser(task, reason)
       try { f.stop?.(id) } catch { /* already gone */ }
       task.status = TASK_STATUS.FAILED
       task.pid = null
@@ -638,6 +749,103 @@ export function apply(ctx, config) {
   }
 
   const memorySamples = new Map()
+
+  const closeTaskBrowser = async (task, reason = 'guard') => {
+    if (!task?.browser?.pid) return { ok: true, skipped: 'no-browser' }
+    const browser = task.browser
+    try { await flushManagedBrowser(browser.port) } catch { /* best effort */ }
+    const result = await closeManagedBrowser({ pid: browser.pid, port: browser.port })
+    task.browser = null
+    task.browserClosed = { at: nowMs(), reason, pid: browser.pid, ok: result.ok }
+    writeWatchdog()
+    try {
+      fs.appendFileSync(path.join(layout.dataDir, 'browser-events.jsonl'), JSON.stringify({ taskId: task.taskId, at: nowMs(), event: 'closed', reason, pid: browser.pid, ok: result.ok }) + '\n')
+    } catch { /* diagnostics only */ }
+    audit('fork-browser-closed', { taskId: task.taskId, reason, pid: browser.pid, ok: result.ok })
+    persist()
+    return result
+  }
+
+  const quarantineTask = async (task, reason, { closeBrowser = true, stopFork = true } = {}) => {
+    if (!task) return { ok: false, error: 'unknown-task' }
+    if (closeBrowser) await closeTaskBrowser(task, reason)
+    if (stopFork) {
+      try { forker()?.stop?.(task.taskId) } catch { /* best effort */ }
+    }
+    task.status = TASK_STATUS.FAILED
+    task.pid = null
+    task.port = null
+    task.url = null
+    task.token = ''
+    task.adapter = { ok: false, error: 'fork-quarantined' }
+    task.quarantined = { reason, at: nowMs(), tokenRevoked: true }
+    audit('fork-quarantined', { taskId: task.taskId, reason })
+    persist()
+    return { ok: true, quarantined: true, taskId: task.taskId, reason }
+  }
+
+  const launchTaskBrowser = async (task, url) => {
+    if (cfg.managedBrowser !== true) return { ok: true, managed: false, url }
+    if (!task || !url) return { ok: false, error: 'browser-url-required' }
+    if (task.browser?.pid && isPidAlive(task.browser.pid)) {
+      return { ok: true, managed: true, pid: task.browser.pid, port: task.browser.port, reused: true }
+    }
+    const liveBrowsers = [...tasks.values()].filter((item) => item.browser?.pid && isPidAlive(item.browser.pid))
+    const max = Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
+    let liveCount = liveBrowsers.length
+    for (const other of liveBrowsers) {
+      if (other.taskId === task.taskId) continue
+      if (liveCount < max) break
+      await closeTaskBrowser(other, 'max-open-fork-browsers')
+      liveCount -= 1
+    }
+    const exe = findBrowserPath(cfg.browserPath)
+    if (!exe) return { ok: false, error: 'browser-unavailable' }
+    const port = await freePort()
+    if (!port) return { ok: false, error: 'browser-port-unavailable' }
+    const profileDir = path.join(task.homeDir, 'browser-profile')
+    const logDir = path.join(task.homeDir, 'browser-logs')
+    const launched = await launchManagedBrowser({ exe, url, profileDir, logDir, port })
+    if (launched.ok !== true) {
+      audit('fork-browser-launch-failed', { taskId: task.taskId, error: launched.error, pid: launched.pid ?? null })
+      return launched
+    }
+    task.browser = {
+      pid: launched.pid, port: launched.port, profileDir, logFile: launched.logFile,
+      crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null,
+    }
+    writeWatchdog()
+    persist()
+    audit('fork-browser-opened', { taskId: task.taskId, pid: launched.pid, port: launched.port })
+    return { ok: true, managed: true, pid: launched.pid, port: launched.port }
+  }
+
+  let hostPanic = false
+  const hostEmergency = async (reason, { safe = false } = {}) => {
+    if (hostPanic) return { ok: true, skipped: 'in-progress' }
+    hostPanic = true
+    try {
+      // Order is deliberate: browser (largest commit) first, then fork backends.
+      for (const task of tasks.values()) {
+        if (task.browser?.pid) await closeTaskBrowser(task, `host-panic:${reason}`)
+      }
+      for (const task of tasks.values()) {
+        if (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING) {
+          await quarantineTask(task, `host-panic:${reason}`, { closeBrowser: false })
+        }
+      }
+      if (safe) {
+        safeMode = true
+        safeModeReason = `host-emergency:${reason}`
+        persistSafeMode()
+      }
+      audit('host-emergency-guard', { reason, safe, tasks: tasks.size })
+      return { ok: true, reason, safe }
+    } finally {
+      hostPanic = false
+    }
+  }
+
   const recordForkMemory = async (task, rootPid, table) => {
     const tree = sumProcessTree(selectProcessTree(table.rows, rootPid))
     if (!tree.count) return null
@@ -668,17 +876,78 @@ export function apply(ctx, config) {
     return tree
   }
 
+  const browserWatchdogTick = async (table) => {
+    if (cfg.managedBrowser !== true || process.platform !== 'win32') return
+    for (const task of tasks.values()) {
+      const browser = task.browser
+      if (!browser?.pid) continue
+      if (!isPidAlive(browser.pid)) {
+        task.browser = null
+        task.browserClosed = { at: nowMs(), reason: 'browser-process-exited', pid: browser.pid }
+        audit('fork-browser-exited', { taskId: task.taskId, pid: browser.pid })
+        persist()
+        continue
+      }
+      const tree = sumProcessTree(selectProcessTree(table.rows, browser.pid))
+      const sample = await sampleManagedBrowser(browser.port)
+      const nodes = Number(sample?.nodes) || 0
+      const heapMB = Math.round((Number(sample?.heapBytes) || 0) / 1048576)
+      browser.last = { at: nowMs(), ...tree, nodes, heapMB, visibility: sample?.visibility ?? 'unknown' }
+      try {
+        fs.appendFileSync(path.join(layout.dataDir, 'browser-samples.jsonl'), JSON.stringify({ taskId: task.taskId, ...browser.last }) + '\n')
+      } catch { /* diagnostics only */ }
+      const overMemory = Number(tree.commitMB) >= Number(cfg.browserMemoryLimitMB)
+      const overDom = nodes >= Number(cfg.browserDomNodeLimit)
+      if (overMemory || overDom) {
+        audit('fork-browser-memory-guard', { taskId: task.taskId, commitMB: tree.commitMB, nodes, heapMB, overMemory, overDom })
+        await quarantineTask(task, overMemory ? 'browser-memory-limit' : 'browser-dom-limit')
+        continue
+      }
+      if (cfg.autoCloseIdleMinutes > 0) {
+        if (sample?.ok === true && sample.visibility === 'hidden') {
+          if (!browser.hiddenSince) browser.hiddenSince = nowMs()
+          const idleMs = nowMs() - Number(browser.hiddenSince)
+          if (idleMs >= Number(cfg.autoCloseIdleMinutes) * 60_000) {
+            await closeTaskBrowser(task, 'idle-hidden')
+            continue
+          }
+        } else if (sample?.ok === true) {
+          browser.hiddenSince = null
+        }
+      }
+    }
+  }
+
   const memoryWatchdogTick = async () => {
     if (cfg.memoryWatchdog !== true || process.platform !== 'win32') return
     const running = [...tasks.values()].filter((task) => task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)
-    if (!running.length) return
+    const hasBrowser = [...tasks.values()].some((task) => task.browser?.pid)
+    if (!running.length && !hasBrowser) return
     const table = await readProcessTable()
     if (!table.ok) return
     for (const task of running) {
       const rootPid = Number(forker()?.status?.(task.taskId)?.pid ?? task.pid)
       if (rootPid > 0) await recordForkMemory(task, rootPid, table)
     }
+    await browserWatchdogTick(table)
+    writeWatchdog()
   }
+
+  let lastHostWarnAt = 0
+  const hostWatchdogTick = async () => {
+    if (process.platform !== 'win32' || hostPanic) return
+    const memory = await readSystemMemory()
+    if (!memory.ok) return
+    const free = Number(memory.commitFreeMB) || 0
+    if (free < Number(cfg.hostWarnFreeMB) && nowMs() - lastHostWarnAt > 60_000) {
+      lastHostWarnAt = nowMs()
+      audit('host-memory-warning', { commitFreeMB: free, warnMB: cfg.hostWarnFreeMB })
+    }
+    if (free < Number(cfg.hostCriticalFreeMB)) {
+      await hostEmergency('commit-free-critical', { safe: true })
+    }
+  }
+
 
   const cleanupOrphanForks = async () => {
     if (process.platform !== 'win32') return { ok: true, killed: [] }
@@ -1180,6 +1449,7 @@ export function apply(ctx, config) {
 
     /** v2 主入口：派生一个任务（= 一个分身）。 */
     async createTask(input = {}) {
+      if (safeMode) return { ok: false, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       const title = String(input.title ?? input.taskTitle ?? '').trim() || `任务 ${tasks.size + 1}`
       const running = [...tasks.values()].filter(t => {
         const s = taskView(t).status
@@ -1983,6 +2253,7 @@ export function apply(ctx, config) {
       }
       const deadline = nowMs() + cfg.archiveStopTimeoutMs
       let alive = true
+      await closeTaskBrowser(task, 'archive')
       while (nowMs() < deadline) {
         alive = typeof f.alive === 'function' ? !!f.alive(id) : !!(f.status?.(id)?.running)
         if (!alive) break
@@ -2078,6 +2349,7 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
+      if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       const f = forker()
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
       const memory = await memoryGate('restore-fork')
@@ -2183,6 +2455,10 @@ export function apply(ctx, config) {
       persist()
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
+      if (task.quarantined) {
+        task.quarantined = null
+        audit('fork-quarantine-cleared', { taskId: id, by: 'restore' })
+      }
       return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard, paused }
     },
 
@@ -2195,6 +2471,8 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
+      if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
+      if (task.quarantined) return { ok: false, taskId: id, error: 'fork-quarantined', detail: task.quarantined.reason ?? 'guard' }
       const memory = await memoryGate('open-fork')
       if (memory.ok !== true) return { ok: false, taskId: id, ...memory }
       const paused = await pauseOtherForks(id, 'open-fork')
@@ -2537,6 +2815,12 @@ export function apply(ctx, config) {
   // 2026-11-24: sample fork PID trees/commit; kill only the offending fork.
   if (cfg.memoryWatchdog === true && process.platform === 'win32') {
     const timer = setInterval(() => { void memoryWatchdogTick() }, cfg.memoryWatchIntervalMs)
+    timer.unref?.()
+    try { ctx.effect(() => () => clearInterval(timer)) } catch { /* fake ctx */ }
+  }
+  // v3.8.0: host self-preservation. This must run even when no fork is running.
+  if (process.platform === 'win32') {
+    const timer = setInterval(() => { void hostWatchdogTick() }, 5000)
     timer.unref?.()
     try { ctx.effect(() => () => clearInterval(timer)) } catch { /* fake ctx */ }
   }
@@ -3677,6 +3961,26 @@ export function apply(ctx, config) {
         capture,
       }
     },
+
+    openManagedBrowser: async (taskId, url) => {
+      const task = tasks.get(String(taskId ?? ''))
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.quarantined) return { ok: false, error: 'fork-quarantined', detail: task.quarantined.reason ?? 'guard' }
+      return launchTaskBrowser(task, String(url ?? task.url ?? ''))
+    },
+    closeManagedBrowser: async (taskId, reason = 'user') => {
+      const task = tasks.get(String(taskId ?? ''))
+      if (!task) return { ok: false, error: 'unknown-task' }
+      return closeTaskBrowser(task, reason)
+    },
+    safeModeStatus: () => ({ ok: true, safeMode, reason: safeModeReason }),
+    resetSafeMode: () => {
+      safeMode = false
+      safeModeReason = ''
+      persistSafeMode()
+      audit('host-safe-mode-reset', {})
+      return { ok: true, safeMode: false }
+    },
     stopEssenceRuntime: async (essenceId) => {
       const id = String(essenceId ?? '').trim()
       const f = forker()
@@ -4785,6 +5089,9 @@ export function apply(ctx, config) {
         const taskId = String(query.get('taskId') ?? '').trim()
         if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
         if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        if (safeMode) return json(res, 423, { ok: false, error: 'safe-mode', detail: safeModeReason })
+        const guardTask = tasks.get(taskId)
+        if (guardTask?.quarantined) return json(res, 423, { ok: false, error: 'fork-quarantined', detail: guardTask.quarantined.reason ?? 'guard' })
         const out = forker()?.openUrl?.(taskId) ?? null
         if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running', taskId })
         return json(res, 200, out)
@@ -4796,10 +5103,21 @@ export function apply(ctx, config) {
         if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
         const out = await service.syncTaskOnOpen(taskId)
         if (!out || out.ok !== true) {
-          const status = out?.error === 'unknown-task' ? 404 : out?.error === 'not-running' ? 404 : 409
+          const status = out?.error === 'unknown-task' ? 404 : out?.error === 'not-running' ? 404 : out?.error === 'safe-mode' || out?.error === 'fork-quarantined' ? 423 : 409
           return json(res, status, { ok: false, error: out?.error ?? 'not-running', ...out })
         }
-        return json(res, 200, out)
+        let managed = { ok: true, managed: false }
+        if (out.url) {
+          const browser = await service.openManagedBrowser(taskId, out.url)
+          if (browser?.ok === true) managed = browser
+          else managed = { ok: true, managed: false, browserError: browser?.error ?? 'browser-unavailable' }
+        }
+        return json(res, 200, { ...out, ...managed })
+      })
+      route('GET', `${prefix}/api/safe-mode`, async (req, res) => json(res, 200, service.safeModeStatus()))
+      route('POST', `${prefix}/api/safe-mode/reset`, async (req, res) => {
+        await readBody(req)
+        return json(res, 200, service.resetSafeMode())
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
         const body = await readBody(req)
@@ -4809,7 +5127,8 @@ export function apply(ctx, config) {
       route('POST', `${prefix}/api/tasks/restore`, async (req, res) => {
         const body = await readBody(req)
         const out = await service.restoreTask(String(body?.taskId ?? ''))
-        return json(res, out.ok ? 200 : 409, out)
+        const status = out.ok ? 200 : out?.error === 'safe-mode' ? 423 : out?.error === 'fork-quarantined' ? 423 : 409
+        return json(res, status, out)
       })
       // 2026-11-22：一键修复（停残留 → 清别名桩 → 重置配置 → 重新拉起；不删 home/会话）
       route('POST', `${prefix}/api/vault/export`, async (req, res) => {
