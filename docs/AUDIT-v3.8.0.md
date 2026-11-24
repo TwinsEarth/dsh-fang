@@ -11,13 +11,14 @@
 5. 浏览器看门狗：Commit 2GB、DOM 20 万节点、隐藏 10 分钟自动关闭。
 6. 独立 sidecar：宿主被强杀后清理 watchdog.json 中登记的 PID 树。
 
-## 验证（待回填）
+## 验证
 
-- 全量 tests：
-- preflight --e2e：
-- 发布 PR CI：
-- release-order：
-- 真机托管浏览器：Edge 启动、CDP 采样、force close（已本地实测，发布前再复验）
+- 全量 tests：**1337 pass / 0 fail / 2 skip**
+- preflight --e2e：**GREEN；e2e 125/125**
+- 发布 PR CI：**#166 8/8 绿**
+- release-order：**10/10**
+- 真机托管浏览器：Edge 启动、CDP 采样（fork URL heap 48.6MB / DOM 1340）、force close 已实测
+- 发布：tag `v3.8.0`；Release `456342403`；npm 新名/旧名均 3.8.0；verify-release GREEN
 
 ## 边界 / 未完成
 
