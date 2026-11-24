@@ -2941,9 +2941,16 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         // v3.7.4：打开是显式用户动作，用 POST 触发同步；GET 只读，避免副作用。
         const result = await api('/fang/api/tasks/open', { method: 'POST', body: JSON.stringify({ taskId }) })
         if (result.status === 200 && result.body?.url) {
-          try { window.open(result.body.url, '_blank', 'noopener'); return } catch { /* 弹层被拦 */ }
+          const paused = Array.isArray(result.body?.paused) ? result.body.paused : []
+          if (paused.length) notify('warn', `为释放内存，已暂停其他 ${paused.length} 个运行中的分身`, '母体只保留当前任务；其他分身可用“还原”重新启动。')
+          try { window.open(result.body.url, '_blank', 'noopener'); void refresh(); return } catch { /* 弹层被拦 */ }
         }
         const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
+        if (code === 'memory-low') {
+          const free = Number(result.body?.commitFreeMB)
+          notify('bad', '系统提交内存不足，已拒绝打开分身', `CommitFree ${Number.isFinite(free) ? free : '?'} MB，低于阈值。请先启用页面文件或关闭其他分身/应用。`)
+          return
+        }
         if (code === 'not-running') {
           notify('warn', '分身已停止，正在启动…')
           // 2026-11-22：服务端 restoreTask 直接接受 failed/archived 任务；不再“先归档再还原”。

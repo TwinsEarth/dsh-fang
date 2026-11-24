@@ -26,6 +26,7 @@ import { installWatchGuard } from '../lib/watch-guard.mjs'
 import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
 import { installGlobalRedline } from '../lib/global-redline.mjs'
+import { evaluateMemoryGuard, killProcessTree, memoryGuardDefaults, readProcessTable, readSystemMemory, selectProcessTree, sumProcessTree } from '../lib/memory-guard.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
@@ -190,6 +191,20 @@ export const Config = z.object({
     .description('官方源 Bearer token（可选；不会写进日志/状态）'),
   maxForks: z.number().min(1).max(64).default(8)
     .description('同时存活的任务/分身上限'),
+  memoryGuard: z.boolean().default(true)
+    .description('创建/打开/还原分身前检查 Windows CommitFree 余量'),
+  memoryMinFreeMB: z.number().min(0).max(1048576).default(4096)
+    .description('CommitFree 低于该值（MB）时拒绝启动新分身'),
+  memoryWatchdog: z.boolean().default(true)
+    .description('定时采样每个分身的 PID 树/Commit，异常增长时只杀该分身'),
+  memoryWatchIntervalMs: z.number().min(5000).max(600000).default(30000)
+    .description('内存看门狗采样间隔（毫秒）'),
+  memoryKillCommitMB: z.number().min(128).max(1048576).default(2048)
+    .description('单个分身 PID 树 commit 超过该值（MB）时进入杀进程候选'),
+  memoryGrowCommitMB: z.number().min(64).max(1048576).default(768)
+    .description('相对该分身低点增长超过该值（MB）才杀，避免误杀启动峰值'),
+  singleActiveFork: z.boolean().default(true)
+    .description('启动新分身时暂停其他运行中的分身，避免同时打开多个 Electron renderer'),
   motherProfile: z.string().default('')
     .description('母体 profile 名；留空 = 当前 profile（分身模板来源）'),
   profileTemplate: z.string().default('')
@@ -588,6 +603,103 @@ export function apply(ctx, config) {
     } catch { /* best effort */ }
   }
   const forker = () => safeGet(SERVICE.forker)
+
+  /** 2026-11-24: commit-memory guard before any new renderer/spawn. */
+  const memoryGate = async (action) => {
+    if (cfg.memoryGuard !== true) return { ok: true, skipped: 'disabled' }
+    const memory = await readSystemMemory()
+    const decision = evaluateMemoryGuard(memory, { minFreeMB: cfg.memoryMinFreeMB })
+    if (decision.ok !== true) audit('fork-memory-low', { action, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
+    return decision
+  }
+
+  /** Single-active-fork policy: stop other running forks before starting/opening one. */
+  const pauseOtherForks = (currentId, reason = 'single-active-fork') => {
+    if (cfg.singleActiveFork !== true) return { ok: true, paused: [] }
+    const f = forker()
+    const paused = []
+    for (const [id, task] of tasks) {
+      if (id === currentId) continue
+      if (task.status !== TASK_STATUS.READY && task.status !== TASK_STATUS.RUNNING) continue
+      const live = f?.status?.(id)
+      if (!live?.running) continue
+      try { f.stop?.(id) } catch { /* already gone */ }
+      task.status = TASK_STATUS.FAILED
+      task.pid = null
+      task.port = null
+      task.url = null
+      task.adapter = { ok: false, error: 'auto-paused-memory' }
+      task.memoryPaused = { reason, at: nowMs() }
+      paused.push(id)
+      audit('fork-auto-paused', { taskId: id, reason, by: currentId })
+    }
+    if (paused.length) persist()
+    return { ok: true, paused }
+  }
+
+  const memorySamples = new Map()
+  const recordForkMemory = async (task, rootPid, table) => {
+    const tree = sumProcessTree(selectProcessTree(table.rows, rootPid))
+    if (!tree.count) return null
+    const list = memorySamples.get(task.taskId) ?? []
+    list.push({ at: nowMs(), ...tree })
+    if (list.length > 40) list.splice(0, list.length - 40)
+    memorySamples.set(task.taskId, list)
+    try {
+      fs.appendFileSync(path.join(layout.dataDir, 'memory-samples.jsonl'), JSON.stringify({ taskId: task.taskId, at: nowMs(), ...tree }) + '\n')
+    } catch { /* diagnostics only */ }
+    const low = Math.min(...list.map((sample) => Number(sample.commitMB) || 0))
+    const current = Number(tree.commitMB) || 0
+    const overKill = current >= Number(cfg.memoryKillCommitMB)
+    const overGrowth = current - low >= Number(cfg.memoryGrowCommitMB)
+    if (overKill && overGrowth) {
+      try { forker()?.stop?.(task.taskId) } catch { /* best effort */ }
+      try { await killProcessTree(rootPid) } catch { /* PID may already be gone */ }
+      task.status = TASK_STATUS.FAILED
+      task.pid = null
+      task.port = null
+      task.url = null
+      task.adapter = { ok: false, error: 'memory-watchdog-killed' }
+      task.memoryKill = { at: nowMs(), commitMB: current, lowMB: low, pids: tree.pids }
+      audit('fork-memory-killed', { taskId: task.taskId, commitMB: current, lowMB: low, pids: tree.pids })
+      persist()
+      return { ...tree, killed: true }
+    }
+    return tree
+  }
+
+  const memoryWatchdogTick = async () => {
+    if (cfg.memoryWatchdog !== true || process.platform !== 'win32') return
+    const running = [...tasks.values()].filter((task) => task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)
+    if (!running.length) return
+    const table = await readProcessTable()
+    if (!table.ok) return
+    for (const task of running) {
+      const rootPid = Number(forker()?.status?.(task.taskId)?.pid ?? task.pid)
+      if (rootPid > 0) await recordForkMemory(task, rootPid, table)
+    }
+  }
+
+  const cleanupOrphanForks = async () => {
+    if (process.platform !== 'win32') return { ok: true, killed: [] }
+    const table = await readProcessTable()
+    if (!table.ok) return { ok: false, killed: [], error: table.error }
+    const killed = []
+    for (const task of tasks.values()) {
+      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) continue
+      const rootPid = Number(task.pid)
+      if (!(rootPid > 0)) continue
+      const tree = selectProcessTree(table.rows, rootPid)
+      if (!tree.length) continue
+      const marker = String(task.taskId)
+      const looksLikeFork = tree.some((row) => row.commandLine.includes(marker) || (task.profile && row.commandLine.includes(String(task.profile))))
+      if (!looksLikeFork) continue
+      const result = await killProcessTree(rootPid)
+      if (result.ok) { killed.push(task.taskId); audit('fork-orphan-killed', { taskId: task.taskId, pid: rootPid }) }
+    }
+    return { ok: true, killed }
+  }
+
   const cliPath = () => (cfg.cliPath ? cfg.cliPath : resolveCliPath('', process.env))
   const forkTempEnv = (taskId) => {
     const tmp = path.join(layout.forkHomesDir, String(taskId), 'tmp')
@@ -1084,6 +1196,9 @@ export function apply(ctx, config) {
       const taskId = newId('task')
       const profile = `fang-${taskId.replace(/^task_/, '').slice(0, 12)}`
       const homeDir = path.join(layout.forkHomesDir, taskId)
+      const memory = await memoryGate('create-fork')
+      if (memory.ok !== true) return { ok: false, taskId, ...memory }
+      const paused = await pauseOtherForks(taskId, 'create-fork')
       const template = String(input.template ?? '').trim()
       // v3.0.9：从原身派生时，模板来源是该原身的 merged/profile（分身只生产，不回写原身）。
       // v3.0.9：未指定来源时，若存在“默认元宝”，快速派生直接以它为模板（新用户小白路径）。
@@ -1965,6 +2080,9 @@ export function apply(ctx, config) {
       if (!task) return { ok: false, error: 'unknown-task' }
       const f = forker()
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      const memory = await memoryGate('restore-fork')
+      if (memory.ok !== true) return { ok: false, taskId: id, ...memory }
+      const paused = await pauseOtherForks(id, 'restore-fork')
       // 2026-11-22：任务可能停在 ready/running，但子进程已经死了（宿主重启、手动 kill、
       // 端口丢失）。客户端「启动」仍会调用 restore；旧逻辑返回 not-archived，导致
       // 真机界面一直显示“启动失败”。这里允许恢复 stale 的 ready/running。
@@ -2065,7 +2183,7 @@ export function apply(ctx, config) {
       persist()
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
-      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard }
+      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard, paused }
     },
 
     /**
@@ -2077,6 +2195,9 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
+      const memory = await memoryGate('open-fork')
+      if (memory.ok !== true) return { ok: false, taskId: id, ...memory }
+      const paused = await pauseOtherForks(id, 'open-fork')
       const sourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
       captureEssenceRuntimeIfPresent(sourceId)
       if (sourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
@@ -2094,15 +2215,15 @@ export function apply(ctx, config) {
         task.url = null
         persist()
         const restored = await service.restoreTask(id)
-        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint }
+        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint, paused }
       }
       if (task.status === TASK_STATUS.FAILED) {
         const restored = await service.restoreTask(id)
-        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint }
+        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint, paused }
       }
       const out = forker()?.openUrl?.(id) ?? null
       if (!out || out.ok !== true) return { ok: false, error: out?.error ?? 'not-running' }
-      return { ...out, synced: true, restarted: false, sourceFingerprint: fingerprint }
+      return { ...out, synced: true, restarted: false, sourceFingerprint: fingerprint, paused }
     },
 
     /**
@@ -2413,6 +2534,14 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => ctx.provide(SERVICE.orchestrator, service))
+  // 2026-11-24: sample fork PID trees/commit; kill only the offending fork.
+  if (cfg.memoryWatchdog === true && process.platform === 'win32') {
+    const timer = setInterval(() => { void memoryWatchdogTick() }, cfg.memoryWatchIntervalMs)
+    timer.unref?.()
+    try { ctx.effect(() => () => clearInterval(timer)) } catch { /* fake ctx */ }
+  }
+  // Startup: reclaim archived/failed fork processes whose recorded PID still lives.
+  void cleanupOrphanForks()
   // v3.3.8：启动后异步自愈默认元主；不阻塞 boot，不 unref 也不会阻止退出。
   {
     const timer = setTimeout(() => { void refreshStaleDefaultEssenceIfNeeded() }, 1500)
@@ -3512,6 +3641,9 @@ export function apply(ctx, config) {
       }
       // 先导入选中的进行中会话，再拉起实例（实例启动时就能看到它们）。
       const importedSessions = importSessionsInto(homeDir, input?.sessionIds)
+      const memory = await memoryGate('start-essence-runtime')
+      if (memory.ok !== true) return { ok: false, error: memory.error, taskId: forkId, ...memory }
+      const paused = await pauseOtherForks(forkId, 'start-essence-runtime')
       // 注意：forker.spawn 需要显式 homeDir/profile（它不从 provision 记录里猜）。
       const started = await f.spawn({
         forkId,
