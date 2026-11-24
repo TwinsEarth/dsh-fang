@@ -6,8 +6,8 @@
 
 | 项 | 结果 |
 |---|---|
-| 全量 npm test | 待回填 |
-| preflight --e2e | 待回填 |
+| 全量 npm test | **1337 pass / 0 fail / 2 skip** |
+| preflight --e2e | **GREEN（e2e 125/125）** |
 | 发布 PR CI | 待回填 |
 | release-order | 待回填 |
 

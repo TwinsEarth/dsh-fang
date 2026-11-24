@@ -48,8 +48,12 @@ export function listTestFiles() {
 export function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const abs = path.join(dir, entry.name)
-    if (entry.isDirectory()) walk(abs, out)
-    else out.push(abs)
+    if (entry.isDirectory()) {
+      // Never traverse local-only / generated trees. They are not package inputs
+      // and can contain sandbox-restricted directories that abort a release build.
+      if (['node_modules', 'dist', '.git', 'scratch', 'archive', 'runtime', '.tmp', 'sessions'].includes(entry.name)) continue
+      walk(abs, out)
+    } else out.push(abs)
   }
   return out
 }

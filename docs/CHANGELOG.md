@@ -32,8 +32,8 @@ autoRestoreForks: false
 ```
 
 ### 门禁（发布前回填）
-- tests: pass=? fail=0 skip=?
-- e2e: ?/?
+- tests: pass=1337 fail=0 skip=2
+- e2e: 125/125
 - routes: ?（allowlist） / plugins: 16
 - preflight: GREEN
 
