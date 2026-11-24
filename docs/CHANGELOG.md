@@ -1,3 +1,38 @@
+## v3.8.2（2026-11-24）
+**主题：数据根隔离：默认 D:\ToFuture\FangData，禁止与宿主/工程目录混用**
+
+### 紧急修复
+
+- **默认数据根固定为 `D:\ToFuture\FangData`**：mirror（母体登记/审计）、essence（元宝）、forks（分身）、sessions（会话）全部落在该根下，不再落进 DSH_HOME 或工程目录。
+- **数据隔离红线**：`enforceDataIsolation=true`；数据根/分身 home 落在 `E:\DSH\DS` 等宿主/工程目录时，拒绝创建分身/启动元主运行态，状态接口返回 `dataIsolationBlocked`。
+- **旧数据安全迁移工具**：`tools/migrate-fang-home.mjs`，只复制不删除、不覆盖，宿主运行中拒绝执行；生成 `migration-*.json` 报告并写 `fang-home.txt` 指针。迁移前旧布局继续可读，UI 显示「旧数据待迁移」，不会静默显示空面板。
+- **分身 workspace 隔离**：新空会话默认落到 `<fork home>\workspace`，禁止默认使用母体/客户端工程目录；显式传入 `E:\DSH\DS` 会被拒绝并回退本地 workspace。
+- **部署工具识别新根**：`deploy-profile.mjs` 优先使用 `D:\ToFuture\FangData\mirror\<profile>`，兼容旧布局。
+
+### 迁移步骤（必须停宿主）
+
+```powershell
+# 完全退出 DeepSeek Harness 后
+node tools/migrate-fang-home.mjs --apply
+# 再部署 v3.8.2 / 启动
+```
+
+工具只复制、不删除源；目标已有 tasks.json 时默认拒绝（需人工确认）。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+- tests: pass=1341 fail=0 skip=2
+- e2e: 125/125
+- routes: ?（allowlist） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+- 不自动删除/移动旧目录；迁移必须显式执行，避免数据丢失。
+- 旧分身的既有 workspace 元数据不强制改写；新建空会话才强制本地 workspace。历史 workspace 需人工确认后迁移。
+- Windows Job Object、官方 client 会话懒加载仍留待下一版。
+
+### 回滚锚点
+- 升级前快照/上一代目录：active-v3.8.2-pre（母体）；merged-v3.8.2-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.8.1（2026-11-24）
 **主题：修复 v3.8.0 sidecar 拉起第二宿主；关闭链路与宿主红线加固**
 

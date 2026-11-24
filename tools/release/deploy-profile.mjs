@@ -27,24 +27,33 @@ const packageName = value('--package', '@twinsearth/fang-dsh-plugin')
 const allowRunning = has('--allow-running')
 const checkOnly = has('--check')
 
-const dataDir = path.resolve(value('--fang-home', path.join(path.dirname(profile), '..', 'fang', 'desktop')))
-const endpointFile = path.join(dataDir, 'endpoint.json')
+const canonicalData = 'D:\\ToFuture\\FangData\\mirror\\desktop'
+const legacyData = path.join(path.dirname(profile), '..', 'fang', 'desktop')
+const explicitFangHome = value('--fang-home', '')
+const dataDir = path.resolve(explicitFangHome || (fs.existsSync(canonicalData) ? canonicalData : legacyData))
+const endpointFiles = explicitFangHome
+  ? [path.join(dataDir, 'endpoint.json')]
+  : [path.join(canonicalData, 'endpoint.json'), path.join(legacyData, 'endpoint.json')]
 
 function readJson(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback }
 }
 
 async function hostAlive() {
-  const endpoint = readJson(endpointFile, null)
-  const url = endpoint?.url
-  if (!url) return { alive: false, reason: 'no-endpoint' }
-  try {
-    // 401/404 也说明 TCP 服务活着；只有连接失败才算宿主已退出。
-    const res = await fetch(url.replace(/\/$/, '') + '/fang/api/status', { signal: AbortSignal.timeout(2500) })
-    return { alive: true, reason: `http ${res.status}`, url }
-  } catch (error) {
-    return { alive: false, reason: String(error?.cause?.code ?? error?.name ?? error).slice(0, 120), url }
+  let last = { alive: false, reason: 'no-endpoint' }
+  for (const endpointFile of endpointFiles) {
+    const endpoint = readJson(endpointFile, null)
+    const url = endpoint?.url
+    if (!url) continue
+    try {
+      // 401/404 also proves TCP is alive; only connection failure means stopped.
+      const res = await fetch(url.replace(/\/$/, '') + '/fang/api/status', { signal: AbortSignal.timeout(2500) })
+      return { alive: true, reason: `http ${res.status}`, url }
+    } catch (error) {
+      last = { alive: false, reason: String(error?.cause?.code ?? error?.name ?? error).slice(0, 120), url }
+    }
   }
+  return last
 }
 
 function digestTree(dir) {
