@@ -238,4 +238,17 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 **防线**：任何后台守护进程必须有单例锁 + 每宿主唯一状态文件 + 测试门禁；每次 e2e 后检查残留进程数。
 **教训**：防崩溃进程本身不能变成崩溃源。
 
+## EB-19 · 2026-11-24 · v3.8.0 sidecar 用 process.execPath 拉起第二个 DSH 宿主
+
+**现象**：安装 v3.8.0 后母体 `Failed to load plugins`，全部客户端服务 pending waiting theme/layout；分身打开报 `handler-threw`。
+**根因**：独立看门狗用 `spawn(process.execPath, [watchdog-sidecar.mjs], { ELECTRON_RUN_AS_NODE:1 })`。打包后的 `process.execPath` 是 `DeepSeek Harness.exe`，RunAsNode 被 fuse 关闭时会启动**第二个 DSH 宿主**，同时读写同一 profile，导致插件加载/路由崩溃。
+**修复**：
+- 只允许用 DSH 自带 Node：`resources/runtime/primary-runtime/dependencies/node/bin/node.exe`；
+- 找不到 Node 时**不启动 sidecar**，写 `watchdog-sidecar-unavailable`，绝不回退到 `process.execPath`；
+- `/fang/api/tasks/open` 的托管浏览器调用加 try/catch，任何浏览器异常返回 JSON，不再让路由抛出 `handler-threw`；
+- 回归测试断言源码不得出现 `spawn(process.execPath`，必须保留 bundled-node 检测。
+**防线**：后台 helper 只能用明确的 runtime 可执行文件；禁止把宿主 Electron 当成 Node。
+**教训**：守护进程如果自己启动第二个宿主，比没有守护更危险。
+
+
 
