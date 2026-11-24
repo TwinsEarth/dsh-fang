@@ -1,4 +1,4 @@
-﻿# v3.8.1 审计（2026-11-24）
+# v3.8.1 审计（2026-11-24）
 
 > 用户指令：**“三方发布，v3.8.1”**。这是 v3.8.0 严重回归的紧急修复版。
 
@@ -15,7 +15,10 @@
 
 - 定向 tests：watchdog/browser/memory 7/7；orchestrator 73/73
 - e2e：125/125
-- 全量 preflight：**GREEN；tests 1338 pass / 0 fail / 2 skip；e2e 125/125**
+- 全量 preflight：**GREEN；1338 pass / 0 fail / 2 skip；e2e 125/125**
+- 发布 PR CI：**#168 8/8 绿**
+- release-order：**10/10**
+- 发布：tag `v3.8.1`；Release `456499683`；npm 新名/旧名均 3.8.1；verify-release GREEN
 - 真机：托管 Edge 启动/CDP（heap 30MB、DOM 1811）/graceful close 已实测
 
 ## 已知边界
