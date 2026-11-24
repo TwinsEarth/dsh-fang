@@ -539,6 +539,25 @@ export function apply(ctx, config) {
     safeMode = true
     safeModeReason = 'unclean-shutdown'
   }
+  // A fresh host process is an explicit recovery boundary: clear per-task
+  // quarantine latches, but keep tokens revoked so the old page cannot reconnect.
+  let quarantineReset = 0
+  if (previousHost?.pid !== process.pid) {
+    for (const task of tasks.values()) {
+      if (!task.quarantined) continue
+      task.quarantineCleared = { at: nowMs(), reason: 'host-restart' }
+      task.quarantined = null
+      task.token = ''
+      task.url = ''
+      task.status = TASK_STATUS.FAILED
+      task.pid = null
+      task.port = null
+      quarantineReset += 1
+    }
+    if (quarantineReset) {
+      try { saveRegistry(layout.tasksFile, [...tasks.values()].map(task => ({ ...task, token: '', url: stripUrlToken(task.url) }))) } catch { /* best effort */ }
+    }
+  }
   const persistSafeMode = () => {
     try { fs.writeFileSync(safeModeFile, JSON.stringify({ safeMode, reason: safeModeReason, at: new Date().toISOString() }, null, 2)) } catch { /* best effort */ }
   }
@@ -925,7 +944,7 @@ export function apply(ctx, config) {
       audit('host-memory-warning', { commitFreeMB: free, warnMB: cfg.hostWarnFreeMB })
     }
     if (free < Number(cfg.hostCriticalFreeMB)) {
-      await hostEmergency('commit-free-critical', { safe: free < Number(cfg.hostEmergencyFreeMB) })
+      await hostEmergency('commit-free-critical', { safe: true })
     }
   }
 
