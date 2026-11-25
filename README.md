@@ -7,7 +7,7 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
-> 当前发布线：**v3.8.5**（2026-11-25，CDP 15s + 母体面板懒渲染 + 统一缓存上限 + 隐藏暂停实验开关 + Job Object 内存上限）。v3.8.2 改变了数据根，升级前先读
+> 当前发布线：**v3.8.6**（2026-11-25，在 v3.8.5 基础上补齐分身打开前健康检查、无 pagefile 证据/单分身 gate、浏览器崩溃日志与根因落盘、10 分钟崩溃闩锁、单 app 窗口）。v3.8.2 改变了数据根，升级前先读
 > [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
 
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。
@@ -168,7 +168,7 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 | 你要做什么 | 先读 |
 |---|---|
 | 安装、升级、v3.8.2 数据根迁移 | [docs/INSTALL.md](docs/INSTALL.md) · [v3.8.2 变更](docs/CHANGELOG.md) |
-| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
+| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.6.md](docs/RELEASE-v3.8.6.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
 | P0 加固实现与真机证据 | [docs/P0-HARDENING.md](docs/P0-HARDENING.md) |
 | 真实宿主回归 smoke（v3.8.0/3.8.1） | [docs/HOST-SMOKE.md](docs/HOST-SMOKE.md) |
 | 防崩溃、Safe Mode、升级红线 | [docs/CRASH-SAFETY.md](docs/CRASH-SAFETY.md) |

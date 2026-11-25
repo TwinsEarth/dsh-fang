@@ -28,13 +28,15 @@ import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
 import { installGlobalRedline } from '../lib/global-redline.mjs'
 import { DEFAULT_FORBIDDEN_ROOTS, DEFAULT_FANG_DATA_ROOT, assertDataPath, isPathInside, workspaceForFork } from '../lib/data-isolation.mjs'
-import { evaluateMemoryGuard, killProcessTree, memoryGuardDefaults, readProcessTable, readProcessIdentity, readSystemMemory, selectProcessTree, sumProcessTree } from '../lib/memory-guard.mjs'
+import { evaluateMemoryGuard, evaluatePagefileSingleFork, isPagefileMissing, killProcessTree, memoryGuardDefaults, readProcessTable, readProcessIdentity, readSystemMemory, selectProcessTree, sumProcessTree } from '../lib/memory-guard.mjs'
 import { resolveMemoryThresholds } from '../lib/memory-policy.mjs'
 import { hashCommandLine, matchesProcessIdentity } from '../lib/process-identity.mjs'
 import { compactTaskSessions, compactLegacySessions } from '../lib/session-compaction.mjs'
 import { cleanupBrowserCaches, scanDiskHygiene } from '../lib/disk-hygiene.mjs'
 import { cleanupWatchdogFiles, pruneHostCrashHistory } from '../lib/host-housekeeping.mjs'
 import { appendBrowserMetricHistory } from '../lib/browser-metrics.mjs'
+import { enforceSinglePageTarget } from '../lib/browser-guard.mjs'
+import { evaluateForkHealth, forkHealthPathForPrefix, inspectForkSessionHealth, probeForkHealth } from '../lib/fork-health.mjs'
 import { readLatestMigrationReport } from '../lib/migration-report.mjs'
 import { DEFAULT_LEGACY_WORKSPACE_ROOTS, mapWorkspacePathForFork, migrateForkWorkspace, prepareImportedSession } from '../lib/workspace-mapping.mjs'
 import { appendJsonlRotated } from '../lib/log-rotation.mjs'
@@ -226,14 +228,14 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}
   const pageFileMB = Number(memory.pageFileMB) || 0
   const commitFreeMB = Number(memory.commitFreeMB) || 0
   const minFreeMB = Math.max(0, Number(hostCriticalFreeMB) || 0)
-  if (memory.hasPageFile !== true || pageFileMB <= 0) {
+  if (isPagefileMissing(memory)) {
     return {
       ok: false,
       error: 'pagefile-missing',
       pageFileMB,
       commitFreeMB,
       minFreeMB,
-      detail: '页面文件缺失/被禁用（Win32_PageFileUsage 无分配）；请先在 Windows 系统属性中启用页面文件并重启，再解除 Safe Mode。',
+      detail: '页面文件缺失/被禁用（Win32_PageFileUsage 无分配，或 PagingFiles={}，或 CommitLimit≈RAM）；请先在 Windows 系统属性中启用页面文件并重启，再解除 Safe Mode。',
     }
   }
   if (commitFreeMB < minFreeMB) {
@@ -251,8 +253,7 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}
 
 /** Boot-time pagefile precheck: missing/disabled pagefile must force Safe Mode. */
 export function pagefileRequiresSafeMode(memory) {
-  if (!memory || memory.ok !== true || memory.supported === false) return false
-  return memory.hasPageFile !== true || (Number(memory.pageFileMB) || 0) <= 0
+  return isPagefileMissing(memory)
 }
 
 export const Config = z.object({
@@ -280,6 +281,16 @@ export const Config = z.object({
     .description('按宿主物理内存自动缩放浏览器 Commit/JS heap 与分身杀阈值；关闭后使用下方固定值'),
   memoryWatchIntervalMs: z.number().min(5000).max(600000).default(15000)
     .description('内存看门狗采样间隔（毫秒）'),
+  forkHealthGate: z.boolean().default(true)
+    .description('打开托管浏览器前请求分身 /api/health，并检查 session 大小/事件数与 adapter 状态'),
+  forkHealthPath: z.string().default('')
+    .description('分身健康检查路径；留空=按 routes.prefix 推导 /<prefix>/api/health'),
+  forkHealthTimeoutMs: z.number().min(100).max(30000).default(2000)
+    .description('分身健康检查超时（毫秒）'),
+  forkHealthMaxSessionMB: z.number().min(1).max(4096).default(64)
+    .description('打开前允许的最大单会话文件（MB）；超过即拒绝打开'),
+  forkHealthMaxEvents: z.number().min(1).max(10000000).default(50000)
+    .description('打开前允许的最大单会话事件数；超过或扫描截断即拒绝打开'),
   memoryProcessScanIntervalMs: z.number().min(10000).max(600000).default(30000)
     .description('全进程表最小采样间隔（毫秒）；中间的 tick 复用缓存表并只做 liveness/CDP 按需检查'),
   browserCdpSampleIntervalMs: z.number().min(15000).max(600000).default(15000)
@@ -310,6 +321,8 @@ export const Config = z.object({
     .description('只关闭确认空闲的 fork 页面；无法确认活跃状态时不自动关'),
   pauseHiddenTab: z.boolean().default(false)
     .description('实验开关：页面隐藏时用 CDP Page.setWebLifecycleState=frozen 暂停渲染；默认关闭，真机验证恢复可见可 active 后再考虑默认开启'),
+  browserSingleAppWindow: z.boolean().default(true)
+    .description('一个 fork profile 只保留一个 app page；启动后和看门狗周期用 CDP 关闭多余标签'),
   orphanSweepMinutes: z.number().min(0).max(1440).default(5)
     .description('孤儿 fork 进程清理间隔（分钟；0=仅启动时）'),
   forkFlushPath: z.string().default('/fang/adapter/flush-session')
@@ -556,6 +569,7 @@ export function apply(ctx, config) {
     } catch { /* guard must never prevent fork boot; failures are audited by caller */ }
   }
   const cfg = { ...Config({}), ...(config ?? {}) }
+  const forkHealthPath = String(cfg.forkHealthPath || '').trim() || forkHealthPathForPrefix(cfg.routes?.prefix)
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
   // 部署工具用这个标识区分“仍是本实例”与“同一端口被别的服务占用”。
@@ -1041,6 +1055,11 @@ export function apply(ctx, config) {
       physicalFreeMB: Number(memory.physicalFreeMB) || 0,
       pageFileMB: Number(memory.pageFileMB) || 0,
       hasPageFile: memory.hasPageFile === true || Number(memory.pageFileMB) > 0,
+      pagingFiles: String(memory.pagingFiles ?? ''),
+      pagingFilesEmpty: memory.pagingFilesEmpty === true,
+      automaticManagedPagefile: memory.automaticManagedPagefile === true,
+      commitLimitNearRam: memory.commitLimitNearRam === true,
+      pagefileMissing: isPagefileMissing(memory),
       checkedAt: nowMs(),
       cached: memory.cached === true,
       error: memory.error ?? null,
@@ -1051,9 +1070,16 @@ export function apply(ctx, config) {
     return memory
   }
   const notePagefile = (memory, action) => {
-    if (memory?.ok === true && (memory.hasPageFile === false || Number(memory.pageFileMB) <= 0) && !pagefileWarned) {
+    if (memory?.ok === true && isPagefileMissing(memory) && !pagefileWarned) {
       pagefileWarned = true
-      audit('pagefile-missing', { action, pageFileMB: Number(memory.pageFileMB) || 0, commitLimitMB: memory.commitLimitMB, commitFreeMB: memory.commitFreeMB })
+      audit('pagefile-missing', {
+        action,
+        pageFileMB: Number(memory.pageFileMB) || 0,
+        pagingFilesEmpty: memory.pagingFilesEmpty === true,
+        commitLimitNearRam: memory.commitLimitNearRam === true,
+        commitLimitMB: memory.commitLimitMB,
+        commitFreeMB: memory.commitFreeMB,
+      })
     }
   }
   /** Effective limits for this host; fixed values remain the no-probe fallback. */
@@ -1092,6 +1118,8 @@ export function apply(ctx, config) {
           commitLimitMB: memory.commitLimitMB,
           commitFreeMB: memory.commitFreeMB,
           hasPageFile: memory.hasPageFile,
+          pagingFilesEmpty: memory.pagingFilesEmpty === true,
+          commitLimitNearRam: memory.commitLimitNearRam === true,
         })
         return { ok: true, safeMode: true, reason: nextReason, pageFileMB: Number(memory.pageFileMB) || 0 }
       }
@@ -1102,9 +1130,24 @@ export function apply(ctx, config) {
     if (cfg.memoryGuard !== true) return { ok: true, skipped: 'disabled' }
     const memory = rememberMemory(await readSystemMemory({ force: true }))
     notePagefile(memory, action)
+    const activeForks = [...tasks.values()].filter((task) => {
+      try {
+        const live = forker()?.status?.(task.taskId)
+        if (live && typeof live.running === 'boolean') return live.running === true
+        return task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING
+      } catch {
+        return task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING
+      }
+    }).length
+    const pagefileLimit = evaluatePagefileSingleFork(memory, { activeForks })
+    if (pagefileLimit.ok !== true) {
+      audit('fork-pagefile-single-fork-refused', { action, activeForks, pageFileMB: Number(memory.pageFileMB) || 0 })
+      return pagefileLimit
+    }
+    if (pagefileLimit.limited === true) audit('fork-pagefile-single-fork', { action, activeForks, pageFileMB: Number(memory.pageFileMB) || 0 })
     const decision = evaluateMemoryGuard(memory, { minFreeMB: cfg.memoryMinFreeMB })
     if (decision.ok !== true) audit('fork-memory-low', { action, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
-    return decision
+    return { ...decision, pagefileLimited: pagefileLimit.limited === true, activeForks }
   }
 
   let sessionCompactBusy = false
@@ -1255,6 +1298,71 @@ export function apply(ctx, config) {
 
   const memorySamples = new Map()
 
+  /**
+   * Browser crash evidence. The exit event can arrive while closeTaskBrowser is
+   * still flushing the page, so this only records facts and clears the live
+   * handle; the normal close result remains authoritative for "saved/unsaved".
+   */
+  const recordBrowserExit = (task, browser, info = {}) => {
+    if (!task || !browser || browser.exitRecorded === true) return null
+    browser.exitRecorded = true
+    const at = Number(info.at) || nowMs()
+    const exit = {
+      code: info.code ?? null,
+      unsignedCode: info.unsignedCode ?? null,
+      hex: info.hex ?? null,
+      signal: info.signal ?? null,
+      kind: info.kind ?? 'unknown',
+      oom: info.oom === true,
+      source: info.source ?? 'process-exit',
+      intentional: browser.intentionalClose ? String(browser.intentionalClose) : null,
+      at,
+    }
+    const last = browser.last && typeof browser.last === 'object' ? { ...browser.last } : null
+    const pidTree = last ? {
+      pids: Array.isArray(last.pids) ? last.pids : [],
+      count: Number(last.count) || 0,
+      workingSetMB: Number(last.workingSetMB) || 0,
+      commitMB: Number(last.commitMB) || 0,
+    } : null
+    const record = {
+      taskId: task.taskId,
+      at,
+      kind: 'browser-exit',
+      source: 'managed-browser',
+      pid: Number(browser.pid) || null,
+      port: Number(browser.port) || null,
+      exit,
+      lastCdp: last ? {
+        at: last.at ?? null,
+        nodes: last.nodes ?? null,
+        heapMB: last.heapMB ?? null,
+        documents: last.documents ?? null,
+        listeners: last.listeners ?? null,
+        layoutCount: last.layoutCount ?? null,
+        visibility: last.visibility ?? null,
+      } : null,
+      pidTree,
+      logFile: browser.logFile ?? null,
+      crashDir: browser.crashDir ?? null,
+    }
+    task.browserExit = record
+    if (task.browser === browser) task.browser = null
+    try { appendJsonlRotated(path.join(layout.dataDir, 'browser-events.jsonl'), { ...record, event: 'exit' }, diagnosticLogOptions()) } catch { /* diagnostics only */ }
+    // memory-samples.jsonl is crash evidence; a deliberate flush+close should not
+    // train the root-cause reader on normal shutdowns.
+    if (!exit.intentional || exit.oom) {
+      try { appendJsonlRotated(path.join(layout.dataDir, 'memory-samples.jsonl'), record, diagnosticLogOptions()) } catch { /* diagnostics only */ }
+    }
+    audit(exit.oom ? 'fork-browser-exit-oom' : (exit.intentional ? 'fork-browser-exit-intentional' : 'fork-browser-exit'), {
+      taskId: task.taskId, pid: record.pid, exitCode: exit.code, exitHex: exit.hex, exitKind: exit.kind,
+      oom: exit.oom, nodes: record.lastCdp?.nodes ?? null, heapMB: record.lastCdp?.heapMB ?? null,
+      pids: pidTree?.pids ?? [],
+    })
+    try { persist() } catch { /* record already written */ }
+    return record
+  }
+
   const flushForkSession = async (task) => {
     const flushPath = String(cfg.forkFlushPath || '').trim()
     if (!flushPath) return { ok: false, error: 'unsupported', saved: false }
@@ -1282,6 +1390,7 @@ export function apply(ctx, config) {
   const closeTaskBrowser = async (task, reason = 'guard') => {
     if (!task?.browser?.pid) return { ok: true, skipped: 'no-browser' }
     const browser = task.browser
+    browser.intentionalClose = String(reason)
     const forkFlush = await flushForkSession(task)
     const sessionSaved = forkFlush.ok === true && forkFlush.saved === true
     const flushView = {
@@ -1354,13 +1463,84 @@ export function apply(ctx, config) {
     return { ok: true, quarantined: true, taskId: task.taskId, reason }
   }
 
+  const inspectTaskOpenHealth = async (task) => {
+    if (cfg.forkHealthGate !== true) return { ok: true, skipped: 'disabled' }
+    // 元主 runtime browser 不是任务，没有 task.adapter/port；它的存活由 forker
+    // 的 live 状态保证，不能套用分身的 task health gate。
+    if (task.runtime === true) return { ok: true, skipped: 'runtime-browser' }
+    const adapter = task.adapter && typeof task.adapter === 'object'
+      ? { ok: task.adapter.ok === true, error: task.adapter.error ?? null, busy: task.adapter.busy === true }
+      : { ok: false, error: 'adapter-missing' }
+    let session = null
+    try {
+      session = await inspectForkSessionHealth(task.homeDir, {
+        maxSessionMB: cfg.forkHealthMaxSessionMB,
+        maxEvents: cfg.forkHealthMaxEvents,
+      })
+    } catch (error) {
+      session = { ok: false, error: String(error?.message ?? error), sessions: 0, totalBytes: 0, events: null }
+    }
+    let http = null
+    if (Number(task.port) > 0) {
+      try {
+        http = await probeForkHealth(task.port, {
+          path: forkHealthPath,
+          fallbackPaths: ['/api/health'],
+          timeoutMs: cfg.forkHealthTimeoutMs,
+        })
+      } catch (error) {
+        http = { ok: false, error: String(error?.message ?? error), status: null, path: forkHealthPath }
+      }
+    } else {
+      http = { ok: false, error: 'fork-port-missing', status: null, path: forkHealthPath }
+    }
+    const decision = evaluateForkHealth({
+      session,
+      adapter,
+      http,
+      limits: { maxSessionMB: cfg.forkHealthMaxSessionMB, maxEvents: cfg.forkHealthMaxEvents },
+    })
+    if (decision.ok !== true) {
+      audit('fork-open-health-refused', {
+        taskId: task.taskId,
+        error: decision.error,
+        failures: decision.failures,
+        session: session ? {
+          sessions: session.sessions, totalBytes: session.totalBytes, largestBytes: session.largestBytes,
+          events: session.events, truncated: session.truncated === true,
+        } : null,
+        http: http ? { ok: http.ok === true, status: http.status ?? null, path: http.path ?? null, error: http.error ?? null } : null,
+        adapter,
+      })
+    }
+    return decision
+  }
+
   const launchTaskBrowser = async (task, url) => {
     if (cfg.managedBrowser !== true) return { ok: false, error: 'managed-browser-disabled', managed: false, url }
     if (!task || !url) return { ok: false, error: 'browser-url-required' }
+    // Reusing an already-open managed page is not a new open; the watchdog still
+    // owns its memory/health enforcement. Only a new launch pays the health gate.
     if (task.browser?.pid && isPidAlive(task.browser.pid)) {
       task.closeWarning = null
       task.memoryGuard = null
       return { ok: true, managed: true, pid: task.browser.pid, port: task.browser.port, reused: true }
+    }
+    const health = await inspectTaskOpenHealth(task)
+    if (health.ok !== true) {
+      return {
+        ok: false,
+        error: health.error ?? 'fork-health-refused',
+        step: 'fork-health',
+        detail: health.detail ?? null,
+        health: {
+          ok: false,
+          failures: health.failures,
+          session: health.session,
+          adapter: health.adapter,
+          http: health.http,
+        },
+      }
     }
     const liveBrowsers = [...tasks.values(), ...runtimeBrowsers.values()].filter((item) => item.browser?.pid && isPidAlive(item.browser.pid))
     const max = Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
@@ -1377,7 +1557,17 @@ export function apply(ctx, config) {
     if (!port) return { ok: false, error: 'browser-port-unavailable' }
     const profileDir = path.join(task.homeDir, 'browser-profile')
     const logDir = path.join(task.homeDir, 'browser-logs')
-    const launched = await launchManagedBrowser({ exe, url, profileDir, logDir, port })
+    let browserHandle = null
+    const launched = await launchManagedBrowser({
+      exe, url, profileDir, logDir, port,
+      onExit: (info) => {
+        const handle = browserHandle ?? {
+          pid: info.pid ?? null, port, logFile: info.logFile ?? null,
+          crashDir: info.crashDir ?? null, last: null,
+        }
+        recordBrowserExit(task, handle, { ...info, source: 'process-exit' })
+      },
+    })
     if (launched.ok !== true) {
       audit('fork-browser-launch-failed', { taskId: task.taskId, error: launched.error, pid: launched.pid ?? null })
       return launched
@@ -1396,7 +1586,7 @@ export function apply(ctx, config) {
       notLowered: Number(launched.priority.notLowered) || 0,
       error: launched.priority.error ?? null,
     } : null
-    task.browser = {
+    browserHandle = task.browser = {
       pid: launched.pid, port: launched.port, profileDir, logFile: launched.logFile,
       crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null, priority, lifecycleState: 'active', lifecycleAt: null, lifecycleError: null, lifecycleFailedAt: null,
     }
@@ -1407,6 +1597,16 @@ export function apply(ctx, config) {
     persist()
     scheduleBrowserProcessIdentity(task)
     audit('fork-browser-opened', { taskId: task.taskId, pid: launched.pid, port: launched.port })
+    if (cfg.browserSingleAppWindow !== false) {
+      try {
+        const single = await enforceSinglePageTarget(launched.port, { maxPages: 1 })
+        browserHandle.singlePage = { at: nowMs(), ...single }
+        if (single.closed?.length) audit('fork-browser-extra-pages-closed', { taskId: task.taskId, port: launched.port, closed: single.closed })
+      } catch (error) {
+        browserHandle.singlePageError = String(error?.message ?? error)
+        audit('fork-browser-extra-pages-close-failed', { taskId: task.taskId, port: launched.port, error: browserHandle.singlePageError })
+      }
+    }
     if (priority) {
       const event = !priority.ok ? 'fork-browser-priority-failed' : priority.partial ? 'fork-browser-priority-partial' : 'fork-browser-priority'
       audit(event, { taskId: task.taskId, ...priority })
@@ -1564,9 +1764,10 @@ export function apply(ctx, config) {
       const browser = task.browser
       if (!browser?.pid) continue
       if (!isPidAlive(browser.pid)) {
+        recordBrowserExit(task, browser, { source: 'watchdog-pid-dead' })
         task.browser = null
-        task.browserClosed = { at: nowMs(), reason: 'browser-process-exited', pid: browser.pid }
-        audit('fork-browser-exited', { taskId: task.taskId, pid: browser.pid })
+        task.browserClosed = { at: nowMs(), reason: 'browser-process-exited', pid: browser.pid, exit: task.browserExit?.exit ?? null }
+        audit('fork-browser-exited', { taskId: task.taskId, pid: browser.pid, exitCode: task.browserExit?.exit?.code ?? null, exitHex: task.browserExit?.exit?.hex ?? null })
         persist()
         continue
       }
@@ -1631,6 +1832,17 @@ export function apply(ctx, config) {
       try {
         appendJsonlRotated(path.join(layout.dataDir, 'browser-samples.jsonl'), { taskId: task.taskId, ...browser.last }, diagnosticLogOptions())
       } catch { /* diagnostics only */ }
+      if (cfg.browserSingleAppWindow !== false) {
+        try {
+          const single = await enforceSinglePageTarget(browser.port, { maxPages: 1 })
+          browser.singlePage = { at: now, ...single }
+          if (single.closed?.length) {
+            audit('fork-browser-extra-pages-closed', { taskId: task.taskId, port: browser.port, closed: single.closed })
+          }
+        } catch (error) {
+          browser.singlePageError = String(error?.message ?? error)
+        }
+      }
       const limits = memoryPolicySnapshot()
       const overMemory = Number(tree.commitMB) >= Number(limits.browserMemoryLimitMB)
       const overHeap = cdpOk && heapMB >= Number(limits.browserHeapLimitMB)
@@ -2147,6 +2359,14 @@ export function apply(ctx, config) {
       profile: t.profile,
       createdAt: t.createdAt,
       restarts: t.restarts ?? 0,
+      quarantined: t.quarantined ?? live?.quarantined ?? null,
+      crashLoop: live?.quarantined?.reason === 'crash-loop' ? {
+        count: live.quarantined.count ?? null,
+        threshold: live.quarantined.threshold ?? null,
+        windowMs: live.quarantined.windowMs ?? null,
+        at: live.quarantined.at ?? null,
+      } : null,
+      browserExit: t.browserExit ?? null,
       adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', protocol: t.adapter?.protocol ?? 0, error: t.adapter?.error ?? '' },
       activity: (() => {
         const cached = forkActivityCache.get(t.taskId)
@@ -3561,6 +3781,8 @@ export function apply(ctx, config) {
       const wasQuarantined = Boolean(task.quarantined)
       const f = forker()
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
+      const liveQuarantine = typeof f.status === 'function' ? f.status(id)?.quarantined : null
+      const clearingQuarantine = wasQuarantined || Boolean(liveQuarantine)
       const failRestoreStep = (step, error, extra = {}) => {
         const detail = String(error?.message ?? error)
         try { f.stop?.(id) } catch { /* best effort */ }
@@ -3709,6 +3931,7 @@ export function apply(ctx, config) {
         profile: task.profile,
         ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
         coreMode: coreSync.coreMode,
+          resetCrashLoop: clearingQuarantine,
           env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
         })
       } catch (error) {
@@ -3781,6 +4004,23 @@ export function apply(ctx, config) {
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
       if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
+      // Forker 的 10 分钟 2 次崩溃闩锁是进程层事实；把它投影到任务层，
+      // 否则用户点“打开”会绕过隔离直接 restore 出一个新进程。
+      try {
+        const live = forker()?.status?.(id)
+        if (live?.quarantined && !task.quarantined) {
+          task.quarantined = live.quarantined
+          task.status = TASK_STATUS.FAILED
+          task.pid = null
+          task.port = null
+          task.url = null
+          task.token = ''
+          task.adapter = { ok: false, error: 'fork-quarantined' }
+          persist()
+          syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'crash-loop-quarantined' })
+          audit('fork-crash-loop-quarantine-projected', { taskId: id, quarantined: live.quarantined })
+        }
+      } catch { /* status read is best effort */ }
       if (task.quarantined) return { ok: false, taskId: id, error: 'fork-quarantined', detail: task.quarantined.reason ?? 'guard' }
 
       const failOpenStep = (step, error, extra = {}) => {
@@ -4141,8 +4381,50 @@ export function apply(ctx, config) {
         // 和启动探针刷新；status 本身不做 PowerShell 查询，避免拉高采样成本。
         memory: memorySnapshot,
         memoryPolicy: memoryPolicySnapshot(),
+        pagefilePolicy: {
+          missing: memorySnapshot?.pagefileMissing === true,
+          evidence: memorySnapshot?.pagingFilesEmpty === true ? 'PagingFiles={}'
+            : memorySnapshot?.commitLimitNearRam === true ? 'CommitLimit≈RAM'
+              : memorySnapshot?.pagefileMissing === true ? 'Win32_PageFileUsage 无分配' : null,
+          singleForkOnly: memorySnapshot?.pagefileMissing === true,
+          maxConcurrentForks: memorySnapshot?.pagefileMissing === true ? 1 : Math.max(1, Number(cfg.maxForks) || 1),
+          safeMode: safeMode === true,
+        },
         sessionCompact: sessionCompactSnapshot,
         diskHygiene: diskHygieneSnapshot,
+      }
+    },
+
+    healthSnapshot: async () => {
+      const home = role === 'fork' ? String(process.env.DSH_HOME ?? '') : ''
+      let session = null
+      if (home) {
+        try {
+          session = await inspectForkSessionHealth(home, {
+            maxSessionMB: cfg.forkHealthMaxSessionMB,
+            maxEvents: cfg.forkHealthMaxEvents,
+          })
+        } catch (error) {
+          session = { ok: false, error: String(error?.message ?? error), sessions: 0, totalBytes: 0, events: null }
+        }
+      }
+      let adapter = null
+      try {
+        const adapterService = safeGet(SERVICE.adapter)
+        if (adapterService && typeof adapterService.health === 'function') adapter = adapterService.health()
+      } catch (error) {
+        adapter = { ok: false, error: String(error?.message ?? error) }
+      }
+      const ok = session?.ok !== false && session?.truncated !== true && adapter?.ok !== false
+      return {
+        ok,
+        role,
+        version: FANG_VERSION,
+        pid: process.pid ?? null,
+        at: iso(),
+        uptimeMs: Math.max(0, Math.round(process.uptime() * 1000)),
+        session,
+        adapter,
       }
     },
 
@@ -5931,6 +6213,15 @@ export function apply(ctx, config) {
         })
       })
 
+      // 分身打开前健康检查：session 大小/事件数 + adapter 状态。
+      // Public only in the sense of no install token; Host/Origin loopback checks still run.
+      const handleHealth = async (req, res) => json(res, 200, await service.healthSnapshot())
+      route('GET', `${prefix}/api/health`, handleHealth, { public: true })
+      if (prefix !== '') {
+        try { route('GET', '/api/health', handleHealth, { public: true }) } catch (error) {
+          audit('fork-health-root-alias-skipped', { detail: String(error?.message ?? error) })
+        }
+      }
       route('GET', `${prefix}/api/status`, (req, res) => json(res, 200, service.status()))
       // v3.1.15：fang-master 契约端点（HTTP fallback；token 未配置时禁用）。
       if (contractCfg.enabled !== false) {

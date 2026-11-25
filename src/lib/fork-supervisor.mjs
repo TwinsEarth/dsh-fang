@@ -15,7 +15,29 @@ export const SUPERVISION_DEFAULTS = Object.freeze({
   jitter: 0.2,
   healthPath: '/',
   healthTimeoutMs: 1500,
+  crashWindowMs: 10 * 60 * 1000,
+  crashThreshold: 2,
 })
+
+/** Prune crash timestamps to the window and decide whether auto-restart must stop. */
+export function evaluateCrashLoop(times = [], now = Date.now(), options = {}) {
+  const windowMs = Math.max(1000, Number(options.windowMs ?? SUPERVISION_DEFAULTS.crashWindowMs) || SUPERVISION_DEFAULTS.crashWindowMs)
+  const threshold = Math.max(1, Math.floor(Number(options.threshold ?? SUPERVISION_DEFAULTS.crashThreshold) || SUPERVISION_DEFAULTS.crashThreshold))
+  const at = Number(now) || Date.now()
+  const kept = (Array.isArray(times) ? times : [])
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item) && item > 0 && at - item <= windowMs)
+    .sort((a, b) => a - b)
+  return {
+    tripped: kept.length >= threshold,
+    count: kept.length,
+    threshold,
+    windowMs,
+    firstAt: kept[0] ?? null,
+    lastAt: kept[kept.length - 1] ?? null,
+    times: kept,
+  }
+}
 
 export const META_FILE = 'fang-meta.json'
 export const META_VERSION = 1

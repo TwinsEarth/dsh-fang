@@ -61,7 +61,7 @@ import {
   writeJsonAtomic,
   z,
 } from '../kernel/index.mjs'
-import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
+import { computeBackoff, evaluateCrashLoop, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
@@ -199,6 +199,10 @@ export const Config = z
       .description('backoff cap in milliseconds'),
     backoffJitter: z.number().min(0).max(0.9).default(SUPERVISION_DEFAULTS.jitter)
       .description('backoff jitter ratio'),
+    crashWindowMs: z.natural().min(60_000).max(60 * 60 * 1000).default(SUPERVISION_DEFAULTS.crashWindowMs)
+      .description('崩溃退避窗口（毫秒）；同一 fork 在窗口内达到阈值即停止自动重开'),
+    crashThreshold: z.natural().min(1).max(10).default(SUPERVISION_DEFAULTS.crashThreshold)
+      .description('窗口内崩溃次数阈值；默认 10 分钟 2 次'),
     healthPath: z.string().default(SUPERVISION_DEFAULTS.healthPath)
       .description('HTTP liveness path (any response counts)')
   })
@@ -636,6 +640,9 @@ export function apply(ctx, config) {
     exitedAt: rec.exitedAt ?? null,
     exit: rec.exit ?? null,
     lastError: rec.lastError ?? null,
+    crashCount: rec.crashCount ?? 0,
+    crashTimes: Array.isArray(rec.crashTimes) ? rec.crashTimes.slice(-10) : [],
+    quarantined: rec.quarantined ?? null,
     jobObject: jobObjectSummary(rec.jobObject),
   })
 
@@ -1077,6 +1084,7 @@ export function apply(ctx, config) {
       status: FORK_STATUS.PROVISIONING,
       exit: null,
       lastError: null,
+      quarantined: null,
     })
     records.set(forkId, rec)
     persist()
@@ -1098,6 +1106,8 @@ export function apply(ctx, config) {
       forkId: rec.forkId, status: rec.status, pid: rec.pid ?? null, port: rec.port ?? null,
       url: rec.url ?? null, profile: rec.profile ?? null,
       crashCount: rec.crashCount ?? 0, restartCount: rec.restartCount ?? 0,
+      crashTimes: Array.isArray(rec.crashTimes) ? rec.crashTimes.slice(-10) : [],
+      quarantined: rec.quarantined ?? null,
       lastError: rec.lastError ?? null, startedAt: rec.startedAt ?? null,
       exitedAt: rec.exitedAt ?? null, restartScheduledAt: rec.restartScheduledAt ?? null,
       jobObject: jobObjectSummary(rec.jobObject),
@@ -1230,6 +1240,11 @@ function applyForkExperimentalSurface(profileDir) {
       log: collector,
       catalogCompat: spawnCatalogCompat,
     })
+    if (opts.resetCrashLoop === true) {
+      rec.crashTimes = []
+      rec.crashCount = 0
+      rec.quarantined = null
+    }
     records.set(forkId, rec)
     // v3.0.9 生产盘：每次打开/重启都从来源模板重放配置（原身 merged 或 clean template），
     // 分身自己的改动不保存；sessions/storages/buffer 与 node_modules junction 保持不动。
@@ -1617,14 +1632,43 @@ function applyForkExperimentalSurface(profileDir) {
         }
         // A dead child never keeps a deterministic port: release it on every exit path.
         releaseReserved()
-        if (!rec.intentionalStop) rec.crashCount = (rec.crashCount ?? 0) + 1
+        let crashGate = null
+        if (!rec.intentionalStop) {
+          const at = nowMs()
+          const nextTimes = [...(Array.isArray(rec.crashTimes) ? rec.crashTimes : []), at]
+          crashGate = evaluateCrashLoop(nextTimes, at, {
+            windowMs: cfg.crashWindowMs,
+            threshold: cfg.crashThreshold,
+          })
+          rec.crashTimes = crashGate.times
+          rec.crashCount = (rec.crashCount ?? 0) + 1
+          if (crashGate.tripped) {
+            rec.quarantined = {
+              reason: 'crash-loop',
+              at,
+              count: crashGate.count,
+              threshold: crashGate.threshold,
+              windowMs: crashGate.windowMs,
+              firstAt: crashGate.firstAt,
+              lastAt: crashGate.lastAt,
+            }
+            rec.status = FORK_STATUS.CRASHED
+            rec.lastError = 'crash-loop-quarantined'
+            audit(AUDIT.FORK_CRASHED, {
+              forkId, crashLoop: true, count: crashGate.count,
+              threshold: crashGate.threshold, windowMs: crashGate.windowMs,
+            })
+            emit(EVENTS.crashed, { forkId, code: exitInfo.code, kind: exitInfo.kind, crashLoop: true, quarantined: rec.quarantined })
+            emit(EVENTS.restartFailed, { forkId, error: 'crash-loop-quarantined', terminal: true, quarantined: rec.quarantined })
+          }
+        }
         // A reap may already have deleted the record + home; never resurrect it from the exit handler.
         if (records.get(forkId) === rec) {
           // Dead child: never leave a stale running pid/port/url in fang-meta.
           writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null })
           persist()
         }
-        if (!rec.intentionalStop && runtimeSupervise && !disposed) {
+        if (!rec.intentionalStop && crashGate?.tripped !== true && runtimeSupervise && !disposed) {
           const plan = planRestart(exitInfo, rec, {
             maxRestarts: cfg.maxRestarts, baseMs: cfg.backoffBaseMs,
             maxMs: cfg.backoffMaxMs, jitter: cfg.backoffJitter,

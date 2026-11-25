@@ -37,12 +37,16 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
   if (cache.pending) return cache.pending
   const script = [
     '$o = Get-CimInstance Win32_OperatingSystem',
+    '$cs = Get-CimInstance Win32_ComputerSystem',
+    '$mm = Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management" -ErrorAction SilentlyContinue',
     '$p = [pscustomobject]@{',
     '  CommitLimitMB = [math]::Round($o.TotalVirtualMemorySize / 1024)',
     '  CommitFreeMB = [math]::Round($o.FreeVirtualMemory / 1024)',
     '  PhysicalTotalMB = [math]::Round($o.TotalVisibleMemorySize / 1024)',
     '  PhysicalFreeMB = [math]::Round($o.FreePhysicalMemory / 1024)',
     '  PageFileMB = [math]::Round((Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue | Measure-Object AllocatedBaseSize -Sum).Sum)',
+    '  PagingFiles = [string](@($mm.PagingFiles) -join ";")',
+    '  AutomaticManagedPagefile = [bool]($cs.AutomaticManagedPagefile -eq $true)',
     '}',
     '$p | ConvertTo-Json -Compress',
   ].join('\n')
@@ -63,10 +67,15 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
         physicalFreeMB: Number(data.PhysicalFreeMB) || 0,
         pageFileMB: Number(data.PageFileMB) || 0,
         hasPageFile: Number(data.PageFileMB) > 0,
+        pagingFiles: String(data.PagingFiles ?? ''),
+        pagingFilesEmpty: String(data.PagingFiles ?? '').trim() === '',
+        automaticManagedPagefile: data.AutomaticManagedPagefile === true,
+        commitLimitNearRam: isCommitLimitNearRam(Number(data.CommitLimitMB) || 0, Number(data.PhysicalTotalMB) || 0),
         at: now,
         cached: false,
         cacheAgeMs: 0,
       }
+      value.pagefileMissing = isPagefileMissing(value)
       cache = { at: now, value, pending: null }
       return value
     } catch (error) {
@@ -77,6 +86,40 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
   })()
   cache.pending = run
   return run
+}
+
+/** CommitLimit ≈ physical RAM is a second, independent no-pagefile signal. */
+export function isCommitLimitNearRam(commitLimitMB, physicalTotalMB) {
+  const limit = Number(commitLimitMB) || 0
+  const total = Number(physicalTotalMB) || 0
+  if (limit <= 0 || total <= 0) return false
+  return limit <= total * 1.1
+}
+
+/** Pagefile missing by usage, registry PagingFiles={}, or CommitLimit≈RAM. */
+export function isPagefileMissing(memory) {
+  if (!memory || memory.ok !== true || memory.supported === false) return false
+  if (memory.pagingFilesEmpty === true || memory.commitLimitNearRam === true) return true
+  return memory.hasPageFile !== true || Number(memory.pageFileMB) <= 0
+}
+
+/**
+ * No-pagefile policy: allow one fork at most, refuse the second.
+ * This is deliberately a pure decision so the UI and the server share one rule.
+ */
+export function evaluatePagefileSingleFork(memory, { activeForks = 0 } = {}) {
+  if (!isPagefileMissing(memory)) return { ok: true, limited: false, activeForks: Number(activeForks) || 0 }
+  const active = Math.max(0, Number(activeForks) || 0)
+  if (active >= 1) {
+    return {
+      ok: false,
+      error: 'pagefile-single-fork',
+      limited: true,
+      activeForks: active,
+      detail: '页面文件缺失（PagingFiles={} 或 CommitLimit≈RAM）：只允许一个分身，第二个已拒绝。',
+    }
+  }
+  return { ok: true, limited: true, activeForks: active }
 }
 
 /** Pure guard decision, kept separate for tests. */

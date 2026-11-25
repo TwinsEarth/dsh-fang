@@ -2158,7 +2158,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const memory = S.status?.data?.memory || null
         const policy = S.status?.data?.memoryPolicy || {}
         const pageFileMB = Number(memory?.pageFileMB) || 0
-        const pagefileMissing = memory?.ok === true && (memory?.hasPageFile !== true || pageFileMB <= 0)
+        const pagefileMissing = memory?.ok === true && (
+          memory?.pagefileMissing === true
+          || memory?.pagingFilesEmpty === true
+          || memory?.commitLimitNearRam === true
+          || memory?.hasPageFile !== true
+          || pageFileMB <= 0
+        )
         const commitLow = memory?.ok === true
           && Number(memory?.commitFreeMB) < Number(policy.hostCriticalFreeMB ?? 4096)
         lockScroll()
@@ -4201,15 +4207,25 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
     function renderPagefileBanner(S, app) {
       const memory = S.status?.data?.memory
-      if (!memory || memory.ok !== true || memory.supported === false
-        || (memory.hasPageFile === true && Number(memory.pageFileMB) > 0)) return null
+      if (!memory || memory.ok !== true || memory.supported === false) return null
+      const pagefileMissing = memory.pagefileMissing === true
+        || memory.pagingFilesEmpty === true
+        || memory.commitLimitNearRam === true
+        || memory.hasPageFile !== true
+        || Number(memory.pageFileMB) <= 0
+      if (!pagefileMissing) return null
       const limit = Number(memory.commitLimitMB) || 0
       const free = Number(memory.commitFreeMB) || 0
+      const evidence = memory.pagingFilesEmpty === true
+        ? 'PagingFiles={}'
+        : memory.commitLimitNearRam === true
+          ? 'CommitLimit≈物理内存'
+          : 'Win32_PageFileUsage 无分配'
       return h('div', { class: 'notice notice--bad fang-pagefile-banner', role: 'alert', 'data-zone': 'pagefile-banner' },
         h('div', { class: 'notice-main' },
           h('div', { class: 'notice-title' }, icon('alert', 15), '页面文件缺失 · 宿主随时可能 OOM'),
           h('div', { class: 'notice-text' },
-            `Windows 没有可用的页面文件/Commit 扩展空间（上限 ${limit} MB，当前余量 ${free} MB）。瓮城会拒绝新分身；大 session、浏览器缓存和并发任务会直接推高 Commit。`),
+            `Windows 没有可用的页面文件/Commit 扩展空间（证据：${evidence}；上限 ${limit} MB，当前余量 ${free} MB）。瓮城会拒绝新分身；大 session、浏览器缓存和并发任务会直接推高 Commit。`),
           h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } },
             '修复不需要重装系统：恢复系统托管的页面文件，或至少留 8–16 GB，然后重启宿主。')),
         h('div', { class: 'notice-actions' },
