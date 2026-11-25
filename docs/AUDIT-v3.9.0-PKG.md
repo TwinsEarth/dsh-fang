@@ -67,3 +67,10 @@ node tools/release/clean-locale-sidecars.mjs
 - 已发布的 npm `3.9.0` 与 GitHub Release `v3.9.0` 不能原地覆盖；修复包若要给用户安装，需要新版本（建议 `3.9.1`）并重新走构建/发布确认。
 - 当前工作树只完成源码和门禁修复；未 bump 版本、未发布、未部署到本机 profile。
 - 本机 `~/.dsh/profiles/desktop` 安装的是旧 `3.8.2`，未发现 `._en.json`，因此无法用本机复现该文件本身；`maxForks=8` 已用已发布 3.9.0 tarball 的 package smoke 复现。
+
+## 五、范围决定（2026-11-26）
+
+- **D3（Windows ARM64）**：不支持 / 未验证。没有 ARM64 Windows 真机执行证据；不把 `fang-job-host-arm64.exe` 的静态核对写成已支持。ARM64 上 helper 不可用时仍按 `job-object-unavailable` fail-closed，不退化裸 spawn。
+- **E3（GitHub 凭据安全）**：暂不处理，继续使用当前 PAT；本轮不做吊销、轮换、OAuth 或 SSH 变更，相关风险由用户接受。
+- 因此后续 `3.9.1` 的范围只包含包元信息修复，不包含 D3、E3。
+
