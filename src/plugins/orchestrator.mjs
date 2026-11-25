@@ -1381,17 +1381,29 @@ export function apply(ctx, config) {
       if (task.status !== TASK_STATUS.READY && task.status !== TASK_STATUS.RUNNING) continue
       const live = f?.status?.(id)
       if (!live?.running) continue
-      await closeTaskBrowser(task, reason)
-      try { f.stop?.(id) } catch { /* already gone */ }
+      let browserClose = null
+      try { browserClose = await closeTaskBrowser(task, reason) } catch (error) {
+        audit('fork-auto-pause-browser-close-failed', { taskId: id, reason, by: currentId, error: String(error?.message ?? error) })
+      }
+      let stopped = null
+      try { stopped = await f.stop?.(id) } catch (error) {
+        audit('fork-auto-pause-stop-failed', { taskId: id, reason, by: currentId, error: String(error?.message ?? error) })
+      }
       task.status = TASK_STATUS.FAILED
       task.pid = null
       task.port = null
       task.url = null
+      task.token = ''
       task.adapter = { ok: false, error: 'auto-paused-memory' }
       task.memoryPaused = { reason, at: nowMs() }
-      syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'auto-paused-memory' })
+      const metaSynced = syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'auto-paused-memory' })
       paused.push(id)
-      audit('fork-auto-paused', { taskId: id, reason, by: currentId })
+      audit('fork-auto-paused', {
+        taskId: id, reason, by: currentId,
+        browserCloseOk: browserClose?.ok === true,
+        stopOk: stopped?.ok !== false,
+        metaSynced: metaSynced === true,
+      })
     }
     if (paused.length) persist()
     return { ok: true, paused }
@@ -2665,7 +2677,75 @@ export function apply(ctx, config) {
     return task.adapter
   }
 
+    const syncTaskMeta = (task, overrides = {}) => {
+      if (!task?.homeDir) return false
+      try {
+        const previous = readForkMeta(task.homeDir) ?? {}
+        const written = writeForkMeta(task.homeDir, {
+          ...previous,
+          forkId: task.taskId,
+          status: overrides.status ?? task.status,
+          pid: overrides.pid !== undefined ? overrides.pid : (task.pid ?? null),
+          port: overrides.port !== undefined ? overrides.port : (task.port ?? null),
+          url: overrides.url !== undefined ? overrides.url : stripUrlToken(task.url),
+          profile: task.profile ?? previous.profile ?? null,
+          taskStatus: overrides.status ?? task.status,
+          lastError: overrides.lastError ?? task.adapter?.error ?? previous.lastError ?? null,
+        })
+        if (written !== true) audit('fork-meta-write-failed', { taskId: task.taskId, homeDir: task.homeDir })
+        return written
+      } catch {
+        return false
+      }
+    }
+
+
+    /**
+     * Repair a fork's own fang-meta.json when no live process exists. The task
+     * registry is authoritative after pause/stop; a meta that still says
+     * running/pid/port is exactly the state that makes Open/Restore reuse a
+     * port now owned by the essence runtime.
+     */
+    const repairTaskMetaIfStale = (task, reason = 'task-view') => {
+      if (!task?.homeDir || task.status === TASK_STATUS.ARCHIVED) return false
+      let live = null
+      try { live = forker()?.status?.(task.taskId) ?? null } catch { live = null }
+      if (live?.running === true) return false
+      if (task.pid && isPidAlive(Number(task.pid))) return false
+      const meta = readForkMeta(task.homeDir)
+      const metaStatus = String(meta?.status ?? meta?.taskStatus ?? '')
+      const taskStatus = String(task.status ?? '')
+      const metaSuspect = Boolean(meta?.pid || meta?.port || meta?.url)
+        || metaStatus === TASK_STATUS.RUNNING
+        || metaStatus === TASK_STATUS.READY
+        || metaStatus === TASK_STATUS.PROVISIONING
+      const taskSuspect = Boolean(task.pid || task.port || task.url)
+        || taskStatus === TASK_STATUS.RUNNING
+        || taskStatus === TASK_STATUS.READY
+        || taskStatus === TASK_STATUS.PROVISIONING
+      if (!metaSuspect && !taskSuspect) return false
+      const before = {
+        task: { status: task.status, pid: task.pid ?? null, port: task.port ?? null, url: task.url ?? null, adapter: task.adapter?.ok ?? null },
+        meta: meta ? { status: meta.status ?? meta.taskStatus ?? null, pid: meta.pid ?? null, port: meta.port ?? null, url: meta.url ?? null } : null,
+      }
+      const lastError = task.adapter?.error || (metaSuspect ? 'stale-meta-reconciled' : 'stale-process')
+      let changed = false
+      if (task.status !== TASK_STATUS.FAILED) { task.status = TASK_STATUS.FAILED; changed = true }
+      if (task.pid != null) { task.pid = null; changed = true }
+      if (task.port != null) { task.port = null; changed = true }
+      if (task.url != null) { task.url = null; changed = true }
+      if (task.token) { task.token = ''; changed = true }
+      if (task.adapter?.ok === true) { task.adapter = { ok: false, error: lastError }; changed = true }
+      if (changed) persist()
+      const synced = meta ? syncTaskMeta(task, {
+        status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError,
+      }) : false
+      audit('fork-meta-reconciled', { taskId: task.taskId, reason, before, synced })
+      return synced || changed
+    }
+
   function taskView(t) {
+    try { repairTaskMetaIfStale(t, 'task-view') } catch { /* best effort */ }
     const live = forker()?.status?.(t.taskId)
     const running = live ? !!live.running : t.status === TASK_STATUS.RUNNING || t.status === TASK_STATUS.READY
     const status = !running ? (t.status === TASK_STATUS.ARCHIVED ? TASK_STATUS.ARCHIVED : TASK_STATUS.FAILED)
@@ -3065,26 +3145,6 @@ export function apply(ctx, config) {
      * missing. Merge the prior doc so crash counters survive; never write the
      * tokenized URL.
      */
-    const syncTaskMeta = (task, overrides = {}) => {
-      if (!task?.homeDir) return false
-      try {
-        const previous = readForkMeta(task.homeDir) ?? {}
-        return writeForkMeta(task.homeDir, {
-          ...previous,
-          forkId: task.taskId,
-          status: overrides.status ?? task.status,
-          pid: overrides.pid !== undefined ? overrides.pid : (task.pid ?? null),
-          port: overrides.port !== undefined ? overrides.port : (task.port ?? null),
-          url: overrides.url !== undefined ? overrides.url : stripUrlToken(task.url),
-          profile: task.profile ?? previous.profile ?? null,
-          taskStatus: overrides.status ?? task.status,
-          lastError: overrides.lastError ?? task.adapter?.error ?? previous.lastError ?? null,
-        })
-      } catch {
-        return false
-      }
-    }
-
     /** Loopback bind probe; falls back to the browser-guard scanner when an older forker lacks portFree. */
     const portIsFree = async (port) => {
       const n = Math.floor(Number(port))
@@ -3134,14 +3194,21 @@ export function apply(ctx, config) {
         return { ok: true, changed, live: true, pid: task.pid, port: task.port }
       }
       const liveStatus = String(task.status ?? '')
-      const suspect = Boolean(task.pid || task.port || task.url)
+      const meta = readForkMeta(task.homeDir)
+      const metaStatus = String(meta?.status ?? meta?.taskStatus ?? '')
+      const metaSuspect = Boolean(meta?.pid || meta?.port || meta?.url)
+        || metaStatus === TASK_STATUS.RUNNING
+        || metaStatus === TASK_STATUS.READY
+        || metaStatus === TASK_STATUS.PROVISIONING
+      const suspect = Boolean(task.pid || task.port || task.url) || metaSuspect
         || liveStatus === TASK_STATUS.RUNNING
         || liveStatus === TASK_STATUS.READY
         || liveStatus === TASK_STATUS.PROVISIONING
       if (!suspect) return { ok: true, changed: false, live: false }
-      const before = { status: task.status, pid: task.pid ?? null, port: task.port ?? null, url: task.url ?? null }
+      const before = { status: task.status, pid: task.pid ?? null, port: task.port ?? null, url: task.url ?? null, meta: meta ? { status: meta.status ?? meta.taskStatus ?? null, pid: meta.pid ?? null, port: meta.port ?? null, url: meta.url ?? null } : null }
+      const stalePort = Number(task.port) || Number(meta?.port) || null
       let portFree = true
-      if (task.port) portFree = await portIsFree(task.port)
+      if (stalePort) portFree = await portIsFree(stalePort)
       // Stop a stale forker record; stopRecord is safe when nothing is running and
       // rewrites fang-meta with pid/port/url=null.
       try { await f?.stop?.(id) } catch { /* meta repair is best effort */ }
@@ -3155,7 +3222,7 @@ export function apply(ctx, config) {
       } catch (error) {
         audit('fork-open-stale-browser-close-failed', { taskId: id, reason, error: String(error?.message ?? error) })
       }
-      const portConflict = Boolean(task.port) && !portFree
+      const portConflict = Boolean(stalePort) && !portFree
       task.status = TASK_STATUS.FAILED
       task.pid = null
       task.port = null
@@ -6511,6 +6578,18 @@ export function apply(ctx, config) {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify(obj))
       }
+      const handlerFailure = (res, error, method, pathname) => {
+        const requestId = `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+        const detail = String(error?.message ?? error)
+        audit('http-handler-threw', {
+          requestId, method, path: pathname, detail,
+          stack: String(error?.stack ?? '').slice(0, 3000),
+        })
+        return json(res, 500, {
+          ok: false, error: 'handler-threw', code: 'handler-threw',
+          detail, route: pathname, method, requestId,
+        })
+      }
       // v3.3.3: queue journal route gate (json is in this scope).
       const queueJournalGate = (res) => {
         if (queueJournalEnabled()) return false
@@ -6555,7 +6634,7 @@ export function apply(ctx, config) {
             return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
           }
           try { return await handler(req, res) } catch (e) {
-            return json(res, 500, { ok: false, error: 'handler-threw', code: 'handler-threw', detail: String(e?.message ?? e) })
+            return handlerFailure(res, e, method, pathname)
           }
         },
       })
@@ -6582,7 +6661,7 @@ export function apply(ctx, config) {
             return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
           }
           try { return await fn(req, res) } catch (e) {
-            return json(res, 500, { ok: false, error: 'handler-threw', code: 'handler-threw', detail: String(e?.message ?? e) })
+            return handlerFailure(res, e, String(req.method ?? 'GET').toUpperCase(), pathname)
           }
         },
       })
