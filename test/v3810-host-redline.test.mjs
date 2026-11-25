@@ -82,10 +82,10 @@ test('v3.8.13 measure 5: maxForks is hard-limited to 1 and multi-fork is not con
   assert.match(forker, /allowMultiFork: false/)
 })
 
-test('v3.8.10 measure 6: fork/browser tree is lowered to BelowNormal, host not lowered', () => {
-  assert.match(browserGuard, /PriorityClass = 'BelowNormal'/)
+test('v3.8.10 measure 6: fork/browser tree is lowered, host not lowered', () => {
+  assert.match(browserGuard, /PriorityClass = '\$\{targetClass\}'/)
   assert.match(browserGuard, /lowerProcessPriority/)
-  assert.match(orchestrator, /void lowerProcessPriority\(task\.pid\)/)
+  assert.match(orchestrator, /void lowerProcessPriority\(task\.pid, \{ priorityClass: processPriorityClass \}\)/)
   // No code path lowers the DSH host's own priority.
   assert.equal(/lowerProcessPriority\(process\.pid\)/.test(orchestrator), false)
 })

@@ -75,5 +75,5 @@ test('job object: forker and orchestrator are wired to the helper, not a silent 
   assert.match(forker, /shell: launchShell/)
   assert.match(forker, /rec\.pid = ready\.childPid/)
   assert.match(orchestrator, /watchdog-\$\{process\.pid\}\.heartbeat/)
-  assert.match(orchestrator, /setInterval\(writeHostHeartbeat, 15000\)/)
+  assert.match(orchestrator, /setInterval\(writeHostHeartbeat, HOST_STATE_WRITE_INTERVAL_MS\)/)
 })

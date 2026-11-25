@@ -294,6 +294,10 @@ export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = 4096, mi
 }
 
 export const HARD_MAX_FORKS = 1
+// C1: host-state.json lastMetrics lag follows this timer; 5s matches the host tick.
+export const HOST_STATE_WRITE_INTERVAL_MS = 5000
+// C4: explicit confirm token; confirmation is audited but never lifts the hard limit.
+export const MULTI_FORK_CONFIRM_TOKEN = 'MULTI-FORK'
 
 export const Config = z.object({
   role: z.union([z.const('mother'), z.const('fork')]).default('mother')
@@ -366,6 +370,8 @@ export const Config = z.object({
     .description('全进程表最小采样间隔（毫秒）；中间的 tick 复用缓存表并只做 liveness/CDP 按需检查'),
   browserCdpSampleIntervalMs: z.number().min(15000).max(600000).default(15000)
     .description('托管浏览器 CDP heap/DOM/visibility 采样间隔（毫秒）；v3.8.5 默认 15s，中间复用上次 CDP 指标'),
+  processPriority: z.union([z.const('below-normal'), z.const('idle')]).default('below-normal')
+    .description('托管浏览器/分身的进程优先级档位；idle 更低但可能拖慢页面，默认 below-normal'),
   memoryKillCommitMB: z.number().min(128).max(1048576).default(2048)
     .description('固定兜底：单个分身 PID 树 commit 超过该值（MB）才进入杀进程候选；自适应开启时仅无内存探针时使用'),
   memoryGrowCommitMB: z.number().min(64).max(1048576).default(768)
@@ -426,6 +432,8 @@ export const Config = z.object({
     .description('上次宿主非正常退出时启动 Safe Mode，禁止自动恢复分身'),
   hostCrashMaxEntries: z.number().min(10).max(1000).default(50)
     .description('host-crashes.json 保留的最大崩溃条数（超出丢弃最旧条目）'),
+  hostCrashWindowMinutes: z.number().min(1).max(1440).default(10)
+    .description('host-crashes.json 的崩溃循环窗口（分钟）；safe-mode 原因与 UI 文案同源，默认 10'),
   hostCrashRetentionDays: z.number().min(1).max(365).default(30)
     .description('host-crashes.json 崩溃条目最长保留天数'),
   watchdogRetentionDays: z.number().min(1).max(365).default(7)
@@ -656,6 +664,13 @@ export function apply(ctx, config) {
     } catch { /* guard must never prevent fork boot; failures are audited by caller */ }
   }
   const cfg = { ...Config({}), ...(config ?? {}) }
+  // C4: remember whether the operator asked for multi-fork before the hard red line
+  // clamps it back to 1. The status/confirm endpoints can then explain the refusal.
+  const requestedMultiFork = Number(config?.maxForks) > HARD_MAX_FORKS || config?.allowMultiFork === true
+  // C5: normalize the only two safe tiers once; never pass arbitrary strings to PowerShell.
+  const processPriorityClass = cfg.processPriority === 'idle' ? 'Idle' : 'BelowNormal'
+  const hostCrashWindowMinutes = Math.max(1, Math.min(1440, Math.round(Number(cfg.hostCrashWindowMinutes) || 10)))
+  const hostCrashWindowMs = hostCrashWindowMinutes * 60_000
   // v3.8.13: maxForks is a hard single-fork red line. `allowMultiFork` is kept
   // as a compatibility field but can no longer open a second fork. Legacy tests
   // that exercise multi-task bookkeeping may opt in through an env-gated hook;
@@ -892,9 +907,9 @@ export function apply(ctx, config) {
     maxEntries: cfg.hostCrashMaxEntries,
     retentionDays: cfg.hostCrashRetentionDays,
   })
-  // The JSON counter keeps only the 10-minute crash-loop window. Full history
+  // The JSON counter keeps only the configured crash-loop window. Full history
   // (with metrics) goes to host-crashes.jsonl so a crash loop cannot grow it.
-  const recent = crashPrune.crashes.filter((item) => now - Number(item.at) <= 10 * 60_000)
+  const recent = crashPrune.crashes.filter((item) => now - Number(item.at) <= hostCrashWindowMs)
   if (unclean || crashDoc) {
     const pruned = crashPrune.changed
       ? { at: now, expired: crashPrune.expired, dropped: crashPrune.dropped }
@@ -904,15 +919,16 @@ export function apply(ctx, config) {
         crashes: recent,
         cap: crashPrune.maxEntries,
         retentionDays: crashPrune.retentionDays,
-        windowMinutes: 10,
+        windowMinutes: hostCrashWindowMinutes,
         pruned,
       }, null, 2))
     } catch { /* best effort */ }
   }
-  // Red line: one crash is context; two crashes within 10 minutes means a loop.
+  // Red line: one crash is context; two crashes within the configured window means a loop.
   if (unclean && cfg.safeModeAfterCrash === true && !safeMode && recent.length >= 2) {
     safeMode = true
     safeModeReason = 'crash-loop-10m'
+    if (hostCrashWindowMinutes !== 10) safeModeReason = `crash-loop-${hostCrashWindowMinutes}m`
     hostAdmissionClosed = true
   }
   // A fresh host process is an explicit recovery boundary: clear per-task
@@ -925,7 +941,8 @@ export function apply(ctx, config) {
       task.quarantined = null
       task.token = ''
       task.url = ''
-      task.status = TASK_STATUS.FAILED
+      // C3: an archived task swept by an allTasks panic stays archived after restart.
+      if (task.status !== TASK_STATUS.ARCHIVED) task.status = TASK_STATUS.FAILED
       task.pid = null
       task.port = null
       quarantineReset += 1
@@ -974,7 +991,9 @@ export function apply(ctx, config) {
     } catch { /* best effort */ }
   }
   writeHostHeartbeat()
-  const hostHeartbeatTimer = setInterval(writeHostHeartbeat, 15000)
+  // C1: 5s (not 15s) so a hard kill leaves host-state.json lastMetrics within one
+  // hostWatchdogTick of the crash, not up to three ticks stale.
+  const hostHeartbeatTimer = setInterval(writeHostHeartbeat, HOST_STATE_WRITE_INTERVAL_MS)
   hostHeartbeatTimer.unref?.()
   try {
     ctx.effect?.(() => () => { clearInterval(hostHeartbeatTimer) })
@@ -1767,21 +1786,24 @@ export function apply(ctx, config) {
     return { ...result, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null }
   }
 
-  const quarantineTask = async (task, reason, { closeBrowser = true, stopFork = true } = {}) => {
+  const quarantineTask = async (task, reason, { closeBrowser = true, stopFork = true, preserveArchived = false } = {}) => {
     if (!task) return { ok: false, error: 'unknown-task' }
+    const archived = task.status === TASK_STATUS.ARCHIVED
     if (closeBrowser) await closeTaskBrowser(task, reason)
     if (stopFork) {
       try { forker()?.stop?.(task.taskId) } catch { /* best effort */ }
     }
-    task.status = TASK_STATUS.FAILED
+    // C3: allTasks must sweep ARCHIVED records too, but must not demote their
+    // archive state to FAILED merely because a host-wide panic ran.
+    task.status = archived && preserveArchived ? TASK_STATUS.ARCHIVED : TASK_STATUS.FAILED
     task.pid = null
     task.port = null
     task.url = null
     task.token = ''
     task.adapter = { ok: false, error: 'fork-quarantined' }
     task.quarantined = { reason, at: nowMs(), tokenRevoked: true }
-    syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'fork-quarantined' })
-    audit('fork-quarantined', { taskId: task.taskId, reason })
+    syncTaskMeta(task, { status: task.status, pid: null, port: null, url: null, lastError: archived && preserveArchived ? 'host-panic-quarantined' : 'fork-quarantined' })
+    audit('fork-quarantined', { taskId: task.taskId, reason, archived })
     persist()
     return { ok: true, quarantined: true, taskId: task.taskId, reason }
   }
@@ -1920,6 +1942,7 @@ export function apply(ctx, config) {
     let browserHandle = null
     const launched = await launchManagedBrowser({
       exe, url, profileDir, logDir, port,
+      priorityClass: processPriorityClass,
       jobObject: jobEnabled ? {
         enabled: true,
         helperPath: jobHelperPath,
@@ -2038,10 +2061,12 @@ export function apply(ctx, config) {
         if (runtime.browser?.pid) await closeTaskBrowser(runtime, `host-panic:${reason}`)
       }
       runtimeBrowsers.clear()
+      let archivedSwept = 0
       for (const task of tasks.values()) {
-        if (task.status === TASK_STATUS.ARCHIVED) continue
-        if (!allTasks && task.status !== TASK_STATUS.READY && task.status !== TASK_STATUS.RUNNING) continue
-        await quarantineTask(task, `host-panic:${reason}`, { closeBrowser: false })
+        const archived = task.status === TASK_STATUS.ARCHIVED
+        if (!allTasks && (archived || (task.status !== TASK_STATUS.READY && task.status !== TASK_STATUS.RUNNING))) continue
+        await quarantineTask(task, `host-panic:${reason}`, { closeBrowser: false, preserveArchived: archived })
+        if (archived) archivedSwept += 1
       }
       if (safe) {
         safeMode = true
@@ -2050,7 +2075,7 @@ export function apply(ctx, config) {
       }
       const self = process.memoryUsage()
       audit('host-emergency-guard', {
-        reason, safe, allTasks, tasks: tasks.size, admissionClosed: hostAdmissionClosed,
+        reason, safe, allTasks, tasks: tasks.size, archivedSwept, admissionClosed: hostAdmissionClosed,
         selfRssMB: Number(lastHostMetrics?.selfRssMB) || Math.round(self.rss / 1048576),
         selfPrivateMB: Number(lastHostMetrics?.selfPrivateMB) || Math.round((self.heapUsed + self.external) / 1048576),
         metrics: lastHostMetrics,
@@ -3802,7 +3827,7 @@ export function apply(ctx, config) {
               syncTaskMeta(task, { pid: task.pid, port: task.port ?? null })
               persist()
               writeWatchdog()
-              void lowerProcessPriority(task.pid)
+              void lowerProcessPriority(task.pid, { priorityClass: processPriorityClass })
             } catch { /* sidecar sync is best effort */ }
           }, 200)
           spawnPidPoll.unref?.()
@@ -3850,7 +3875,7 @@ export function apply(ctx, config) {
         scheduleTaskProcessIdentity(task)
         persist()
         writeWatchdog()
-        void lowerProcessPriority(task.pid)
+        void lowerProcessPriority(task.pid, { priorityClass: processPriorityClass })
         audit(AUDIT.FORK_STARTED, { taskId, pid: task.pid, port: task.port, profile })
         bus.emit('fang/task-created', { taskId, forkId: taskId, title, url: task.url, port: task.port })
 
@@ -4019,6 +4044,41 @@ export function apply(ctx, config) {
           supervise: live ? live.enabled : persisted.supervise,
         },
         forker: live,
+      }
+    },
+
+    /** C4: compatibility field status; confirmation never lifts the hard limit. */
+    multiForkStatus() {
+      return {
+        ok: true,
+        requested: requestedMultiFork,
+        enabled: false,
+        hardLimit: HARD_MAX_FORKS,
+        confirmRequired: true,
+        confirmToken: MULTI_FORK_CONFIRM_TOKEN,
+        detail: 'v3.8.13 起生产路径硬限 1；二次确认只用于审计，不会开启第二个分身。',
+      }
+    },
+
+    /** C4: UI/HTTP confirm endpoint; requires an explicit token, still returns enabled:false. */
+    confirmMultiFork(input = {}) {
+      if (input?.confirm !== true || String(input?.token ?? '') !== MULTI_FORK_CONFIRM_TOKEN) {
+        return {
+          ok: false,
+          error: 'confirmation-required',
+          requested: requestedMultiFork,
+          hardLimit: HARD_MAX_FORKS,
+          confirmToken: MULTI_FORK_CONFIRM_TOKEN,
+        }
+      }
+      try { audit('multi-fork-confirmed', { requested: requestedMultiFork, hardLimit: HARD_MAX_FORKS }) } catch { /* audit optional */ }
+      return {
+        ok: true,
+        confirmed: true,
+        requested: requestedMultiFork,
+        enabled: false,
+        hardLimit: HARD_MAX_FORKS,
+        detail: '二次确认已记录；生产路径仍硬限 1，第二次 create 返回 quota-exceeded。',
       }
     },
 
@@ -4736,7 +4796,7 @@ export function apply(ctx, config) {
       scheduleTaskProcessIdentity(task)
       persist()
       writeWatchdog()
-      void lowerProcessPriority(task.pid)
+      void lowerProcessPriority(task.pid, { priorityClass: processPriorityClass })
       audit(AUDIT.FORK_STARTED, { taskId: id, pid: task.pid, port: task.port, profile: task.profile, restored: true })
       let adapter
       try {
@@ -5156,6 +5216,14 @@ export function apply(ctx, config) {
         memoryPolicy: memoryPolicySnapshot(),
         // v3.8.8: mother RSS/private + fork/browser aggregate commit snapshot.
         hostMetrics: lastHostMetrics,
+        processPriority: {
+          mode: cfg.processPriority,
+          class: processPriorityClass,
+        },
+        multiFork: service.multiForkStatus(),
+        hostCrash: {
+          windowMinutes: hostCrashWindowMinutes,
+        },
         // v3.8.14: Host JS heap + session body. These are independent of the
         // OS Commit probe so a PowerShell failure cannot hide a V8 heap spike.
         hostPressure: {
@@ -5264,6 +5332,7 @@ export function apply(ctx, config) {
       const pagefileMissing = memorySnapshot ? isPagefileMissing(memorySnapshot) : false
       return {
         ok: true, safeMode, admissionClosed: hostAdmissionClosed, reason: safeModeReason,
+        windowMinutes: hostCrashWindowMinutes,
         reset: {
           canReset: guard.ok === true,
           error: guard.ok === true ? null : guard.error,
@@ -7933,6 +8002,16 @@ export function apply(ctx, config) {
           const body = await readBody(req)
           const out = service.setForkSupervision(body ?? {})
           return json(res, out.ok ? 200 : 400, out)
+        },
+      })
+      // C4: explicit second confirmation. It is recorded/audited but the hard
+      // limit remains 1; no request can turn this into a multi-fork bypass.
+      routeMethods(`${prefix}/api/forks/multi-fork`, {
+        GET: (req, res) => json(res, 200, service.multiForkStatus()),
+        POST: async (req, res) => {
+          const body = await readBody(req)
+          const out = service.confirmMultiFork(body ?? {})
+          return json(res, out.ok ? 200 : 409, out)
         },
       })
       // watchdog 启动时的分身自动恢复；只拉起已登记但没在跑的非归档任务。

@@ -53,7 +53,8 @@ test('header Safe Mode action opens the checklist instead of resetting directly'
   assert.doesNotMatch(client, /button\('解除 Safe Mode'[\s\S]{0,260}?safe-mode\/reset/, 'header must not bypass the checklist')
 })
 
-test('migration report call site guards the optional client API', () => {
-  assert.match(client, /typeof app\.openMigrationReport !== 'function'/)
-  assert.match(client, /请单独上报 DSH 客户端 API 问题/)
+test('migration report call site uses the local function, not an optional app API', () => {
+  assert.match(client, /onClick: \(\) => openMigrationReport\(\)/)
+  assert.doesNotMatch(client, /app\.openMigrationReport\(\)/)
+  assert.doesNotMatch(client, /typeof app\.openMigrationReport !== 'function'/)
 })

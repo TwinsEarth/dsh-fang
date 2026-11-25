@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { buildPriorityTreeScript, findBrowserPath, freePort, isLoweredPriorityClass, isPidAlive, lowerProcessPriority, summarizePriorityRows } from '../src/lib/browser-guard.mjs'
+import { PROCESS_PRIORITY_CLASSES, buildPriorityTreeScript, findBrowserPath, freePort, isLoweredPriorityClass, isPidAlive, lowerProcessPriority, normalizePriorityClass, summarizePriorityRows } from '../src/lib/browser-guard.mjs'
 
 const orchestrator = fs.readFileSync(new URL('../src/plugins/orchestrator.mjs', import.meta.url), 'utf8')
 
@@ -50,6 +50,19 @@ test('priority tree script enumerates descendants and samples before/after', () 
   assert.match(script, /BelowNormal/)
   assert.match(script, /Before=\$before/)
   assert.match(script, /After=\$after/)
+})
+
+test('priority tree script can target Idle and still lowers BelowNormal', () => {
+  const idle = buildPriorityTreeScript(4321, 'idle')
+  assert.match(idle, /\$p\.PriorityClass = "Idle"/)
+  assert.match(idle, /\$before -in @\("Idle"\)/)
+  assert.doesNotMatch(idle, /\$p\.PriorityClass = "BelowNormal"/)
+
+  const below = buildPriorityTreeScript(4321, PROCESS_PRIORITY_CLASSES.belowNormal)
+  assert.match(below, /\$before -in @\("Idle","BelowNormal"\)/)
+  assert.equal(normalizePriorityClass('IDLE'), 'Idle')
+  assert.equal(normalizePriorityClass('below-normal'), 'BelowNormal')
+  assert.equal(normalizePriorityClass('unknown'), 'BelowNormal')
 })
 
 test('priority classes below normal are recognized case-insensitively', () => {

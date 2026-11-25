@@ -2176,6 +2176,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         S.modal = {
           kind: 'safeMode',
           reason: String(S.safeMode?.data?.reason || ''),
+          windowMinutes: Number(S.safeMode?.data?.windowMinutes) || 10,
           legacy: layout.legacyDataDetected === true,
           isolation: layout.dataIsolationBlocked === true,
           pagefileMissing,
@@ -3680,9 +3681,33 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         })
       }
 
+      async function confirmMultiFork() {
+        askConfirm({
+          tone: 'warn',
+          title: '多分身二次确认（硬限仍为 1）',
+          message: 'v3.8.13 起生产路径硬限 1 个分身。这里只记录你的显式确认并写入审计；不会开启第二个分身，第二次创建仍返回 quota-exceeded。',
+          strong: true,
+          expected: 'MULTI-FORK',
+          confirmVerb: '记录确认',
+          confirmLabel: '确认（仍限 1）',
+          onConfirm: async () => {
+            const out = await api('/fang/api/forks/multi-fork', {
+              method: 'POST',
+              body: JSON.stringify({ confirm: true, token: 'MULTI-FORK' }),
+            })
+            if (out.status === 200) {
+              notify('warn', '已记录多分身确认', '生产路径仍硬限 1；不会开启第二个分身。')
+              return
+            }
+            notify('bad', '多分身确认失败', failureHint(out.body?.error || `http-${out.status}`))
+          },
+        })
+      }
+
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         reviewSafeMode, confirmSafeModeReset, confirmPanic,
+        confirmMultiFork,
         probeMemory, openPagefileHelp, openMigrationReport, openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
         openRestartDialog, submitRestart,
         archiveTask, restoreTask, startTask, restartQuarantinedTask, repairTask, deleteArchive, promoteTask, openTask, setActiveTask, exportTask, importTask, copyText, captureEssence,
@@ -4174,10 +4199,14 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         h('div', { role: 'list', style: { marginTop: 4 } }, ...rows)))]
     }
 
-    function safeModeReasonText(reason) {
+    function safeModeReasonText(reason, windowMinutes = 10) {
       const value = String(reason || '').trim()
       if (!value) return '上次宿主非正常退出或触发内存熔断；自动恢复已暂停。'
-      if (value === 'crash-loop-10m') return '10 分钟内连续两次非正常退出（可能是 pagefile/Commit 不足或插件崩溃）。'
+      const crashLoop = /^crash-loop-(\d+)m$/.exec(value)
+      if (crashLoop) {
+        const minutes = Number(crashLoop[1]) || Number(windowMinutes) || 10
+        return `${minutes} 分钟内连续两次非正常退出（可能是 pagefile/Commit 不足或插件崩溃）。`
+      }
       if (value === 'pagefile-missing-low-commit' || value.endsWith('+pagefile-missing-low-commit')) {
         return 'Windows 没有可用页面文件，且 Commit 余量低于宿主紧急阈值；Fang 暂停自动拉起分身。修复页面文件后重启宿主。'
       }
@@ -4210,13 +4239,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         h('div', { class: 'notice-actions' },
           button('查看迁移报告', {
             size: 'sm', variant: 'ghost', fk: 'migration-report-open',
-            onClick: () => {
-              if (typeof app.openMigrationReport !== 'function') {
-                notify('bad', '迁移报告暂不可用', '客户端没有提供 openMigrationReport；这不是 Host/Commit 崩溃，请单独上报 DSH 客户端 API 问题。')
-                return
-              }
-              app.openMigrationReport()
-            },
+            onClick: () => openMigrationReport(),
           })))
     }
 
@@ -4286,7 +4309,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       return h('div', { class: 'notice notice--warn fang-safe-banner', role: 'alert', 'data-zone': 'safe-mode-banner' },
         h('div', { class: 'notice-main' },
           h('div', { class: 'notice-title' }, icon('alert', 15), 'Safe Mode · 自动恢复已禁止'),
-          h('div', { class: 'notice-text' }, `原因：${safeModeReasonText(S.safeMode.data.reason)}`),
+          h('div', { class: 'notice-text' }, `原因：${safeModeReasonText(S.safeMode.data.reason, S.safeMode.data.windowMinutes)}`),
           h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } },
             '恢复前检查：① Windows 页面文件 / Commit 余量 ② 旧数据迁移与数据根 ③ 已关闭占用内存的程序。点击“恢复前检查清单”逐项确认。')),
         h('div', { class: 'notice-actions' },
@@ -5917,7 +5940,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             h('div', { class: 'notice notice--warn', role: 'status' },
               h('div', { class: 'notice-main' },
                 h('div', { class: 'notice-title' }, '当前原因'),
-                h('div', { class: 'notice-text' }, safeModeReasonText(modal.reason)))),
+                h('div', { class: 'notice-text' }, safeModeReasonText(modal.reason, modal.windowMinutes)))),
             modal.pagefileMissing
               ? h('div', { class: 'notice notice--warn', role: 'status' },
                 h('div', { class: 'notice-main' },
@@ -6100,7 +6123,12 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             toggle('autostartForks', '自动启动分身（watchdog 下次启动生效）', eff.autostartForks === true),
             toggle('supervise', '崩溃自动重启（立即生效）', eff.supervise === true),
             h('span', { style: { color: 'var(--f-text-3)' } },
-              `持久化：${persisted.exists ? '已保存' : '默认值'}${data.forker?.enabled === true ? ' · forker 看护中' : ''}`))))
+              `持久化：${persisted.exists ? '已保存' : '默认值'}${data.forker?.enabled === true ? ' · forker 看护中' : ''}`),
+            button('多开二次确认（仍限 1）', {
+              size: 'sm', variant: 'ghost', fk: 'multi-fork-confirm',
+              title: '记录一次显式确认并审计；生产路径仍硬限 1，不会开启第二个分身',
+              onClick: () => void app.confirmMultiFork(),
+            }))))
     }
 
     function renderApp(S, app) {

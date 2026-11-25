@@ -22,6 +22,18 @@ const CHROME_CANDIDATES = [
 /** 0xE0000008 is the Windows/Chromium OOM-family exit code observed in EB-21. */
 export const BROWSER_OOM_EXIT_CODE = 0xE0000008
 
+/** C5: only two safe lowering tiers; Idle is opt-in because it can starve UI. */
+export const PROCESS_PRIORITY_CLASSES = Object.freeze({
+  belowNormal: 'BelowNormal',
+  idle: 'Idle',
+})
+
+export function normalizePriorityClass(value = '') {
+  return String(value ?? '').trim().toLowerCase() === 'idle'
+    ? PROCESS_PRIORITY_CLASSES.idle
+    : PROCESS_PRIORITY_CLASSES.belowNormal
+}
+
 /** Normalize Node's signed/unsigned exit code and classify the common Chromium crashes. */
 export function classifyBrowserExit(code, signal = null) {
   if (signal) return { code: null, unsignedCode: null, hex: null, signal: String(signal), kind: 'signal', oom: false }
@@ -96,9 +108,13 @@ export function summarizePriorityRows(rows = [], rootPid = 0) {
 }
 
 /** Build the PowerShell one-shot tree sampler. Exported so tests can assert recursion and safety. */
-export function buildPriorityTreeScript(rootPid) {
+export function buildPriorityTreeScript(rootPid, priorityClass = 'BelowNormal') {
   const root = Math.floor(Number(rootPid))
   if (!Number.isInteger(root) || root <= 0) throw new Error('invalid-pid')
+  const targetClass = normalizePriorityClass(priorityClass)
+  const skipClasses = targetClass === PROCESS_PRIORITY_CLASSES.idle
+    ? '@("Idle")'
+    : '@("Idle","BelowNormal")'
   return [
     `$root = ${root}`,
     '$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId',
@@ -137,9 +153,9 @@ export function buildPriorityTreeScript(rootPid) {
     '  }',
     '  $before = [string]$p.PriorityClass',
     '  $changed = $false; $skipped = $false; $setError = $null',
-    '  if ($before -in @("Idle","BelowNormal")) { $skipped = $true }',
+    `  if ($before -in ${skipClasses}) { $skipped = $true }`,
     '  else {',
-    '    try { $p.PriorityClass = "BelowNormal"; $changed = $true } catch { $setError = $_.Exception.Message }',
+    `    try { $p.PriorityClass = "${targetClass}"; $changed = $true } catch { $setError = $_.Exception.Message }`,
     '    try { $p.Refresh() } catch {}',
     '  }',
     '  $after = [string]$p.PriorityClass',
@@ -149,10 +165,11 @@ export function buildPriorityTreeScript(rootPid) {
   ].join('\n')
 }
 
-function setRootPriorityFallback(pid) {
+function setRootPriorityFallback(pid, priorityClass = 'BelowNormal') {
+  const targetClass = normalizePriorityClass(priorityClass)
   return new Promise((resolve) => {
     try {
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).PriorityClass = 'BelowNormal'`], { windowsHide: true, timeout: 5000 }, (error) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).PriorityClass = '${targetClass}'`], { windowsHide: true, timeout: 5000 }, (error) => {
         resolve(error ? { ok: false, error: String(error.message ?? error), rootOnly: true, partial: true } : { ok: true, rootOnly: true, partial: true })
       })
     } catch (error) { resolve({ ok: false, error: String(error?.message ?? error), rootOnly: true, partial: true }) }
@@ -164,11 +181,11 @@ function setRootPriorityFallback(pid) {
  * children may or may not inherit the root priority; the tree is sampled before
  * and after so callers can audit what actually changed.
  */
-export async function lowerProcessPriority(pid, { timeoutMs = 10000 } = {}) {
+export async function lowerProcessPriority(pid, { timeoutMs = 10000, priorityClass = 'BelowNormal' } = {}) {
   const value = Number(pid)
   if (process.platform !== 'win32' || !Number.isInteger(value) || value <= 0) return { ok: false, error: 'unsupported' }
   let script = ''
-  try { script = buildPriorityTreeScript(value) } catch (error) { return { ok: false, error: String(error?.message ?? error) } }
+  try { script = buildPriorityTreeScript(value, priorityClass) } catch (error) { return { ok: false, error: String(error?.message ?? error) } }
   const output = await new Promise((resolve) => {
     try {
       execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
@@ -178,12 +195,12 @@ export async function lowerProcessPriority(pid, { timeoutMs = 10000 } = {}) {
     } catch (error) { resolve({ ok: false, error: String(error?.message ?? error) }) }
   })
   if (!output.ok) {
-    const fallback = await setRootPriorityFallback(value)
+    const fallback = await setRootPriorityFallback(value, priorityClass)
     return { ...fallback, tree: false, detail: output.error }
   }
   const parsed = parsePowerShellJson(output.stdout)
   if (parsed === null) {
-    const fallback = await setRootPriorityFallback(value)
+    const fallback = await setRootPriorityFallback(value, priorityClass)
     return { ...fallback, tree: false, detail: 'priority-json-parse-failed' }
   }
   const rows = Array.isArray(parsed) ? parsed : [parsed]
@@ -222,7 +239,7 @@ export async function freePort(start = 19300, end = 19400) {
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
 /** Launch an isolated app window and wait for its CDP endpoint. */
-export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [], onExit = null, jobObject = null }) {
+export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [], onExit = null, jobObject = null, priorityClass = 'BelowNormal' }) {
   if (!exe || !fs.existsSync(exe)) return { ok: false, error: 'browser-unavailable' }
   fs.mkdirSync(profileDir, { recursive: true })
   fs.mkdirSync(logDir, { recursive: true })
@@ -340,7 +357,7 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
     return { ok: false, error: 'browser-cdp-timeout', pid: exitPid(), helperPid: useJob ? helperPid : null }
   }
   let priority = null
-  try { priority = await lowerProcessPriority(exitPid()) } catch (error) { priority = { ok: false, error: String(error?.message ?? error) } }
+  try { priority = await lowerProcessPriority(exitPid(), { priorityClass }) } catch (error) { priority = { ok: false, error: String(error?.message ?? error) } }
   return {
     ok: true,
     pid: exitPid(),
