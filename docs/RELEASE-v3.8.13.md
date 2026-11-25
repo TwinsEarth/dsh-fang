@@ -54,13 +54,13 @@
 
 - `dist/dsh-fang-3.8.13.tgz` 由 `node tools/release/build.mjs --skip-preflight` 生成。
 - `dist/manifest.json` 的 `preflight` 记录为 `{ green:false, skipped:true, reason:'--skip-preflight' }`，**不是 GREEN**。
-- 当前没有可用的 Windows 真机 preflight/e2e；Release 文案不得写“发布门禁通过”。
+- Windows Job helper 真机 E2E 已跑通；真实 Windows DSH 宿主的 preflight/e2e 仍未跑。Release 文案不得写“发布门禁通过”。
 
 ## 四、未闭环 / 边界（必须如实保留）
 
 1. **真实 Windows DSH 宿主 E2E 未跑**：健康预检、单 app 窗口、崩溃闩锁目前只有单测/静态覆盖，尚未做真机端到端。
-2. **native helper 已重编但未 Windows 真机验证**：v3.8.5–v3.8.9 的 tarball 仍是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 的 tarball 已带 82KB/54KB 新 helper（PE 时间 2026-11-25 19:28），C 源码含 `JOB_OBJECT_LIMIT_PROCESS_MEMORY` / `JOB_OBJECT_LIMIT_JOB_MEMORY`。但新 helper 未在 Windows 真机启动验证，Job 内存上限是否实际生效、browser/fork 的 kill-on-close 真机行为均未证实。
-3. browser Job Object 没有 Windows 真机启动测试；只有 helper 缺失 fail-closed 与静态/纯函数测试。
+2. **native helper 真机验证结果分版本**：v3.8.5–v3.8.9 的 tarball 仍是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 的 tarball 已带 82KB/54KB 新 helper。2026-11-26 在 Windows 11 build 26300 真机跑 `tools/job-object-windows-e2e.mjs --memory`，`KILL_ON_JOB_CLOSE`、`JOB_OBJECT_LIMIT_JOB_MEMORY=64MB`、`JOB_OBJECT_LIMIT_PROCESS_MEMORY=64MB` 三例全部 PASS，证据见 `docs/evidence/job-object-e2e-2026-11-26.md`。这只证明 helper 本身与限额生效，不等于 browser/fork 经 orchestrator 启动的完整链路已验。
+3. **browser/fork 的 Job Object 端到端仍未跑**：helper 启动器真机通过；但 orchestrator 拉起浏览器/分身后由 helper 接管、宿主卡死时 heartbeat 杀树的整链，仍只有单测/静态覆盖。
 4. `lastHostMetrics` 最多滞后 15 秒；硬杀时 JSONL 记录最后一次 heartbeat 快照，不是精确死亡瞬间。
 5. `host-crashes.json` 只保留 10 分钟；更早历史只在 JSONL。
 6. `allTasks` 跳过 `ARCHIVED`；归档任务不会被重新标记。

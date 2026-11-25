@@ -12,7 +12,7 @@
 ### 测试
 
 - 新增 `test/commit-budget-v3813.test.mjs` 7/7；`orchestrator` 74/74；v3.8.8 redline 10/10；v3.8.5 定向 12/12；pagefile/client-safe-mode 全通过。
-- 全量结果见 `docs/AUDIT-v3.8.13.md`；Windows 真机 E2E 与 native helper 重编仍未闭环。
+- 全量结果见 `docs/AUDIT-v3.8.13.md`；Windows DSH 宿主 E2E 与 native helper 的 browser/fork 完整编排链路仍未闭环；helper 本身的 kill-on-close + Job/进程内存上限已于 2026-11-26 Windows 11 真机三例 PASS，证据见 `docs/evidence/job-object-e2e-2026-11-26.md`。
 
 ## v3.8.12（2026-11-25）
 **主题：页面文件缺失时 Safe Mode 解除硬门**

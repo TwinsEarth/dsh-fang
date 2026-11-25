@@ -60,13 +60,13 @@
 
 - 构建命令：`node tools/release/build.mjs --skip-preflight`。
 - `dist/manifest.json` 的 `preflight` 必须是 `{ green:false, skipped:true, reason:'--skip-preflight', at:... }`，不得复用旧 `dist/preflight.json`。
-- 本版没有真实 Windows 宿主 preflight/e2e；Release 不得写“preflight GREEN”。
+- Windows Job helper E2E 已跑通；本版仍没有真实 Windows 宿主 preflight/e2e；Release 不得写“preflight GREEN”。
 
 ## 四、未闭环 / 风险
 
 1. **真实 Windows DSH 宿主 E2E 未跑**：健康预检、单 app 窗口、崩溃闩锁只有单测/静态覆盖。需要真实 Windows 自托管 runner 跑 `/fang/adapter/flush-session` 3s 落盘与 `browser-health.jsonl` 采样。
-2. **native helper 已重编但未 Windows 真机验证**：v3.8.5–v3.8.9 tarball 是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 tarball 是 82KB/54KB 新 helper（PE 时间 2026-11-25 19:28）。C 源码含 Job/进程内存上限，但未在 Windows 真机启动验证，不能宣称 Job 内存上限或 kill-on-close 已生效。
-3. **browser Job Object 无真机启动测试**：仅 macOS 上 helper 缺失 fail-closed 与静态/纯函数测试。
+2. **native helper 真机验证结果分版本**：v3.8.5–v3.8.9 tarball 是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 tarball 是 82KB/54KB 新 helper。2026-11-26 在 Windows 11 build 26300 真机跑 `tools/job-object-windows-e2e.mjs --memory`，kill-on-close、64MB Job 内存上限、64MB 进程内存上限三例全部 PASS，证据 `docs/evidence/job-object-e2e-2026-11-26.md`。这证明 helper 本身与限额生效，不证明 browser/fork 完整编排链路。
+3. **browser/fork 的 Job Object 端到端未跑**：helper 启动器真机通过；orchestrator 拉起浏览器/分身后由 helper 接管、宿主卡死时 heartbeat 杀树的整链仍是单测/静态覆盖。
 4. **lastHostMetrics 滞后**：最多 15 秒；硬杀 JSONL 是最后一次 heartbeat 快照。
 5. **host-crashes.json 只保留 10 分钟**：更早历史只在 JSONL。
 6. **allTasks 跳过 ARCHIVED**：归档任务不会被重新标记。
@@ -77,4 +77,4 @@
 
 - 命令：`npm test`
 - 结果：1579 tests / 1556 pass / 0 fail / 13 skipped / 10 todo。
-- 这不是“全绿发布门禁”；仅表示代码测试通过，Windows E2E 与 preflight 仍未闭环。
+- 这不是“全绿发布门禁”；仅表示代码测试通过，Windows DSH E2E 与 preflight 仍未闭环。
