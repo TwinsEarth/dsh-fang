@@ -65,7 +65,7 @@
 ## 四、未闭环 / 风险
 
 1. **真实 Windows DSH 宿主 E2E 未跑**：健康预检、单 app 窗口、崩溃闩锁只有单测/静态覆盖。需要真实 Windows 自托管 runner 跑 `/fang/adapter/flush-session` 3s 落盘与 `browser-health.jsonl` 采样。
-2. **native helper 仍旧二进制**：`native/win32/fang-job-host.exe`、`fang-job-host-arm64.exe` 未重编；C 源码的 Job/进程内存上限尚未在 Windows 产物生效。浏览器/fork 的 kill-on-close 仍用旧 helper。
+2. **native helper 已重编但未 Windows 真机验证**：v3.8.5–v3.8.9 tarball 是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 tarball 是 82KB/54KB 新 helper（PE 时间 2026-11-25 19:28）。C 源码含 Job/进程内存上限，但未在 Windows 真机启动验证，不能宣称 Job 内存上限或 kill-on-close 已生效。
 3. **browser Job Object 无真机启动测试**：仅 macOS 上 helper 缺失 fail-closed 与静态/纯函数测试。
 4. **lastHostMetrics 滞后**：最多 15 秒；硬杀 JSONL 是最后一次 heartbeat 快照。
 5. **host-crashes.json 只保留 10 分钟**：更早历史只在 JSONL。

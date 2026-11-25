@@ -59,7 +59,7 @@
 ## 四、未闭环 / 边界（必须如实保留）
 
 1. **真实 Windows DSH 宿主 E2E 未跑**：健康预检、单 app 窗口、崩溃闩锁目前只有单测/静态覆盖，尚未做真机端到端。
-2. **`native/win32/fang-job-host.exe` / `fang-job-host-arm64.exe` 仍是旧二进制**：C 源码已含 `JOB_OBJECT_LIMIT_PROCESS_MEMORY` / `JOB_OBJECT_LIMIT_JOB_MEMORY`，但本机 macOS 无 MinGW/Windows SDK；Job 内存上限需 Windows CI/真机重编后才生效。当前 browser/fork 的 kill-on-close 仍依赖旧 helper。
+2. **native helper 已重编但未 Windows 真机验证**：v3.8.5–v3.8.9 的 tarball 仍是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 的 tarball 已带 82KB/54KB 新 helper（PE 时间 2026-11-25 19:28），C 源码含 `JOB_OBJECT_LIMIT_PROCESS_MEMORY` / `JOB_OBJECT_LIMIT_JOB_MEMORY`。但新 helper 未在 Windows 真机启动验证，Job 内存上限是否实际生效、browser/fork 的 kill-on-close 真机行为均未证实。
 3. browser Job Object 没有 Windows 真机启动测试；只有 helper 缺失 fail-closed 与静态/纯函数测试。
 4. `lastHostMetrics` 最多滞后 15 秒；硬杀时 JSONL 记录最后一次 heartbeat 快照，不是精确死亡瞬间。
 5. `host-crashes.json` 只保留 10 分钟；更早历史只在 JSONL。
