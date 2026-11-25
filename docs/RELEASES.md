@@ -2,6 +2,8 @@
 
 只列当前发布线附近的记录；更早版本见 `docs/RELEASE-*.md` 与 `docs/AUDIT-*.md`。
 
+> **v3.8.5–v3.8.12 tag 说明**：仓库为 shallow clone，早期无逐版 commit；本次按各版 tarball 重建了独立源码快照 commit（不含 `test/` 与 release tooling），并让它们成为 `main` 的线性祖先。v3.8.13 为完整开发树。每个 tag 对应唯一 commit，详见 [RELEASE-v3.8.13](RELEASE-v3.8.13.md)。
+
 > **发布门禁状态（2026-11-25）**：v3.8.13 及之前的 tarball 均走 `--skip-preflight`；`dist/manifest.json` 的 `preflight` 必须记录 `skipped:true / green:false`，不得被解读为“preflight GREEN / 发布门禁通过”。真实 Windows DSH 宿主的 flush 3s 端到端、`browser-health.jsonl` 真机采样、健康预检/单 app 窗口/崩溃闩锁 E2E 仍待补跑；`native/win32/fang-job-host*.exe` 仍是旧二进制，Job 内存上限需 Windows 重编后才生效。
 
 | 版本 | 主题 | 发布记录 | 审计 |
