@@ -7,7 +7,7 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
-> 当前发布线：**v3.8.9**（2026-11-25，在 v3.8.8 基础上把托管浏览器关闭收敛为“flush → Browser.close 3s → taskkill /T /F → 停 fork → 清端口/Token”，默认 autoClose=true，硬阈值 2 GB commit / 1.5 GB heap / 20 万 DOM / 宿主 CommitFree <4 GB，关闭不删 home、必须手动重新打开）。v3.8.2 改变了数据根，升级前先读
+> 当前发布线：**v3.8.10**（2026-11-25，在 v3.8.9 基础上落实“严禁把宿主搞崩”十条：母体 5s 常驻采样、2 GB 紧急熔断与新准入闸门、独立 sidecar heartbeat 卡死判定、maxForks=1、BelowNormal、崩溃循环 Safe Mode、禁止自动重启、全局 Panic、fork 总 commit 40% 与宿主 8/4/2 GB 分级；同时删除正式 flush 中三个虚构端点）。v3.8.2 改变了数据根，升级前先读
 > [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
 
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。
@@ -168,7 +168,7 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 | 你要做什么 | 先读 |
 |---|---|
 | 安装、升级、v3.8.2 数据根迁移 | [docs/INSTALL.md](docs/INSTALL.md) · [v3.8.2 变更](docs/CHANGELOG.md) |
-| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
+| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
 | P0 加固实现与真机证据 | [docs/P0-HARDENING.md](docs/P0-HARDENING.md) |
 | 真实宿主回归 smoke（v3.8.0/3.8.1） | [docs/HOST-SMOKE.md](docs/HOST-SMOKE.md) |
 | 防崩溃、Safe Mode、升级红线 | [docs/CRASH-SAFETY.md](docs/CRASH-SAFETY.md) |

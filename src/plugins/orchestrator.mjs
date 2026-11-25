@@ -368,8 +368,10 @@ export const Config = z.object({
     .description('一个 fork profile 只保留一个 app page；启动后和看门狗周期用 CDP 关闭多余标签'),
   orphanSweepMinutes: z.number().min(0).max(1440).default(5)
     .description('孤儿 fork 进程清理间隔（分钟；0=仅启动时）'),
+  watchdogHostStuckMs: z.number().min(15000).max(600000).default(60000)
+    .description('独立看门狗判定宿主卡死的 heartbeat 静默阈值（毫秒）；默认 60s'),
   forkFlushPath: z.string().default('')
-    .description('关闭浏览器前调用的 fork 会话落盘路径；留空=按 routes.prefix 推导 /<prefix>/adapter/flush-session；调用前仍会实测该路径'),
+    .description('关闭浏览器前调用的 fork 会话落盘路径（显式覆盖）；留空=只用 fork health 广告的 flush 或实际注册的 /<prefix>/adapter/flush-session，不猜 /api/session/* 端点'),
   forkCommitShareLimit: z.number().min(0.05).max(1).default(0.4)
     .description('fork+browser 聚合 Commit 占系统上限的比例；超过即紧急处置'),
   forkCommitWarnShare: z.number().min(0.05).max(1).default(0.3)
@@ -753,6 +755,10 @@ export function apply(ctx, config) {
   const unclean = Boolean(previousHost && previousHost.clean !== true && Number(previousHost.pid) !== process.pid)
   let safeMode = Boolean(previousSafeMode?.safeMode)
   let safeModeReason = String(previousSafeMode?.reason ?? '')
+  // Emergency admission latch is independent from the persisted Safe Mode:
+  // it closes new fork/browser creation immediately, while status/panic routes
+  // stay reachable for the operator.
+  let hostAdmissionClosed = Boolean(safeMode)
   const hostStartedAt = new Date().toISOString()
   let lastHostMetrics = null
   let lastProcessCount = 0
@@ -799,6 +805,7 @@ export function apply(ctx, config) {
   if (unclean && cfg.safeModeAfterCrash === true && !safeMode && recent.length >= 2) {
     safeMode = true
     safeModeReason = 'crash-loop-10m'
+    hostAdmissionClosed = true
   }
   // A fresh host process is an explicit recovery boundary: clear per-task
   // quarantine latches, but keep tokens revoked so the old page cannot reconnect.
@@ -912,7 +919,7 @@ export function apply(ctx, config) {
         port: browser.port,
       })
     }
-    try { fs.writeFileSync(watchdogFile, JSON.stringify({ hostPid: process.pid, hostStartedAt: Date.now() - Math.round(process.uptime() * 1000), clean: false, at: new Date().toISOString(), heartbeatFile: hostHeartbeatFile, targets }, null, 2)) } catch { /* best effort */ }
+    try { fs.writeFileSync(watchdogFile, JSON.stringify({ hostPid: process.pid, hostStartedAt: Date.now() - Math.round(process.uptime() * 1000), clean: false, at: new Date().toISOString(), heartbeatFile: hostHeartbeatFile, hostStuckMs: Number(cfg.watchdogHostStuckMs), targets }, null, 2)) } catch { /* best effort */ }
   }
   writeWatchdog()
   const testLike = Boolean(process.env.NODE_TEST_CONTEXT) || process.env.DSH_FANG_E2E === '1' || /(?:test|e2e)/i.test(String(process.argv[1] ?? ''))
@@ -1191,6 +1198,7 @@ export function apply(ctx, config) {
         const nextReason = safeMode && safeModeReason ? `${safeModeReason}+pagefile-missing-low-commit` : 'pagefile-missing-low-commit'
         safeMode = true
         safeModeReason = nextReason
+        hostAdmissionClosed = true
         persistSafeMode()
         audit('safe-mode-pagefile-missing', {
           action: 'boot',
@@ -1492,16 +1500,17 @@ export function apply(ctx, config) {
   const flushForkSession = async (task) => {
     const configured = String(cfg.forkFlushPath || '').trim()
     const capability = task?.flushCapability && typeof task.flushCapability === 'object' ? task.flushCapability : null
-    // Verify by calling, not by fabricating a path: configured path first, then the
-    // endpoint advertised by fork health, then the conventional DSH save names.
-    const candidates = [
-      configured,
-      capability?.method === 'POST' ? String(capability.path ?? '').trim() : '',
-      forkFlushDefaultPath,
-      '/api/session/flush',
-      '/api/session/save',
-      '/api/sessions/flush',
-    ].filter((value, index, list) => value && list.indexOf(value) === index)
+    // Formal flush only uses a confirmed endpoint:
+    //   1) explicit operator override, 2) endpoint advertised by fork health,
+    //   3) the adapter route that this plugin actually registers.
+    // Never guess `/api/session/*` names; an unconfirmed endpoint stays unsaved.
+    const candidateSpecs = [
+      { path: configured, source: 'configured' },
+      { path: capability?.method === 'POST' ? String(capability.path ?? '').trim() : '', source: 'health-capability' },
+      { path: forkFlushDefaultPath, source: 'adapter-route' },
+    ].filter((item) => item.path)
+    const candidates = candidateSpecs.map((item) => item.path).filter((value, index, list) => list.indexOf(value) === index)
+    const specByPath = new Map(candidateSpecs.map((item) => [item.path, item.source]))
     if (candidates.length === 0) {
       return { ok: false, error: 'flush-unsupported', code: 'flush-unsupported', saved: false, attempted: [] }
     }
@@ -1513,14 +1522,15 @@ export function apply(ctx, config) {
     const attempted = []
     let last = null
     for (const flushPath of candidates) {
+      const source = specByPath.get(flushPath) ?? 'unknown'
       const remaining = deadline - Date.now()
       if (remaining <= 0) {
-        attempted.push({ path: flushPath, ok: false, saved: false, error: 'flush-budget-exhausted' })
+        attempted.push({ path: flushPath, source, ok: false, saved: false, error: 'flush-budget-exhausted' })
         break
       }
       let endpoint
       try { endpoint = resolveFlushEndpoint(opened.url, flushPath) } catch (error) {
-        attempted.push({ path: flushPath, ok: false, saved: false, error: String(error?.message ?? error) })
+        attempted.push({ path: flushPath, source, ok: false, saved: false, error: String(error?.message ?? error) })
         continue
       }
       const startedAt = Date.now()
@@ -1538,6 +1548,7 @@ export function apply(ctx, config) {
         const result = flushResultFromResponse(response, body)
         const view = {
           path: flushPath,
+          source,
           ok: result.ok,
           status: result.status,
           saved: result.saved,
@@ -1546,15 +1557,15 @@ export function apply(ctx, config) {
           error: body?.error ?? null,
         }
         attempted.push(view)
-        last = { ...result, path: flushPath, attempted, code: view.code, detail: view.error }
+        last = { ...result, path: flushPath, source, attempted, code: view.code, detail: view.error }
         if (result.saved === true) return { ...last, verified: true, unsupported: false }
         // 401/403/5xx means the endpoint exists but cannot save; trying aliases would
         // only repeat the same failure. 404/405 means this candidate is not registered.
         if (Number(result.status) !== 404 && Number(result.status) !== 405) return { ...last, verified: true, unsupported: false }
       } catch (error) {
         const detail = String(error?.message ?? error)
-        attempted.push({ path: flushPath, ok: false, saved: false, error: detail, latencyMs: Math.max(0, Date.now() - startedAt) })
-        last = { ok: false, status: null, saved: false, path: flushPath, attempted, error: detail }
+        attempted.push({ path: flushPath, source, ok: false, saved: false, error: detail, latencyMs: Math.max(0, Date.now() - startedAt) })
+        last = { ok: false, status: null, saved: false, path: flushPath, source, attempted, error: detail }
         if (/timeout|timed out|aborted/i.test(detail)) break
       }
     }
@@ -1563,6 +1574,7 @@ export function apply(ctx, config) {
       status: last?.status ?? null,
       saved: false,
       path: last?.path ?? candidates[candidates.length - 1],
+      source: last?.source ?? specByPath.get(candidates[candidates.length - 1]) ?? 'unknown',
       attempted,
       error: 'flush-unsupported',
       code: 'flush-unsupported',
@@ -1583,6 +1595,7 @@ export function apply(ctx, config) {
       ok: forkFlush.ok === true,
       status: forkFlush.status ?? null,
       path: forkFlush.path ?? null,
+      source: forkFlush.source ?? null,
       saved: forkFlush.saved === true,
       error: forkFlush.error ?? null,
       code: forkFlush.response?.code ?? forkFlush.code ?? null,
@@ -1733,6 +1746,7 @@ export function apply(ctx, config) {
   }
 
   const launchTaskBrowser = async (task, url) => {
+    if (hostAdmissionClosed) return { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
     if (cfg.managedBrowser !== true) return { ok: false, error: 'managed-browser-disabled', managed: false, url }
     if (!task || !url) return { ok: false, error: 'browser-url-required' }
     // Reusing an already-open managed page is not a new open; the watchdog still
@@ -1887,6 +1901,9 @@ export function apply(ctx, config) {
   const hostEmergency = async (reason, { safe = false, allTasks = false } = {}) => {
     if (hostPanic) return { ok: true, skipped: 'in-progress' }
     hostPanic = true
+    // Close admission before the first close: no new fork/browser can enter
+    // while the emergency drains the existing trees. Status/panic routes stay up.
+    hostAdmissionClosed = true
     try {
       // Order is deliberate: browser (largest commit) first, then fork backends.
       for (const task of tasks.values()) {
@@ -1908,7 +1925,7 @@ export function apply(ctx, config) {
       }
       const self = process.memoryUsage()
       audit('host-emergency-guard', {
-        reason, safe, allTasks, tasks: tasks.size,
+        reason, safe, allTasks, tasks: tasks.size, admissionClosed: hostAdmissionClosed,
         selfRssMB: Number(lastHostMetrics?.selfRssMB) || Math.round(self.rss / 1048576),
         selfPrivateMB: Number(lastHostMetrics?.selfPrivateMB) || Math.round((self.heapUsed + self.external) / 1048576),
         metrics: lastHostMetrics,
@@ -2262,7 +2279,7 @@ export function apply(ctx, config) {
       const warn = Number(cfg.forkCommitWarnShare)
       if (share > emergency) {
         audit('fork-commit-share-exceeded', { ...selfMetrics, limitMB: Math.round(limitMB * emergency), shareLimit: emergency })
-        await hostEmergency('fork-commit-share', { safe: true })
+        await hostEmergency('fork-commit-share', { safe: true, allTasks: true })
         return
       }
       if (share > severe && nowMs() - lastCommitSevereAt > 60_000) {
@@ -2282,13 +2299,8 @@ export function apply(ctx, config) {
   let lastCommitSevereAt = 0
   const hostWatchdogTick = async () => {
     if (process.platform !== 'win32' || hostPanic) return
-    // No fork/browser means hostEmergency has nothing to close; skip the
-    // PowerShell memory query entirely (low-end machines idle cost = 0).
-    const active = [...tasks.values(), ...runtimeBrowsers.values()].some((task) => task.browser?.pid
-      || (Number(task.pid) > 0
-        && task.status !== TASK_STATUS.ARCHIVED
-        && task.status !== TASK_STATUS.FAILED))
-    if (!active) return
+    // Red line: the mother samples self RSS/Private + CommitFree every 5 s even
+    // when no fork/browser exists. A DSH host can OOM without any child.
     const memory = rememberMemory(await readSystemMemory())
     notePagefile(memory, 'memory-watchdog')
     if (!memory.ok) return
@@ -2324,7 +2336,7 @@ export function apply(ctx, config) {
       })
     }
     if (free < Number(cfg.hostEmergencyFreeMB)) {
-      await hostEmergency('commit-free-emergency', { safe: true })
+      await hostEmergency('commit-free-emergency', { safe: true, allTasks: true })
     }
   }
 
@@ -3164,6 +3176,7 @@ export function apply(ctx, config) {
     /** v2 主入口：派生一个任务（= 一个分身）。 */
     async createTask(input = {}) {
       await bootPagefileGate
+      if (hostAdmissionClosed) return { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
       if (safeMode) return { ok: false, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       if (isolationBlocked) return { ok: false, error: 'data-root-forbidden', detail: isolationChecks }
       const title = String(input.title ?? input.taskTitle ?? '').trim() || `任务 ${tasks.size + 1}`
@@ -4153,6 +4166,7 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
+      if (hostAdmissionClosed) return { ok: false, taskId: id, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
       if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       const wasQuarantined = Boolean(task.quarantined)
       const f = forker()
@@ -4379,6 +4393,7 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
+      if (hostAdmissionClosed) return { ok: false, taskId: id, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
       if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       // Forker 的 10 分钟 2 次崩溃闩锁是进程层事实；把它投影到任务层，
       // 否则用户点“打开”会绕过隔离直接 restore 出一个新进程。
@@ -4785,6 +4800,7 @@ export function apply(ctx, config) {
           singleForkOnly: memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false,
           maxConcurrentForks: (memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) ? 1 : effectiveMaxForks(),
           safeMode: safeMode === true,
+          admissionClosed: hostAdmissionClosed === true,
         },
         sessionCompact: sessionCompactSnapshot,
         diskHygiene: diskHygieneSnapshot,
@@ -4851,7 +4867,7 @@ export function apply(ctx, config) {
       notePagefile(memory, 'manual-probe')
       return { ok: memory?.ok !== false, memory: memorySnapshot, memoryPolicy: memoryPolicySnapshot() }
     },
-    safeModeStatus: () => ({ ok: true, safeMode, reason: safeModeReason }),
+    safeModeStatus: () => ({ ok: true, safeMode, admissionClosed: hostAdmissionClosed, reason: safeModeReason }),
     panic: async () => hostEmergency('manual-panic', { safe: true, allTasks: true }),
     resetSafeMode: async () => {
       let memory = null
@@ -4880,6 +4896,7 @@ export function apply(ctx, config) {
       }
       safeMode = false
       safeModeReason = ''
+      hostAdmissionClosed = false
       persistSafeMode()
       audit('host-safe-mode-reset', { pageFileMB: decision.pageFileMB, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
       return { ok: true, safeMode: false }
@@ -7274,6 +7291,7 @@ export function apply(ctx, config) {
         const taskId = String(query.get('taskId') ?? '').trim()
         if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
         if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
+        if (hostAdmissionClosed) return json(res, 423, { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' })
         if (safeMode) return json(res, 423, { ok: false, error: 'safe-mode', detail: safeModeReason })
         const guardTask = tasks.get(taskId)
         if (guardTask?.quarantined) return json(res, 423, { ok: false, error: 'fork-quarantined', detail: guardTask.quarantined.reason ?? 'guard' })
@@ -7301,7 +7319,7 @@ export function apply(ctx, config) {
           return json(res, 500, { ok: false, error: 'open-fork-threw', step: 'sync-task-on-open', taskId, detail })
         }
         if (!out || out.ok !== true) {
-          const status = out?.error === 'unknown-task' ? 404 : out?.error === 'not-running' ? 404 : out?.error === 'safe-mode' || out?.error === 'fork-quarantined' ? 423 : 409
+          const status = out?.error === 'unknown-task' ? 404 : out?.error === 'not-running' ? 404 : out?.error === 'safe-mode' || out?.error === 'host-admission-closed' || out?.error === 'fork-quarantined' ? 423 : 409
           return json(res, status, { ok: false, error: out?.error ?? 'not-running', ...out })
         }
         if (!out.url) return json(res, 409, { ...out, ok: false, error: 'fork-url-missing' })
@@ -7367,7 +7385,7 @@ export function apply(ctx, config) {
           audit('fork-restore-handler-failed', { taskId: body?.taskId ?? '', detail })
           return json(res, 500, { ok: false, error: 'restore-fork-threw', step: 'restore', taskId: body?.taskId ?? '', detail })
         }
-        const status = out.ok ? 200 : out?.error === 'safe-mode' ? 423 : out?.error === 'fork-quarantined' ? 423 : 409
+        const status = out.ok ? 200 : out?.error === 'safe-mode' || out?.error === 'fork-quarantined' || out?.error === 'host-admission-closed' ? 423 : 409
         return json(res, status, out)
       })
       // 2026-11-22：一键修复（停残留 → 清别名桩 → 重置配置 → 重新拉起；不删 home/会话）

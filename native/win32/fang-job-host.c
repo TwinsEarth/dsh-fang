@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include <stdint.h>
+#include <shellapi.h>
 
 #define MAX_PATH_LEN 32768
 
@@ -302,7 +303,25 @@ static int run_child(const wchar_t *command, wchar_t **args, int argc, int shell
   return (int)child_code;
 }
 
+static int fang_wmain(int argc, wchar_t **argv);
+
+#ifndef FANG_MINGW_ENTRY
 int wmain(int argc, wchar_t **argv) {
+  return fang_wmain(argc, argv);
+}
+#else
+// Zig/MinGW cross-build: use the narrow CRT entry and recover wide argv.
+int main(void) {
+  int argc = 0;
+  LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  if (!argv) return 1;
+  int rc = fang_wmain(argc, argv);
+  LocalFree(argv);
+  return rc;
+}
+#endif
+
+static int fang_wmain(int argc, wchar_t **argv) {
   InitializeCriticalSection(&g_log_lock);
   const wchar_t *heartbeat = NULL;
   const wchar_t *ready_file = NULL;
