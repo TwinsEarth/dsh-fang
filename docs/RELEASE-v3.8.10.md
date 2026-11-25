@@ -46,6 +46,7 @@
 ## Windows helper 真机验证
 
 - 2026-11-26 Windows 11 build 26300 / Node 22 真机：`node tools/job-object-windows-e2e.mjs --helper native/win32/fang-job-host.exe --memory`，kill-on-close、`--job-memory-mb 64`、`--job-process-memory-mb 64` 三例全部 PASS；证据 `docs/evidence/job-object-e2e-2026-11-26.md`。
+- 同一真机用 headless Edge 验证 browser Job Object：root + 13 个 Edge 子进程，强杀 helper 后全部消失；证据 `docs/evidence/browser-job-e2e-2026-11-26.md`。
 - 新 exe：x64 82,944 bytes，arm64 54,784 bytes，PE32+ console；导入 `CreateJobObjectW`、`SetInformationJobObject`、`AssignProcessToJobObject`、`TerminateJobObject`。
 - x64 冒烟 1：`--job-process-memory-mb 64 --job-memory-mb 128` 启动 `cmd /c exit 0`，helper 退出 0，ready 文件 `mode=kill-on-close`、`error=null`，证明 Job 限额设置成功。
 - x64 冒烟 2：Job 内启动长驻子进程后强杀 helper，3 秒后子进程消失，`CHILD-KILLED-BY-JOB-CLOSE`。

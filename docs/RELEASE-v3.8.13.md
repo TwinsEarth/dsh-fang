@@ -59,13 +59,14 @@
 ## 四、未闭环 / 边界（必须如实保留）
 
 1. **真实 Windows DSH 宿主 E2E 未跑**：健康预检、单 app 窗口、崩溃闩锁目前只有单测/静态覆盖，尚未做真机端到端。
-2. **native helper 真机验证结果分版本**：v3.8.5–v3.8.9 的 tarball 仍是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 的 tarball 已带 82KB/54KB 新 helper。2026-11-26 在 Windows 11 build 26300 真机跑 `tools/job-object-windows-e2e.mjs --memory`，`KILL_ON_JOB_CLOSE`、`JOB_OBJECT_LIMIT_JOB_MEMORY=64MB`、`JOB_OBJECT_LIMIT_PROCESS_MEMORY=64MB` 三例全部 PASS，证据见 `docs/evidence/job-object-e2e-2026-11-26.md`。这只证明 helper 本身与限额生效，不等于 browser/fork 经 orchestrator 启动的完整链路已验。
-3. **browser/fork 的 Job Object 端到端仍未跑**：helper 启动器真机通过；但 orchestrator 拉起浏览器/分身后由 helper 接管、宿主卡死时 heartbeat 杀树的整链，仍只有单测/静态覆盖。
+2. **native helper 真机验证结果分版本**：v3.8.5–v3.8.9 的 tarball 仍是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 的 tarball 已带 82KB/54KB 新 helper。2026-11-26 在 Windows 11 build 26300 真机跑 `tools/job-object-windows-e2e.mjs --memory`，`KILL_ON_JOB_CLOSE`、`JOB_OBJECT_LIMIT_JOB_MEMORY=64MB`、`JOB_OBJECT_LIMIT_PROCESS_MEMORY=64MB` 三例全部 PASS，证据见 `docs/evidence/job-object-e2e-2026-11-26.md`。这只证明 helper 本身与限额生效，不等于 browser/fork 经 orchestrator 启动的完整链路已验。Windows 上的 `E:\DB\Fang` 是独立的 v3.8.3 脏工作树，它里面的 28KB/24KB helper 不能代表 v3.8.10–v3.8.13 发布包；要让它生效必须同步 v3.8.13 的 `buildJobHostArgs`，不是只换 exe。
+3. **browser Job Object 已真机验证；orchestrator 整链仍未跑**：2026-11-26 Windows 11 build 26300 / Edge 158 真机启动 headless Edge，确认 root + 13 个 Edge 子进程，强杀 helper 后全部消失（`tools/browser-job-windows-e2e.mjs`，证据 `docs/evidence/browser-job-e2e-2026-11-26.md`）。但“DSH orchestrator 拉起浏览器/分身后交给 helper”的完整链路仍只有单测/静态覆盖。
 4. `lastHostMetrics` 最多滞后 15 秒；硬杀时 JSONL 记录最后一次 heartbeat 快照，不是精确死亡瞬间。
 5. `host-crashes.json` 只保留 10 分钟；更早历史只在 JSONL。
 6. `allTasks` 跳过 `ARCHIVED`；归档任务不会被重新标记。
 7. `allowMultiFork=true` 已不再生效；没有 UI/HTTP confirm 参数，也不需要。
 8. 进程优先级仍主要写 `BelowNormal`，`Idle` 未作为可配置档位落地。
+9. **宿主属主准入的边界**：`/fang/api/auth-token` 的 peer-owner 只能证明对端进程与宿主属于同一 OS 用户，不等于同用户进程隔离；同一用户下的恶意进程仍可读取 token。其余非 bootstrap 路由仍要求 token。
 
 ## 五、升级说明
 

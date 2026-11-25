@@ -103,6 +103,9 @@ jobs:
       - name: Job Object E2E (shipped binary)
         if: matrix.node == 24
         run: node tools/job-object-windows-e2e.mjs --helper native/win32/fang-job-host.exe --memory
+      - name: Browser Job Object E2E (shipped binary)
+        if: matrix.node == 24
+        run: node tools/browser-job-windows-e2e.mjs --helper native/win32/fang-job-host.exe
 
   # ── 3. 许可分层（跨平台检查放 ubuntu）────────────────────────────────────
   license:

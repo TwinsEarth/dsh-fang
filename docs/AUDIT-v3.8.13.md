@@ -66,12 +66,13 @@
 
 1. **真实 Windows DSH 宿主 E2E 未跑**：健康预检、单 app 窗口、崩溃闩锁只有单测/静态覆盖。需要真实 Windows 自托管 runner 跑 `/fang/adapter/flush-session` 3s 落盘与 `browser-health.jsonl` 采样。
 2. **native helper 真机验证结果分版本**：v3.8.5–v3.8.9 tarball 是 28KB/24KB 旧 helper；v3.8.10–v3.8.13 tarball 是 82KB/54KB 新 helper。2026-11-26 在 Windows 11 build 26300 真机跑 `tools/job-object-windows-e2e.mjs --memory`，kill-on-close、64MB Job 内存上限、64MB 进程内存上限三例全部 PASS，证据 `docs/evidence/job-object-e2e-2026-11-26.md`。这证明 helper 本身与限额生效，不证明 browser/fork 完整编排链路。
-3. **browser/fork 的 Job Object 端到端未跑**：helper 启动器真机通过；orchestrator 拉起浏览器/分身后由 helper 接管、宿主卡死时 heartbeat 杀树的整链仍是单测/静态覆盖。
+3. **browser Job Object 已真机验证；orchestrator 整链仍未跑**：2026-11-26 Windows 11 build 26300 / Edge 158 真机启动 headless Edge，确认 root + 13 个 Edge 子进程，强杀 helper 后全部消失（`tools/browser-job-windows-e2e.mjs`，证据 `docs/evidence/browser-job-e2e-2026-11-26.md`）。但 DSH orchestrator 拉起浏览器/分身并交给 helper 的完整链路仍只有单测/静态覆盖。
 4. **lastHostMetrics 滞后**：最多 15 秒；硬杀 JSONL 是最后一次 heartbeat 快照。
 5. **host-crashes.json 只保留 10 分钟**：更早历史只在 JSONL。
 6. **allTasks 跳过 ARCHIVED**：归档任务不会被重新标记。
 7. **allowMultiFork 已失效**：没有 UI/HTTP confirm 参数，也不需要；兼容字段不会改变上限。
 8. **进程优先级**：主要 `BelowNormal`，`Idle` 未做成可配置档位。
+9. **宿主属主准入的边界**：`/fang/api/auth-token` 的 peer-owner 只证明对端进程与宿主属于同一 OS 用户，不是同用户进程隔离；同一用户下的恶意进程仍可读取 token。其余非 bootstrap 路由仍要求 token。
 
 ## 五、最终全量（构建前）
 
