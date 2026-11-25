@@ -309,6 +309,8 @@ int wmain(int argc, wchar_t **argv) {
   const wchar_t *job_name = L"fang-job";
   uint64_t heartbeat_timeout_ms = 120000ULL;
   uint64_t heartbeat_grace_ms = 30000ULL;
+  uint64_t process_memory_mb = 0ULL;
+  uint64_t job_memory_mb = 0ULL;
   DWORD host_pid = 0;
   int shell_mode = 0;
   int split = -1;
@@ -321,6 +323,8 @@ int wmain(int argc, wchar_t **argv) {
     else if (!wcscmp(argv[i], L"--host-pid") && i + 1 < argc) host_pid = (DWORD)wcstoul(argv[++i], NULL, 10);
     else if (!wcscmp(argv[i], L"--heartbeat-timeout-ms") && i + 1 < argc) heartbeat_timeout_ms = _wcstoui64(argv[++i], NULL, 10);
     else if (!wcscmp(argv[i], L"--heartbeat-grace-ms") && i + 1 < argc) heartbeat_grace_ms = _wcstoui64(argv[++i], NULL, 10);
+    else if (!wcscmp(argv[i], L"--job-process-memory-mb") && i + 1 < argc) process_memory_mb = _wcstoui64(argv[++i], NULL, 10);
+    else if (!wcscmp(argv[i], L"--job-memory-mb") && i + 1 < argc) job_memory_mb = _wcstoui64(argv[++i], NULL, 10);
     else if (!wcscmp(argv[i], L"--log") && i + 1 < argc) wcsncpy_s(g_log_path, MAX_PATH_LEN, argv[++i], _TRUNCATE);
     else if (!wcscmp(argv[i], L"--shell")) shell_mode = 1;
   }
@@ -342,6 +346,14 @@ int wmain(int argc, wchar_t **argv) {
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
   ZeroMemory(&limits, sizeof(limits));
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (process_memory_mb > 0ULL) {
+    limits.ProcessMemoryLimit = (SIZE_T)(process_memory_mb * 1024ULL * 1024ULL);
+    limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+  }
+  if (job_memory_mb > 0ULL) {
+    limits.JobMemoryLimit = (SIZE_T)(job_memory_mb * 1024ULL * 1024ULL);
+    limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+  }
   if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
     DWORD err = GetLastError();
     log_line_v(L"SetInformationJobObject failed: %lu", (unsigned long)err);

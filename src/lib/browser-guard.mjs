@@ -351,6 +351,22 @@ export async function flushManagedBrowser(port) {
   return { ok: true }
 }
 
+/**
+ * Experimental hidden-tab pause. Chromium supports Page.setWebLifecycleState
+ * with 'frozen'/'active'; callers must keep this off by default until a real
+ * fork page has been verified to wake up and accept input after 'active'.
+ */
+export async function setManagedBrowserLifecycle(port, state) {
+  const normalized = state === 'frozen' ? 'frozen' : 'active'
+  const targets = await cdpTargets(port)
+  if (!targets.length) return { ok: false, state: normalized, error: 'no-page' }
+  const target = targets.find((item) => item.url?.startsWith('http://127.0.0.1:')) ?? targets[0]
+  await cdpCommand(target.webSocketDebuggerUrl, 'Page.enable', {}, 1500)
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Page.setWebLifecycleState', { state: normalized }, 1500)
+  if (!result || typeof result !== 'object') return { ok: false, state: normalized, error: 'cdp-lifecycle-failed' }
+  return { ok: true, state: normalized }
+}
+
 export async function sampleManagedBrowser(port) {
   const targets = await cdpTargets(port)
   if (!targets.length) return { ok: false, error: 'browser-cdp-no-page' }

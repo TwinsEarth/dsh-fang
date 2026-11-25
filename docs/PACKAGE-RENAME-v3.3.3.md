@@ -8,7 +8,7 @@
 |---|---|
 | npm 包名 | `@twinsearth/fang-dsh-plugin` |
 | 安装 | `dsh plugin --profile desktop add @twinsearth/fang-dsh-plugin@3.3.3` |
-| 本地开发 bundle 名 | `@local/dsh-fang`（构建时统一改写为新包名） |
+| 本地开发 bundle 名 | `@twinsearth/fang-dsh-plugin`（构建时统一改写为新包名） |
 | 旧 npm 包名 | `@twinsearth/dsh-fang`（继续兼容，不再作为新发布身份） |
 
 ## 为什么保留旧名兼容

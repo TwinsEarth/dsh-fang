@@ -967,7 +967,7 @@ export class EssenceManager {
       const guide = [
         '# dsh-Fang 元主导入引导',
         '',
-        '1. 目标机器安装并启用 dsh-Fang（@local/dsh-fang）。',
+        '1. 目标机器安装并启用 dsh-Fang（@twinsearth/fang-dsh-plugin）。',
         '2. 打开瓮城面板 → 元主区 → 「导入」→ 选择本 JSON 文件（或 POST /fang/api/essence/import）。',
         '3. 导入会生成新的 essences/<新id> 并自动重算；凭据不随包迁移，需要重新登录。',
         '4. 打开前建议先执行「同步」，把该元主重放到目标机器当前的母体镜像。',

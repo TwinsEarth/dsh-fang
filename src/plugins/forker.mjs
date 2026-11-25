@@ -70,7 +70,7 @@ import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } 
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady, resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
 
-/** Repository root of this plugin (used as the @local/dsh-fang junction source). */
+/** Repository root of this plugin (used as the @twinsearth/fang-dsh-plugin junction source). */
 const FANG_ROOT = (() => {
   try {
     return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -122,11 +122,13 @@ const DEFAULTS = {
   portPool: { ...DEFAULT_PORT_POOL },
   allocatePorts: true,
   cleanTemplate: true,
-  bundleName: '@local/dsh-fang',
+  bundleName: '@twinsearth/fang-dsh-plugin',
   forkProfileTag: 'web-base',
   jobObject: true,
   jobHeartbeatTimeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
   jobHeartbeatGraceMs: JOB_HEARTBEAT_GRACE_MS,
+  jobProcessMemoryMB: 2048,
+  jobTotalMemoryMB: 4096,
 }
 
 /** Files cloned from a (clean or mother) template profile: package.json + cordis*.yml only. */
@@ -163,7 +165,7 @@ export const Config = z
       .boolean()
       .default(true)
       .description('true：用内置干净模板（不继承母体脏 profile）；false：沿用 profileTemplate'),
-    bundleName: z.string().default('@local/dsh-fang').description('干净模板 profile.bundles 的第三个 bundle'),
+    bundleName: z.string().default('@twinsearth/fang-dsh-plugin').description('干净模板 profile.bundles 的第三个 bundle'),
     coreMode: z.union([z.const('stock'), z.const('accelerated')]).default('stock').description('new fork uses stock or accelerated DSH core'),
     acceleratedCliPath: z.string().default('').description('accelerated DSH CLI path'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),
@@ -173,6 +175,10 @@ export const Config = z
       .description('Job helper 判定宿主心跳失效的阈值（毫秒）；宿主冻结时据此 TerminateJobObject'),
     jobHeartbeatGraceMs: z.natural().default(JOB_HEARTBEAT_GRACE_MS)
       .description('Job helper 对心跳缺失/过期额外宽限（毫秒）'),
+    jobProcessMemoryMB: z.natural().min(0).max(16384).default(2048)
+      .description('Windows Job Object 单进程提交内存上限（MB，0=不限制）；由 helper 设 JOB_OBJECT_LIMIT_PROCESS_MEMORY'),
+    jobTotalMemoryMB: z.natural().min(0).max(32768).default(4096)
+      .description('Windows Job Object 整个 Job 提交内存上限（MB，0=不限制）；由 helper 设 JOB_OBJECT_LIMIT_JOB_MEMORY'),
     // v3.1.12：新机器/新用户的干净分身默认不带第三方插件；这里按“安装不激活 /
     // 安装并激活”两组清单给每个新分身装默认插件（开关可关；失败不阻塞分身启动）。
     forkSeed: z
@@ -1437,6 +1443,7 @@ function applyForkExperimentalSurface(profileDir) {
           launchArgs = buildJobHostArgs({
             spec, forkId, homeDir, heartbeatFile, hostPid: process.pid,
             timeoutMs: cfg.jobHeartbeatTimeoutMs, graceMs: cfg.jobHeartbeatGraceMs,
+            memoryMb: cfg.jobProcessMemoryMB, totalMemoryMb: cfg.jobTotalMemoryMB,
           })
           launchShell = false
         } else {

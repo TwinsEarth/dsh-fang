@@ -47,6 +47,8 @@ export function buildJobHostArgs({
   hostPid = process.pid,
   timeoutMs = JOB_HEARTBEAT_TIMEOUT_MS,
   graceMs = JOB_HEARTBEAT_GRACE_MS,
+  memoryMb = 0,
+  totalMemoryMb = 0,
 } = {}) {
   const paths = jobObjectPaths(homeDir)
   if (!paths) throw new Error('job-object: no homeDir')
@@ -60,6 +62,10 @@ export function buildJobHostArgs({
     '--heartbeat-grace-ms', String(Math.max(0, Math.floor(Number(graceMs) || JOB_HEARTBEAT_GRACE_MS))),
     '--job-name', `fang-${String(forkId || 'fork').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 80)}`,
   ]
+  const processMemory = Math.floor(Number(memoryMb) || 0)
+  const jobMemory = Math.floor(Number(totalMemoryMb) || 0)
+  if (processMemory > 0) args.push('--job-process-memory-mb', String(processMemory))
+  if (jobMemory > 0) args.push('--job-memory-mb', String(jobMemory))
   if (spec.shell === true) args.push('--shell')
   args.push('--', String(spec.command), ...(Array.isArray(spec.args) ? spec.args.map(String) : []))
   return args

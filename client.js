@@ -32,7 +32,7 @@
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 window.__ModuleLoader__.load({
-  id: '@local/dsh-fang',
+  id: '@twinsearth/fang-dsh-plugin',
   factory(require) {
     // React 只用于宿主插槽返回值（slots 契约），UI 不依赖它。见文件头说明。
     const React = require('react')
@@ -81,6 +81,16 @@ window.__ModuleLoader__.load({
     const POLL_MS = 5000
     const ACTIVE_SESSION_LIMIT = 7     // 元主展开后默认显示的会话条数
     const MAX_TITLE = 40
+    // v3.8.5：客户端硬上限。所有来自 API 的集合/预览进入 UI 前先裁剪，
+    // 归档/删除时 releaseTaskCache() 立即释放对应任务缓存。
+    const CACHE_LIMITS = Object.freeze({
+      taskRows: 200,
+      motherSessions: 200,
+      forkSessionTasks: 16,
+      forkSessionItems: 80,
+      previewChars: 240,
+      logChars: 65536,
+    })
 
     // 状态 → 语义色：只允许 绿（进行中）/ 蓝（非工作的暂停或归档）/ 红（已证实故障）/ 中性（未知）。
     // 橘色只用于“配置类动作”，绝不能出现在状态 chip 上。
@@ -1677,6 +1687,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         safeMode: { state: 'loading', data: null, error: '', at: 0 },
         sessions: { state: 'loading', items: [], total: 0, degraded: [], error: '', diagnostic: null, at: 0 },
         forkSessions: new Map(),
+        activeTaskId: '',
         query: '',
         selectedSessionId: '',
         expanded: new Set(),
@@ -1719,6 +1730,58 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         decisionAi: { state: 'idle', configured: false, provider: null, model: null, providers: [], error: '' },
         decisionOpen: { green: false, gray: false },
         lastRefreshAt: 0,
+      }
+
+      function clampCacheText(value, max = CACHE_LIMITS.previewChars) {
+        const text = value == null ? '' : String(value)
+        return text.length > max ? text.slice(0, max) + '\n…（已截断）' : text
+      }
+
+      function capTaskRows(rows, activeId = '') {
+        const list = Array.isArray(rows) ? rows.slice() : []
+        if (list.length <= CACHE_LIMITS.taskRows) return list
+        const active = list.find((row) => String(row?.taskId ?? '') === String(activeId))
+        const rest = list.filter((row) => row !== active)
+          .sort((a, b) => (Number(b?.updatedAt) || Number(b?.createdAt) || 0) - (Number(a?.updatedAt) || Number(a?.createdAt) || 0))
+        return (active ? [active, ...rest] : rest).slice(0, CACHE_LIMITS.taskRows)
+      }
+
+      function ensureActiveTask(rows) {
+        const list = Array.isArray(rows) ? rows : []
+        const current = list.find((row) => String(row?.taskId ?? '') === String(S.activeTaskId))
+        if (current) return S.activeTaskId
+        const preferred = list.find((row) => ['running', 'ready'].includes(String(row?.status ?? '')))
+          || list.find((row) => String(row?.status ?? '') !== 'archived')
+          || list[0]
+        S.activeTaskId = String(preferred?.taskId ?? '')
+        return S.activeTaskId
+      }
+
+      function capForkSessionCache() {
+        while (S.forkSessions.size > CACHE_LIMITS.forkSessionTasks) {
+          const key = [...S.forkSessions.keys()].find((item) => item !== S.activeTaskId)
+          if (!key) break
+          S.forkSessions.delete(key)
+        }
+      }
+
+      function releaseTaskCache(taskId) {
+        const id = String(taskId ?? '')
+        if (!id) return
+        S.forkSessions.delete(id)
+        S.expanded.delete('fork:' + id)
+        S.collapsedTasks.delete(id)
+        if (S.activeTaskId === id) S.activeTaskId = ''
+        capForkSessionCache()
+      }
+
+      function setActiveTask(taskId) {
+        const id = String(taskId ?? '')
+        if (!id || id === S.activeTaskId) return
+        S.activeTaskId = id
+        capForkSessionCache()
+        if (!S.forkSessions.has(id)) void loadForkSessions(id)
+        schedule()
       }
 
       const root = h('div', { class: 'fang-console', 'data-fang-console': 'v4' })
@@ -1841,10 +1904,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         forkSeq.set(id, seq)
         S.forkSessions.set(id, { ...(S.forkSessions.get(id) || { items: [] }), state: 'loading', busy: true })
         schedule()
-        const result = await api('/fang/api/tasks/sessions?taskId=' + encodeURIComponent(id) + '&limit=20')
+        const result = await api('/fang/api/tasks/sessions?taskId=' + encodeURIComponent(id) + '&limit=' + CACHE_LIMITS.forkSessionItems)
         if (!alive || forkSeq.get(id) !== seq) return
         if (result.status === 200 && result.body && result.body.ok !== false) {
-          const items = Array.isArray(result.body.sessions) ? result.body.sessions : []
+          const items = (Array.isArray(result.body.sessions) ? result.body.sessions : []).slice(0, CACHE_LIMITS.forkSessionItems)
           S.forkSessions.set(id, {
             state: 'ready', items, busy: false, at: Date.now(),
             total: Number(result.body.total) || items.length,
@@ -1854,6 +1917,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
           S.forkSessions.set(id, { state: 'error', items: [], busy: false, error: code, diagnostic: result.diagnostic || null })
         }
+        capForkSessionCache()
         schedule()
       }
 
@@ -1875,7 +1939,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           const [statusRes, tasksRes, sessionsRes, essenceRes, approvalsRes, supervisionRes, forkCoreRes, safeModeRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
-            api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? 1000 : S.sessionWindow}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? CACHE_LIMITS.motherSessions : Math.min(Number(S.sessionWindow) || 20, CACHE_LIMITS.motherSessions)}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/essence/list').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/approvals').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/forks/supervision').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
@@ -1895,8 +1959,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           if (approvalsRes.status === 200 && approvalsRes.body && approvalsRes.body.ok !== false) {
             S.approvals = {
               state: 'ready',
-              items: Array.isArray(approvalsRes.body.items) ? approvalsRes.body.items : [],
-              failed: Array.isArray(approvalsRes.body.failed) ? approvalsRes.body.failed : [],
+              items: (Array.isArray(approvalsRes.body.items) ? approvalsRes.body.items : []).slice(0, CACHE_LIMITS.taskRows),
+              failed: (Array.isArray(approvalsRes.body.failed) ? approvalsRes.body.failed : []).slice(0, CACHE_LIMITS.taskRows),
               degraded: approvalsRes.body.degraded === true,
               error: '', at: Date.now(),
             }
@@ -1924,7 +1988,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
           let taskItems = []
           if (tasksRes.status === 200 && Array.isArray(tasksRes.body?.tasks)) {
-            taskItems = tasksRes.body.tasks
+            ensureActiveTask(tasksRes.body.tasks)
+            taskItems = capTaskRows(tasksRes.body.tasks, S.activeTaskId)
             S.tasks = { state: 'ready', items: taskItems, error: '', diagnostic: null, at: Date.now() }
           } else {
             const code = tasksRes.body?.error || (tasksRes.status ? 'http-' + tasksRes.status : 'network')
@@ -1941,7 +2006,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
           if (sessionsRes.status === 200 && sessionsRes.body && sessionsRes.body.ok !== false) {
             const body = sessionsRes.body
-            const items = Array.isArray(body.sessions) ? body.sessions : []
+            const items = (Array.isArray(body.sessions) ? body.sessions : []).slice(0, CACHE_LIMITS.motherSessions)
             const degraded = Array.isArray(body.degraded) ? body.degraded : []
             const softEmpty = body.readable === false && degraded.includes('sessions-root-missing')
             const readable = body.readable !== false || softEmpty
@@ -1956,10 +2021,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
           S.lastRefreshAt = Date.now()
           if (!options.silent) schedule()
-          // 分身会话：首次出现时预热一次（拿到会话数），之后只为展开的卡片刷新；
-          // 失败按卡独立，不拖垮整列，也不做 N+1 的每 5 秒全量轮询。
-          const targets = taskItems.filter((task) => ['ready', 'running', 'failed'].includes(String(task?.status ?? ''))
-            && (S.expanded.has('fork:' + task.taskId) || !S.forkSessions.has(String(task.taskId))))
+          // v3.8.5：只预热当前 active task 的会话目录；其他任务保持摘要，
+          // 切换 active task 时才调用 loadForkSessions()。不再对所有任务做 N+1 预热。
+          const targets = taskItems.filter((task) => String(task.taskId) === String(S.activeTaskId)
+            && ['ready', 'running', 'failed'].includes(String(task?.status ?? ''))
+            && !S.forkSessions.has(String(task.taskId)))
           for (const task of targets) void loadForkSessions(task.taskId)
         } finally {
           refreshingLock = false
@@ -2163,6 +2229,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             S.busy = ''
             const body = result.body
             if (result.status === 200 && body?.ok) {
+              releaseTaskCache(task.taskId)
               setNotice({ tone: 'ok', title: body.already ? '已在存档中' : '已归档', message: `${task.title || task.taskId} · 进程已停止，存档保留。` })
             } else {
               const code = body?.error || (result.status ? 'http-' + result.status : 'network')
@@ -2299,7 +2366,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             const result = await api('/fang/api/tasks/archive/delete', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
             S.busy = ''
             const body = result.body
-            if (result.status === 200 && body?.ok) setNotice({ tone: 'ok', title: '存档已删除', message: `${task.title || task.taskId} 的存档与 home 已删除。` })
+            if (result.status === 200 && body?.ok) { releaseTaskCache(task.taskId); setNotice({ tone: 'ok', title: '存档已删除', message: `${task.title || task.taskId} 的存档与 home 已删除。` }) }
             else {
               const code = body?.error || (result.status ? 'http-' + result.status : 'network')
               setNotice({ tone: 'bad', title: '删除存档失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
@@ -3120,6 +3187,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       async function openTask(task, retryDepth = 0) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
+        setActiveTask(taskId)
         // v3.7.4：打开是显式用户动作，用 POST 触发同步；GET 只读，避免副作用。
         const result = await api('/fang/api/tasks/open', { method: 'POST', body: JSON.stringify({ taskId }) })
         if (result.status === 200 && result.body?.url) {
@@ -3599,7 +3667,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         reviewSafeMode, confirmSafeModeReset, confirmPanic,
         probeMemory, openPagefileHelp, openMigrationReport, openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
         openRestartDialog, submitRestart,
-        archiveTask, restoreTask, startTask, restartQuarantinedTask, repairTask, deleteArchive, promoteTask, openTask, exportTask, importTask, copyText, captureEssence,
+        archiveTask, restoreTask, startTask, restartQuarantinedTask, repairTask, deleteArchive, promoteTask, openTask, setActiveTask, exportTask, importTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         decideApproval,
         setForkSupervision,
@@ -4911,9 +4979,48 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       }, head, h('div', { class: 'cdp-metric-grid' }, cards))
     }
 
-    function renderForkCard(S, app, task, options = {}) {
+    function renderForkSummary(S, app, task, options = {}) {
+      const taskId = String(task?.taskId ?? '')
       const health = taskHealth(task)
+      const stateView = forkStateOf(task)
+      const archived = !!options.archived || String(task?.status) === 'archived'
+      return h('article', {
+        class: 'fork-card fork-card--summary',
+        'data-bar': health.tone,
+        'data-task': taskId,
+        'data-state': health.phase,
+        'data-health': health.adapter,
+        'data-summary': '1',
+        'data-active': '0',
+        'aria-label': `分身 ${task.title || taskId}，状态 ${health.label}（摘要）`,
+      },
+        h('div', { class: 'fork-head' },
+          h('div', { class: 'fork-head-main' },
+            h('div', { class: 'fork-title' }, clampText(task.title) || `分身 ${short(taskId, 8)}`),
+            h('div', { class: 'fork-chips' },
+              chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
+              archived ? chip('neutral', '已归档') : null,
+              task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）` }) : null)),
+          h('div', { class: 'fork-actions' },
+            button('查看详情', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-11',
+              title: '切换为当前任务；只加载这一个任务的完整卡片',
+              onClick: () => app.setActiveTask(taskId),
+              fk: 'activate:' + taskId,
+            }))),
+        h('div', {
+          class: 'fork-status', 'data-state': stateView.key, 'data-tone': stateView.tone,
+          role: 'status', 'aria-label': `分身状态：${stateView.label}`,
+        },
+          h('span', { class: 'fork-status-dot', 'aria-hidden': 'true' }),
+          h('span', { class: 'fork-status-label' }, stateView.label),
+          stateView.hint ? h('span', { class: 'fork-status-hint' }, stateView.hint) : null))
+    }
+
+    function renderForkCard(S, app, task, options = {}) {
       const taskId = String(task.taskId ?? '')
+      if (taskId !== String(S.activeTaskId)) return renderForkSummary(S, app, task, options)
+      const health = taskHealth(task)
       const archived = !!options.archived || String(task.status) === 'archived'
       const expanded = S.expanded.has('fork:' + taskId)
       const sessionsState = S.forkSessions.get(taskId)
@@ -5365,7 +5472,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         } else {
           body.append(h('pre', {
             style: { maxHeight: '46vh', overflow: 'auto', fontSize: 11, lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0 },
-          }, detail.logs || '（暂无运行日志；先点「打开」启动该元主的隔离实例）'))
+          }, clampCacheText(detail.logs, CACHE_LIMITS.logChars) || '（暂无运行日志；先点「打开」启动该元主的隔离实例）'))
         }
       }
       const tabBar = h('div', { class: 'panel-tools', style: { borderTop: 'none' } },

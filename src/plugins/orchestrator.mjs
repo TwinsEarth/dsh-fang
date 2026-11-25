@@ -38,7 +38,7 @@ import { appendBrowserMetricHistory } from '../lib/browser-metrics.mjs'
 import { readLatestMigrationReport } from '../lib/migration-report.mjs'
 import { DEFAULT_LEGACY_WORKSPACE_ROOTS, mapWorkspacePathForFork, migrateForkWorkspace, prepareImportedSession } from '../lib/workspace-mapping.mjs'
 import { appendJsonlRotated } from '../lib/log-rotation.mjs'
-import { closeManagedBrowser, findBrowserPath, flushManagedBrowser, freePort, isPidAlive, launchManagedBrowser, lowerProcessPriority, sampleManagedBrowser } from '../lib/browser-guard.mjs'
+import { closeManagedBrowser, findBrowserPath, flushManagedBrowser, freePort, isPidAlive, launchManagedBrowser, lowerProcessPriority, sampleManagedBrowser, setManagedBrowserLifecycle } from '../lib/browser-guard.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
@@ -139,9 +139,9 @@ export function atomicReplaceDir(sourceDir, targetDir) {
 }
 
 
-const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@local/dsh-fang'])
-// build.mjs rewrites @local/dsh-fang to the published package name.
-const CURRENT_FANG_BUNDLE = '@local/dsh-fang'
+const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@twinsearth/fang-dsh-plugin'])
+// build.mjs rewrites @twinsearth/fang-dsh-plugin to the published package name.
+const CURRENT_FANG_BUNDLE = '@twinsearth/fang-dsh-plugin'
 
 function profileBundles(profileDir) {
   try {
@@ -170,14 +170,14 @@ export function profileUsesCurrentFangBundle(profileDir) {
     // Only a positively-declared legacy bundle is stale. Templates that don't
     // declare fang at all (unit-test fixtures, custom hosts) are left to the
     // existing forkBundlePath probe.
-    return !(declared.has('@twinsearth/dsh-fang') || declared.has('@local/dsh-fang-legacy'))
+    return !(declared.has('@twinsearth/dsh-fang') || declared.has('@twinsearth/fang-dsh-plugin-legacy'))
   }
   // v3.3.8: same package name but an older exact version is stale too. This is
   // the normal upgrade case (3.3.7 essence after installing 3.3.8).
   const dependencies = pkg?.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
   const declaredVersion = String(
     dependencies['@twinsearth/fang-dsh-plugin'] ||
-    dependencies['@local/dsh-fang'] ||
+    dependencies['@twinsearth/fang-dsh-plugin'] ||
     dependencies['@twinsearth/dsh-fang'] ||
     '',
   ).replace(/^[~^]/, '')
@@ -282,8 +282,8 @@ export const Config = z.object({
     .description('内存看门狗采样间隔（毫秒）'),
   memoryProcessScanIntervalMs: z.number().min(10000).max(600000).default(30000)
     .description('全进程表最小采样间隔（毫秒）；中间的 tick 复用缓存表并只做 liveness/CDP 按需检查'),
-  browserCdpSampleIntervalMs: z.number().min(15000).max(600000).default(45000)
-    .description('托管浏览器 CDP heap/DOM/visibility 采样间隔（毫秒）；中间复用上次 CDP 指标'),
+  browserCdpSampleIntervalMs: z.number().min(15000).max(600000).default(15000)
+    .description('托管浏览器 CDP heap/DOM/visibility 采样间隔（毫秒）；v3.8.5 默认 15s，中间复用上次 CDP 指标'),
   memoryKillCommitMB: z.number().min(128).max(1048576).default(2048)
     .description('固定兜底：单个分身 PID 树 commit 超过该值（MB）才进入杀进程候选；自适应开启时仅无内存探针时使用'),
   memoryGrowCommitMB: z.number().min(64).max(1048576).default(768)
@@ -308,6 +308,8 @@ export const Config = z.object({
     .description('CDP Browser.close 后等待优雅退出的时间；超时才 taskkill'),
   idleCloseOnlyWhenIdle: z.boolean().default(true)
     .description('只关闭确认空闲的 fork 页面；无法确认活跃状态时不自动关'),
+  pauseHiddenTab: z.boolean().default(false)
+    .description('实验开关：页面隐藏时用 CDP Page.setWebLifecycleState=frozen 暂停渲染；默认关闭，真机验证恢复可见可 active 后再考虑默认开启'),
   orphanSweepMinutes: z.number().min(0).max(1440).default(5)
     .description('孤儿 fork 进程清理间隔（分钟；0=仅启动时）'),
   forkFlushPath: z.string().default('/fang/adapter/flush-session')
@@ -1396,7 +1398,7 @@ export function apply(ctx, config) {
     } : null
     task.browser = {
       pid: launched.pid, port: launched.port, profileDir, logFile: launched.logFile,
-      crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null, priority,
+      crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null, priority, lifecycleState: 'active', lifecycleAt: null, lifecycleError: null, lifecycleFailedAt: null,
     }
     // A fresh browser session invalidates the previous close's unsaved warning.
     task.closeWarning = null
@@ -1557,7 +1559,7 @@ export function apply(ctx, config) {
   const browserWatchdogTick = async (table, { freshTable = true } = {}) => {
     if (cfg.managedBrowser !== true || process.platform !== 'win32') return
     const now = nowMs()
-    const cdpIntervalMs = Math.max(15000, Number(cfg.browserCdpSampleIntervalMs) || 45000)
+    const cdpIntervalMs = Math.max(15000, Number(cfg.browserCdpSampleIntervalMs) || 15000)
     for (const task of tasks.values()) {
       const browser = task.browser
       if (!browser?.pid) continue
@@ -1638,6 +1640,28 @@ export function apply(ctx, config) {
         audit('fork-browser-memory-guard', { taskId: task.taskId, commitMB: tree.commitMB, nodes, heapMB, overMemory, overHeap, overDom, memoryLimitMB: limits.browserMemoryLimitMB, heapLimitMB: limits.browserHeapLimitMB, source: limits.source })
         await quarantineTask(task, reason)
         continue
+      }
+      // Experimental pause: freeze a hidden renderer at the CDP lifecycle layer.
+      // Default off; only enable after a real fork page has been verified to
+      // resume (visibility -> active -> accepts input) on the target host.
+      if (cfg.pauseHiddenTab === true && cdpOk) {
+        const desired = visibility === 'hidden' ? 'frozen' : 'active'
+        if (browser.lifecycleState !== desired) {
+          const lastFail = Number(browser.lifecycleFailedAt) || 0
+          if (desired === 'active' || now - lastFail >= 60_000) {
+            const lifecycle = await setManagedBrowserLifecycle(browser.port, desired)
+            if (lifecycle.ok) {
+              browser.lifecycleState = desired
+              browser.lifecycleAt = now
+              browser.lifecycleError = null
+              audit(desired === 'frozen' ? 'fork-browser-hidden-paused' : 'fork-browser-visible-resumed', { taskId: task.taskId, port: browser.port })
+            } else {
+              browser.lifecycleError = lifecycle.error || 'cdp-lifecycle-failed'
+              browser.lifecycleFailedAt = now
+              audit('fork-browser-lifecycle-failed', { taskId: task.taskId, port: browser.port, state: desired, error: browser.lifecycleError })
+            }
+          }
+        }
       }
       if (cfg.autoCloseIdleMinutes > 0) {
         if (cdpOk && visibility === 'hidden') {
@@ -1922,7 +1946,7 @@ export function apply(ctx, config) {
   // The booted profile's own directory is authoritative (launcher sets DSH_PROFILE_DIR);
   // resolving "$DSH_HOME/profiles/<tag>" from argv can point at a template that never existed.
   // 分身模板必须来自一个**真的装了本 bundle** 的 profile；否则分身的 node_modules junction
-  // 指到一个没有 @local/dsh-fang 的 profile，fork 里所有 /fang 路由都会 404（实测事故）。
+  // 指到一个没有 @twinsearth/fang-dsh-plugin 的 profile，fork 里所有 /fang 路由都会 404（实测事故）。
   const templateDir = () => {
     const candidates = [cfg.profileTemplate, process.env.DSH_PROFILE_DIR, resolveProfileDir(motherProfile), resolveProfileDir(layout.profileTag)]
     const usable = candidates.filter((dir) => typeof dir === "string" && dir.trim()
@@ -2666,7 +2690,7 @@ export function apply(ctx, config) {
           // 加速档 + 原身派生：同步原身插件面（第三方包复制 + @deepseek-ai/* 别名桩包）。
           ...(coreMode === 'accelerated' && sourceEssence ? { sourceProfileDir: profileTemplate } : {}),
           // node_modules：优先元主自己的模块树；默认元宝/新建原身可能尚未物化 node_modules，
-          // 此时回退母体模块树，保证分身仍能解析 @local/dsh-fang（否则是僵尸分身）。
+          // 此时回退母体模块树，保证分身仍能解析 @twinsearth/fang-dsh-plugin（否则是僵尸分身）。
           ...(sourceEssence ? {
             cleanTemplate: false,
             nodeModulesSource: (() => {
@@ -2692,7 +2716,7 @@ export function apply(ctx, config) {
 
         // 防御：分身的 profile 必须能解析本 bundle；否则派生出来的是一个"没有 /fang 路由"的
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
-        // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @local/dsh-fang 继续兼容。
+        // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @twinsearth/fang-dsh-plugin 继续兼容。
         const forkProfileDir = path.join(homeDir, 'profiles', profile)
         if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-fork-profile')) } catch { /* debug best effort */ } }
         const forkBundle = forkBundlePath(forkProfileDir)
@@ -4786,7 +4810,7 @@ export function apply(ctx, config) {
       const forkBundlesBefore = Array.isArray(forkPkg?.dsh?.profile?.bundles) ? forkPkg.dsh.profile.bundles : []
       const forkFangBundle = FORK_BUNDLE_NAMES.find((candidate) => exists(path.join(String(profileDir), 'node_modules', ...candidate.split('/'))))
         || forkBundlesBefore.find((candidate) => /(^|\/)dsh-fang$/.test(String(candidate)))
-        || '@local/dsh-fang'
+        || '@twinsearth/fang-dsh-plugin'
       const bundles = sourceBundles
         .filter((name) => name !== NODE_COMPAT_BUNDLE)
         .map((name) => /(^|\/)(dsh-fang|fang-dsh-plugin)$/.test(String(name)) ? forkFangBundle : name)

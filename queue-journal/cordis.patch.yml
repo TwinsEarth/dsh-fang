@@ -1,4 +1,0 @@
-- insert:
-    - id: fang-queue-journal
-      name: '@twinsearth/dsh-fang-queue-journal'
-      disabled: true
