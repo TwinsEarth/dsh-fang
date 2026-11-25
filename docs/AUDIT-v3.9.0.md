@@ -129,5 +129,9 @@ test/v3814-host-guard.test.mjs
 - 构建与打包结果：`dist/dsh-fang-3.9.0.tgz`，206 entries，944022 bytes，sha256 `3790ec291f4355299c09d3200317215e315f42fe8c490592844098cfd4376e60`；package smoke / crash-safety / allow-list / main-city gate 均 PASS。
 - 发布工具修正：`tools/release/build.mjs` 原先把目录条目写进 tarball，npm registry 以 HTTP 415 `invalid path: package/` 拒收；本版改为显式文件清单打包，tarball 只含文件条目（`dir_count=0`）。
 - `manifest.json` 的 preflight 是 `skipped:true / green:false`，不能宣称门禁 GREEN。
-- 三方发布状态：`__THREE_PARTY_STATUS__`。
+- 三方发布状态：
+  - GitHub：`v3.9.0` annotated tag `ae3680be53f90041c2ae8a5afc067983d039eb1c` 指向发布提交 `a023acc65d7bfd0d0c9e1e72e5fb2a1db0903f82`；远端三个 commit SHA 与本地逐一相同。Release ID `458636406`，非 draft / 非 prerelease，`latest=v3.9.0`，3 个附件均已上传。
+  - npm：`@twinsearth/fang-dsh-plugin@3.9.0` 已发布，`dist-tags.latest=3.9.0`；registry 元数据 `shasum=cea147184340d394c8a96020c54b59a4b3d5783c`，公开 tarball 下载 944022 bytes，sha256 与本地一致。
+  - 项目目录：发布包、校验和、RELEASE/AUDIT 副本与三方发布报告交付到 `/Users/fang/Doubao/chats/2026-11-26/new-chat-1`。
+  - 远端 `origin/main` 仍在 v3.8.4；v3.9.0 通过 tag/commit 发布，未改写 main。
 - 真实 Windows DSH 宿主 E2E（heap 采样、session gate、pagefile 全盘显示）仍需安装后补跑。
