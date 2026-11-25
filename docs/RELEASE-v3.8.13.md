@@ -88,6 +88,6 @@
 | v3.8.10 | `640ec6f` | `dsh-fang-3.8.10.tgz` 快照 |
 | v3.8.11 | `58b7c9a` | `dsh-fang-3.8.11.tgz` 快照 |
 | v3.8.12 | `0f46989` | `dsh-fang-3.8.12.tgz` 快照 |
-| v3.8.13 | `ee51ef8` | 完整开发树（806 files） |
+| v3.8.13 | `3b52d58` | 完整开发树 + Windows Job Object E2E 证据 |
 
 每个 tag 对应唯一 commit，不再使用“九个 tag 指向同一个汇总提交”的方案。
