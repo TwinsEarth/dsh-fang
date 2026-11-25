@@ -73,7 +73,12 @@ fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(stagedPkg, nu
 
 const tarball = tarballPath
 fs.rmSync(tarball, { force: true })
-const tgz = run('tar', ['-czf', tarball, '-C', stage, 'package'])
+// npm registry rejects tar directory entries with HTTP 415 "invalid path: package/".
+// Pass an explicit file list instead of the directory so the tarball contains files only.
+const tarFileList = path.join(stage, '.tar-files.txt')
+fs.writeFileSync(tarFileList, files.map((rel) => `package/${rel}`).join('\n') + '\n', 'utf8')
+const tgz = run('tar', ['-czf', tarball, '-C', stage, '-T', tarFileList])
+fs.rmSync(tarFileList, { force: true })
 if (tgz.status !== 0) { console.error('FAIL tar: ' + (tgz.stderr || tgz.stdout)); process.exit(1) }
 const listing = run('tar', ['-tzf', tarball])
 const entries = listing.stdout.split(/\r?\n/).filter(Boolean)

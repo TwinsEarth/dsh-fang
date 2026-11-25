@@ -114,7 +114,7 @@ test/v3814-host-guard.test.mjs
 5. C: + D: 双分页文件、全盘 commit 上限；
 6. orchestrator/client/memory-guard 源码接线。
 
-全量结果：`1585 tests / 1562 pass / 0 fail / 13 skipped / 10 todo`，`duration_ms=200083.72`（2026-11-26，Mac，`npm test`）。
+全量结果：`1585 tests / 1562 pass / 0 fail / 13 skipped / 10 todo`，`duration_ms=200145.04`（2026-11-26，Mac，`npm test`）。
 
 ## 五、未闭环 / 边界
 
@@ -126,7 +126,8 @@ test/v3814-host-guard.test.mjs
 
 ## 六、发布门禁
 
-- 构建与打包结果：`dist/dsh-fang-3.9.0.tgz`，232 entries，949556 bytes，sha256 `730131247167d1704ee9d847772a970a0cf3404e0fd996021f4b10820134a8dd`；package smoke / crash-safety / allow-list / main-city gate 均 PASS。
+- 构建与打包结果：`dist/dsh-fang-3.9.0.tgz`，206 entries，944022 bytes，sha256 `3790ec291f4355299c09d3200317215e315f42fe8c490592844098cfd4376e60`；package smoke / crash-safety / allow-list / main-city gate 均 PASS。
+- 发布工具修正：`tools/release/build.mjs` 原先把目录条目写进 tarball，npm registry 以 HTTP 415 `invalid path: package/` 拒收；本版改为显式文件清单打包，tarball 只含文件条目（`dir_count=0`）。
 - `manifest.json` 的 preflight 是 `skipped:true / green:false`，不能宣称门禁 GREEN。
 - 三方发布状态：`__THREE_PARTY_STATUS__`。
 - 真实 Windows DSH 宿主 E2E（heap 采样、session gate、pagefile 全盘显示）仍需安装后补跑。

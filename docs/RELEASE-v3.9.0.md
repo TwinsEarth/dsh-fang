@@ -30,12 +30,13 @@ v3.8.14 的主题是“宿主守卫改看 Host JS heap 与 session 文件体量�
 ## 三、测试
 
 - 定向守卫测试 `test/v3814-host-guard.test.mjs`：6 / 6 PASS。
-- 全量回归：`1585 tests / 1562 pass / 0 fail / 13 skipped / 10 todo`，`duration_ms=200083.72`（2026-11-26，Mac，`npm test`）。
+- 全量回归：`1585 tests / 1562 pass / 0 fail / 13 skipped / 10 todo`，`duration_ms=200145.04`（2026-11-26，Mac，`npm test`）。
 - 历史证据：TOFUTURE 页面文件在 D:、`CommitLimitOSMB=44821`、Host session 206 个合计 222.56 MB、最大单文件 60.91 MB；按本版默认 48 MB 单文件紧急线会置 `sessionFootprintGate`，属预期行为，见 `docs/evidence/memory-probe-all-drives-2026-11-26.md`。
 
 ## 四、构建与门禁
 
-- `dist/dsh-fang-3.9.0.tgz`：232 entries，949556 bytes，sha256 `730131247167d1704ee9d847772a970a0cf3404e0fd996021f4b10820134a8dd`；package smoke / crash-safety / allow-list / main-city gate 均 PASS。
+- `dist/dsh-fang-3.9.0.tgz`：206 entries，944022 bytes，sha256 `3790ec291f4355299c09d3200317215e315f42fe8c490592844098cfd4376e60`；package smoke / crash-safety / allow-list / main-city gate 均 PASS。
+- 发布工具修正：`tools/release/build.mjs` 原先 `tar -czf ... package` 会把目录条目写进 tarball，npm registry 以 HTTP 415 `invalid path: package/` 拒收；本版改为显式文件清单打包，tarball 只含文件条目。
 - `dist/manifest.json` 的 `preflight` 为 `skipped:true / green:false`，本版不宣称“preflight GREEN / 发布门禁通过”。
 - 真实 Windows DSH 宿主内的 heap/session 实时读数、pagefile 全盘显示与 orchestrator 拉起 browser/fork 全链 E2E 仍未跑；本版只验证纯逻辑、静态接线、Windows PowerShell 探针和本地全量测试。
 

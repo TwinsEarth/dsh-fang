@@ -11,6 +11,7 @@
 ### 测试与构建
 
 - 全量回归与构建结果见 `docs/AUDIT-v3.9.0.md`；v3.8.14 的 6 项宿主守卫测试继续纳入全量。
+- 发布工具：`tools/release/build.mjs` 改为显式文件清单打包，移除 tarball 目录条目；否则 npm registry 以 HTTP 415 `invalid path: package/` 拒收。
 - v3.8.14 真机证据仍有效：TOFUTURE 页面文件在 D:、`CommitLimitOSMB=44821`、Host session 206 个合计 222.56 MB、最大单文件 60.91 MB，见 `docs/evidence/memory-probe-all-drives-2026-11-26.md`。
 
 ## v3.8.14（2026-11-26）
