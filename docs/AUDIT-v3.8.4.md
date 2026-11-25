@@ -59,5 +59,5 @@
 
 - 不修改 DSH 安装文件；不自动安装/更新插件；部署/重启需用户手动二次确认。
 - 页面文件是系统级前置条件，代码不静默改系统配置；需用户单独确认后启用。
-- 真实 Windows 宿主 pagefile 缺失场景需部署后复测；本版在 VM 完成代码与单测。
+- 真实 Windows 宿主 pagefile 缺失场景已在 TOFUTURE 隔离 profile 复现；代码/单测在 VM 完成，e2e 因本机无页面文件被新门禁按设计拦截最后两项，未获全绿。
 - `openMigrationReport` 仍按 Fang 侧防护处理，不修改 DSH core。
