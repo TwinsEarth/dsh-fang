@@ -70,7 +70,7 @@ import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } 
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady, resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
 
-/** Repository root of this plugin (used as the @twinsearth/fang-dsh-plugin junction source). */
+/** Repository root of this plugin (used as the @local/dsh-fang junction source). */
 const FANG_ROOT = (() => {
   try {
     return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -123,7 +123,7 @@ const DEFAULTS = {
   portPool: { ...DEFAULT_PORT_POOL },
   allocatePorts: true,
   cleanTemplate: true,
-  bundleName: '@twinsearth/fang-dsh-plugin',
+  bundleName: '@local/dsh-fang',
   forkProfileTag: 'web-base',
   jobObject: true,
   jobHeartbeatTimeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
@@ -167,7 +167,7 @@ export const Config = z
       .boolean()
       .default(true)
       .description('true：用内置干净模板（不继承母体脏 profile）；false：沿用 profileTemplate'),
-    bundleName: z.string().default('@twinsearth/fang-dsh-plugin').description('干净模板 profile.bundles 的第三个 bundle'),
+    bundleName: z.string().default('@local/dsh-fang').description('干净模板 profile.bundles 的第三个 bundle'),
     coreMode: z.union([z.const('stock'), z.const('accelerated')]).default('stock').description('new fork uses stock or accelerated DSH core'),
     acceleratedCliPath: z.string().default('').description('accelerated DSH CLI path'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),

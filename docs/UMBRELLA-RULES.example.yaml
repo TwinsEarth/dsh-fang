@@ -1,0 +1,91 @@
+# dsh-Fang v2.8.0 — 动作规则表 YAML 配置示例
+#
+# 用法（插件配置）：
+#   fang-umbrella:
+#     rulesFile: 'C:/Users/you/.dsh/umbrella-rules.yaml'
+#     rulesWatch: true
+#     rulesDebounceMs: 200
+#
+# 语义：内置规则永远存在；本文件是**叠加层**——
+#   * id 命中内置规则 → 覆盖 enabled / light / priority / reason / tags / category，或追加正则
+#   * id 不命中内置规则且带 match → 新增声明式规则（只允许下面列出的 matcher kind）
+#   * 未提及的内置规则保持原样
+# 失败策略：YAML 语法/schema 错误 → 整份拒绝，保留上一次有效规则（启动时 = 纯内置）。
+# 未知 id 默认只警告；settings.failOnUnknownRule: true 时整份拒绝。
+
+version: 1
+
+settings:
+  failOnUnknownRule: false      # 未知 id：false=警告跳过，true=整份拒绝
+  failOnInvalidPattern: false   # 正则编译失败：false=跳过该条，true=整份拒绝
+  rejectUnsafeRegex: true       # 拒绝明显灾难回溯的正则形状
+
+rules:
+  # ── 1. 开关内置规则 ─────────────────────────────────────────
+  - id: credential-access
+    enabled: true
+
+  # 例：临时关掉破坏性命令检测（不建议长期开启）
+  # - id: destructive-command
+  #   enabled: false
+
+  # ── 2. 覆盖内置规则的属性 ───────────────────────────────────
+  - id: write-outside-buffer
+    light: red                    # 默认 yellow
+    priority: 35                  # 默认 100，提前到 credential-access 之后
+    reason: "CI 环境：任何越界写都需人工审批"
+    tags: ["ci-strict"]
+
+  # 例：调整匹配顺序（越小越先匹配；同优先级按内置顺序稳定排序）
+  # - id: read-outside-buffer
+  #   priority: 15
+
+  # ── 3. 给内置规则追加正则（不改代码）───────────────────────
+  - id: credential-access
+    pathPatterns:
+      - re: "\\.dsh[\\\\/]secrets"
+        label: "DSH secrets directory"
+      - re: "\\.npmrc$"
+        label: "npm registry token"
+
+  # ── 4. 新增声明式规则（仅限内置 matcher kind）──────────────
+  - id: project-build-guard
+    category: destructive
+    light: red
+    reason: "禁止删除构建目录"
+    priority: 25
+    match:
+      kind: command-pattern
+      patterns:
+        - re: "\\brm\\s+-rf\\s+(?:dist|build|out)\\b"
+          label: "delete build directory"
+    evidence:
+      kind: pattern-match
+
+  - id: company-allowlist-network
+    category: network
+    light: blue
+    reason: "公司内网域已预批准"
+    priority: 55
+    match:
+      kind: url-host-in
+      hosts: ["*.corp.example.com", "intranet.local"]
+    evidence:
+      kind: static
+      payload:
+        allowlist: company
+
+# ── 可用的声明式 matcher kind ────────────────────────────────
+#   command-pattern : { patterns: [{ re, label? }] }        命令文本命中正则
+#   path-pattern    : { patterns: [...], scope?: target|read|write|all }
+#   path-outside    : { root: $bufferRoot|$productionRoot|literal, literal?, checkAllowPaths? }
+#   url-host-in     : { hosts: ["api.example.com", "*.corp.example"] }
+#   url-host-not-in : { hosts: [...] }
+#   tool-in         : { tools: ["write", "bash"] }
+#   pid-equal       : { pid: $currentPid | 1234 }
+#   always / never  : {}                                     恒真 / 恒假
+#
+# 可用的 evidence kind：pattern-match | list-match | static(payload)
+#
+# 不支持的：任意 JS 谓词、动态计算路径、修改内置规则内部逻辑（parseFailed 等）。
+# 这些必须写在代码里 —— YAML 是配置，不是脚本。

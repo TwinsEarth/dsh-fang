@@ -1,0 +1,30 @@
+# v3.5.4 审计（2026-11-18）
+
+> 用户指令（2026-11-18）：**三方发布 v3.5.4：UI 调整**
+> 1）「母体&元主」与「决策中心&分身」左右对调：母体&元主在左、决策中心&分身在右；
+> 2）「决策中心」与「分身」上下对调：分身在上、决策中心在下。
+
+## 1. 变更
+
+| 项 | v3.5.3 | v3.5.4 |
+|---|---|---|
+| 左列 | 决策中心（上）/ 分身（下） | **母体&元主** |
+| 右列 | 母体&元主 | **分身（上）/ 决策中心（下）** |
+| 垂直分隔条 | 决策/分身（决策在上） | 分身/决策（决策在下；`S.decisionSplit` 仍表示决策占比） |
+| 列分隔条 | 左列 / 母体 | 母体 / 右侧列（`fang.panel.split` 语义不变） |
+
+## 2. 测试
+
+- `test/client-layout-dom.test.mjs` 重写断言：母体为 body 首个 panel；右列 `.fang-col--right` 内分身在上、决策中心在下；
+- 双分隔条：列（vertical）+ 行（horizontal），双击 50:50 / ArrowDown 放大下方决策中心 / localStorage 持久化；
+- 全量 tests / e2e 见 preflight `dist/preflight.json`。
+
+## 3. 诚实边界
+
+- 布局为 jsdom 结构级验证 + 现有 headless 冒烟；未做真实桌面窗口截图回归；
+- 母体正式 profile 的 LSP 仍未安装；fork-local（路线 B）默认关闭。
+
+## 4. 发布（2026-11-18）
+
+- 三方发布完成：annotated tag `v3.5.4`（tag object `c20264de…` → commit `4b2b3c8cd8`）、GitHub Release（3 资产，tgz sha256 `4ae5b1d9…`）、npm `@twinsearth/fang-dsh-plugin@3.5.4`（`latest=3.5.4`，shasum `f2576023…`）；
+- 发布 PR #129 经 CI 8/8 绿后 squash 合并；preflight --e2e 全绿（1282 tests / e2e 123/123）。

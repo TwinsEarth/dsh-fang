@@ -32,7 +32,7 @@
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 window.__ModuleLoader__.load({
-  id: '@twinsearth/fang-dsh-plugin',
+  id: '@local/dsh-fang',
   factory(require) {
     // React 只用于宿主插槽返回值（slots 契约），UI 不依赖它。见文件头说明。
     const React = require('react')
@@ -2193,11 +2193,6 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       async function confirmSafeModeReset() {
         const modal = S.modal
         if (!modal || modal.kind !== 'safeMode' || modal.busy) return
-        if (modal.pagefileMissing === true) {
-          modal.error = '页面文件缺失/被禁用；请先恢复页面文件并重启 Windows。'
-          render(true)
-          return
-        }
         if (modal.commitLow === true) {
           modal.error = 'Commit 余量低于宿主紧急阈值；请先释放内存再重新检测。'
           render(true)
@@ -5867,7 +5862,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         .concat(modal.legacy ? ['migration'] : [])
         .concat(modal.isolation ? ['isolation'] : [])
       const canConfirm = required.every((key) => checks[key] === true) && !modal.busy
-        && modal.pagefileMissing !== true && modal.commitLow !== true
+        && modal.commitLow !== true
         && modal.memoryUnknown !== true && !modal.resetBlocked
       const checkRow = (key, label, hint, disabled = false) => h('label', { class: 'safe-check' },
         h('input', {
@@ -5889,10 +5884,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
                 h('div', { class: 'notice-title' }, '当前原因'),
                 h('div', { class: 'notice-text' }, safeModeReasonText(modal.reason)))),
             modal.pagefileMissing
-              ? h('div', { class: 'notice notice--bad', role: 'alert' },
+              ? h('div', { class: 'notice notice--warn', role: 'status' },
                 h('div', { class: 'notice-main' },
-                  h('div', { class: 'notice-title' }, '页面文件缺失/被禁用'),
-                  h('div', { class: 'notice-text' }, '此时不能解除 Safe Mode：请先在系统属性中启用页面文件并重启 Windows，再回来重新检测。')))
+                  h('div', { class: 'notice-title' }, '页面文件缺失（仅提示）'),
+                  h('div', { class: 'notice-text' }, '建议在系统属性中设置页面文件；v3.8.13 起不再因此禁止解除 Safe Mode。实际能否启动仍看可用内存与 Commit 余量。')))
               : null,
             modal.commitLow
               ? h('div', { class: 'notice notice--bad', role: 'alert' },
@@ -5913,11 +5908,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
                   h('div', { class: 'notice-text' }, String(modal.resetBlocked.detail || modal.resetBlocked.error || '请先修复系统条件。'))))
               : null,
             h('div', { class: 'safe-checklist' },
-              checkRow('pagefile', modal.memoryUnknown ? '无法读取页面文件状态，不能解除' : modal.pagefileMissing ? '页面文件缺失/被禁用，不能解除' : '页面文件 / Commit 余量已恢复', modal.memoryUnknown
+              checkRow('pagefile', modal.memoryUnknown ? '无法读取内存/页面文件状态，不能解除' : modal.pagefileMissing ? '已了解页面文件缺失，建议后续设置' : '页面文件 / Commit 余量已恢复', modal.memoryUnknown
                 ? '内存探测不可用；仅勾选不会通过校验，请先重新检测。'
                 : modal.pagefileMissing
-                  ? '当前系统没有可用页面文件；仅勾选不会通过校验，必须先启用页面文件并重启。'
-                  : '任务管理器性能页的“提交”可用量应高于启动阈值；若 pagefile 被禁用，先在系统属性里恢复“系统管理的大小”。', modal.pagefileMissing === true || modal.memoryUnknown === true),
+                  ? '页面文件缺失只作提示，不再阻止解除；建议之后在系统属性里恢复“系统管理的大小”。'
+                  : '任务管理器性能页的“提交”可用量应高于启动阈值；若 pagefile 被禁用，建议在系统属性里恢复“系统管理的大小”。', modal.memoryUnknown === true),
               modal.legacy
                 ? checkRow('migration', '旧数据已迁移到规范数据根', '完全退出宿主后运行 node tools/migrate-fang-home.mjs --apply；工具只复制不删除。')
                 : null,
@@ -5931,7 +5926,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             button('取消', { size: 'sm', variant: 'ghost', fk: 'safe-mode-cancel', onClick: () => app.closeModal() }),
             button(modal.busy ? '解除中…' : '确认已检查，解除 Safe Mode', {
               size: 'sm', variant: 'danger', fk: 'safe-mode-confirm', disabled: !canConfirm,
-              title: modal.pagefileMissing ? '页面文件缺失/被禁用，不能解除' : modal.commitLow ? 'Commit 余量低于宿主紧急阈值，不能解除' : canConfirm ? '仅解除禁止自动恢复的闩锁' : '请先勾选全部恢复前检查项',
+              title: modal.commitLow ? 'Commit 余量低于宿主紧急阈值，不能解除' : modal.memoryUnknown ? '内存状态未知，请先重新检测' : canConfirm ? '仅解除禁止自动恢复的闩锁' : '请先勾选全部恢复前检查项',
               onClick: () => void app.confirmSafeModeReset(),
             }))))
     }

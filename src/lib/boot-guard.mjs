@@ -14,7 +14,7 @@ import { createRequire } from 'node:module'
 
 import { parseYamlSubset } from './rule-registry.mjs'
 
-export const FANG_PACKAGE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@twinsearth/fang-dsh-plugin'])
+export const FANG_PACKAGE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@local/dsh-fang'])
 export const SMOKE_TIMEOUT_MS = 8000
 
 /** 找到 profile 里已安装的 fang 包目录（发布名优先，其次本地 link 名）。 */

@@ -41,6 +41,7 @@ import { readLatestMigrationReport } from '../lib/migration-report.mjs'
 import { DEFAULT_LEGACY_WORKSPACE_ROOTS, mapWorkspacePathForFork, migrateForkWorkspace, prepareImportedSession } from '../lib/workspace-mapping.mjs'
 import { appendJsonlRotated } from '../lib/log-rotation.mjs'
 import { closeManagedBrowser, findBrowserPath, flushManagedBrowser, freePort, isPidAlive, launchManagedBrowser, lowerProcessPriority, sampleManagedBrowser, setManagedBrowserLifecycle } from '../lib/browser-guard.mjs'
+import { FORK_COMMIT_SHARE_DEFAULT, HOST_COMMIT_RESERVE_MB_DEFAULT, evaluateForkCommitBudget, resolveForkCommitBudget } from '../lib/commit-budget.mjs'
 import { resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
@@ -150,9 +151,9 @@ export function atomicReplaceDir(sourceDir, targetDir) {
 }
 
 
-const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@twinsearth/fang-dsh-plugin'])
-// build.mjs rewrites @twinsearth/fang-dsh-plugin to the published package name.
-const CURRENT_FANG_BUNDLE = '@twinsearth/fang-dsh-plugin'
+const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@local/dsh-fang'])
+// build.mjs rewrites @local/dsh-fang to the published package name.
+const CURRENT_FANG_BUNDLE = '@local/dsh-fang'
 
 function profileBundles(profileDir) {
   try {
@@ -181,14 +182,14 @@ export function profileUsesCurrentFangBundle(profileDir) {
     // Only a positively-declared legacy bundle is stale. Templates that don't
     // declare fang at all (unit-test fixtures, custom hosts) are left to the
     // existing forkBundlePath probe.
-    return !(declared.has('@twinsearth/dsh-fang') || declared.has('@twinsearth/fang-dsh-plugin-legacy'))
+    return !(declared.has('@twinsearth/dsh-fang') || declared.has('@local/dsh-fang-legacy'))
   }
   // v3.3.8: same package name but an older exact version is stale too. This is
   // the normal upgrade case (3.3.7 essence after installing 3.3.8).
   const dependencies = pkg?.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
   const declaredVersion = String(
     dependencies['@twinsearth/fang-dsh-plugin'] ||
-    dependencies['@twinsearth/fang-dsh-plugin'] ||
+    dependencies['@local/dsh-fang'] ||
     dependencies['@twinsearth/dsh-fang'] ||
     '',
   ).replace(/^[~^]/, '')
@@ -223,9 +224,8 @@ export function isLiveForkForApprovals(_task, status) {
  * fresh `readSystemMemory({ force: true })` result; the reset path never trusts
  * a UI checkbox or a cached sample.
  *
- * Hard requirements:
- * - pagefile exists and Win32_PageFileUsage AllocatedBaseSize > 0;
- * - CommitFree >= HostCritical threshold (not merely the fork-start threshold).
+ * v3.8.13: a missing pagefile is advisory, not a hard prerequisite. The real
+ * gate is usable free memory: CommitFree must keep the host-critical reserve.
  */
 export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}) {
   if (!memory || memory.ok !== true) {
@@ -237,16 +237,7 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}
   const pageFileMB = Number(memory.pageFileMB) || 0
   const commitFreeMB = Number(memory.commitFreeMB) || 0
   const minFreeMB = Math.max(0, Number(hostCriticalFreeMB) || 0)
-  if (isPagefileMissing(memory)) {
-    return {
-      ok: false,
-      error: 'pagefile-missing',
-      pageFileMB,
-      commitFreeMB,
-      minFreeMB,
-      detail: '页面文件缺失/被禁用（Win32_PageFileUsage 无分配，或 PagingFiles={}，或 CommitLimit≈RAM）；请先在 Windows 系统属性中启用页面文件并重启，再解除 Safe Mode。',
-    }
-  }
+  const pagefileMissing = isPagefileMissing(memory)
   if (commitFreeMB < minFreeMB) {
     return {
       ok: false,
@@ -254,34 +245,52 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}
       pageFileMB,
       commitFreeMB,
       minFreeMB,
+      pagefileMissing,
       detail: `Commit 余量 ${commitFreeMB} MB 低于宿主紧急阈值 ${minFreeMB} MB；请先释放内存。`,
     }
   }
-  return { ok: true, pageFileMB, commitFreeMB, minFreeMB }
+  return {
+    ok: true,
+    pageFileMB,
+    commitFreeMB,
+    minFreeMB,
+    pagefileMissing,
+    advisory: pagefileMissing ? 'pagefile-missing' : null,
+    detail: pagefileMissing ? '页面文件缺失只作为提示：建议设置页面文件，但当前可用内存仍可解除 Safe Mode。' : null,
+  }
 }
 
-/** Boot-time pagefile precheck. Default stays strict; boot passes allowSingleFork. */
+/** Boot-time pagefile precheck is now advisory only; never force Safe Mode. */
 export function pagefileRequiresSafeMode(memory, { allowSingleFork = false } = {}) {
-  if (!isPagefileMissing(memory)) return false
-  if (allowSingleFork === true) return false
-  return true
+  return false
 }
 
 /**
- * Decide whether a missing pagefile means "stop everything" or "allow one fork".
- * Single-fork mode is only safe while Commit still has the critical reserve; below
- * that a fork can exhaust Windows commit before the watchdog gets a sample.
+ * Decide how a missing pagefile affects boot. v3.8.13 no longer treats it as a
+ * Safe Mode condition. It only reports whether free memory is below the advisory
+ * 3000 MB floor; the actual memory guard still uses `memoryMinFreeMB`.
  */
-export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = 4096 } = {}) {
+export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = 4096, minFreeMB = 3000 } = {}) {
   const missing = isPagefileMissing(memory)
-  if (!missing) return { safeMode: false, singleForkOnly: false, reason: null }
+  if (!missing) return { safeMode: false, singleForkOnly: false, reason: null, advisory: null }
   const commitFree = Number(memory?.commitFreeMB)
-  const commitOk = memory?.ok === true && Number.isFinite(commitFree) && commitFree >= Number(hostCriticalFreeMB)
-  if (commitOk) {
-    return { safeMode: false, singleForkOnly: true, reason: 'pagefile-single-fork', commitFreeMB: commitFree }
+  const physicalFree = Number(memory?.physicalFreeMB)
+  const freeMB = Number.isFinite(physicalFree) && physicalFree > 0 ? physicalFree : (Number.isFinite(commitFree) ? commitFree : null)
+  const lowFree = Number.isFinite(freeMB) && freeMB < Number(minFreeMB)
+  return {
+    safeMode: false,
+    singleForkOnly: true,
+    reason: lowFree ? 'pagefile-missing-low-free' : 'pagefile-missing-advisory',
+    advisory: 'pagefile-missing',
+    lowFree,
+    freeMB,
+    commitFreeMB: Number.isFinite(commitFree) ? commitFree : null,
+    minFreeMB: Number(minFreeMB),
+    detail: '页面文件缺失：建议在 Windows 系统属性中设置页面文件；不强制阻止分身，仅按可用内存判断。',
   }
-  return { safeMode: true, singleForkOnly: true, reason: 'pagefile-missing-low-commit', commitFreeMB: Number.isFinite(commitFree) ? commitFree : null }
 }
+
+export const HARD_MAX_FORKS = 1
 
 export const Config = z.object({
   role: z.union([z.const('mother'), z.const('fork')]).default('mother')
@@ -290,14 +299,14 @@ export const Config = z.object({
     .description('官方源 manifest 基础 URL（https；留空 = 无官方源，升级显式 official-source-unavailable）'),
   officialSourceToken: z.string().default('')
     .description('官方源 Bearer token（可选；不会写进日志/状态）'),
-  maxForks: z.number().min(1).max(64).default(1)
-    .description('同时存活的任务/分身上限；默认 1'),
+  maxForks: z.number().min(1).max(HARD_MAX_FORKS).default(HARD_MAX_FORKS)
+    .description('同时存活的任务/分身上限；v3.8.13 硬固定为 1（second create 返回 quota-exceeded）'),
   allowMultiFork: z.boolean().default(false)
-    .description('显式二次确认后才允许 maxForks>1；false 时强制 1'),
+    .description('v3.8.13 起失效：仅保留兼容字段；maxForks>1 一律拒绝，不再提供二次确认旁路'),
   memoryGuard: z.boolean().default(true)
     .description('创建/打开/还原分身前检查 Windows CommitFree 余量'),
-  memoryMinFreeMB: z.number().min(0).max(1048576).default(6144)
-    .description('CommitFree 低于该值（MB）时拒绝启动新分身'),
+  memoryMinFreeMB: z.number().min(0).max(1048576).default(3000)
+    .description('创建/打开/还原分身前检查 Windows CommitFree 余量；v3.8.13 默认 3000 MB，不再因页面文件缺失而拒绝'),
   hostWarnFreeMB: z.number().min(0).max(1048576).default(8192)
     .description('宿主内存警告阈值（MB，仅提示）'),
   hostCriticalFreeMB: z.number().min(0).max(1048576).default(4096)
@@ -372,8 +381,10 @@ export const Config = z.object({
     .description('独立看门狗判定宿主卡死的 heartbeat 静默阈值（毫秒）；默认 60s'),
   forkFlushPath: z.string().default('')
     .description('关闭浏览器前调用的 fork 会话落盘路径（显式覆盖）；留空=只用 fork health 广告的 flush 或实际注册的 /<prefix>/adapter/flush-session，不猜 /api/session/* 端点'),
-  forkCommitShareLimit: z.number().min(0.05).max(1).default(0.4)
+  forkCommitShareLimit: z.number().min(0.05).max(1).default(FORK_COMMIT_SHARE_DEFAULT)
     .description('fork+browser 聚合 Commit 占系统上限的比例；超过即紧急处置'),
+  forkCommitHostReserveMB: z.number().min(0).max(1048576).default(HOST_COMMIT_RESERVE_MB_DEFAULT)
+    .description('v3.8.13：无论 fork 占比多少，都必须为宿主保留的 CommitLimit 余量（MB）'),
   forkCommitWarnShare: z.number().min(0.05).max(1).default(0.3)
     .description('聚合 Commit 警告阈值'),
   forkCommitSevereShare: z.number().min(0.05).max(1).default(0.35)
@@ -618,11 +629,19 @@ export function apply(ctx, config) {
     } catch { /* guard must never prevent fork boot; failures are audited by caller */ }
   }
   const cfg = { ...Config({}), ...(config ?? {}) }
-  // multi-fork is an explicit opt-in; maxForks alone must never bypass the
-  // single-fork red line (host memory is the shared failure domain).
-  const effectiveMaxForks = () => (cfg.allowMultiFork === true
-    ? Math.max(1, Math.floor(Number(cfg.maxForks) || 1))
-    : 1)
+  // v3.8.13: maxForks is a hard single-fork red line. `allowMultiFork` is kept
+  // as a compatibility field but can no longer open a second fork. Legacy tests
+  // that exercise multi-task bookkeeping may opt in through an env-gated hook;
+  // production processes never see NODE_TEST_CONTEXT.
+  const testOnlyMultiFork = Boolean(process.env.NODE_TEST_CONTEXT) && config?.__testOnlyAllowMultiFork === true
+  if (!testOnlyMultiFork && (Number(cfg.maxForks) > HARD_MAX_FORKS || cfg.allowMultiFork === true)) {
+    cfg.maxForks = HARD_MAX_FORKS
+    cfg.allowMultiFork = false
+  }
+  const effectiveMaxForks = () => {
+    if (!testOnlyMultiFork) return HARD_MAX_FORKS
+    return Math.max(1, Math.min(64, Math.floor(Number(cfg.maxForks) || 1)))
+  }
   const forkHealthPath = String(cfg.forkHealthPath || '').trim() || forkHealthPathForPrefix(cfg.routes?.prefix)
   const forkPrefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
   const forkFlushDefaultPath = `${forkPrefix}/adapter/flush-session`
@@ -1193,27 +1212,22 @@ export function apply(ctx, config) {
         return { ok: false, error: 'memory-probe-threw' }
       }
       notePagefile(memory, 'boot')
-      const bootPolicy = decidePagefileBootPolicy(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
-      if (bootPolicy.safeMode === true) {
-        const nextReason = safeMode && safeModeReason ? `${safeModeReason}+pagefile-missing-low-commit` : 'pagefile-missing-low-commit'
-        safeMode = true
-        safeModeReason = nextReason
-        hostAdmissionClosed = true
-        persistSafeMode()
-        audit('safe-mode-pagefile-missing', {
+      const bootPolicy = decidePagefileBootPolicy(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB, minFreeMB: cfg.memoryMinFreeMB })
+      if (bootPolicy.advisory === 'pagefile-missing') {
+        audit('pagefile-missing-advisory', {
           action: 'boot',
           pageFileMB: Number(memory.pageFileMB) || 0,
           commitLimitMB: memory.commitLimitMB,
           commitFreeMB: memory.commitFreeMB,
+          physicalFreeMB: memory.physicalFreeMB,
           hasPageFile: memory.hasPageFile,
           pagingFilesEmpty: memory.pagingFilesEmpty === true,
           commitLimitNearRam: memory.commitLimitNearRam === true,
-          commitFreeMB: bootPolicy.commitFreeMB,
+          lowFree: bootPolicy.lowFree === true,
         })
-        return { ok: true, safeMode: true, singleForkOnly: true, reason: nextReason, pageFileMB: Number(memory.pageFileMB) || 0 }
       }
       if (bootPolicy.singleForkOnly === true) {
-        // Missing pagefile is not "stop everything": keep exactly one active fork.
+        // Missing pagefile is advisory: never force Safe Mode for it alone.
         // Clear only a pagefile-only latch; other Safe Mode reasons still hold.
         if (safeMode && safeModeReason) {
           const remaining = safeModeReason.split('+').filter((part) => part && !part.startsWith('pagefile-'))
@@ -1221,8 +1235,8 @@ export function apply(ctx, config) {
           safeModeReason = remaining.join('+')
           persistSafeMode()
         }
-        audit('pagefile-single-fork-boot', { action: 'boot', pageFileMB: Number(memory.pageFileMB) || 0, commitFreeMB: bootPolicy.commitFreeMB })
-        return { ok: true, safeMode: false, singleForkOnly: true, reason: bootPolicy.reason, pageFileMB: Number(memory.pageFileMB) || 0 }
+        audit('pagefile-single-fork-boot', { action: 'boot', pageFileMB: Number(memory.pageFileMB) || 0, commitFreeMB: bootPolicy.commitFreeMB, lowFree: bootPolicy.lowFree === true })
+        return { ok: true, safeMode: false, singleForkOnly: true, reason: bootPolicy.reason, pageFileMB: Number(memory.pageFileMB) || 0, advisory: bootPolicy.advisory }
       }
       return { ok: true, safeMode: false, pageFileMB: Number(memory.pageFileMB) || 0 }
     })()
@@ -2231,6 +2245,67 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * v3.8.13 P0: aggregate commit for fork + managed browser PID trees.
+   * `rows` is the shared process table snapshot used by the 5s host gate and
+   * the pre-spawn gate, so accounting cannot diverge between them.
+   */
+  const currentForkCommitMB = (rows) => {
+    if (!Array.isArray(rows)) return { forkCommitMB: 0, browserCommitMB: 0, totalMB: 0 }
+    let forkCommitMB = 0
+    let browserCommitMB = 0
+    for (const task of tasks.values()) {
+      if (task.status === TASK_STATUS.ARCHIVED || task.status === TASK_STATUS.FAILED) continue
+      if (Number(task.pid) > 0) {
+        forkCommitMB += sumProcessTree(selectProcessTree(rows, Number(forker()?.status?.(task.taskId)?.pid ?? task.pid))).commitMB
+      }
+      if (task.browser?.pid) browserCommitMB += sumProcessTree(selectProcessTree(rows, Number(task.browser.pid))).commitMB
+    }
+    for (const runtime of runtimeBrowsers.values()) {
+      if (runtime.browser?.pid) browserCommitMB += sumProcessTree(selectProcessTree(rows, Number(runtime.browser.pid))).commitMB
+    }
+    return { forkCommitMB, browserCommitMB, totalMB: forkCommitMB + browserCommitMB }
+  }
+
+  let commitBudgetBusy = false
+  /** Evaluate the 40% share + 4 GB host reserve ceiling. */
+  const enforceForkCommitBudget = async ({ source = 'commit-budget', table = null, memory = null, failClosed = false } = {}) => {
+    if (process.platform !== 'win32' || cfg.memoryWatchdog !== true) return { ok: true, skipped: 'disabled' }
+    if (commitBudgetBusy) return { ok: true, skipped: 'busy' }
+    commitBudgetBusy = true
+    try {
+      const hasActive = [...tasks.values(), ...runtimeBrowsers.values()].some((task) => task.browser?.pid
+        || (Number(task.pid) > 0 && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)))
+      if (!hasActive && source !== 'create-fork' && source !== 'restore-fork') return { ok: true, skipped: 'no-active-fork' }
+      const mem = memory ?? rememberMemory(await readSystemMemory())
+      const limitMB = Number(mem?.commitLimitMB) || 0
+      if (mem?.ok !== true || limitMB <= 0) {
+        audit('fork-commit-budget-unavailable', { source, failClosed, reason: 'commit-limit-unavailable' })
+        return { ok: !failClosed, error: 'commit-limit-unavailable', source }
+      }
+      const tableNow = table ?? await readProcessTable({ detailed: false, cacheMs: 5000 })
+      if (tableNow.ok !== true) {
+        audit('fork-commit-budget-unavailable', { source, failClosed, reason: 'process-table-unavailable', detail: tableNow.error ?? null })
+        return { ok: !failClosed, error: 'process-table-unavailable', source }
+      }
+      const totals = currentForkCommitMB(tableNow.rows)
+      const decision = evaluateForkCommitBudget({
+        commitLimitMB: limitMB,
+        forkTotalMB: totals.totalMB,
+        share: cfg.forkCommitShareLimit,
+        reserveMB: cfg.forkCommitHostReserveMB,
+      })
+      if (!decision.ok || decision.over) {
+        audit('fork-commit-share-exceeded', { source, ...decision, forkCommitMB: Math.round(totals.forkCommitMB), browserCommitMB: Math.round(totals.browserCommitMB) })
+        await hostEmergency('fork-commit-share', { safe: true, allTasks: true })
+        return { ok: false, error: 'fork-commit-share-exceeded', source, ...decision }
+      }
+      return { ok: true, source, ...decision, forkCommitMB: Math.round(totals.forkCommitMB), browserCommitMB: Math.round(totals.browserCommitMB) }
+    } finally {
+      commitBudgetBusy = false
+    }
+  }
+
   const memoryWatchdogTick = async () => {
     if (cfg.memoryWatchdog !== true || process.platform !== 'win32') return
     const running = [...tasks.values()].filter((task) => task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)
@@ -2256,21 +2331,19 @@ export function apply(ctx, config) {
     const memory = rememberMemory(await readSystemMemory())
     notePagefile(memory, 'memory-watchdog')
     if (memory.ok && Number(memory.commitLimitMB) > 0) {
-      let forkCommitMB = 0
-      let browserCommitMB = 0
-      for (const task of tasks.values()) {
-        if (task.status === TASK_STATUS.ARCHIVED || task.status === TASK_STATUS.FAILED) continue
-        if (Number(task.pid) > 0) {
-          forkCommitMB += sumProcessTree(selectProcessTree(table.rows, Number(forker()?.status?.(task.taskId)?.pid ?? task.pid))).commitMB
-        }
-        if (task.browser?.pid) browserCommitMB += sumProcessTree(selectProcessTree(table.rows, Number(task.browser.pid))).commitMB
-      }
-      for (const runtime of runtimeBrowsers.values()) {
-        if (runtime.browser?.pid) browserCommitMB += sumProcessTree(selectProcessTree(table.rows, Number(runtime.browser.pid))).commitMB
-      }
-      const total = forkCommitMB + browserCommitMB
+      const totals = currentForkCommitMB(table.rows)
+      const forkCommitMB = totals.forkCommitMB
+      const browserCommitMB = totals.browserCommitMB
+      const total = totals.totalMB
       const limitMB = Number(memory.commitLimitMB) || 0
       const share = limitMB > 0 ? total / limitMB : 0
+      const budget = evaluateForkCommitBudget({
+        commitLimitMB: limitMB,
+        forkTotalMB: total,
+        share: cfg.forkCommitShareLimit,
+        reserveMB: cfg.forkCommitHostReserveMB,
+      })
+      const effectiveShare = limitMB > 0 ? budget.limitMB / limitMB : 0
       const self = process.memoryUsage()
       const selfMetrics = {
         at: nowMs(),
@@ -2283,14 +2356,24 @@ export function apply(ctx, config) {
         totalCommitMB: Math.round(total),
         processCount: table.rows.length,
         forkShare: Math.round(share * 1000) / 1000,
+        forkCommitLimitMB: budget.limitMB,
+        forkCommitHostReserveMB: budget.reserveMB,
+        forkCommitReserveLimitMB: budget.reserveLimitMB,
+        forkCommitShareLimitMB: budget.shareLimitMB,
       }
       lastHostMetrics = selfMetrics
       lastProcessCount = table.rows.length
-      const emergency = Number(cfg.forkCommitShareLimit)
-      const severe = Number(cfg.forkCommitSevereShare)
-      const warn = Number(cfg.forkCommitWarnShare)
-      if (share > emergency) {
-        audit('fork-commit-share-exceeded', { ...selfMetrics, limitMB: Math.round(limitMB * emergency), shareLimit: emergency })
+      const emergency = effectiveShare
+      const severe = Math.min(Number(cfg.forkCommitSevereShare), effectiveShare)
+      const warn = Math.min(Number(cfg.forkCommitWarnShare), effectiveShare)
+      if (!budget.ok || share > emergency) {
+        audit('fork-commit-share-exceeded', {
+          ...selfMetrics,
+          limitMB: budget.limitMB,
+          shareLimit: Math.round(effectiveShare * 1000) / 1000,
+          reserveMB: budget.reserveMB,
+          reason: budget.reason,
+        })
         await hostEmergency('fork-commit-share', { safe: true, allTasks: true })
         return
       }
@@ -2328,6 +2411,14 @@ export function apply(ctx, config) {
       selfPrivateMB: Number(memory.selfPrivateMB) || Math.round((self.heapUsed + self.external) / 1048576),
       processCount: lastProcessCount || lastHostMetrics?.processCount || null,
     }
+    // v3.8.13: the 5 s host tick also enforces the aggregate fork budget, so a
+    // runaway child cannot wait for the slower memory watchdog sample.
+    const activeForBudget = [...tasks.values(), ...runtimeBrowsers.values()].some((task) => task.browser?.pid
+      || (Number(task.pid) > 0 && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)))
+    if (activeForBudget) {
+      const commitGate = await enforceForkCommitBudget({ source: 'host-watchdog-5s', memory })
+      if (commitGate.ok !== true) return
+    }
     if (free < Number(cfg.hostWarnFreeMB) && nowMs() - lastHostWarnAt > 60_000) {
       lastHostWarnAt = nowMs()
       audit('host-memory-warning', {
@@ -2361,7 +2452,15 @@ export function apply(ctx, config) {
   const captureTaskProcessIdentity = async (task) => {
     task.pidIdentity = null
     task.pidIdentityError = null
-    task.pidStartedAt = null
+    // v3.8.13: keep the spawn-time provisional timestamp if CIM is late or
+    // unavailable. Orphan cleanup can then reject recycled PIDs immediately
+    // instead of waiting for a second identity sample.
+    const provisionalStartedAt = Number(task?.pidStartedAt)
+    const provisionalSource = String(task?.pidStartedAtSource ?? '')
+    if (!Number.isFinite(provisionalStartedAt) || provisionalStartedAt <= 0) {
+      task.pidStartedAt = null
+      task.pidStartedAtSource = null
+    }
     const pid = Number(task?.pid)
     if (!Number.isInteger(pid) || pid <= 0) {
       task.pidIdentityError = 'bad-pid'
@@ -2374,29 +2473,38 @@ export function apply(ctx, config) {
     const identity = await readProcessIdentity(pid).catch((error) => ({ ok: false, error: String(error?.message ?? error), row: null }))
     if (!identity.ok || !identity.row || Number(identity.row.pid) !== pid) {
       task.pidIdentityError = identity?.error ?? (identity?.row ? 'pid-mismatch' : 'not-found')
-      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError })
+      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError, pidStartedAtSource: task.pidStartedAtSource ?? null })
       return { ok: false, error: task.pidIdentityError }
     }
     const tokenCheck = matchesProcessIdentity(identity.row, { pid, taskId: task.taskId, profile: task.profile, port: task.port })
     if (!tokenCheck.ok) {
       task.pidIdentityError = `identity-token-mismatch:${tokenCheck.reason}`
-      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError })
+      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError, pidStartedAtSource: task.pidStartedAtSource ?? null })
       return { ok: false, error: task.pidIdentityError }
     }
+    const createdAt = Number(identity.row.createdAt)
     task.pidIdentity = {
       pid,
-      startedAt: identity.row.createdAt ?? null,
+      startedAt: Number.isFinite(createdAt) ? createdAt : (Number.isFinite(provisionalStartedAt) ? provisionalStartedAt : null),
       commandLineHash: hashCommandLine(identity.row.commandLine),
       profile: task.profile,
       port: task.port,
       capturedAt: nowMs(),
-      source: 'cim',
+      source: Number.isFinite(createdAt) ? 'cim' : 'spawn-provisional',
     }
-    task.pidStartedAt = identity.row.createdAt ?? null
-    if (!Number.isFinite(task.pidStartedAt)) {
+    if (Number.isFinite(createdAt)) {
+      task.pidStartedAt = createdAt
+      task.pidStartedAtSource = 'cim'
+    } else {
+      task.pidStartedAt = Number.isFinite(provisionalStartedAt) ? provisionalStartedAt : null
+      task.pidStartedAtSource = task.pidStartedAt ? 'spawn-provisional' : null
       task.pidIdentityError = 'creation-time-missing'
-      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError })
+      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError, pidStartedAtSource: task.pidStartedAtSource })
       return { ok: false, error: task.pidIdentityError }
+    }
+    if (provisionalSource && task.pidStartedAtSource === 'cim') {
+      task.pidIdentity.provisionalStartedAt = Number.isFinite(provisionalStartedAt) ? provisionalStartedAt : null
+      task.pidIdentity.provisionalSource = provisionalSource
     }
     return { ok: true }
   }
@@ -2527,7 +2635,7 @@ export function apply(ctx, config) {
   // The booted profile's own directory is authoritative (launcher sets DSH_PROFILE_DIR);
   // resolving "$DSH_HOME/profiles/<tag>" from argv can point at a template that never existed.
   // 分身模板必须来自一个**真的装了本 bundle** 的 profile；否则分身的 node_modules junction
-  // 指到一个没有 @twinsearth/fang-dsh-plugin 的 profile，fork 里所有 /fang 路由都会 404（实测事故）。
+  // 指到一个没有 @local/dsh-fang 的 profile，fork 里所有 /fang 路由都会 404（实测事故）。
   const templateDir = () => {
     const candidates = [cfg.profileTemplate, process.env.DSH_PROFILE_DIR, resolveProfileDir(motherProfile), resolveProfileDir(layout.profileTag)]
     const usable = candidates.filter((dir) => typeof dir === "string" && dir.trim()
@@ -3255,6 +3363,10 @@ export function apply(ctx, config) {
       if (running >= maxForks) {
         return { ok: false, error: 'quota-exceeded', detail: `已达上限 ${maxForks}，请先归档旧任务` }
       }
+      const commitGate = await enforceForkCommitBudget({ source: 'create-fork', failClosed: true })
+      if (commitGate.ok !== true) {
+        return { ok: false, error: commitGate.error || 'fork-commit-share-exceeded', detail: `fork 总 Commit 超过宿主余量红线（保留 ${cfg.forkCommitHostReserveMB} MB）` }
+      }
       const f = forker()
       if (!f || typeof f.spawn !== 'function') {
         return { ok: false, error: 'forker-unavailable', detail: 'fang-forker 未加载' }
@@ -3343,7 +3455,7 @@ export function apply(ctx, config) {
           // 加速档 + 原身派生：同步原身插件面（第三方包复制 + @deepseek-ai/* 别名桩包）。
           ...(coreMode === 'accelerated' && sourceEssence ? { sourceProfileDir: profileTemplate } : {}),
           // node_modules：优先元主自己的模块树；默认元宝/新建原身可能尚未物化 node_modules，
-          // 此时回退母体模块树，保证分身仍能解析 @twinsearth/fang-dsh-plugin（否则是僵尸分身）。
+          // 此时回退母体模块树，保证分身仍能解析 @local/dsh-fang（否则是僵尸分身）。
           ...(sourceEssence ? {
             cleanTemplate: false,
             nodeModulesSource: (() => {
@@ -3369,7 +3481,7 @@ export function apply(ctx, config) {
 
         // 防御：分身的 profile 必须能解析本 bundle；否则派生出来的是一个"没有 /fang 路由"的
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
-        // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @twinsearth/fang-dsh-plugin 继续兼容。
+        // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @local/dsh-fang 继续兼容。
         const forkProfileDir = path.join(homeDir, 'profiles', profile)
         if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-fork-profile')) } catch { /* debug best effort */ } }
         const forkBundle = forkBundlePath(forkProfileDir)
@@ -3536,6 +3648,8 @@ export function apply(ctx, config) {
         }
         task.status = TASK_STATUS.RUNNING
         task.pid = started.pid ?? null
+        task.pidStartedAt = Number(started.pid) > 0 ? nowMs() : null
+        task.pidStartedAtSource = Number(started.pid) > 0 ? 'spawn-provisional' : null
         task.port = started.port ?? null
         task.url = started.url ?? null
         task.token = started.token ?? extractTokenSafe(task.url)
@@ -4419,6 +4533,8 @@ export function apply(ctx, config) {
       task.archivedAt = null
       task.archiveRemote = null
       task.pid = started.pid ?? null
+      task.pidStartedAt = Number(started.pid) > 0 ? nowMs() : null
+      task.pidStartedAtSource = Number(started.pid) > 0 ? 'spawn-provisional' : null
       task.port = started.port ?? null
       task.url = started.url ?? null
       task.token = started.token ?? extractTokenSafe(task.url)
@@ -4696,12 +4812,15 @@ export function apply(ctx, config) {
         }
         task.status = TASK_STATUS.RUNNING
         task.pid = started.pid ?? null
+        task.pidStartedAt = Number(started.pid) > 0 ? nowMs() : null
+        task.pidStartedAtSource = Number(started.pid) > 0 ? 'spawn-provisional' : null
         task.port = started.port ?? null
         task.url = started.url ?? null
         task.token = started.token ?? extractTokenSafe(task.url)
         task.adapter = { ok: false, error: 'handshaking' }
         scheduleTaskProcessIdentity(task)
         persist()
+        writeWatchdog()
         audit(AUDIT.FORK_STARTED, { taskId: id, pid: task.pid, port: task.port, profile: task.profile, reason: 'autostart' })
         bus.emit('fang/fork-started', { taskId: id, forkId: id, pid: task.pid, port: task.port })
         report.started.push({ taskId: id, pid: task.pid, port: task.port })
@@ -5633,7 +5752,7 @@ export function apply(ctx, config) {
       const forkBundlesBefore = Array.isArray(forkPkg?.dsh?.profile?.bundles) ? forkPkg.dsh.profile.bundles : []
       const forkFangBundle = FORK_BUNDLE_NAMES.find((candidate) => exists(path.join(String(profileDir), 'node_modules', ...candidate.split('/'))))
         || forkBundlesBefore.find((candidate) => /(^|\/)dsh-fang$/.test(String(candidate)))
-        || '@twinsearth/fang-dsh-plugin'
+        || '@local/dsh-fang'
       const bundles = sourceBundles
         .filter((name) => name !== NODE_COMPAT_BUNDLE)
         .map((name) => /(^|\/)(dsh-fang|fang-dsh-plugin)$/.test(String(name)) ? forkFangBundle : name)

@@ -1,0 +1,7 @@
+# T1 fixture — mother profile bundle patch.
+# forker.provision must clone this file into homeDir/profiles/<profile>/.
+- insert:
+    - id: fixture-row
+      name: '@local/fixture-plugin'
+      config:
+        enabled: true

@@ -1,0 +1,11 @@
+# build/runtime artefacts — never bake into images
+.git
+node_modules
+dist
+docs
+test
+tools
+sdk
+relay-server
+enterprise
+*.log

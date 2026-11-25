@@ -334,8 +334,8 @@ function cmdDoctor(layout) {
   let pkg = null
   try { pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8')) } catch { /* ignore */ }
   const bundles = Array.isArray(pkg?.dsh?.profile?.bundles) ? pkg.dsh.profile.bundles : []
-  const installed = bundles.includes('@twinsearth/fang-dsh-plugin') || Boolean(pkg?.dependencies?.['@twinsearth/fang-dsh-plugin'])
-  check('bundle-installed', installed, installed ? `profiles/${layout.profileTag} 的 bundles 含 @twinsearth/fang-dsh-plugin` : 'profile package.json 未列出 @twinsearth/fang-dsh-plugin（bundle 未安装）')
+  const installed = bundles.includes('@local/dsh-fang') || Boolean(pkg?.dependencies?.['@local/dsh-fang'])
+  check('bundle-installed', installed, installed ? `profiles/${layout.profileTag} 的 bundles 含 @local/dsh-fang` : 'profile package.json 未列出 @local/dsh-fang（bundle 未安装）')
 
   const template = resolveProfileDir(layout.profileTag)
   check('fork-template', exists(template), `${template}（分身 profile 模板；可用 config.profileTemplate 覆盖）`)

@@ -113,18 +113,11 @@ export function isPagefileMissing(memory) {
  * This is deliberately a pure decision so the UI and the server share one rule.
  */
 export function evaluatePagefileSingleFork(memory, { activeForks = 0 } = {}) {
+  // v3.8.13: pagefile absence is advisory. maxForks=1 is enforced separately,
+  // so this helper must never be the reason a first/second fork is refused.
   if (!isPagefileMissing(memory)) return { ok: true, limited: false, activeForks: Number(activeForks) || 0 }
   const active = Math.max(0, Number(activeForks) || 0)
-  if (active >= 1) {
-    return {
-      ok: false,
-      error: 'pagefile-single-fork',
-      limited: true,
-      activeForks: active,
-      detail: '页面文件缺失（PagingFiles={} 或 CommitLimit≈RAM）：只允许一个分身，第二个已拒绝。',
-    }
-  }
-  return { ok: true, limited: true, activeForks: active }
+  return { ok: true, limited: true, advisory: 'pagefile-missing', activeForks: active, detail: '页面文件缺失：建议设置页面文件；当前仅按可用内存判断，不阻止分身。' }
 }
 
 /** Pure guard decision, kept separate for tests. */

@@ -1,0 +1,351 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# 发布流水线：tag v* → 守卫（tag 必须在 main 尖端）→ 测试 → 真实 e2e 构建 → npm / GitHub Release /
+# Docker / healthz / 私有镜像复核 → 终检。任一环节红，发布即停（fail-closed）。
+#
+# 与旧版的三个关键差别：
+#   1) 新增 guard job：tag 不在 main 的 first-parent 上就直接失败（v3.0.7 的标签打在特性分支上）。
+#   2) npm 发布**复用 Windows 上构建的产物**（dist/npm + tarball），不在 ubuntu 上重新打包，
+#      否则 npm 上的 sha256 与 GitHub Release 的附件不是同一份字节。
+#   3) 私有镜像 verify 默认必过（MIRROR_REQUIRED=0 才允许跳过），对应 RELEASE-WAIVER 的第 3 条。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已存在的 tag（vX.Y.Z，必须已在 main 尖端）'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false # 发布不可取消：中途取消会留下半发布状态
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  PUBLISH_NAME: '@twinsearth/fang-dsh-plugin'
+
+jobs:
+  # ── 0. 守卫：发布闸门的第一道，纯元数据检查，几十秒内出结果 ──────────────────
+  guard:
+    name: guard (tag on main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: fetch main
+        run: git fetch --no-tags origin main:refs/remotes/origin/main --force
+      - name: tag 必须正好是 main 尖端
+        run: |
+          set -euo pipefail
+          ahead=$(git rev-list --count "${RELEASE_TAG}..origin/main")
+          behind=$(git rev-list --count "origin/main..${RELEASE_TAG}")
+          echo "main 超前 tag: $ahead ；tag 超前 main: $behind"
+          if [ "$ahead" != "0" ]; then
+            echo "::error::origin/main 已超前 ${RELEASE_TAG} ${ahead} 个提交：发布必须打在 main 尖端（先合并再打 tag）"
+            exit 1
+          fi
+      - name: verify-release（无产物模式：此时还没构建）
+        id: check
+        run: |
+          node tools/git/verify-release.mjs --tag "$RELEASE_TAG" --base origin/main --no-artifact --no-write --json | tee dist-release-verify.json
+          version=$(node -e "console.log(require('./dist-release-verify.json').version)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: main-city gate（源码：版本/契约/防线/发布接线）
+        run: |
+          mkdir -p dist
+          node tools/gate/main-city.mjs --target source --version "${{ steps.check.outputs.version }}" --json | tee dist/main-city-gate.json
+          node tools/gate/main-city.mjs --target workflows --json | tee dist/main-city-gate-workflows.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-guard
+          path: |
+            dist-release-verify.json
+            dist/main-city-gate.json
+          retention-days: 30
+
+  # ── 1. 测试（与 PR 相同的矩阵，防止“合并后才发现红”）────────────────────────
+  test:
+    name: test (node ${{ matrix.node }})
+    needs: guard
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: install jsdom for client DOM harness
+        run: npm install --no-save --no-audit --no-fund --ignore-scripts jsdom@^31.0.0
+      - run: node --test --test-concurrency=1 "test/*.test.mjs"
+      - run: node test/licensing.test.mjs
+
+  # ── 2. 真实 e2e 构建（自托管 Windows：需要真 DSH；没有 runner 就红，不静默降级）──
+  build:
+    name: build tarball + manifest (e2e)
+    needs: test
+    runs-on: [self-hosted, windows, fang-e2e]
+    timeout-minutes: 45
+    # v3.1.27：build job 现在亲自创建 GitHub Release 并上传资产，
+    # 需要 contents: write（workflow 级是 contents: read，缺它就会 403
+    # "Resource not accessible by integration"）。
+    permissions:
+      contents: write
+    outputs:
+      artifact_ok: ${{ steps.artifact.outcome == 'success' && '1' || '0' }}
+    steps:
+      # v3.1.22：自托管机到 github.com:443 不稳定（actions/checkout 反复失败），
+      # 改用 codeload 的 tarball 取源码（同一 ref、同一字节），不降级任何门禁。
+      # v3.1.26：自托管 runner 的工作区是复用的。上一轮残留的 .githooks / .github 等目录
+      # 会让解包时的 Move-Item 变成「把目录搬进同名目录」→
+      #   Cannot create ...\.githooks\\.githooks because a file or directory with the same name already exists.
+      # 之前每次都要人工清理 runner。这里在解包前无条件清空工作区。
+      - name: 工作区清空（避免 .githooks 嵌套撞名）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ws = $env:GITHUB_WORKSPACE
+          if (-not $ws -or -not (Test-Path $ws)) { Write-Host "workspace missing: $ws"; exit 0 }
+          Get-ChildItem $ws -Force | ForEach-Object {
+            try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop }
+            catch { Write-Host ("::warning::无法删除 {0}", $_.Name) }
+          }
+          $left = (Get-ChildItem $ws -Force | Measure-Object).Count
+          Write-Host "workspace cleared, entries left: $left"
+          if ($left -gt 0) { Write-Host "::error::工作区未能完全清空，解包会撞名"; exit 1 }
+      - name: 取源码（codeload，避开 github.com 直连）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.ref_name }}"
+          Write-Host "fetch $url"
+          # 用 zip + Expand-Archive：tar.gz 在 Windows 上对中文文件名会报
+          # "Invalid empty pathname"（codepage 解码问题），zip 由 .NET 以 UTF-8 处理，稳定。
+          $zipUrl = "https://codeload.github.com/${{ github.repository }}/zip/${{ github.ref_name }}"
+          $zip = Join-Path $env:RUNNER_TEMP 'src.zip'
+          $stage = Join-Path $env:RUNNER_TEMP 'src-stage'
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Write-Host "fetch $zipUrl"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zip -TimeoutSec 600
+          Write-Host ("zip bytes: {0}" -f (Get-Item $zip).Length)
+          Expand-Archive -Path $zip -DestinationPath $stage -Force
+          $top = Get-ChildItem $stage -Directory | Select-Object -First 1
+          if (-not $top) { Write-Host "::error::压缩包结构异常"; exit 1 }
+          Get-ChildItem $top.FullName -Force | ForEach-Object { Move-Item $_.FullName (Join-Path $env:GITHUB_WORKSPACE $_.Name) -Force }
+          if (-not (Test-Path (Join-Path $env:GITHUB_WORKSPACE 'package.json'))) {
+            Write-Host "::error::源码解包失败（缺少 package.json）"; exit 1
+          }
+          Write-Host "source ready"
+      - name: runner 自检
+        shell: pwsh
+        run: |
+          Write-Host "node: $(node -v)"
+          if (-not (Get-Command dsh -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::runner 缺少 dsh CLI，e2e 无法执行。修复 runner 而不是跳过 e2e。"
+            exit 1
+          }
+          $free = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free / 1GB
+          Write-Host ("free disk: {0:N1} GB" -f $free)
+          if ($free -lt 10) { Write-Host "::error::磁盘不足 10GB，构建可能中途失败"; exit 1 }
+      - name: 清理上一轮残留
+        shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item dist -Recurse -Force }
+      - name: build（内置 preflight --e2e）
+        run: node tools/release/build.mjs
+      - name: 记录门禁证据
+        run: node -e "const p=require('./dist/preflight.json');console.log('tests',p.tests,'e2e',p.e2e,'green',p.green)"
+      # v3.1.25：artifact 只作「存档」，不再作为发布路径的单点。
+      # 自托管机对 results-receiver.actions.githubusercontent.com 的解析会间歇 ENOTFOUND，
+      # 之前它一挂，npm / GitHub Release 全部被 skip（构建本身是绿的）。
+      - id: artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: dsh-fang-release
+          path: |
+            dist/dsh-fang-*.tgz
+            dist/dsh-fang-*.tgz.sha256
+            dist/manifest.json
+            dist/preflight.json
+            dist/npm/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      # v3.1.25：不依赖 artifact 的发布兜底——产物就在本 job 的工作区里，
+      # 直接发 npm 与 GitHub Release。幂等：已存在则跳过。
+      - name: 发布 npm（build job 内直发，不依赖 artifact）
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: pwsh
+        run: |
+          if (-not $env:NPM_TOKEN) {
+            Write-Host "::warning::未配置 NPM_TOKEN —— npm 发布跳过"
+            exit 0
+          }
+          $version = "${{ env.RELEASE_TAG }}".Replace('v','')
+          node -e "const p=require('./queue-journal/package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "::notice::queue-journal 已存在，跳过"
+          } else {
+            Set-Content -Path 'queue-journal/.npmrc' -Value "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" -Encoding utf8
+            Push-Location queue-journal
+            npm publish --ignore-scripts --access public
+            Pop-Location
+            Remove-Item 'queue-journal/.npmrc' -Force -ErrorAction SilentlyContinue
+          }
+          node -e "const p=require('./package.json');const u='https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+encodeURIComponent(p.version);fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "::notice::${{ env.PUBLISH_NAME }}@$version 已存在，跳过"
+          } else {
+            node tools/release/publish-npm.mjs
+          }
+
+      # v3.1.26：自托管 Windows runner 上没有 gh CLI（v3.1.25 就是卡在这里），
+      # 改用仓库内的 node 脚本走 REST API（幂等：release 复用、同名资产替换）。
+      - name: 直传 GitHub Release（不依赖 artifact）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:GH_TOKEN) { Write-Host "::error::缺少 GH_TOKEN，无法创建 Release"; exit 1 }
+          node tools/release/upload-release-assets.mjs --tag $env:RELEASE_TAG --repo $env:GH_REPOSITORY --dist dist
+
+  # ── 3. npm：build 已直发；这里只做「artifact 可用时的二次核验 + 补发」──────
+  #      artifact 缺失（自托管机 DNS 抖动）时本 job 直接跳过，不算失败。
+  # ── 3. npm / GitHub Release 已在 build job 内完成（v3.1.27+）──────────────
+  #     这里不再保留独立 job：它们与 build 内的直发重复，
+  #     v3.1.27 的 npm job 就因为「build 已发布」而 409 把流水线打红。
+
+  docker:
+    name: docker image (healthz)
+    needs: build
+    # Docker Hub 凭据是可选外部依赖；未显式开启时跳过，避免无凭据的发布流水线变红。
+    if: vars.ENABLE_DOCKER == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_USERNAME != ''
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        if: env.DOCKERHUB_USERNAME != ''
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_USERNAME }}/dsh-fang:${{ env.RELEASE_TAG }}
+            ${{ env.DOCKERHUB_USERNAME }}/dsh-fang:latest
+
+  # ── 6. healthz 远端复核（npm + GitHub 都必须能取到这一版）──────────────────
+  healthz:
+    name: healthz (remote)
+    needs: [build]   # v3.1.25：build 内已直发 npm + Release
+    # v3.1.31：原 if 引用已删除的 npm job，导致 healthz 永远 skipped；改为跟随 build 成功。
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-fang-release
+          path: dist
+      - run: node tools/release/healthz.mjs --remote
+
+  # ── 7. 私有镜像 verify（默认必过；RELEASE-WAIVER 规则 3）────────────────────
+  mirror:
+    name: private mirror verify
+    needs: [guard, build]   # v3.1.25：Release 由 build 直传
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: verify
+        run: |
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            if [ "${{ vars.MIRROR_REQUIRED }}" = "0" ]; then
+              echo "::warning::MIRROR_REQUIRED=0 且无 MIRROR_TOKEN —— 私有镜像 verify 跳过（需在发布记录中声明）"
+              exit 0
+            fi
+            echo "::error::缺少 MIRROR_TOKEN：私有镜像 verify 是发布条件；配置 token 或显式设置 MIRROR_REQUIRED=0"
+            exit 1
+          fi
+          node tools/release/sync-private.mjs verify --tag "$RELEASE_TAG" --json
+
+  # ── 8. 终检：把“已发布”这件事再断言一次（含远端）──────────────────────────
+  verify:
+    name: final verify
+    needs: [guard, build, mirror, healthz]
+    # v3.1.31：原 if 引用已删除的 github-release job；Release 由 build 直传，改为跟随 build。
+    if: always() && needs.build.result == 'success' && needs.mirror.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-fang-release
+          path: dist
+      - name: fetch main
+        run: git fetch --no-tags origin main:refs/remotes/origin/main --force
+      - name: verify-release（本地证据 + 远端）
+        run: node tools/git/verify-release.mjs --tag "$RELEASE_TAG" --base origin/main --remote
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-verify
+          path: dist/release-verify.json
+          retention-days: 90

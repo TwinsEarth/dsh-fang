@@ -1,9 +1,9 @@
 {
-  "name": "@twinsearth/fang-dsh-plugin",
-  "version": "3.8.12",
-  "private": false,
+  "name": "@local/dsh-fang",
+  "version": "3.8.13",
+  "private": true,
   "type": "module",
-  "description": "dsh-Fang (瓮城) — mother/fork plugin development environment for DeepSeek Harness: one readonly mother, a disposable child dsh-Web per task.",
+  "description": "瓮城：DSH 的第一台虚拟机！插件开发狂魔、多任务并发狂与安全焦虑症患者的隔离沙箱：热更新坏了秒回滚，多开不崩各跑各的，危险代码进审核与独立沙箱。1 编排器 + 12 子插件。",
   "exports": {
     ".": "./src/index.mjs",
     "./compose": "./src/compose.mjs",
@@ -32,6 +32,59 @@
     "./decision-center": "./src/plugins/decision-center.mjs",
     "./contract": "./src/contract/index.js"
   },
+  "files": [
+    "src/**/*.mjs",
+    "src/**/*.js",
+    "src/contract/VENDOR.json",
+    "client.js",
+    "tools/recover-queue.mjs",
+    "tools/mcp/**/*.mjs",
+    "tools/gate/**/*.mjs",
+    "tools/approval-drill.mjs",
+    "tools/decision-ingest.mjs",
+    "tools/restart-watchdog.mjs",
+    "tools/restart-supervisor.mjs",
+    "tools/desktop-launch.mjs",
+    "tools/boot-guard.mjs",
+    "cordis.patch.yml",
+    "docs/PM-DECISION-POLICY.md",
+    "docs/WORKFLOW-UI.md",
+    "docs/OVERLAY-MASTER-SWITCH.md",
+    "docs/PACKAGE-RENAME-v3.3.3.md",
+    "docs/APPROVAL-DRILL.md",
+    "docs/RESTART-CONFIRMATION.md",
+    "docs/AUTO-WATCHDOG.md",
+    "docs/ESSENCE-AUTO-SYNC.md",
+    "docs/DECISION-LOSSLESS.md",
+    "docs/INBOX-SCROLL.md",
+    "docs/TEST-STABILITY-v3.4.0.md",
+    "docs/CRASH-SAFETY.md",
+    "docs/INSTALL.md",
+    "docs/HOST-SMOKE.md",
+    "docs/DSH-ARCHITECTURE-MAP.md",
+    "docs/MAIN-CITY-GATE.md",
+    "docs/FORK-SEED.md",
+    "docs/DECISION-RELAY.md",
+    "docs/CONTRACT-INTEROP.md",
+    "locale/*.json",
+    "icon.svg",
+    "native/**/*",
+    "LICENSE-CORE",
+    "LICENSE-SDK",
+    "LICENSE-COMMERCIAL",
+    "NOTICE",
+    "CLA.md",
+    "LICENSES/**",
+    "sdk/**",
+    "defaults/**",
+    "vault/**/*.mjs",
+    "vault/package.json",
+    "vault/client.js",
+    "vault/cordis.patch.yml",
+    "tools/migrate-fang-home.mjs",
+    "tools/repair-core-ui-profile.mjs",
+    "tools/release/host-boot-smoke.mjs"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -43,7 +96,34 @@
     }
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\""
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "smoke:host": "node tools/release/host-boot-smoke.mjs",
+    "test:dom": "node --test --test-concurrency=1 test/client-inbox-dom.test.mjs",
+    "check": "node tools/fangctl.mjs verify",
+    "doctor": "node tools/fangctl.mjs doctor",
+    "preflight": "node tools/release/preflight.mjs",
+    "acceptance": "node tools/release/preflight.mjs --e2e --json",
+    "build": "node tools/release/build.mjs",
+    "healthz": "node tools/release/healthz.mjs",
+    "compat": "node tools/release/compat.mjs",
+    "mcp": "node tools/mcp/server.mjs",
+    "smoke:accel": "node tools/release/accelerated-fork-smoke.mjs",
+    "publish:npm": "node tools/release/publish-npm.mjs",
+    "typecheck": "node tools/release/typecheck.mjs",
+    "gate": "node tools/gate/main-city.mjs",
+    "test:accel-live": "node --test --test-concurrency=1 test/accelerated-fork-live.test.mjs",
+    "install:accel": "node tools/release/accelerated-install.mjs",
+    "smoke:accel-plugins": "node tools/release/accel-plugin-smoke.mjs",
+    "probe:mother": "node tools/release/mother-capability-probe.mjs",
+    "smoke:contract-delegation": "node tools/release/contract-delegation-smoke.mjs",
+    "spike:ui-client": "node tools/release/ui-client-half-spike.mjs",
+    "release:check": "node tools/release/release-order.mjs",
+    "smoke:ui-client-render": "node tools/release/ui-client-render-smoke.mjs",
+    "setup:lsp-live": "node tools/release/lsp-live-setup.mjs",
+    "test:lsp-live": "node tools/e2e.mjs --lsp",
+    "test:lsp-bundle": "node tools/release/lsp-bundle-install.mjs",
+    "verify:lsp-evidence": "node tools/release/lsp-evidence.mjs",
+    "check:lsp-mother": "node tools/release/lsp-mother-check.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {
@@ -66,11 +146,5 @@
   "homepage": "https://github.com/TwinsEarth/fang-dsh-plugin#readme",
   "bugs": {
     "url": "https://github.com/TwinsEarth/fang-dsh-plugin/issues"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "bin": {
-    "fangctl": "./tools/fangctl.mjs"
   }
 }

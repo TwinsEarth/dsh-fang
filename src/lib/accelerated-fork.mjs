@@ -7,7 +7,7 @@
 // stock core, so they cannot be reused here.
 //
 // Composition is intentionally tiny and asserted by tests:
-//   @twinsearth/dsh-base → @twinsearth/dsh-web-app → @twinsearth/fang-dsh-plugin
+//   @twinsearth/dsh-base → @twinsearth/dsh-web-app → @local/dsh-fang
 // plus per-entry junctions for the fang bundle and its two child plugins, and a
 // scope-rewritten model overlay for the fork's own DSH_HOME.
 import fs from 'node:fs'
@@ -16,8 +16,8 @@ import zlib from 'node:zlib'
 import { pathToFileURL } from 'node:url'
 
 export const ACCEL_BUNDLES = Object.freeze(['@twinsearth/dsh-base', '@twinsearth/dsh-web-app'])
-export const FANG_BUNDLE = '@twinsearth/fang-dsh-plugin'
-/** npm-installed fang bundle name (aliases @twinsearth/fang-dsh-plugin in production profiles). */
+export const FANG_BUNDLE = '@local/dsh-fang'
+/** npm-installed fang bundle name (aliases @local/dsh-fang in production profiles). */
 export const FANG_NPM_BUNDLE = '@twinsearth/dsh-fang'
 /** Published npm package name of this repo's bundle (post-build name; not renamed by build). */
 export const FANG_PUBLISHED_BUNDLE = '@twinsearth/fang-dsh-plugin'
@@ -34,9 +34,9 @@ export const OVERLAY_FILE = 'cordis.patch.yml'
 
 /**
  * 2026-11-22：fork profile 里 fang bundle 的**实际包名**以 fangRoot/package.json 为准。
- * 发布构建会把源码里的 `@twinsearth/fang-dsh-plugin` 常量改名成发布名，而 junction 路径若写死
- * `@twinsearth/fang-dsh-plugin` 就会与包名/bundle 行不一致 → 派生时报 fork-bundle-unavailable。
- * 这里统一用包名（开发链 @twinsearth/fang-dsh-plugin / npm 安装 @twinsearth/fang-dsh-plugin）。
+ * 发布构建会把源码里的 `@local/dsh-fang` 常量改名成发布名，而 junction 路径若写死
+ * `@local/dsh-fang` 就会与包名/bundle 行不一致 → 派生时报 fork-bundle-unavailable。
+ * 这里统一用包名（开发链 @local/dsh-fang / npm 安装 @twinsearth/fang-dsh-plugin）。
  */
 export function fangBundleNameOf(fangRoot = '') {
   try {
@@ -748,13 +748,13 @@ export function writeAcceleratedForkProfile(options = {}) {
   }
   const junctions = []
   // 2026-11-22: 用 package.json 的真实包名建 junction（发布包名与开发别名不同；
-  // 只写死 @twinsearth/fang-dsh-plugin 会让发布版在 orchestrator 的 bundle 探测里找不到 → fork-bundle-unavailable）。
+  // 只写死 @local/dsh-fang 会让发布版在 orchestrator 的 bundle 探测里找不到 → fork-bundle-unavailable）。
   const fangBundle = fangBundleNameOf(fangDir)
   const fangTarget = path.join(moduleDir, ...fangBundle.split('/'))
   fs.mkdirSync(path.dirname(fangTarget), { recursive: true })
   junctions.push({ package: fangBundle, ...makeEntryJunction(fangDir, fangTarget) })
   if (fangBundle !== FANG_BUNDLE) {
-    // 兼容旧检查/旧 profile：保留 @twinsearth/fang-dsh-plugin 开发别名 junction。
+    // 兼容旧检查/旧 profile：保留 @local/dsh-fang 开发别名 junction。
     junctions.push({ package: FANG_BUNDLE, ...makeEntryJunction(fangDir, path.join(moduleDir, '@local', 'dsh-fang')) })
   }
   for (const child of FANG_CHILD_PACKAGES) {
