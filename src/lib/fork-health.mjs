@@ -13,8 +13,8 @@ export const FORK_HEALTH_DEFAULTS = Object.freeze({
   path: '/fang/api/health',
   fallbackPaths: ['/api/health'],
   timeoutMs: 2000,
-  maxSessionMB: 64,
-  maxEvents: 50000,
+  maxSessionMB: 20,
+  maxEvents: 20000,
   maxUncompressedBytes: 64 * 1024 * 1024,
 })
 
@@ -150,8 +150,8 @@ export function evaluateForkHealth({ session = null, adapter = null, http = null
     if (session.truncated === true) {
       failures.push({ code: 'fork-health-events-limit', detail: `events >= ${session.events ?? maxEvents} (limit ${maxEvents})` })
     }
-    if (Number(session.events) >= maxEvents) {
-      failures.push({ code: 'fork-health-events-limit', detail: `events=${session.events} >= ${maxEvents}` })
+    if (Number(session.events) > maxEvents) {
+      failures.push({ code: 'fork-health-events-limit', detail: `events=${session.events} > ${maxEvents}` })
     }
   }
   if (http) {
@@ -167,6 +167,9 @@ export function evaluateForkHealth({ session = null, adapter = null, http = null
       if (remote && remote.truncated === true) {
         failures.push({ code: 'fork-health-events-limit', detail: 'remote session scan truncated' })
       }
+      if (remote && Number(remote.events) > maxEvents) {
+        failures.push({ code: 'fork-health-events-limit', detail: `remote events=${remote.events} > ${maxEvents}` })
+      }
       if (http.data?.adapter && http.data.adapter.ok === false) {
         failures.push({ code: 'fork-adapter-unavailable', detail: String(http.data.adapter.error ?? 'adapter reported not-ok') })
       }
@@ -179,17 +182,18 @@ export function evaluateForkHealth({ session = null, adapter = null, http = null
     detail: failures[0]?.detail ?? null,
     session,
     adapter,
-    http: http ? { ok: http.ok === true, status: http.status ?? null, path: http.path ?? null, data: http.data ?? null } : null,
+    http: http ? { ok: http.ok === true, status: http.status ?? null, path: http.path ?? null, latencyMs: http.latencyMs ?? null, data: http.data ?? null } : null,
   }
 }
 
 function fetchJson(port, pathName, timeoutMs) {
   return new Promise((resolve) => {
+    const startedAt = Date.now()
     let resolved = false
     const done = (value) => {
       if (resolved) return
       resolved = true
-      resolve(value)
+      resolve({ ...value, latencyMs: Math.max(0, Date.now() - startedAt) })
     }
     let req = null
     try {

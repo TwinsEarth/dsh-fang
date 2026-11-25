@@ -53,6 +53,7 @@ import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-confi
 import { enforceCoreUiEntries } from '../lib/core-ui-plugins.mjs'
 import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
 import { decideIdleClose } from '../lib/fork-activity.mjs'
+import { classifyCloseReason } from '../lib/browser-close-reason.mjs'
 import { resolveFlushEndpoint, flushResultFromResponse, flushRequestHeaders, unsavedCloseWarning } from '../lib/fork-flush.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
@@ -60,7 +61,7 @@ import { createBusinessProducers } from '../lib/business-producers.mjs'
 import { createManifestOfficialSource } from '../lib/mirror-official-source.mjs'
 import { clearForkConfigLock } from '../lib/fork-config-lock.mjs'
 import { readForkSupervisionSettings, writeForkSupervisionSettings } from '../lib/fork-supervision-settings.mjs'
-import { readForkMeta, writeForkMeta } from '../lib/fork-supervisor.mjs'
+import { evaluateCrashLoop, readForkMeta, writeForkMeta } from '../lib/fork-supervisor.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { openDecisionEventStream } from '../lib/decision-events.mjs'
@@ -251,9 +252,27 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}
   return { ok: true, pageFileMB, commitFreeMB, minFreeMB }
 }
 
-/** Boot-time pagefile precheck: missing/disabled pagefile must force Safe Mode. */
-export function pagefileRequiresSafeMode(memory) {
-  return isPagefileMissing(memory)
+/** Boot-time pagefile precheck. Default stays strict; boot passes allowSingleFork. */
+export function pagefileRequiresSafeMode(memory, { allowSingleFork = false } = {}) {
+  if (!isPagefileMissing(memory)) return false
+  if (allowSingleFork === true) return false
+  return true
+}
+
+/**
+ * Decide whether a missing pagefile means "stop everything" or "allow one fork".
+ * Single-fork mode is only safe while Commit still has the critical reserve; below
+ * that a fork can exhaust Windows commit before the watchdog gets a sample.
+ */
+export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = 4096 } = {}) {
+  const missing = isPagefileMissing(memory)
+  if (!missing) return { safeMode: false, singleForkOnly: false, reason: null }
+  const commitFree = Number(memory?.commitFreeMB)
+  const commitOk = memory?.ok === true && Number.isFinite(commitFree) && commitFree >= Number(hostCriticalFreeMB)
+  if (commitOk) {
+    return { safeMode: false, singleForkOnly: true, reason: 'pagefile-single-fork', commitFreeMB: commitFree }
+  }
+  return { safeMode: true, singleForkOnly: true, reason: 'pagefile-missing-low-commit', commitFreeMB: Number.isFinite(commitFree) ? commitFree : null }
 }
 
 export const Config = z.object({
@@ -287,10 +306,16 @@ export const Config = z.object({
     .description('分身健康检查路径；留空=按 routes.prefix 推导 /<prefix>/api/health'),
   forkHealthTimeoutMs: z.number().min(100).max(30000).default(2000)
     .description('分身健康检查超时（毫秒）'),
-  forkHealthMaxSessionMB: z.number().min(1).max(4096).default(64)
-    .description('打开前允许的最大单会话文件（MB）；超过即拒绝打开'),
-  forkHealthMaxEvents: z.number().min(1).max(10000000).default(50000)
-    .description('打开前允许的最大单会话事件数；超过或扫描截断即拒绝打开'),
+  forkHealthMaxSessionMB: z.number().min(1).max(4096).default(20)
+    .description('打开前允许的最大单会话文件（MB）；超过即拒绝打开并要求归档/压缩'),
+  forkHealthMaxEvents: z.number().min(1).max(10000000).default(20000)
+    .description('打开前允许的最大单会话事件数；超过或扫描截断即拒绝打开并要求归档/压缩'),
+  forkFlushTimeoutMs: z.number().min(100).max(30000).default(3000)
+    .description('关闭浏览器前等待 fork flush 的总预算（毫秒；超时按 unsupported/未确认处理，不假装保存）'),
+  browserCrashWindowMs: z.number().min(60_000).max(60 * 60 * 1000).default(10 * 60_000)
+    .description('同一任务浏览器崩溃退避窗口（毫秒）'),
+  browserCrashThreshold: z.number().min(1).max(10).default(2)
+    .description('同一任务在窗口内浏览器崩溃次数达到该值时隔离（browser-crash-loop）'),
   memoryProcessScanIntervalMs: z.number().min(10000).max(600000).default(30000)
     .description('全进程表最小采样间隔（毫秒）；中间的 tick 复用缓存表并只做 liveness/CDP 按需检查'),
   browserCdpSampleIntervalMs: z.number().min(15000).max(600000).default(15000)
@@ -325,8 +350,8 @@ export const Config = z.object({
     .description('一个 fork profile 只保留一个 app page；启动后和看门狗周期用 CDP 关闭多余标签'),
   orphanSweepMinutes: z.number().min(0).max(1440).default(5)
     .description('孤儿 fork 进程清理间隔（分钟；0=仅启动时）'),
-  forkFlushPath: z.string().default('/fang/adapter/flush-session')
-    .description('关闭浏览器前调用的 fork 会话落盘路径（默认走 Fang adapter 对 DSH 内部 sessions.flush 的桥；留空=显式 unsupported，关闭前标记“未保存强杀”）'),
+  forkFlushPath: z.string().default('')
+    .description('关闭浏览器前调用的 fork 会话落盘路径；留空=按 routes.prefix 推导 /<prefix>/adapter/flush-session；调用前仍会实测该路径'),
   forkCommitShareLimit: z.number().min(0.05).max(1).default(0.4)
     .description('fork+browser PID 树 commit 总和占系统 CommitLimit 的上限'),
   browserDomNodeLimit: z.number().min(1000).max(10000000).default(200000)
@@ -570,6 +595,8 @@ export function apply(ctx, config) {
   }
   const cfg = { ...Config({}), ...(config ?? {}) }
   const forkHealthPath = String(cfg.forkHealthPath || '').trim() || forkHealthPathForPrefix(cfg.routes?.prefix)
+  const forkPrefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
+  const forkFlushDefaultPath = `${forkPrefix}/adapter/flush-session`
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
   // 部署工具用这个标识区分“仍是本实例”与“同一端口被别的服务占用”。
@@ -1107,8 +1134,9 @@ export function apply(ctx, config) {
         return { ok: false, error: 'memory-probe-threw' }
       }
       notePagefile(memory, 'boot')
-      if (pagefileRequiresSafeMode(memory)) {
-        const nextReason = safeMode && safeModeReason ? `${safeModeReason}+pagefile-missing` : 'pagefile-missing'
+      const bootPolicy = decidePagefileBootPolicy(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
+      if (bootPolicy.safeMode === true) {
+        const nextReason = safeMode && safeModeReason ? `${safeModeReason}+pagefile-missing-low-commit` : 'pagefile-missing-low-commit'
         safeMode = true
         safeModeReason = nextReason
         persistSafeMode()
@@ -1120,8 +1148,21 @@ export function apply(ctx, config) {
           hasPageFile: memory.hasPageFile,
           pagingFilesEmpty: memory.pagingFilesEmpty === true,
           commitLimitNearRam: memory.commitLimitNearRam === true,
+          commitFreeMB: bootPolicy.commitFreeMB,
         })
-        return { ok: true, safeMode: true, reason: nextReason, pageFileMB: Number(memory.pageFileMB) || 0 }
+        return { ok: true, safeMode: true, singleForkOnly: true, reason: nextReason, pageFileMB: Number(memory.pageFileMB) || 0 }
+      }
+      if (bootPolicy.singleForkOnly === true) {
+        // Missing pagefile is not "stop everything": keep exactly one active fork.
+        // Clear only a pagefile-only latch; other Safe Mode reasons still hold.
+        if (safeMode && safeModeReason) {
+          const remaining = safeModeReason.split('+').filter((part) => part && !part.startsWith('pagefile-'))
+          safeMode = remaining.length > 0
+          safeModeReason = remaining.join('+')
+          persistSafeMode()
+        }
+        audit('pagefile-single-fork-boot', { action: 'boot', pageFileMB: Number(memory.pageFileMB) || 0, commitFreeMB: bootPolicy.commitFreeMB })
+        return { ok: true, safeMode: false, singleForkOnly: true, reason: bootPolicy.reason, pageFileMB: Number(memory.pageFileMB) || 0 }
       }
       return { ok: true, safeMode: false, pageFileMB: Number(memory.pageFileMB) || 0 }
     })()
@@ -1349,6 +1390,39 @@ export function apply(ctx, config) {
     task.browserExit = record
     if (task.browser === browser) task.browser = null
     try { appendJsonlRotated(path.join(layout.dataDir, 'browser-events.jsonl'), { ...record, event: 'exit' }, diagnosticLogOptions()) } catch { /* diagnostics only */ }
+    const unexpected = (!exit.intentional || exit.oom === true) && exit.kind !== 'normal'
+    if (unexpected) {
+      const crash = {
+        taskId: task.taskId,
+        at,
+        pid: record.pid,
+        code: exit.code,
+        rawCode: exit.code,
+        unsignedCode: exit.unsignedCode,
+        hex: exit.hex,
+        signal: exit.signal,
+        oom: exit.oom === true,
+        kind: exit.kind,
+        source: exit.source,
+        lastMetrics: last,
+        pids: pidTree?.pids ?? [],
+        cdp: record.lastCdp,
+      }
+      const crashes = Array.isArray(task.browserCrashes) ? task.browserCrashes.slice(-20) : []
+      crashes.push(crash)
+      task.browserCrashes = crashes
+      task.browserCrash = crash
+      try { appendJsonlRotated(path.join(layout.dataDir, 'browser-crashes.jsonl'), crash, diagnosticLogOptions()) } catch { /* diagnostics only */ }
+      const loop = evaluateCrashLoop(crashes.map((item) => item.at), at, {
+        windowMs: cfg.browserCrashWindowMs,
+        threshold: cfg.browserCrashThreshold,
+      })
+      if (loop.tripped === true) {
+        task.quarantined = { reason: 'browser-crash-loop', count: loop.count, windowMs: loop.windowMs, at, tokenRevoked: true }
+        audit('browser-crash-loop', { taskId: task.taskId, count: loop.count, windowMs: loop.windowMs, oom: exit.oom === true })
+        void quarantineTask(task, 'browser-crash-loop').catch(() => { /* best effort */ })
+      }
+    }
     // memory-samples.jsonl is crash evidence; a deliberate flush+close should not
     // train the root-cause reader on normal shutdowns.
     if (!exit.intentional || exit.oom) {
@@ -1364,26 +1438,84 @@ export function apply(ctx, config) {
   }
 
   const flushForkSession = async (task) => {
-    const flushPath = String(cfg.forkFlushPath || '').trim()
-    if (!flushPath) return { ok: false, error: 'unsupported', saved: false }
+    const configured = String(cfg.forkFlushPath || '').trim()
+    const capability = task?.flushCapability && typeof task.flushCapability === 'object' ? task.flushCapability : null
+    // Verify by calling, not by fabricating a path: configured path first, then the
+    // endpoint advertised by fork health, then the conventional DSH save names.
+    const candidates = [
+      configured,
+      capability?.method === 'POST' ? String(capability.path ?? '').trim() : '',
+      forkFlushDefaultPath,
+      '/api/session/flush',
+      '/api/session/save',
+      '/api/sessions/flush',
+    ].filter((value, index, list) => value && list.indexOf(value) === index)
+    if (candidates.length === 0) {
+      return { ok: false, error: 'flush-unsupported', code: 'flush-unsupported', saved: false, attempted: [] }
+    }
     const opened = forker()?.openUrl?.(task.taskId)
-    if (!opened?.url) return { ok: false, error: 'fork-url-unavailable', saved: false }
-    try {
-      const endpoint = resolveFlushEndpoint(opened.url, flushPath)
-      const token = String(forker()?.getToken?.(task.taskId) ?? '')
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: flushRequestHeaders(token),
-        signal: AbortSignal.timeout(5000),
-      })
-      let body = null
+    if (!opened?.url) return { ok: false, error: 'fork-url-unavailable', saved: false, attempted: [] }
+    const budgetMs = Math.max(100, Number(cfg.forkFlushTimeoutMs) || 3000)
+    const deadline = Date.now() + budgetMs
+    const token = String(forker()?.getToken?.(task.taskId) ?? '')
+    const attempted = []
+    let last = null
+    for (const flushPath of candidates) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        attempted.push({ path: flushPath, ok: false, saved: false, error: 'flush-budget-exhausted' })
+        break
+      }
+      let endpoint
+      try { endpoint = resolveFlushEndpoint(opened.url, flushPath) } catch (error) {
+        attempted.push({ path: flushPath, ok: false, saved: false, error: String(error?.message ?? error) })
+        continue
+      }
+      const startedAt = Date.now()
       try {
-        const text = await response.text()
-        body = text.trim() ? JSON.parse(text) : null
-      } catch { /* non-JSON or empty body: saved stays unconfirmed */ }
-      return { ...flushResultFromResponse(response, body), path: flushPath }
-    } catch (error) {
-      return { ok: false, error: String(error?.message ?? error), path: flushPath, saved: false }
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: flushRequestHeaders(token),
+          signal: AbortSignal.timeout(remaining),
+        })
+        let body = null
+        try {
+          const text = await response.text()
+          body = text.trim() ? JSON.parse(text) : null
+        } catch { /* non-JSON or empty body: saved stays unconfirmed */ }
+        const result = flushResultFromResponse(response, body)
+        const view = {
+          path: flushPath,
+          ok: result.ok,
+          status: result.status,
+          saved: result.saved,
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          code: body?.code ?? null,
+          error: body?.error ?? null,
+        }
+        attempted.push(view)
+        last = { ...result, path: flushPath, attempted, code: view.code, detail: view.error }
+        if (result.saved === true) return { ...last, verified: true, unsupported: false }
+        // 401/403/5xx means the endpoint exists but cannot save; trying aliases would
+        // only repeat the same failure. 404/405 means this candidate is not registered.
+        if (Number(result.status) !== 404 && Number(result.status) !== 405) return { ...last, verified: true, unsupported: false }
+      } catch (error) {
+        const detail = String(error?.message ?? error)
+        attempted.push({ path: flushPath, ok: false, saved: false, error: detail, latencyMs: Math.max(0, Date.now() - startedAt) })
+        last = { ok: false, status: null, saved: false, path: flushPath, attempted, error: detail }
+        if (/timeout|timed out|aborted/i.test(detail)) break
+      }
+    }
+    return {
+      ok: false,
+      status: last?.status ?? null,
+      saved: false,
+      path: last?.path ?? candidates[candidates.length - 1],
+      attempted,
+      error: 'flush-unsupported',
+      code: 'flush-unsupported',
+      unsupported: true,
+      verified: true,
     }
   }
 
@@ -1391,6 +1523,8 @@ export function apply(ctx, config) {
     if (!task?.browser?.pid) return { ok: true, skipped: 'no-browser' }
     const browser = task.browser
     browser.intentionalClose = String(reason)
+    const closeKind = classifyCloseReason(reason)
+    task.closeReason = { raw: String(reason), kind: closeKind, at: nowMs() }
     const forkFlush = await flushForkSession(task)
     const sessionSaved = forkFlush.ok === true && forkFlush.saved === true
     const flushView = {
@@ -1399,8 +1533,11 @@ export function apply(ctx, config) {
       path: forkFlush.path ?? null,
       saved: forkFlush.saved === true,
       error: forkFlush.error ?? null,
-      code: forkFlush.response?.code ?? null,
+      code: forkFlush.response?.code ?? forkFlush.code ?? null,
       detail: forkFlush.response?.error ?? null,
+      unsupported: forkFlush.unsupported === true,
+      verified: forkFlush.verified === true,
+      attempted: Array.isArray(forkFlush.attempted) ? forkFlush.attempted.slice(0, 10) : [],
       flushed: Array.isArray(forkFlush.response?.flushed) ? forkFlush.response.flushed.slice(0, 20) : [],
       failed: Array.isArray(forkFlush.response?.failed) ? forkFlush.response.failed.slice(0, 20) : [],
     }
@@ -1417,12 +1554,13 @@ export function apply(ctx, config) {
     const result = await closeManagedBrowser({ pid: browser.pid, port: browser.port, graceMs: cfg.gracefulBrowserCloseMs })
     task.browser = null
     task.browserClosed = {
-      at: nowMs(), reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true,
+      at: nowMs(), reason, reasonKind: closeKind, pid: browser.pid, ok: result.ok, graceful: result.graceful === true,
       pageFlush: pageFlush ?? null,
       forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null,
     }
     task.memoryGuard = {
       reason,
+      reasonKind: closeKind,
       at: nowMs(),
       pid: browser.pid,
       metrics: browser.last ?? null,
@@ -1437,9 +1575,9 @@ export function apply(ctx, config) {
     }
     writeWatchdog()
     try {
-      fs.appendFileSync(path.join(layout.dataDir, 'browser-events.jsonl'), JSON.stringify({ taskId: task.taskId, at: nowMs(), event: 'closed', reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null, metrics: browser.last ?? null }) + '\n')
+      fs.appendFileSync(path.join(layout.dataDir, 'browser-events.jsonl'), JSON.stringify({ taskId: task.taskId, at: nowMs(), event: 'closed', reason, reasonKind: closeKind, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null, metrics: browser.last ?? null }) + '\n')
     } catch { /* diagnostics only */ }
-    audit('fork-browser-closed', { taskId: task.taskId, reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null })
+    audit('fork-browser-closed', { taskId: task.taskId, reason, reasonKind: closeKind, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null })
     persist()
     return { ...result, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null }
   }
@@ -1500,20 +1638,46 @@ export function apply(ctx, config) {
       http,
       limits: { maxSessionMB: cfg.forkHealthMaxSessionMB, maxEvents: cfg.forkHealthMaxEvents },
     })
+    // A successful fork health response may advertise the real flush endpoint.
+    // Never invent one: if it is absent, close will record flush=unsupported.
+    if (http?.data?.flush) task.flushCapability = http.data.flush
+    const healthRecord = {
+      taskId: task.taskId,
+      at: nowMs(),
+      ok: decision.ok === true,
+      error: decision.error ?? null,
+      failures: decision.failures,
+      session: session ? {
+        ok: session.ok === true,
+        sessions: session.sessions,
+        totalBytes: session.totalBytes,
+        largestBytes: session.largestBytes,
+        largestSessionId: session.largestSessionId ?? null,
+        events: session.events,
+        truncated: session.truncated === true,
+      } : null,
+      http: http ? {
+        ok: http.ok === true,
+        status: http.status ?? null,
+        path: http.path ?? null,
+        latencyMs: http.latencyMs ?? null,
+        error: http.error ?? null,
+        flush: http.data?.flush ?? null,
+      } : null,
+      adapter,
+    }
+    try { appendJsonlRotated(path.join(layout.dataDir, 'browser-health.jsonl'), healthRecord, diagnosticLogOptions()) } catch { /* diagnostics only */ }
     if (decision.ok !== true) {
       audit('fork-open-health-refused', {
         taskId: task.taskId,
         error: decision.error,
         failures: decision.failures,
-        session: session ? {
-          sessions: session.sessions, totalBytes: session.totalBytes, largestBytes: session.largestBytes,
-          events: session.events, truncated: session.truncated === true,
-        } : null,
-        http: http ? { ok: http.ok === true, status: http.status ?? null, path: http.path ?? null, error: http.error ?? null } : null,
+        session: healthRecord.session,
+        http: healthRecord.http,
         adapter,
       })
     }
-    return decision
+    return { ...decision, healthRecord }
   }
 
   const launchTaskBrowser = async (task, url) => {
@@ -1543,7 +1707,10 @@ export function apply(ctx, config) {
       }
     }
     const liveBrowsers = [...tasks.values(), ...runtimeBrowsers.values()].filter((item) => item.browser?.pid && isPidAlive(item.browser.pid))
-    const max = Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
+    // Native pagefile policy outranks maxOpenForkBrowsers: with no pagefile there
+    // may be exactly one active fork browser, regardless of config.
+    const pagefileMissing = memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false
+    const max = pagefileMissing === true ? 1 : Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
     let liveCount = liveBrowsers.length
     for (const other of liveBrowsers) {
       if (other.taskId === task.taskId) continue
@@ -1597,7 +1764,7 @@ export function apply(ctx, config) {
     persist()
     scheduleBrowserProcessIdentity(task)
     audit('fork-browser-opened', { taskId: task.taskId, pid: launched.pid, port: launched.port })
-    if (cfg.browserSingleAppWindow !== false) {
+    if (cfg.browserSingleAppWindow !== false || pagefileMissing === true) {
       try {
         const single = await enforceSinglePageTarget(launched.port, { maxPages: 1 })
         browserHandle.singlePage = { at: nowMs(), ...single }
@@ -1766,7 +1933,7 @@ export function apply(ctx, config) {
       if (!isPidAlive(browser.pid)) {
         recordBrowserExit(task, browser, { source: 'watchdog-pid-dead' })
         task.browser = null
-        task.browserClosed = { at: nowMs(), reason: 'browser-process-exited', pid: browser.pid, exit: task.browserExit?.exit ?? null }
+        task.browserClosed = { at: nowMs(), reason: 'browser-process-exited', reasonKind: task.browserExit?.exit?.oom ? 'browser-oom' : 'user', pid: browser.pid, exit: task.browserExit?.exit ?? null }
         audit('fork-browser-exited', { taskId: task.taskId, pid: browser.pid, exitCode: task.browserExit?.exit?.code ?? null, exitHex: task.browserExit?.exit?.hex ?? null })
         persist()
         continue
@@ -1832,7 +1999,7 @@ export function apply(ctx, config) {
       try {
         appendJsonlRotated(path.join(layout.dataDir, 'browser-samples.jsonl'), { taskId: task.taskId, ...browser.last }, diagnosticLogOptions())
       } catch { /* diagnostics only */ }
-      if (cfg.browserSingleAppWindow !== false) {
+      if (cfg.browserSingleAppWindow !== false || memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) {
         try {
           const single = await enforceSinglePageTarget(browser.port, { maxPages: 1 })
           browser.singlePage = { at: now, ...single }
@@ -2367,6 +2534,11 @@ export function apply(ctx, config) {
         at: live.quarantined.at ?? null,
       } : null,
       browserExit: t.browserExit ?? null,
+      browserCrash: t.browserCrash ?? null,
+      browserCrashes: Array.isArray(t.browserCrashes) ? t.browserCrashes.slice(-5) : [],
+      closeReason: t.closeReason ?? null,
+      browserClosed: t.browserClosed ?? null,
+      flushCapability: t.flushCapability ?? null,
       adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', protocol: t.adapter?.protocol ?? 0, error: t.adapter?.error ?? '' },
       activity: (() => {
         const cached = forkActivityCache.get(t.taskId)
@@ -4380,14 +4552,18 @@ export function apply(ctx, config) {
         // 2026-11-25: pagefile / Commit 快照。由 memoryGate、host/memory watchdog
         // 和启动探针刷新；status 本身不做 PowerShell 查询，避免拉高采样成本。
         memory: memorySnapshot,
+        pageFileMB: Number(memorySnapshot?.pageFileMB) || 0,
+        hasPageFile: memorySnapshot?.hasPageFile === true,
         memoryPolicy: memoryPolicySnapshot(),
         pagefilePolicy: {
           missing: memorySnapshot?.pagefileMissing === true,
+          hasPageFile: memorySnapshot?.hasPageFile === true,
+          pageFileMB: Number(memorySnapshot?.pageFileMB) || 0,
           evidence: memorySnapshot?.pagingFilesEmpty === true ? 'PagingFiles={}'
             : memorySnapshot?.commitLimitNearRam === true ? 'CommitLimit≈RAM'
               : memorySnapshot?.pagefileMissing === true ? 'Win32_PageFileUsage 无分配' : null,
-          singleForkOnly: memorySnapshot?.pagefileMissing === true,
-          maxConcurrentForks: memorySnapshot?.pagefileMissing === true ? 1 : Math.max(1, Number(cfg.maxForks) || 1),
+          singleForkOnly: memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false,
+          maxConcurrentForks: (memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) ? 1 : Math.max(1, Number(cfg.maxForks) || 1),
           safeMode: safeMode === true,
         },
         sessionCompact: sessionCompactSnapshot,
@@ -4409,9 +4585,19 @@ export function apply(ctx, config) {
         }
       }
       let adapter = null
+      let flush = null
       try {
         const adapterService = safeGet(SERVICE.adapter)
         if (adapterService && typeof adapterService.health === 'function') adapter = adapterService.health()
+        if (role === 'fork') {
+          flush = {
+            available: typeof adapterService?.flushSessions === 'function',
+            method: 'POST',
+            path: forkFlushDefaultPath,
+            source: 'fang-adapter',
+            timeoutMs: cfg.forkFlushTimeoutMs,
+          }
+        }
       } catch (error) {
         adapter = { ok: false, error: String(error?.message ?? error) }
       }
@@ -4425,6 +4611,7 @@ export function apply(ctx, config) {
         uptimeMs: Math.max(0, Math.round(process.uptime() * 1000)),
         session,
         adapter,
+        flush,
       }
     },
 

@@ -1247,6 +1247,7 @@ export function apply(ctx, config) {
     reportClient,
     status,
     activity,
+    flushSessions,
     approvals,
     audit,
     command,

@@ -4166,6 +4166,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const value = String(reason || '').trim()
       if (!value) return '上次宿主非正常退出或触发内存熔断；自动恢复已暂停。'
       if (value === 'crash-loop-10m') return '10 分钟内连续两次非正常退出（可能是 pagefile/Commit 不足或插件崩溃）。'
+      if (value === 'pagefile-missing-low-commit' || value.endsWith('+pagefile-missing-low-commit')) {
+        return 'Windows 没有可用页面文件，且 Commit 余量低于宿主紧急阈值；Fang 暂停自动拉起分身。修复页面文件后重启宿主。'
+      }
       if (value === 'pagefile-missing' || value.endsWith('+pagefile-missing')) {
         return 'Windows 没有可用页面文件（Win32_PageFileUsage 无分配）；Fang 在启动前已进入 Safe Mode，不会自动拉起分身或浏览器。'
       }
@@ -4223,9 +4226,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           : 'Win32_PageFileUsage 无分配'
       return h('div', { class: 'notice notice--bad fang-pagefile-banner', role: 'alert', 'data-zone': 'pagefile-banner' },
         h('div', { class: 'notice-main' },
-          h('div', { class: 'notice-title' }, icon('alert', 15), '页面文件缺失 · 宿主随时可能 OOM'),
+          h('div', { class: 'notice-title' }, icon('alert', 15), '未启用页面文件，已强制单分身'),
           h('div', { class: 'notice-text' },
-            `Windows 没有可用的页面文件/Commit 扩展空间（证据：${evidence}；上限 ${limit} MB，当前余量 ${free} MB）。瓮城会拒绝新分身；大 session、浏览器缓存和并发任务会直接推高 Commit。`),
+            `Windows 没有可用的页面文件/Commit 扩展空间（证据：${evidence}；上限 ${limit} MB，当前余量 ${free} MB）。系统已忽略“最大并发分身”配置，最多只保留 1 个活跃分身；第 2 个会被拒绝。大 session、浏览器缓存和并发任务会直接推高 Commit。`),
           h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } },
             '修复不需要重装系统：恢复系统托管的页面文件，或至少留 8–16 GB，然后重启宿主。')),
         h('div', { class: 'notice-actions' },
@@ -5016,6 +5019,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             h('div', { class: 'fork-chips' },
               chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
               archived ? chip('neutral', '已归档') : null,
+              task.browserCrash ? chip('bad', task.browserCrash.oom ? '上次崩溃于 OOM' : `上次崩溃于 exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`, { title: `上次浏览器崩溃：${task.browserCrash.oom ? 'OOM（0xE0000008）' : task.browserCrash.hex || task.browserCrash.code || 'unknown'}；${new Date(task.browserCrash.at || Date.now()).toLocaleString()}` }) : null,
               task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）` }) : null)),
           h('div', { class: 'fork-actions' },
             button('查看详情', {
@@ -5093,7 +5097,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
             task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
             task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）；点任务卡「重启并解除隔离」恢复（新端口/新 token）` }) : null,
-            task.memoryGuard ? chip(task.memoryGuard.unsavedForceClose ? 'bad' : 'warn', task.memoryGuard.unsavedForceClose ? '未保存强杀' : '内存保护关闭', { title: `${task.memoryGuard.unsavedForceClose ? '关闭前会话落盘未确认：未保存强杀；' : ''}关闭原因：${task.memoryGuard.reason || 'guard'}；PID ${task.memoryGuard.pid ?? '—'}；会话 home 保留，可重新打开` }) : null,
+            task.browserCrash ? chip('bad', task.browserCrash.oom ? '上次崩溃于 OOM' : `上次崩溃于 exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`, { title: `上次浏览器崩溃：${task.browserCrash.oom ? 'OOM（0xE0000008）' : `exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`}；${new Date(task.browserCrash.at || Date.now()).toLocaleString()}；PID ${task.browserCrash.pid ?? '—'}${task.browserCrash.signal ? `；signal ${task.browserCrash.signal}` : ''}` }) : null,
+            task.memoryGuard ? chip(task.memoryGuard.unsavedForceClose ? 'bad' : 'warn', task.memoryGuard.unsavedForceClose ? '未保存强杀' : '内存保护关闭', { title: `${task.memoryGuard.unsavedForceClose ? '关闭前会话落盘未确认：未保存强杀；' : ''}关闭原因：${task.memoryGuard.reason || 'guard'}${task.memoryGuard.reasonKind ? `（${task.memoryGuard.reasonKind}）` : ''}；PID ${task.memoryGuard.pid ?? '—'}；会话 home 保留，可重新打开` }) : null,
             task.sessions?.violation ? chip('warn', `会话 ${task.sessions.count}/${task.sessions.max} 超限`, { title: '分身会话超过上限；打开/修复不会再自动搬移，需手动归档或 enforce' }) : null,
             task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
