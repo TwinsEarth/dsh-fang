@@ -46,7 +46,9 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/fang/adapter/hello` | 握手：role/taskId/version/capabilities |
-| GET | `/fang/adapter/status` | 分身内服务表、buffer 三态、待审批数、审计头 |
+| GET | `/fang/adapter/status` | 分身内服务表、buffer 三态、待审批数、审计头、最近活动 |
+| GET | `/fang/adapter/activity` | 最近活动时间 + 运行中 turn（空闲关浏览器判据） |
+| POST | `/fang/adapter/flush-session` | 在分身宿主内调用 DSH 官方 `sessions.flush`，返回 `{ok, saved, flushed, failed}` |
 | GET | `/fang/adapter/approvals` | 分身本地待审批项 |
 | GET | `/fang/adapter/audit?limit=n` | 分身审计尾部（母体 aggregate 用） |
 | POST | `/fang/adapter/command` | 控制命令（见下表） |
@@ -57,6 +59,8 @@
 |---|---|---|
 | `ping` | — | `{ pong:true, at }` |
 | `status` | — | 同 GET status |
+| `activity` | — | 同 GET activity |
+| `flush-session` | `{sessionId?}` | `{ saved:boolean, flushed:[], skipped:[], failed:[] }`；`saved` 只认显式成功 |
 | `flush-buffer` | `{strictMs?}` | `{ state:'settled'|'pending-high-risk', flushed:[] }` |
 | `score-plugin` | `{pluginId}` | 分身 Scorer 的 Assessment（fork 阈值） |
 | `read-plugin` | `{pluginId}` | `{ files:{relPath:text} }`（≤1MB/文件、≤2MB/总量、拒绝路径逃逸） |
@@ -65,7 +69,7 @@
 | `approval-decide` | `{id,outcome,by?,note?}` | 决策结果 |
 | `archive` | — | flush + 归档标记（进程 kill 由母体 Forker 执行） |
 
-鉴权：复用 DSH 的 `?token=`（裸 URL 401）。Remote 客户端负责 `withToken()`；超时 5–8s；所有失败返回 `{ok:false, kind:'timeout'|'network'|'http'|'json', error}`，**不抛**。
+鉴权：adapter 控制面用 `Authorization: Bearer <DSH_ADAPTER_TOKEN>`；`?token=` 是分身 Web URL 的页面 token，不用于 adapter。Remote 客户端负责 Bearer；超时 5–8s；所有失败返回 `{ok:false, kind:'timeout'|'network'|'http'|'json', error}`，**不抛**。
 
 ---
 

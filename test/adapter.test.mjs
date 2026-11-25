@@ -11,6 +11,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { EventEmitter } from 'node:events'
 
 import { makeCtx, makeWebServerStub, makeReq, makeRes, tmpDir } from './helpers.mjs'
@@ -244,6 +245,8 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
     routePath(ADAPTER_ROUTE.CLIENT_REPORT),
     routePath(ADAPTER_ROUTE.HELLO),
     routePath(ADAPTER_ROUTE.STATUS),
+    routePath(ADAPTER_ROUTE.ACTIVITY),
+    routePath(ADAPTER_ROUTE.FLUSH_SESSION),
     routePath(ADAPTER_ROUTE.APPROVALS),
     routePath(ADAPTER_ROUTE.AUDIT),
     routePath(ADAPTER_ROUTE.COMMAND),
@@ -252,7 +255,7 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
     routePath(ADAPTER_ROUTE.STATE),
     routePath(ADAPTER_ROUTE.COMMANDS),
     routePath(ADAPTER_ROUTE.EVENTS),
-  ], '12 条路由 = identity + client-report + v2 五条 + v3 五条，顺序与 ADAPTER_ROUTE 常量一致')
+  ], '14 条路由 = identity + client-report + v2 五条 + activity + flush-session + v3 五条，顺序与 ADAPTER_ROUTE 常量一致')
   assert.deepEqual(service.routes, ws.paths(), 'service.routes 暴露已注册路径（测试用）')
   for (const route of ws.routes) assert.equal(route.kind, 'exact')
 
@@ -298,7 +301,7 @@ test('hello(): role/taskId/version/capabilities；taskId 取 environ / 配置优
 test('Config.prefix 生效（与母体 Remote.prefix 对齐）', () => {
   const { ctx, ws } = applyAsFork({ prefix: '/x/' })
   assert.deepEqual(ws.paths(), [
-    '/x/adapter/identity', '/x/adapter/client-report', '/x/adapter/hello', '/x/adapter/status', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
+    '/x/adapter/identity', '/x/adapter/client-report', '/x/adapter/hello', '/x/adapter/status', '/x/adapter/activity', '/x/adapter/flush-session', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
     '/x/adapter/version', '/x/adapter/health', '/x/adapter/state', '/x/adapter/commands', '/x/adapter/events',
   ])
   ctx.dispose()
@@ -371,6 +374,105 @@ test('HTTP GET status: 200 + 服务表/缓冲三态/待批数/审计头', async 
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('HTTP GET activity: 末帧 turn/start → turnRunning=true，status 也带同一活动信号', async () => {
+  const home = tmpDir('fang-t5-activity-')
+  try {
+    const workspace = 'ws'
+    const sessionId = 'session-11111111-2222-4333-8444-555555555555'
+    const dir = path.join(home, 'sessions', workspace, sessionId)
+    fs.mkdirSync(dir, { recursive: true })
+    const now = Date.now()
+    const frames = [
+      JSON.stringify({ type: 'session', version: 4, id: sessionId, createdAt: now }),
+      JSON.stringify({ type: 'user/message', seq: 1, time: now, data: { content: [{ type: 'text', text: 'hi' }] } }),
+      JSON.stringify({ type: 'turn/start', seq: 2, time: now, data: { turn: 1 } }),
+      JSON.stringify({ type: 'assistant/message', seq: 3, time: now, data: { content: [{ type: 'text', text: 'working' }] } }),
+    ]
+    fs.writeFileSync(path.join(dir, 'session.v4.jsonl.zstd'), Buffer.concat(frames.map((line) => zlib.zstdCompressSync(Buffer.from(line + '\n', 'utf8')))))
+    const { ctx, ws, service } = applyAsFork({ homeDir: home, activityCacheMs: 0, taskId: 'task_activity' })
+    const snapshot = service.activity()
+    assert.equal(snapshot.ok, true)
+    assert.equal(snapshot.activity.turnRunning, true)
+    assert.equal(snapshot.activity.signal, 'turn-event')
+    assert.equal(snapshot.activity.sessionId, sessionId)
+
+    const handler = findHandler(ws, 'GET', ADAPTER_ROUTE.ACTIVITY)
+    const res = makeRes()
+    await handler(getReq(routePath(ADAPTER_ROUTE.ACTIVITY)), res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.json().activity.turnRunning, true)
+    ctx.dispose()
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('HTTP POST flush-session: 调用 DSH 官方 sessions.flush，全部成功才 saved=true', async () => {
+  const calls = []
+  const sessions = {
+    list: () => [{ id: 's-1' }, { id: 's-2' }],
+    flush: async (session) => {
+      calls.push(session.id)
+      return true
+    },
+  }
+  const { ctx, ws } = applyAsFork({}, { sessions })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.FLUSH_SESSION)
+  const res = makeRes()
+  await handler(makeReq(undefined, 'POST'), res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().ok, true)
+  assert.equal(res.json().saved, true)
+  assert.deepEqual(res.json().flushed, ['s-1', 's-2'])
+  assert.deepEqual(calls, ['s-1', 's-2'], '每个活会话都必须走一次 sessions.flush')
+  ctx.dispose()
+})
+
+test('HTTP POST flush-session: 无持久化监听器 → 409 + saved=false（不得谎报落盘）', async () => {
+  const sessions = {
+    list: () => [{ id: 's-1' }],
+    flush: async () => false,
+  }
+  const { ctx, ws } = applyAsFork({}, { sessions })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.FLUSH_SESSION)
+  const res = makeRes()
+  await handler(makeReq(undefined, 'POST'), res)
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.json().ok, false)
+  assert.equal(res.json().code, 'session-flush-failed')
+  assert.equal(res.json().saved, false)
+  assert.equal(res.json().failed[0].code, 'no-persistence-listener')
+  ctx.dispose()
+})
+
+test('HTTP POST flush-session: 读会话跳过落盘，不把 read-only 当成失败', async () => {
+  const sessions = {
+    list: () => [{ id: 'read-only-1' }],
+    flush: async () => { throw new Error('SessionReadOnlyError: session is read-only') },
+  }
+  const { ctx, ws } = applyAsFork({}, { sessions })
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.FLUSH_SESSION)
+  const res = makeRes()
+  await handler(makeReq(undefined, 'POST'), res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().ok, true)
+  assert.equal(res.json().saved, true)
+  assert.deepEqual(res.json().skipped, [{ id: 'read-only-1', reason: 'read-only' }])
+  ctx.dispose()
+})
+
+test('HTTP POST flush-session: sessions 缺失时显式降级，不假装保存成功', async () => {
+  const { ctx, ws } = applyAsFork({})
+  const handler = findHandler(ws, 'POST', ADAPTER_ROUTE.FLUSH_SESSION)
+  const res = makeRes()
+  await handler(makeReq(undefined, 'POST'), res)
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.json().ok, false)
+  assert.equal(res.json().code, 'service-unavailable')
+  assert.equal(res.json().saved, false)
+  ctx.dispose()
 })
 
 test('HTTP GET status: 依赖全缺时显式降级（不 pretend）', async () => {

@@ -49,10 +49,22 @@ node tools/release/preflight.mjs      # 版本/许可/allowlist/client 解析/cr
 3. npm token 有效（`NPM_TOKEN` / 本地 secret 文件，可 `whoami` 或 dry-run 校验）；
 4. 目标版本号**未打 tag**、CHANGELOG 有对应 `## vX.Y.Z` 段、`FANG_VERSION` 与 `package.json` 一致；
 5. `node tools/release/preflight.mjs --e2e` 本地 GREEN，且构建产物通过
-   `crash-safety --package`（打包后二次验证）。
+   `crash-safety --package`（打包后二次验证）；
+6. 涉及 sidecar / client boot 的版本，在 Windows 真机跑 `npm run smoke:host -- --cli <dsh.cmd> --plugin <plugin dir>`，`report.json` 全 PASS；该 smoke 需要打包 DSH + Edge/Chrome，不在 Linux CI 内替代。
 
 发布顺序（只有人类授权后才执行）：
 `PR 合并 → 新 main 打注解 tag → release workflow → 校验 tests/build/Release/npm/healthz/final verify → 告知升级与重启方式`。
+
+### 4.1 上传重试与幂等
+
+`tools/release/upload-release-assets.mjs` 已内置重试，不需要人工反复重跑：
+
+- 默认 5 次；`--retries` 可调 1–10，也可用 `FANG_RELEASE_RETRIES`。
+- 408/425/429/500/502/503/504 与 `ECONNRESET` / `ENOTFOUND` / `EAI_AGAIN` / TLS/socket 错误按瞬时失败重试；尊重 `Retry-After`。
+- 创建 release 的 422 视为竞争，回读 tag；同名资产按 size + digest 判定，一致则跳过，不一致才删除重传。
+- 上传响应丢失后重试遇 422，会回读已有资产并按 name+size+digest 判定“已落地”，不会重复上传。
+- workflow 的 codeload 源码下载独立重试 5 次（1/2/4/8/16 秒退避），不再单次失败就红。
+- 私有 GitHub Enterprise / 测试替身可用 `--api` 或 `GITHUB_API_URL` 指向 API 根；`--dry-run` 行为不变。
 
 ## 5. 运行中的 profile 升级安全规程（2026-11-10 事故后新增）
 

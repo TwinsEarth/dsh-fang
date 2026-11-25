@@ -29,6 +29,7 @@ import {
 import { parseYamlSubset } from './rule-registry.mjs'
 import { KeyedMutex } from './mutex.mjs'
 import { Semaphore } from './semaphore.mjs'
+import { enforceCoreUiEntries, isCoreUiPluginName } from './core-ui-plugins.mjs'
 
 export const ESSENCE_VERSION = '1.0.0'
 
@@ -659,9 +660,16 @@ export class EssenceManager {
     overlay.packageJson.dsh.profile.bundles = bundles
     const managedNames = new Set([...recommended, ...experimental].map((entry) => String(entry.name)))
     const preserved = (Array.isArray(overlay.patchEntries) ? overlay.patchEntries : [])
-      .filter((entry) => !String(entry?.id ?? '').startsWith('official-'))
+      // Keep boot-critical UI rows even when an older official-prefixed row
+      // carries user config; enforceCoreUiEntries will only flip the kill switch.
+      .filter((entry) => !String(entry?.id ?? '').startsWith('official-') || isCoreUiPluginName(entry?.name))
       .filter((entry) => !managedNames.has(String(entry?.name ?? '')))
-    overlay.patchEntries = [...recommended, ...experimental, ...shadows, ...preserved]
+    // Boot-critical client UI rows cannot be left disabled by an older overlay
+    // or a mother-profile import. `ui-theme` in particular is a required
+    // service; a preserved `disabled: true` makes layout/sidebar/chat pend
+    // forever and the whole web boot fails with "required entries did not activate".
+    const enforced = enforceCoreUiEntries([...recommended, ...experimental, ...shadows, ...preserved])
+    overlay.patchEntries = enforced.entries
     this.saveOverlay(root, overlay)
     const merge = this.recompute(OFFICIAL_ESSENCE_ID)
     return {
@@ -669,6 +677,7 @@ export class EssenceManager {
       essenceId: OFFICIAL_ESSENCE_ID,
       recommended: recommended.length,
       experimental: experimental.length,
+      coreUiForced: enforced.forced,
       status: merge.status,
     }
   }

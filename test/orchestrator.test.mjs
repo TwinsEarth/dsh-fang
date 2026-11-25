@@ -19,6 +19,12 @@ import { MirrorManager } from '../src/lib/mirror.mjs'
 import { readForkSupervisionSettings } from '../src/lib/fork-supervision-settings.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
+test('orchestrator: 关闭浏览器默认走 DSH sessions.flush 的 adapter 桥，而不是空 unsupported', () => {
+  assert.equal(orchestrator.Config({}).forkFlushPath, '/fang/adapter/flush-session')
+  assert.equal(orchestrator.Config({}).diagnosticLogMaxMB, 16)
+  assert.equal(orchestrator.Config({}).diagnosticLogRetentionDays, 7)
+})
+
 test('orchestrator: stale legacy essence bundle is rejected as a fork template', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-stale-essence-'))
   try {
@@ -119,6 +125,13 @@ async function makeAdapterServer(opts = {}) {
       return send(200, {
         ok: true, taskId: 't', role: 'fork', services: { scorer: true, hotReloader: true },
         buffer: { state: 'settled', pending: 0 }, approvals: { pending: 0 }, audit: { records: 3, head: 'abc' },
+        activity: { ok: true, lastActivityAt: Date.now() - 1000, turnRunning: false, signal: 'turn-event', sessionId: 'session-x' },
+      })
+    }
+    if (url.pathname.endsWith('/adapter/activity')) {
+      return send(200, {
+        ok: true, taskId: 't', role: 'fork',
+        activity: { ok: true, lastActivityAt: Date.now() - 1000, turnRunning: false, signal: 'turn-event', sessionId: 'session-x' },
       })
     }
     if (url.pathname.endsWith('/adapter/command')) {
@@ -402,6 +415,8 @@ test('orchestrator: getTaskStatus merges the fork-side adapter status', skipNoRe
     assert.equal(status.adapter.ok, true)
     assert.equal(status.adapterStatus.services.hotReloader, true)
     assert.equal(status.adapterStatus.audit.records, 3)
+    assert.equal(status.activity.turnRunning, false)
+    assert.equal(status.activity.sessionId, 'session-x')
     assert.equal((await svc.getTaskStatus('missing')).error, 'unknown-task')
     cleanup(ctx, dataRoot)
   } finally { await adapter.close() }
@@ -1423,7 +1438,8 @@ test('orchestrator: 启动时加载已有 tasks.json 不触发 scanForkSessions 
 test('orchestrator: resolveCliPath derives the CLI from the current install root', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-cli-'))
   try {
-    const cli = path.join(root, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd')
+    const cliName = process.platform === 'win32' ? 'dsh.cmd' : 'dsh'
+    const cli = path.join(root, 'resources', 'runtime', 'cli', 'bin', cliName)
     fs.mkdirSync(path.dirname(cli), { recursive: true })
     fs.writeFileSync(cli, '@echo off\n', 'utf8')
     assert.equal(

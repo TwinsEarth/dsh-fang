@@ -37,6 +37,15 @@ test('Vault actions use an in-app dialog, not Electron-unsupported window.prompt
   assert.match(client, /\/fang\/api\/vault\/import/)
 })
 
+test('fork card Vault buttons resolve handlers through app scope (scope regression)', () => {
+  // renderForkCard is a top-level function; it must not reference closure-local exportTask/importTask.
+  assert.match(client, /const app = \{[\s\S]{0,900}?exportTask, importTask/)
+  assert.match(client, /onClick: \(\) => void app\.exportTask\(task\)/)
+  assert.match(client, /onClick: \(\) => void app\.importTask\(\)/)
+  assert.doesNotMatch(client, /void exportTask\(task\)/)
+  assert.doesNotMatch(client, /void importTask\(\)/)
+})
+
 test('repair endpoint + service are wired (no new dependency)', () => {
   assert.match(client, /\/fang\/api\/tasks\/repair/)
   assert.match(orchestrator, /async repairTask\(taskId\)/)

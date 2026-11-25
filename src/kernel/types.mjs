@@ -131,7 +131,7 @@ export const AUDIT = {
   RUNTIME_ERROR: 'runtime-error',
 }
 
-export const FANG_VERSION = '3.8.2'
+export const FANG_VERSION = '3.8.4'
 
 /**
  * @typedef {object} ForkInfo
@@ -180,6 +180,8 @@ export const TASK_STATUS = {
 export const ADAPTER_OP = {
   PING: 'ping',
   STATUS: 'status',
+  ACTIVITY: 'activity',
+  FLUSH_SESSION: 'flush-session',
   FLUSH_BUFFER: 'flush-buffer',
   SCORE_PLUGIN: 'score-plugin',
   READ_PLUGIN: 'read-plugin',
@@ -197,6 +199,8 @@ export const ADAPTER_ROUTE = {
   IDENTITY: '/adapter/identity',
   CLIENT_REPORT: '/adapter/client-report',
   STATUS: '/adapter/status',
+  ACTIVITY: '/adapter/activity',
+  FLUSH_SESSION: '/adapter/flush-session',
   APPROVALS: '/adapter/approvals',
   AUDIT: '/adapter/audit',
   COMMAND: '/adapter/command',
@@ -250,6 +254,8 @@ export const ADAPTER_ERROR_STATUS = {
   'not-found': 404,
   'plugin-not-found': 404,
   'session-changed': 409,
+  'session-not-live': 404,
+  'session-flush-failed': 409,
   'state-conflict': 409,
   'not-pending': 409,
   'service-unavailable': 409,

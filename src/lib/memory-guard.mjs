@@ -6,8 +6,12 @@ import { promisify } from 'node:util'
 import os from 'node:os'
 
 const execFileAsync = promisify(execFile)
-const DEFAULT_CACHE_MS = 5000
+// Host memory is checked on a 5s timer; a 10s cache halves PowerShell starts
+// while keeping the critical-threshold reaction within two ticks.
+const DEFAULT_CACHE_MS = 10000
+const DEFAULT_PROCESS_TABLE_CACHE_MS = 0
 let cache = { at: 0, value: null, pending: null }
+const processTableCache = new Map()
 
 function parsePowerShellJson(text) {
   const trimmed = String(text ?? '').trim()
@@ -27,8 +31,10 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
     return { ok: true, supported: false, source: 'non-windows', commitLimitMB: null, commitFreeMB: null, physicalFreeMB: Math.round(os.freemem() / 1048576) }
   }
   const now = Date.now()
-  if (!force && cache.value && now - cache.at < cacheMs) return cache.value
-  if (!force && cache.pending) return cache.pending
+  if (!force && cache.value && now - cache.at < cacheMs) return { ...cache.value, cached: true, cacheAgeMs: now - cache.at }
+  // A forced gate read must join an in-flight sample instead of spawning a
+  // second PowerShell/CIM query in parallel.
+  if (cache.pending) return cache.pending
   const script = [
     '$o = Get-CimInstance Win32_OperatingSystem',
     '$p = [pscustomobject]@{',
@@ -58,11 +64,13 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
         pageFileMB: Number(data.PageFileMB) || 0,
         hasPageFile: Number(data.PageFileMB) > 0,
         at: now,
+        cached: false,
+        cacheAgeMs: 0,
       }
       cache = { at: now, value, pending: null }
       return value
     } catch (error) {
-      const value = { ok: false, supported: true, source: 'powershell', error: String(error?.message ?? error) }
+      const value = { ok: false, supported: true, source: 'powershell', error: String(error?.message ?? error), cached: false, cacheAgeMs: 0 }
       cache = { at: now, value, pending: null }
       return value
     }
@@ -81,31 +89,111 @@ export function evaluateMemoryGuard(memory, { minFreeMB = 4096 } = {}) {
   return { ok: true, commitFreeMB: free, minFreeMB: min, memory }
 }
 
-/** Snapshot all Windows processes into rows; caller filters by PID tree. */
-export async function readProcessTable() {
-  if (process.platform !== 'win32') return { ok: true, supported: false, rows: [] }
-  const script = [
+/** Parse Windows CIM CreationDate (ISO, /Date(ms)/, or numeric epoch) to milliseconds. */
+export function parseProcessCreationDate(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const text = String(value).trim()
+  const wmi = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/.exec(text)
+  if (wmi) return Number(wmi[1])
+  if (/^\d+$/.test(text)) return Number(text)
+  const parsed = Date.parse(text)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function normalizeProcessRow(row) {
+  const creationDate = String(row?.CreationDate ?? '')
+  return {
+    pid: Number(row?.ProcessId),
+    ppid: Number(row?.ParentProcessId),
+    name: String(row?.Name ?? ''),
+    workingSetMB: Math.round((Number(row?.WorkingSetSize) || 0) / 1048576),
+    commitMB: Math.round((Number(row?.PageFileUsage) || 0) / 1048576),
+    commandLine: String(row?.CommandLine ?? ''),
+    creationDate,
+    createdAt: parseProcessCreationDate(row?.CreationDate),
+  }
+}
+
+function processTableKey(detailed) {
+  return detailed ? 'full' : 'lite'
+}
+
+/** Build the PowerShell table query. Lite rows omit identity-only fields. */
+export function buildProcessTableScript({ detailed = true } = {}) {
+  const fields = detailed
+    ? 'ProcessId,ParentProcessId,Name,WorkingSetSize,PageFileUsage,CommandLine,CreationDate'
+    : 'ProcessId,ParentProcessId,Name,WorkingSetSize,PageFileUsage'
+  return [
     'Get-CimInstance Win32_Process |',
-    '  Select-Object ProcessId,ParentProcessId,Name,WorkingSetSize,PageFileUsage,CommandLine |',
+    `  Select-Object ${fields} |`,
+    '  ConvertTo-Json -Compress',
+  ].join('\n')
+}
+
+/**
+ * Snapshot all Windows processes into rows; caller filters by PID tree.
+ * `cacheMs` lets the 15s watchdog reuse one table across ticks; `force` is for
+ * kill/identity paths that must not act on a stale snapshot. Lite tables omit
+ * CommandLine/CreationDate, which are only needed by orphan identity checks.
+ */
+export async function readProcessTable({ detailed = true, cacheMs = DEFAULT_PROCESS_TABLE_CACHE_MS, force = false } = {}) {
+  if (process.platform !== 'win32') return { ok: true, supported: false, rows: [] }
+  const key = processTableKey(detailed)
+  const now = Date.now()
+  let entry = processTableCache.get(key)
+  if (!entry) entry = { at: 0, value: null, pending: null }
+  if (!force && cacheMs > 0 && entry.value && now - entry.at < cacheMs) {
+    return { ...entry.value, cached: true, cacheAgeMs: now - entry.at }
+  }
+  if (!force && entry.pending) return entry.pending
+  const started = Date.now()
+  const script = buildProcessTableScript({ detailed })
+  const run = (async () => {
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+        timeout: 12000, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
+      })
+      let rows = parsePowerShellJson(stdout)
+      if (rows === null) {
+        processTableCache.set(key, { at: entry.at, value: entry.value, pending: null })
+        return { ok: false, supported: true, error: 'process-table-parse-failed', rows: [], costMs: Date.now() - started, cached: false, cacheAgeMs: 0 }
+      }
+      if (!Array.isArray(rows)) rows = [rows]
+      const value = { ok: true, supported: true, rows: rows.map(normalizeProcessRow), costMs: Date.now() - started, cached: false, cacheAgeMs: 0 }
+      processTableCache.set(key, { at: Date.now(), value, pending: null })
+      return value
+    } catch (error) {
+      processTableCache.set(key, { at: entry.at, value: entry.value, pending: null })
+      return { ok: false, supported: true, error: String(error?.message ?? error), rows: [], costMs: Date.now() - started, cached: false, cacheAgeMs: 0 }
+    }
+  })()
+  processTableCache.set(key, { at: entry.at, value: entry.value, pending: run })
+  return run
+}
+
+/** Read one process row, including CreationDate and CommandLine. Windows-only; no table scan. */
+export async function readProcessIdentity(pid) {
+  if (process.platform !== 'win32') return { ok: true, supported: false, row: null }
+  const target = Math.floor(Number(pid))
+  if (!Number.isInteger(target) || target <= 0) return { ok: false, supported: true, error: 'bad-pid', row: null }
+  const script = [
+    `Get-CimInstance Win32_Process -Filter "ProcessId = ${target}" |`,
+    '  Select-Object ProcessId,ParentProcessId,Name,WorkingSetSize,PageFileUsage,CommandLine,CreationDate |',
     '  ConvertTo-Json -Compress',
   ].join('\n')
   try {
     const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-      timeout: 12000, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
+      timeout: 8000, windowsHide: true, maxBuffer: 1024 * 1024,
     })
+    if (!String(stdout ?? '').trim()) return { ok: false, supported: true, error: 'not-found', row: null }
     let rows = parsePowerShellJson(stdout)
-    if (rows === null) return { ok: false, supported: true, error: 'process-table-parse-failed', rows: [] }
-    if (!Array.isArray(rows)) rows = [rows]
-    return { ok: true, supported: true, rows: rows.map((row) => ({
-      pid: Number(row.ProcessId),
-      ppid: Number(row.ParentProcessId),
-      name: String(row.Name ?? ''),
-      workingSetMB: Math.round((Number(row.WorkingSetSize) || 0) / 1048576),
-      commitMB: Math.round((Number(row.PageFileUsage) || 0) / 1048576),
-      commandLine: String(row.CommandLine ?? ''),
-    })) }
+    if (rows === null) return { ok: false, supported: true, error: 'process-identity-parse-failed', row: null }
+    if (Array.isArray(rows)) rows = rows[0]
+    if (!rows || !Number(rows.ProcessId)) return { ok: false, supported: true, error: 'not-found', row: null }
+    return { ok: true, supported: true, row: normalizeProcessRow(rows) }
   } catch (error) {
-    return { ok: false, supported: true, error: String(error?.message ?? error), rows: [] }
+    return { ok: false, supported: true, error: String(error?.message ?? error), row: null }
   }
 }
 

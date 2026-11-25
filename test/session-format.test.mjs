@@ -22,6 +22,7 @@ import {
   encodeWorkspaceKey,
   readBoundedHead,
   readBoundedEvents,
+  readBoundedTailEvents,
   extractSessionTitle,
   TITLE_DEFAULTS,
   redact,
@@ -383,6 +384,77 @@ test('readBoundedEvents: frame budget degrades honestly instead of pretending to
     assert.equal(decoded.framesDecoded, 1)
     assert.ok(decoded.degraded.includes('frame-limit'))
     assert.equal(extractSessionTitle(decoded.events).title, null)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('readBoundedTailEvents: 只读尾部并保留最后一帧的 turn/end', () => {
+  const dir = tmpDir('fang-sf-tail-')
+  try {
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    const frames = [
+      JSON.stringify({ type: 'session', version: 4 }) + '\n',
+      JSON.stringify({ type: 'turn/start', seq: 1, data: { turn: 1 } }) + '\n',
+      JSON.stringify({ type: 'assistant/message', seq: 2, data: { content: [{ type: 'text', text: 'done' }] } }) + '\n',
+      JSON.stringify({ type: 'turn/end', seq: 3, data: { turn: 1 } }) + '\n',
+    ]
+    fs.writeFileSync(file, Buffer.concat(frames.map((fr) => zlib.zstdCompressSync(Buffer.from(fr, 'utf8')))))
+    const decoded = readBoundedTailEvents({ file, fsApi: FSA, zstdDecompressSync: zlib.zstdDecompressSync })
+    assert.equal(decoded.events.at(-1).type, 'turn/end')
+    assert.equal(decoded.events.length, 4)
+    assert.equal(decoded.degraded.includes('compressed-limit'), false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('readBoundedTailEvents: 超过尾部字节预算时仍返回真实最后事件并标记 compressed-limit', () => {
+  const dir = tmpDir('fang-sf-tail-budget-')
+  try {
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    const filler = 'x'.repeat(180)
+    const frames = Array.from({ length: 120 }, (_, i) => JSON.stringify({ type: 'test/frame', seq: i, filler }) + '\n')
+    fs.writeFileSync(file, Buffer.concat(frames.map((fr) => zlib.zstdCompressSync(Buffer.from(fr, 'utf8')))))
+    const decoded = readBoundedTailEvents({ file, maxFrames: 5, maxCompressedBytes: 4096, fsApi: FSA, zstdDecompressSync: zlib.zstdDecompressSync })
+    assert.deepEqual(decoded.events.map((e) => e.seq), [115, 116, 117, 118, 119])
+    assert.equal(decoded.degraded.includes('compressed-limit'), true)
+    assert.equal(decoded.degraded.includes('frame-limit'), true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('readBoundedTailEvents: 多事件帧超出 maxEvents 时保留最新事件而不是最早事件', () => {
+  const dir = tmpDir('fang-sf-tail-events-')
+  try {
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    const frames = Array.from({ length: 10 }, (_, frame) => {
+      const lines = Array.from({ length: 300 }, (_, i) => JSON.stringify({ type: 'test/frame', seq: frame * 300 + i }))
+      return zlib.zstdCompressSync(Buffer.from(lines.join('\n') + '\n', 'utf8'))
+    })
+    fs.writeFileSync(file, Buffer.concat(frames))
+    const decoded = readBoundedTailEvents({ file, maxFrames: 10, maxEvents: 2000, maxCompressedBytes: 64 * 1024, fsApi: FSA, zstdDecompressSync: zlib.zstdDecompressSync })
+    assert.equal(decoded.events.length, 2000)
+    assert.equal(decoded.events[0].seq, 1000)
+    assert.equal(decoded.events.at(-1).seq, 2999)
+    assert.ok(decoded.degraded.includes('event-limit'))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('readBoundedTailEvents: 小预算时只保留最后 maxFrames 帧并标记 frame-limit', () => {
+  const dir = tmpDir('fang-sf-tail-cap-')
+  try {
+    const file = path.join(dir, 'session.v4.jsonl.zstd')
+    const frames = Array.from({ length: 8 }, (_, i) => JSON.stringify({ type: 'test/frame', seq: i }) + '\n')
+    fs.writeFileSync(file, Buffer.concat(frames.map((fr) => zlib.zstdCompressSync(Buffer.from(fr, 'utf8')))))
+    const decoded = readBoundedTailEvents({ file, maxFrames: 2, fsApi: FSA, zstdDecompressSync: zlib.zstdDecompressSync })
+    assert.equal(decoded.events.length, 2)
+    assert.equal(decoded.events[0].seq, 6)
+    assert.equal(decoded.events[1].seq, 7)
+    assert.ok(decoded.degraded.includes('frame-limit'))
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

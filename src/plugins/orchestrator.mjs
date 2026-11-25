@@ -28,7 +28,16 @@ import { ensureInstallSnapshot } from '../lib/install-snapshot.mjs'
 import { exportVault, importVault, readVault } from '../../vault/lib/vault.mjs'
 import { installGlobalRedline } from '../lib/global-redline.mjs'
 import { DEFAULT_FORBIDDEN_ROOTS, DEFAULT_FANG_DATA_ROOT, assertDataPath, isPathInside, workspaceForFork } from '../lib/data-isolation.mjs'
-import { evaluateMemoryGuard, killProcessTree, memoryGuardDefaults, readProcessTable, readSystemMemory, selectProcessTree, sumProcessTree } from '../lib/memory-guard.mjs'
+import { evaluateMemoryGuard, killProcessTree, memoryGuardDefaults, readProcessTable, readProcessIdentity, readSystemMemory, selectProcessTree, sumProcessTree } from '../lib/memory-guard.mjs'
+import { resolveMemoryThresholds } from '../lib/memory-policy.mjs'
+import { hashCommandLine, matchesProcessIdentity } from '../lib/process-identity.mjs'
+import { compactTaskSessions, compactLegacySessions } from '../lib/session-compaction.mjs'
+import { cleanupBrowserCaches, scanDiskHygiene } from '../lib/disk-hygiene.mjs'
+import { cleanupWatchdogFiles, pruneHostCrashHistory } from '../lib/host-housekeeping.mjs'
+import { appendBrowserMetricHistory } from '../lib/browser-metrics.mjs'
+import { readLatestMigrationReport } from '../lib/migration-report.mjs'
+import { DEFAULT_LEGACY_WORKSPACE_ROOTS, mapWorkspacePathForFork, migrateForkWorkspace, prepareImportedSession } from '../lib/workspace-mapping.mjs'
+import { appendJsonlRotated } from '../lib/log-rotation.mjs'
 import { closeManagedBrowser, findBrowserPath, flushManagedBrowser, freePort, isPidAlive, launchManagedBrowser, lowerProcessPriority, sampleManagedBrowser } from '../lib/browser-guard.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
@@ -39,13 +48,17 @@ import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
 import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, VIP_QUOTAS, parsePatchEntries } from '../lib/essence.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
+import { enforceCoreUiEntries } from '../lib/core-ui-plugins.mjs'
 import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
+import { decideIdleClose } from '../lib/fork-activity.mjs'
+import { resolveFlushEndpoint, flushResultFromResponse, flushRequestHeaders, unsavedCloseWarning } from '../lib/fork-flush.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
 import { createBusinessProducers } from '../lib/business-producers.mjs'
 import { createManifestOfficialSource } from '../lib/mirror-official-source.mjs'
 import { clearForkConfigLock } from '../lib/fork-config-lock.mjs'
 import { readForkSupervisionSettings, writeForkSupervisionSettings } from '../lib/fork-supervision-settings.mjs'
+import { readForkMeta, writeForkMeta } from '../lib/fork-supervisor.mjs'
 import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCompatStatus } from '../lib/compat.mjs'
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { openDecisionEventStream } from '../lib/decision-events.mjs'
@@ -76,6 +89,14 @@ import {
   METHODS as CONTRACT_METHODS, CONTRACT_VERSION,
 } from '../contract/index.js'
 import zlib from 'node:zlib'
+
+// Legacy workspace mapping must cover the full known set of shared roots,
+// even when forbiddenDataRoots only names the DS-level paths. Otherwise a fork
+// pointing at E:\DSH (no DS segment) would keep escaping its home.
+function workspaceMigrationRoots(cfg) {
+  const configured = Array.isArray(cfg?.forbiddenDataRoots) ? cfg.forbiddenDataRoots : []
+  return [...new Set([...configured, ...DEFAULT_LEGACY_WORKSPACE_ROOTS])]
+}
 
 /**
  * Commit a promoted directory by copy → digest → directory swap.
@@ -185,6 +206,55 @@ export function isLiveForkForApprovals(_task, status) {
   return status === TASK_STATUS.READY || status === TASK_STATUS.RUNNING
 }
 
+/**
+ * Safe Mode reset gate. This is deliberately pure so a simulated Windows memory
+ * sample can be regression-tested without PowerShell. The caller must pass a
+ * fresh `readSystemMemory({ force: true })` result; the reset path never trusts
+ * a UI checkbox or a cached sample.
+ *
+ * Hard requirements:
+ * - pagefile exists and Win32_PageFileUsage AllocatedBaseSize > 0;
+ * - CommitFree >= HostCritical threshold (not merely the fork-start threshold).
+ */
+export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}) {
+  if (!memory || memory.ok !== true) {
+    return { ok: false, error: 'memory-probe-unavailable', detail: '无法读取系统内存状态，拒绝解除 Safe Mode。' }
+  }
+  if (memory.supported === false) {
+    return { ok: true, skipped: 'unsupported-platform', pageFileMB: 0, commitFreeMB: Number(memory.commitFreeMB) || 0, minFreeMB: 0 }
+  }
+  const pageFileMB = Number(memory.pageFileMB) || 0
+  const commitFreeMB = Number(memory.commitFreeMB) || 0
+  const minFreeMB = Math.max(0, Number(hostCriticalFreeMB) || 0)
+  if (memory.hasPageFile !== true || pageFileMB <= 0) {
+    return {
+      ok: false,
+      error: 'pagefile-missing',
+      pageFileMB,
+      commitFreeMB,
+      minFreeMB,
+      detail: '页面文件缺失/被禁用（Win32_PageFileUsage 无分配）；请先在 Windows 系统属性中启用页面文件并重启，再解除 Safe Mode。',
+    }
+  }
+  if (commitFreeMB < minFreeMB) {
+    return {
+      ok: false,
+      error: 'commit-low',
+      pageFileMB,
+      commitFreeMB,
+      minFreeMB,
+      detail: `Commit 余量 ${commitFreeMB} MB 低于宿主紧急阈值 ${minFreeMB} MB；请先释放内存。`,
+    }
+  }
+  return { ok: true, pageFileMB, commitFreeMB, minFreeMB }
+}
+
+/** Boot-time pagefile precheck: missing/disabled pagefile must force Safe Mode. */
+export function pagefileRequiresSafeMode(memory) {
+  if (!memory || memory.ok !== true || memory.supported === false) return false
+  return memory.hasPageFile !== true || (Number(memory.pageFileMB) || 0) <= 0
+}
+
 export const Config = z.object({
   role: z.union([z.const('mother'), z.const('fork')]).default('mother')
     .description('配置层角色；环境 DSH_FANG_ROLE 优先（forker 派生的分身自动为 fork）'),
@@ -206,12 +276,22 @@ export const Config = z.object({
     .description('宿主最低保留（MB）；低于此值进入 Safe Mode 并隔离'),
   memoryWatchdog: z.boolean().default(true)
     .description('定时采样每个分身的 PID 树/Commit，异常增长时只杀该分身'),
+  memoryAdaptiveThresholds: z.boolean().default(true)
+    .description('按宿主物理内存自动缩放浏览器 Commit/JS heap 与分身杀阈值；关闭后使用下方固定值'),
   memoryWatchIntervalMs: z.number().min(5000).max(600000).default(15000)
     .description('内存看门狗采样间隔（毫秒）'),
+  memoryProcessScanIntervalMs: z.number().min(10000).max(600000).default(30000)
+    .description('全进程表最小采样间隔（毫秒）；中间的 tick 复用缓存表并只做 liveness/CDP 按需检查'),
+  browserCdpSampleIntervalMs: z.number().min(15000).max(600000).default(45000)
+    .description('托管浏览器 CDP heap/DOM/visibility 采样间隔（毫秒）；中间复用上次 CDP 指标'),
   memoryKillCommitMB: z.number().min(128).max(1048576).default(2048)
-    .description('单个分身 PID 树 commit 超过该值（MB）时进入杀进程候选'),
+    .description('固定兜底：单个分身 PID 树 commit 超过该值（MB）才进入杀进程候选；自适应开启时仅无内存探针时使用'),
   memoryGrowCommitMB: z.number().min(64).max(1048576).default(768)
-    .description('相对该分身低点增长超过该值（MB）才杀，避免误杀启动峰值'),
+    .description('固定兜底：相对该分身低点增长超过该值（MB）才杀；自适应开启时按有效杀阈值等比缩放'),
+  diagnosticLogMaxMB: z.number().min(1).max(1024).default(16)
+    .description('browser-samples/memory-samples 单个活动日志上限（MB），超过即轮转'),
+  diagnosticLogRetentionDays: z.number().min(1).max(365).default(7)
+    .description('轮转后的诊断日志保留天数，过期归档自动清理'),
   singleActiveFork: z.boolean().default(true)
     .description('启动新分身时暂停其他运行中的分身，避免同时打开多个 Electron renderer'),
   managedBrowser: z.boolean().default(true)
@@ -221,17 +301,17 @@ export const Config = z.object({
   maxOpenForkBrowsers: z.number().min(1).max(16).default(1)
     .description('同时存活的托管浏览器窗口上限'),
   browserMemoryLimitMB: z.number().min(256).max(1048576).default(2048)
-    .description('单个托管浏览器 PID 树 Commit 上限（MB），超过即关闭'),
+    .description('固定兜底：单个托管浏览器 PID 树 Commit 上限（MB）；自适应开启时按宿主内存计算'),
   browserHeapLimitMB: z.number().min(128).max(1048576).default(1536)
-    .description('托管浏览器 JS heap 上限（MB），超过即关闭'),
+    .description('固定兜底：托管浏览器 JS heap 上限（MB）；自适应开启时按宿主内存计算'),
   gracefulBrowserCloseMs: z.number().min(0).max(30000).default(3000)
     .description('CDP Browser.close 后等待优雅退出的时间；超时才 taskkill'),
   idleCloseOnlyWhenIdle: z.boolean().default(true)
     .description('只关闭确认空闲的 fork 页面；无法确认活跃状态时不自动关'),
   orphanSweepMinutes: z.number().min(0).max(1440).default(5)
     .description('孤儿 fork 进程清理间隔（分钟；0=仅启动时）'),
-  forkFlushPath: z.string().default('')
-    .description('关闭浏览器前调用的 fork 落盘路径（如 /api/session/flush；留空=显式 unsupported）'),
+  forkFlushPath: z.string().default('/fang/adapter/flush-session')
+    .description('关闭浏览器前调用的 fork 会话落盘路径（默认走 Fang adapter 对 DSH 内部 sessions.flush 的桥；留空=显式 unsupported，关闭前标记“未保存强杀”）'),
   forkCommitShareLimit: z.number().min(0.05).max(1).default(0.4)
     .description('fork+browser PID 树 commit 总和占系统 CommitLimit 的上限'),
   browserDomNodeLimit: z.number().min(1000).max(10000000).default(200000)
@@ -242,6 +322,14 @@ export const Config = z.object({
     .description('内存护栏触发后隔离任务，禁止自动重连'),
   safeModeAfterCrash: z.boolean().default(true)
     .description('上次宿主非正常退出时启动 Safe Mode，禁止自动恢复分身'),
+  hostCrashMaxEntries: z.number().min(10).max(1000).default(50)
+    .description('host-crashes.json 保留的最大崩溃条数（超出丢弃最旧条目）'),
+  hostCrashRetentionDays: z.number().min(1).max(365).default(30)
+    .description('host-crashes.json 崩溃条目最长保留天数'),
+  watchdogRetentionDays: z.number().min(1).max(365).default(7)
+    .description('旧 watchdog-<pid>.json 最长保留天数；死亡 PID 文件超期移入回收目录'),
+  watchdogMaxFiles: z.number().min(0).max(200).default(20)
+    .description('旧 watchdog-<pid>.json 最多保留份数；当前宿主文件始终保留'),
   autoRestoreForks: z.boolean().default(false)
     .description('宿主启动时自动恢复上次运行的分身（默认关闭）'),
   motherProfile: z.string().default('')
@@ -283,6 +371,26 @@ export const Config = z.object({
     .description('空闲多少分钟后自动回收任务（0 = 不自终）'),
   archiveStopTimeoutMs: z.number().min(100).max(30000).default(3000)
     .description('归档时等待分身进程真正退出的上限（毫秒）'),
+  sessionCompactEnabled: z.boolean().default(true)
+    .description('归档后自动对超过阈值的大 session.v4 日志做无损重压缩（保留硬链接回滚备份）'),
+  sessionCompactBytes: z.number().min(0).max(1073741824).default(16777216)
+    .description('触发会话日志压缩的最小压缩字节数（默认 16 MiB；0 = 所有多帧日志）'),
+  sessionCompactMaxBytes: z.number().min(1048576).max(1073741824).default(134217728)
+    .description('单文件压缩上限（默认 128 MiB；超过则跳过，避免一次读入过多内存）'),
+  sessionCompactLevel: z.number().min(1).max(19).default(9)
+    .description('zstd 重压缩等级（默认 9；19 更省空间但 CPU/耗时显著更高）'),
+  sessionCompactIntervalMs: z.number().min(0).max(86400000).default(600000)
+    .description('归档任务会话压缩巡检间隔（毫秒；0 = 只在新归档时触发）'),
+  sessionCompactLegacyEnabled: z.boolean().default(true)
+    .description('是否压缩 <dataDir>/sessions/**/legacy 下的迁移历史日志（不压缩活动会话；仍保留硬链接备份）'),
+  diskHygieneEnabled: z.boolean().default(true)
+    .description('是否定期盘点托管浏览器缓存与 Windows 搜索索引大小（只读，不删除）'),
+  diskHygieneIntervalMs: z.number().min(60000).max(86400000).default(1800000)
+    .description('磁盘卫生盘点间隔（毫秒，默认 30 分钟；只读扫描，不产生清理动作）'),
+  browserCacheCleanupEnabled: z.boolean().default(false)
+    .description('归档时是否自动把可重建的浏览器缓存移入回收目录（默认关闭；只移动 Cache/Code Cache 等，不碰登录态）'),
+  browserCacheCleanupMinBytes: z.number().min(0).max(1073741824).default(67108864)
+    .description('触发浏览器缓存清理的最小缓存字节数（默认 64 MiB）'),
   commercial: z.object({
     collaboration: z.boolean().default(false).description('联合开发（需 fangCommercial provider）'),
     git: z.boolean().default(false).description('本地 Git 快照（需 provider）'),
@@ -448,6 +556,8 @@ export function apply(ctx, config) {
   const cfg = { ...Config({}), ...(config ?? {}) }
   const gate = roleGate('orchestrator', { cfgRole: cfg.role, logger: ctx.logger })
   if (!gate.active) return
+  // 部署工具用这个标识区分“仍是本实例”与“同一端口被别的服务占用”。
+  const instanceId = `fang-${gate.role}-${process.pid}-${crypto.randomBytes(6).toString('hex')}`
   // 2026-11-22：宿主 watcher EPERM 不应杀死整个 DSH host。在加载业务插件前安装
   // fs.watch error 降级层（止损；上游仍应修复 watcher error 处理）。
   try {
@@ -459,6 +569,9 @@ export function apply(ctx, config) {
   const role = gate.role
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
+  // P2 #10: migration is performed while the host is stopped; read the latest
+  // report once at boot so the panel can show what was copied/conflicted.
+  const migrationReport = readLatestMigrationReport(layout.fangHome || layout.canonicalFangHome)
   const isolationChecks = [
     ['dataDir', layout.dataDir],
     ['essenceRoot', layout.essenceRoot],
@@ -555,6 +668,9 @@ export function apply(ctx, config) {
       tasks.set(task.taskId, task)
     }
   }
+  // 元主 Web（essence runtime）不是 task，但它的托管浏览器也必须进入
+  // watchdog/慌张清单；否则最后两个 window.open 只能继续回退外部浏览器。
+  const runtimeBrowsers = new Map()
 
   // v3.8.0: host crash latch. A previous host that did not write cleanShutdown
   // means the last run died; enter Safe Mode unless explicitly disabled.
@@ -567,17 +683,35 @@ export function apply(ctx, config) {
   const unclean = Boolean(previousHost && previousHost.clean !== true && Number(previousHost.pid) !== process.pid)
   let safeMode = Boolean(previousSafeMode?.safeMode)
   let safeModeReason = String(previousSafeMode?.reason ?? '')
-  if (unclean) {
-    const now = nowMs()
-    const prior = readJsonFile(hostCrashFile)?.crashes
-    const recent = (Array.isArray(prior) ? prior : []).filter((item) => now - Number(item.at) <= 10 * 60_000)
-    recent.push({ at: now, previousPid: previousHost?.pid ?? null, reason: 'unclean-shutdown' })
-    try { fs.writeFileSync(hostCrashFile, JSON.stringify({ crashes: recent }, null, 2)) } catch { /* best effort */ }
-    // Red line: one crash is context; two crashes within 10 minutes means a loop.
-    if (cfg.safeModeAfterCrash === true && !safeMode && recent.length >= 2) {
-      safeMode = true
-      safeModeReason = 'crash-loop-10m'
-    }
+  const now = nowMs()
+  const crashDoc = readJsonFile(hostCrashFile)
+  const priorCrashes = Array.isArray(crashDoc?.crashes) ? crashDoc.crashes : []
+  const crashHistory = priorCrashes.slice()
+  if (unclean) crashHistory.push({ at: now, previousPid: previousHost?.pid ?? null, reason: 'unclean-shutdown' })
+  const crashPrune = pruneHostCrashHistory(crashHistory, {
+    now,
+    maxEntries: cfg.hostCrashMaxEntries,
+    retentionDays: cfg.hostCrashRetentionDays,
+  })
+  if (unclean || crashPrune.changed) {
+    const pruned = crashPrune.changed
+      ? { at: now, expired: crashPrune.expired, dropped: crashPrune.dropped }
+      : (crashDoc?.pruned ?? null)
+    try {
+      fs.writeFileSync(hostCrashFile, JSON.stringify({
+        crashes: crashPrune.crashes,
+        cap: crashPrune.maxEntries,
+        retentionDays: crashPrune.retentionDays,
+        pruned,
+      }, null, 2))
+    } catch { /* best effort */ }
+  }
+  // Red line: one crash is context; two crashes within 10 minutes means a loop.
+  // The 10-minute loop window is applied to the capped history, not to the whole file.
+  const recent = crashPrune.crashes.filter((item) => now - Number(item.at) <= 10 * 60_000)
+  if (unclean && cfg.safeModeAfterCrash === true && !safeMode && recent.length >= 2) {
+    safeMode = true
+    safeModeReason = 'crash-loop-10m'
   }
   // A fresh host process is an explicit recovery boundary: clear per-task
   // quarantine latches, but keep tokens revoked so the old page cannot reconnect.
@@ -595,7 +729,10 @@ export function apply(ctx, config) {
       quarantineReset += 1
     }
     if (quarantineReset) {
-      try { saveRegistry(layout.tasksFile, [...tasks.values()].map(task => ({ ...task, token: '', url: stripUrlToken(task.url) }))) } catch { /* best effort */ }
+      try { saveRegistry(layout.tasksFile, [...tasks.values()].map(task => ({
+        ...task, token: '', url: stripUrlToken(task.url),
+        browser: task.browser ? { ...task.browser, metricsHistory: undefined } : task.browser,
+      }))) } catch { /* best effort */ }
     }
   }
   const persistSafeMode = () => {
@@ -617,13 +754,70 @@ export function apply(ctx, config) {
   // managed browsers/fork trees if this host is force-killed. It never reads
   // user data and acts only on PIDs written here.
   const watchdogFile = path.join(layout.dataDir, `watchdog-${process.pid}.json`)
+  // Job helper heartbeat: separate from watchdog.json (which only changes on
+  // state transitions) and refreshed on a fixed timer. A frozen host stops
+  // refreshing it; the per-fork helper then terminates the kernel job.
+  const hostHeartbeatFile = path.join(layout.dataDir, `watchdog-${process.pid}.heartbeat`)
+  const writeHostHeartbeat = () => {
+    try {
+      fs.writeFileSync(hostHeartbeatFile, JSON.stringify({ hostPid: process.pid, at: new Date().toISOString() }), 'utf8')
+    } catch { /* best effort: helper also watches the host process */ }
+  }
+  writeHostHeartbeat()
+  const hostHeartbeatTimer = setInterval(writeHostHeartbeat, 15000)
+  hostHeartbeatTimer.unref?.()
+  try {
+    ctx.effect?.(() => () => { clearInterval(hostHeartbeatTimer) })
+  } catch { /* fake ctx in tests */ }
   const writeWatchdog = () => {
     const targets = []
     for (const task of tasks.values()) {
-      if (task.browser?.pid) targets.push({ pid: Number(task.browser.pid), kind: 'browser', taskId: task.taskId })
-      if (task.pid && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)) targets.push({ pid: Number(task.pid), kind: 'fork', taskId: task.taskId })
+      if (task.browser?.pid) {
+        const browser = task.browser
+        targets.push({
+          pid: Number(browser.pid),
+          kind: 'browser',
+          taskId: task.taskId,
+          createdAt: browser.pidIdentity?.startedAt ?? browser.startedAt ?? null,
+          commandLineHash: browser.pidIdentity?.commandLineHash ?? null,
+          tokens: browser.profileDir && Number(browser.port) > 0
+            ? [`--user-data-dir=${browser.profileDir}`, `--remote-debugging-port=${browser.port}`]
+            : [],
+          port: browser.port,
+        })
+      }
+      if (task.pid && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)) {
+        targets.push({
+          pid: Number(task.pid),
+          kind: 'fork',
+          taskId: task.taskId,
+          createdAt: task.pidIdentity?.startedAt ?? task.pidStartedAt ?? null,
+          commandLineHash: task.pidIdentity?.commandLineHash ?? null,
+          tokens: task.profile && Number(task.port) > 0
+            ? [String(task.profile), '--port', String(task.port)]
+            : [],
+          profile: task.profile,
+          port: task.port,
+        })
+      }
     }
-    try { fs.writeFileSync(watchdogFile, JSON.stringify({ hostPid: process.pid, clean: false, at: new Date().toISOString(), targets }, null, 2)) } catch { /* best effort */ }
+    for (const runtime of runtimeBrowsers.values()) {
+      const browser = runtime.browser
+      if (!browser?.pid) continue
+      targets.push({
+        pid: Number(browser.pid),
+        kind: 'browser',
+        taskId: runtime.taskId,
+        runtime: true,
+        createdAt: browser.pidIdentity?.startedAt ?? browser.startedAt ?? null,
+        commandLineHash: browser.pidIdentity?.commandLineHash ?? null,
+        tokens: browser.profileDir && Number(browser.port) > 0
+          ? [`--user-data-dir=${browser.profileDir}`, `--remote-debugging-port=${browser.port}`]
+          : [],
+        port: browser.port,
+      })
+    }
+    try { fs.writeFileSync(watchdogFile, JSON.stringify({ hostPid: process.pid, hostStartedAt: Date.now() - Math.round(process.uptime() * 1000), clean: false, at: new Date().toISOString(), heartbeatFile: hostHeartbeatFile, targets }, null, 2)) } catch { /* best effort */ }
   }
   writeWatchdog()
   const testLike = Boolean(process.env.NODE_TEST_CONTEXT) || process.env.DSH_FANG_E2E === '1' || /(?:test|e2e)/i.test(String(process.argv[1] ?? ''))
@@ -753,11 +947,75 @@ export function apply(ctx, config) {
       ok: auditFailures === 0 && (auditorStatus === null || auditorStatus.ok !== false),
     }
   }
+  // P0: existing fork homes may still point at the shared E:\DSH\DS tree.
+  // Migrate them once at startup (metadata + Fang-owned session dirs only) so
+  // an old workspace is not reused by the next fork merely because it was
+  // created before this fix. Idempotent; failures are audited, never fatal.
+  const startupWorkspaceMigrations = []
+  {
+    const homes = new Set()
+    for (const task of tasks.values()) {
+      const home = String(task?.homeDir ?? '').trim()
+      if (home) homes.add(home)
+    }
+    try {
+      for (const entry of fs.readdirSync(layout.forkHomesDir, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.name.startsWith('.')) homes.add(path.join(layout.forkHomesDir, entry.name))
+      }
+    } catch { /* first boot has no fork homes */ }
+    for (const home of homes) {
+      if (!exists(path.join(home, 'storages', 'workspace.json'))) continue
+      let result
+      try {
+        result = migrateForkWorkspace(home, { roots: workspaceMigrationRoots(cfg) })
+      } catch (error) {
+        result = { ok: false, error: String(error?.message ?? error), changed: false, mappings: [], moved: [], conflicts: [] }
+      }
+      if (result.changed || (result.conflicts?.length ?? 0) > 0 || result.ok === false) {
+        startupWorkspaceMigrations.push({ home, ...result })
+        try {
+          audit('fork-workspace-migrated-startup', {
+            home,
+            changed: result.changed === true,
+            mappings: result.mappings?.length ?? 0,
+            moved: result.moved?.length ?? 0,
+            conflicts: result.conflicts?.slice(0, 5) ?? [],
+            error: result.error ?? null,
+          })
+        } catch { /* audit optional */ }
+      }
+    }
+  }
+
+  // P2#4: every host boot creates watchdog-<pid>.json. Dead PID files are
+  // bounded here (retention + count) and moved to the same-volume recycle
+  // directory instead of being silently deleted.
+  try {
+    const watchdogCleanup = cleanupWatchdogFiles({
+      dataDir: layout.dataDir,
+      currentPid: process.pid,
+      maxFiles: cfg.watchdogMaxFiles,
+      retentionDays: cfg.watchdogRetentionDays,
+      recycleDir: path.join(layout.dataDir, 'recycle', 'watchdog'),
+      isPidAlive,
+    })
+    if (watchdogCleanup.moved > 0 || watchdogCleanup.errors.length > 0) {
+      audit('watchdog-files-pruned', {
+        moved: watchdogCleanup.moved,
+        kept: watchdogCleanup.kept,
+        recycleDir: watchdogCleanup.recycleDir,
+        errors: watchdogCleanup.errors.slice(0, 10),
+      })
+    }
+  } catch (error) {
+    audit('watchdog-files-pruned', { moved: 0, error: String(error?.message ?? error).slice(0, 300) })
+  }
   const persist = () => {
     try {
       // v3.0.5/B4：tasks.json 不落 token，URL 也不带 ?token=（打开时走 open-url 临时下发）
       saveRegistry(layout.tasksFile, [...tasks.values()].map(task => ({
         ...task, token: '', url: stripUrlToken(task.url),
+        browser: task.browser ? { ...task.browser, metricsHistory: undefined } : task.browser,
       })))
     } catch { /* best effort */ }
   }
@@ -765,16 +1023,206 @@ export function apply(ctx, config) {
 
   /** 2026-11-24: commit-memory guard before any new renderer/spawn. */
   let pagefileWarned = false
+  let memorySnapshot = null
+  // Last successful capacity keeps adaptive limits stable when a later probe
+  // fails; falling back to the fixed 2 GB would loosen an 8 GB host's limits.
+  let lastGoodMemory = null
+  const rememberMemory = (memory) => {
+    if (!memory || typeof memory !== 'object') return memory
+    memorySnapshot = {
+      ok: memory.ok === true,
+      supported: memory.supported !== false,
+      source: memory.source ?? null,
+      commitLimitMB: Number(memory.commitLimitMB) || 0,
+      commitFreeMB: Number(memory.commitFreeMB) || 0,
+      physicalTotalMB: Number(memory.physicalTotalMB) || 0,
+      physicalFreeMB: Number(memory.physicalFreeMB) || 0,
+      pageFileMB: Number(memory.pageFileMB) || 0,
+      hasPageFile: memory.hasPageFile === true || Number(memory.pageFileMB) > 0,
+      checkedAt: nowMs(),
+      cached: memory.cached === true,
+      error: memory.error ?? null,
+    }
+    if (memorySnapshot.ok === true && (memorySnapshot.physicalTotalMB > 0 || memorySnapshot.commitLimitMB > 0)) {
+      lastGoodMemory = memorySnapshot
+    }
+    return memory
+  }
+  const notePagefile = (memory, action) => {
+    if (memory?.ok === true && (memory.hasPageFile === false || Number(memory.pageFileMB) <= 0) && !pagefileWarned) {
+      pagefileWarned = true
+      audit('pagefile-missing', { action, pageFileMB: Number(memory.pageFileMB) || 0, commitLimitMB: memory.commitLimitMB, commitFreeMB: memory.commitFreeMB })
+    }
+  }
+  /** Effective limits for this host; fixed values remain the no-probe fallback. */
+  const memoryPolicySnapshot = () => ({
+    ...resolveMemoryThresholds(cfg, memorySnapshot?.ok === true ? memorySnapshot : lastGoodMemory),
+    hostCriticalFreeMB: Number(cfg.hostCriticalFreeMB),
+    memoryMinFreeMB: Number(cfg.memoryMinFreeMB),
+  })
+  // Boot probe: the banner must be visible before the first gate/host tick even
+  // when every fork is idle. A failed probe leaves memorySnapshot=null and the
+  // UI stays silent instead of inventing a warning.
+  //
+  // Boot pagefile precheck: a missing/disabled page file is a system-level
+  // precondition that Fang cannot repair from inside the plugin. Force Safe Mode
+  // before any autostart can spawn a DSH fork; otherwise the next boot can hit
+  // the same Windows commit/read failure before the Fang watchdog is loaded.
+  let bootPagefileGate = Promise.resolve({ ok: true, skipped: 'non-windows' })
+  if (process.platform === 'win32') {
+    bootPagefileGate = (async () => {
+      let memory
+      try {
+        memory = rememberMemory(await readSystemMemory({ force: true }))
+      } catch (error) {
+        audit('safe-mode-pagefile-probe-failed', { action: 'boot', detail: String(error?.message ?? error).slice(0, 300) })
+        return { ok: false, error: 'memory-probe-threw' }
+      }
+      notePagefile(memory, 'boot')
+      if (pagefileRequiresSafeMode(memory)) {
+        const nextReason = safeMode && safeModeReason ? `${safeModeReason}+pagefile-missing` : 'pagefile-missing'
+        safeMode = true
+        safeModeReason = nextReason
+        persistSafeMode()
+        audit('safe-mode-pagefile-missing', {
+          action: 'boot',
+          pageFileMB: Number(memory.pageFileMB) || 0,
+          commitLimitMB: memory.commitLimitMB,
+          commitFreeMB: memory.commitFreeMB,
+          hasPageFile: memory.hasPageFile,
+        })
+        return { ok: true, safeMode: true, reason: nextReason, pageFileMB: Number(memory.pageFileMB) || 0 }
+      }
+      return { ok: true, safeMode: false, pageFileMB: Number(memory.pageFileMB) || 0 }
+    })()
+  }
   const memoryGate = async (action) => {
     if (cfg.memoryGuard !== true) return { ok: true, skipped: 'disabled' }
-    const memory = await readSystemMemory()
-    if (memory.ok === true && memory.hasPageFile === false && !pagefileWarned) {
-      pagefileWarned = true
-      audit('pagefile-missing', { action, commitLimitMB: memory.commitLimitMB, commitFreeMB: memory.commitFreeMB })
-    }
+    const memory = rememberMemory(await readSystemMemory({ force: true }))
+    notePagefile(memory, action)
     const decision = evaluateMemoryGuard(memory, { minFreeMB: cfg.memoryMinFreeMB })
     if (decision.ok !== true) audit('fork-memory-low', { action, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
     return decision
+  }
+
+  let sessionCompactBusy = false
+  let sessionCompactSnapshot = null
+  const compactArchivedTaskSessions = (task) => {
+    if (cfg.sessionCompactEnabled !== true) return { ok: true, skipped: 'disabled' }
+    if (!task || task.status !== TASK_STATUS.ARCHIVED || !task.homeDir || sessionCompactBusy) {
+      return { ok: true, skipped: sessionCompactBusy ? 'busy' : 'not-archived' }
+    }
+    sessionCompactBusy = true
+    try {
+      const result = compactTaskSessions(task.homeDir, {
+        minBytes: cfg.sessionCompactBytes,
+        maxBytes: cfg.sessionCompactMaxBytes,
+        level: cfg.sessionCompactLevel,
+      })
+      sessionCompactSnapshot = {
+        at: nowMs(), taskId: task.taskId,
+        candidates: result.candidates, compacted: result.compacted,
+        skipped: result.skipped, failed: result.failed, savedBytes: result.savedBytes,
+      }
+      if (result.compacted > 0) {
+        audit('session-compacted', sessionCompactSnapshot)
+      }
+      if (result.failed > 0) {
+        audit('session-compact-failed', {
+          ...sessionCompactSnapshot,
+          errors: result.results.filter((row) => row.ok !== true).slice(0, 5).map((row) => row.error),
+        })
+      }
+      return result
+    } catch (error) {
+      audit('session-compact-failed', { taskId: task.taskId, error: String(error?.message ?? error) })
+      return { ok: false, error: String(error?.message ?? error) }
+    } finally {
+      sessionCompactBusy = false
+    }
+  }
+  const sessionCompactTick = async () => {
+    if (cfg.sessionCompactEnabled !== true || Number(cfg.sessionCompactIntervalMs) <= 0 || sessionCompactBusy) return
+    for (const task of tasks.values()) {
+      if (task.status !== TASK_STATUS.ARCHIVED) continue
+      const result = compactArchivedTaskSessions(task)
+      if (result.compacted > 0 || result.failed > 0) {
+        // Keep the loop responsive after a potentially slow zstd recompression.
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+    }
+    if (cfg.sessionCompactLegacyEnabled === true && !sessionCompactBusy) {
+      sessionCompactBusy = true
+      try {
+        const result = compactLegacySessions(layout.dataDir, {
+          minBytes: cfg.sessionCompactBytes,
+          maxBytes: cfg.sessionCompactMaxBytes,
+          level: cfg.sessionCompactLevel,
+        })
+        sessionCompactSnapshot = {
+          at: nowMs(), scope: 'legacy',
+          candidates: result.candidates, compacted: result.compacted,
+          skipped: result.skipped, failed: result.failed, savedBytes: result.savedBytes,
+        }
+        if (result.compacted > 0) audit('session-compacted-legacy', sessionCompactSnapshot)
+        if (result.failed > 0) audit('session-compact-failed', { ...sessionCompactSnapshot, scope: 'legacy' })
+      } catch (error) {
+        audit('session-compact-failed', { scope: 'legacy', error: String(error?.message ?? error) })
+      } finally {
+        sessionCompactBusy = false
+      }
+    }
+  }
+
+  let diskHygieneBusy = false
+  let diskHygieneSnapshot = null
+  let diskHygieneAt = 0
+  const refreshDiskHygiene = (force = false) => {
+    if (cfg.diskHygieneEnabled !== true) return diskHygieneSnapshot
+    if (diskHygieneBusy) return diskHygieneSnapshot
+    if (!force && diskHygieneSnapshot && nowMs() - diskHygieneAt < Number(cfg.diskHygieneIntervalMs)) return diskHygieneSnapshot
+    diskHygieneBusy = true
+    try {
+      const homes = [...tasks.values()]
+        .filter((task) => task?.homeDir)
+        .map((task) => ({ taskId: task.taskId, homeDir: task.homeDir, status: task.status }))
+      const report = scanDiskHygiene({ taskHomes: homes })
+      diskHygieneSnapshot = {
+        ...report,
+        summary: {
+          browserProfiles: report.browserProfiles.length,
+          browserBytes: report.browserProfiles.reduce((sum, row) => sum + Number(row.bytes || 0), 0),
+          browserCacheBytes: report.browserCacheBytes,
+          searchIndexReadable: report.searchIndex.some((row) => row.readable === true),
+        },
+      }
+      diskHygieneAt = nowMs()
+      return diskHygieneSnapshot
+    } finally {
+      diskHygieneBusy = false
+    }
+  }
+  const browserCacheCleanup = (task) => {
+    if (!task || task.status !== TASK_STATUS.ARCHIVED || !task.homeDir) return { ok: false, error: 'not-archived' }
+    const result = cleanupBrowserCaches(task.homeDir, {
+      taskId: task.taskId,
+      // Same-volume recycle: the browser profile may live on D: while dataDir
+      // lives on E:. A cross-volume rename would fail, so keep the rollback
+      // copy inside the task home (never in sessions/, never silently deleted).
+      recycleDir: path.join(task.homeDir, '.fang-recycle', 'browser-cache'),
+      confirm: true,
+      minBytes: cfg.browserCacheCleanupMinBytes,
+    })
+    audit('browser-cache-cleanup', {
+      taskId: task.taskId,
+      ok: result.ok === true,
+      moved: result.moved ?? 0,
+      bytes: result.bytes ?? 0,
+      recycleDir: result.recycleDir ?? null,
+      errors: Array.isArray(result.results) ? result.results.filter((row) => row.ok !== true).length : 0,
+    })
+    if (result.ok) refreshDiskHygiene(true)
+    return result
   }
 
   /** Single-active-fork policy: stop other running forks before starting/opening one. */
@@ -795,6 +1243,7 @@ export function apply(ctx, config) {
       task.url = null
       task.adapter = { ok: false, error: 'auto-paused-memory' }
       task.memoryPaused = { reason, at: nowMs() }
+      syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'auto-paused-memory' })
       paused.push(id)
       audit('fork-auto-paused', { taskId: id, reason, by: currentId })
     }
@@ -806,15 +1255,25 @@ export function apply(ctx, config) {
 
   const flushForkSession = async (task) => {
     const flushPath = String(cfg.forkFlushPath || '').trim()
-    if (!flushPath) return { ok: false, error: 'unsupported' }
+    if (!flushPath) return { ok: false, error: 'unsupported', saved: false }
     const opened = forker()?.openUrl?.(task.taskId)
-    if (!opened?.url) return { ok: false, error: 'fork-url-unavailable' }
+    if (!opened?.url) return { ok: false, error: 'fork-url-unavailable', saved: false }
     try {
-      const endpoint = new URL(flushPath, opened.url)
-      const response = await fetch(endpoint, { method: 'POST', signal: AbortSignal.timeout(3000) })
-      return { ok: response.ok, status: response.status, path: flushPath }
+      const endpoint = resolveFlushEndpoint(opened.url, flushPath)
+      const token = String(forker()?.getToken?.(task.taskId) ?? '')
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: flushRequestHeaders(token),
+        signal: AbortSignal.timeout(5000),
+      })
+      let body = null
+      try {
+        const text = await response.text()
+        body = text.trim() ? JSON.parse(text) : null
+      } catch { /* non-JSON or empty body: saved stays unconfirmed */ }
+      return { ...flushResultFromResponse(response, body), path: flushPath }
     } catch (error) {
-      return { ok: false, error: String(error?.message ?? error), path: flushPath }
+      return { ok: false, error: String(error?.message ?? error), path: flushPath, saved: false }
     }
   }
 
@@ -822,26 +1281,56 @@ export function apply(ctx, config) {
     if (!task?.browser?.pid) return { ok: true, skipped: 'no-browser' }
     const browser = task.browser
     const forkFlush = await flushForkSession(task)
-    try { await flushManagedBrowser(browser.port) } catch { /* best effort */ }
+    const sessionSaved = forkFlush.ok === true && forkFlush.saved === true
+    const flushView = {
+      ok: forkFlush.ok === true,
+      status: forkFlush.status ?? null,
+      path: forkFlush.path ?? null,
+      saved: forkFlush.saved === true,
+      error: forkFlush.error ?? null,
+      code: forkFlush.response?.code ?? null,
+      detail: forkFlush.response?.error ?? null,
+      flushed: Array.isArray(forkFlush.response?.flushed) ? forkFlush.response.flushed.slice(0, 20) : [],
+      failed: Array.isArray(forkFlush.response?.failed) ? forkFlush.response.failed.slice(0, 20) : [],
+    }
+    // The warning is written before the force-close so the operator can see why the
+    // browser session is being killed without a confirmed durable checkpoint.
+    const closeWarning = unsavedCloseWarning({ saved: sessionSaved, forkFlush: flushView, at: nowMs() })
+    task.closeWarning = closeWarning
+    if (closeWarning) {
+      try { bus.emit('fang/browser-unsaved-close', { taskId: task.taskId, reason, warning: closeWarning.message, forkFlush: flushView }) } catch { /* bus optional */ }
+      audit('fork-browser-unsaved-close', { taskId: task.taskId, reason, warning: closeWarning.message, forkFlush: flushView })
+    }
+    let pageFlush = null
+    try { pageFlush = await flushManagedBrowser(browser.port) } catch (error) { pageFlush = { ok: false, error: String(error?.message ?? error) } }
     const result = await closeManagedBrowser({ pid: browser.pid, port: browser.port, graceMs: cfg.gracefulBrowserCloseMs })
     task.browser = null
-    task.browserClosed = { at: nowMs(), reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true }
+    task.browserClosed = {
+      at: nowMs(), reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true,
+      pageFlush: pageFlush ?? null,
+      forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null,
+    }
     task.memoryGuard = {
       reason,
       at: nowMs(),
       pid: browser.pid,
       metrics: browser.last ?? null,
       graceful: result.graceful === true,
-      forkFlush,
-      saved: result.graceful === true,
+      browserSaved: result.graceful === true,
+      pageFlush: pageFlush ?? null,
+      sessionSaved,
+      forkFlush: flushView,
+      saved: result.graceful === true && sessionSaved,
+      unsavedForceClose: !sessionSaved,
+      warning: closeWarning?.message ?? null,
     }
     writeWatchdog()
     try {
-      fs.appendFileSync(path.join(layout.dataDir, 'browser-events.jsonl'), JSON.stringify({ taskId: task.taskId, at: nowMs(), event: 'closed', reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, forkFlush, metrics: browser.last ?? null }) + '\n')
+      fs.appendFileSync(path.join(layout.dataDir, 'browser-events.jsonl'), JSON.stringify({ taskId: task.taskId, at: nowMs(), event: 'closed', reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null, metrics: browser.last ?? null }) + '\n')
     } catch { /* diagnostics only */ }
-    audit('fork-browser-closed', { taskId: task.taskId, reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, forkFlush })
+    audit('fork-browser-closed', { taskId: task.taskId, reason, pid: browser.pid, ok: result.ok, graceful: result.graceful === true, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null })
     persist()
-    return result
+    return { ...result, pageFlush, forkFlush: flushView, saved: sessionSaved, warning: closeWarning?.message ?? null }
   }
 
   const quarantineTask = async (task, reason, { closeBrowser = true, stopFork = true } = {}) => {
@@ -857,18 +1346,21 @@ export function apply(ctx, config) {
     task.token = ''
     task.adapter = { ok: false, error: 'fork-quarantined' }
     task.quarantined = { reason, at: nowMs(), tokenRevoked: true }
+    syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'fork-quarantined' })
     audit('fork-quarantined', { taskId: task.taskId, reason })
     persist()
     return { ok: true, quarantined: true, taskId: task.taskId, reason }
   }
 
   const launchTaskBrowser = async (task, url) => {
-    if (cfg.managedBrowser !== true) return { ok: true, managed: false, url }
+    if (cfg.managedBrowser !== true) return { ok: false, error: 'managed-browser-disabled', managed: false, url }
     if (!task || !url) return { ok: false, error: 'browser-url-required' }
     if (task.browser?.pid && isPidAlive(task.browser.pid)) {
+      task.closeWarning = null
+      task.memoryGuard = null
       return { ok: true, managed: true, pid: task.browser.pid, port: task.browser.port, reused: true }
     }
-    const liveBrowsers = [...tasks.values()].filter((item) => item.browser?.pid && isPidAlive(item.browser.pid))
+    const liveBrowsers = [...tasks.values(), ...runtimeBrowsers.values()].filter((item) => item.browser?.pid && isPidAlive(item.browser.pid))
     const max = Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
     let liveCount = liveBrowsers.length
     for (const other of liveBrowsers) {
@@ -888,14 +1380,71 @@ export function apply(ctx, config) {
       audit('fork-browser-launch-failed', { taskId: task.taskId, error: launched.error, pid: launched.pid ?? null })
       return launched
     }
+    const priority = launched.priority && typeof launched.priority === 'object' ? {
+      ok: launched.priority.ok === true,
+      partial: launched.priority.partial === true,
+      tree: launched.priority.tree === true,
+      rootOnly: launched.priority.rootOnly === true,
+      count: Number(launched.priority.count) || 0,
+      lowered: Number(launched.priority.lowered) || 0,
+      changed: Number(launched.priority.changed) || 0,
+      alreadyLow: Number(launched.priority.alreadyLow) || 0,
+      missing: Number(launched.priority.missing) || 0,
+      failed: Number(launched.priority.failed) || 0,
+      notLowered: Number(launched.priority.notLowered) || 0,
+      error: launched.priority.error ?? null,
+    } : null
     task.browser = {
       pid: launched.pid, port: launched.port, profileDir, logFile: launched.logFile,
-      crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null,
+      crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null, priority,
     }
+    // A fresh browser session invalidates the previous close's unsaved warning.
+    task.closeWarning = null
+    task.memoryGuard = null
     writeWatchdog()
     persist()
+    scheduleBrowserProcessIdentity(task)
     audit('fork-browser-opened', { taskId: task.taskId, pid: launched.pid, port: launched.port })
+    if (priority) {
+      const event = !priority.ok ? 'fork-browser-priority-failed' : priority.partial ? 'fork-browser-priority-partial' : 'fork-browser-priority'
+      audit(event, { taskId: task.taskId, ...priority })
+    }
     return { ok: true, managed: true, pid: launched.pid, port: launched.port }
+  }
+
+  /** Managed browser for the essence runtime (元主 Web), which is not a task. */
+  const closeRuntimeManagedBrowser = async (essenceId, reason = 'essence-runtime-browser-close') => {
+    const forkId = runtimeForkId(essenceId)
+    const runtime = runtimeBrowsers.get(forkId)
+    if (!runtime) return { ok: true, skipped: 'no-runtime-browser' }
+    const out = await closeTaskBrowser(runtime, reason)
+    runtimeBrowsers.delete(forkId)
+    try { persist(); writeWatchdog() } catch { /* best effort */ }
+    audit('essence-runtime-browser-closed', { essenceId: String(essenceId), forkId, reason, ok: out.ok === true })
+    return out
+  }
+
+  const openRuntimeManagedBrowser = async (essenceId, url) => {
+    const id = String(essenceId ?? '').trim()
+    const forkId = runtimeForkId(id)
+    const live = forker()?.status?.(forkId) ?? null
+    if (!live?.running || !live.homeDir) return { ok: false, error: 'not-running' }
+    // A runtime URL carries a fresh token; reuse of the previous page would keep
+    // the old token. Close the old managed page first, then launch the new URL.
+    if (runtimeBrowsers.get(forkId)?.browser?.pid) {
+      await closeRuntimeManagedBrowser(id, 'runtime-url-refresh')
+    }
+    const runtime = runtimeBrowsers.get(forkId) ?? { taskId: forkId, homeDir: String(live.homeDir), runtime: true, essenceId: id }
+    runtimeBrowsers.set(forkId, runtime)
+    const out = await launchTaskBrowser(runtime, url)
+    if (out.ok === true) {
+      audit('essence-runtime-browser-opened', { essenceId: id, forkId, pid: out.pid ?? null, port: out.port ?? null, reused: out.reused === true })
+      try { writeWatchdog() } catch { /* best effort */ }
+    } else {
+      runtimeBrowsers.delete(forkId)
+      audit('essence-runtime-browser-refused', { essenceId: id, forkId, error: out.error ?? 'browser-open-failed' })
+    }
+    return out
   }
 
   let hostPanic = false
@@ -907,6 +1456,10 @@ export function apply(ctx, config) {
       for (const task of tasks.values()) {
         if (task.browser?.pid) await closeTaskBrowser(task, `host-panic:${reason}`)
       }
+      for (const runtime of [...runtimeBrowsers.values()]) {
+        if (runtime.browser?.pid) await closeTaskBrowser(runtime, `host-panic:${reason}`)
+      }
+      runtimeBrowsers.clear()
       for (const task of tasks.values()) {
         if (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING) {
           await quarantineTask(task, `host-panic:${reason}`, { closeBrowser: false })
@@ -925,6 +1478,11 @@ export function apply(ctx, config) {
     }
   }
 
+  const diagnosticLogOptions = () => ({
+    maxBytes: Number(cfg.diagnosticLogMaxMB) * 1024 * 1024,
+    retentionDays: Number(cfg.diagnosticLogRetentionDays),
+  })
+
   const recordForkMemory = async (task, rootPid, table) => {
     const tree = sumProcessTree(selectProcessTree(table.rows, rootPid))
     if (!tree.count) return null
@@ -933,12 +1491,13 @@ export function apply(ctx, config) {
     if (list.length > 40) list.splice(0, list.length - 40)
     memorySamples.set(task.taskId, list)
     try {
-      fs.appendFileSync(path.join(layout.dataDir, 'memory-samples.jsonl'), JSON.stringify({ taskId: task.taskId, at: nowMs(), ...tree }) + '\n')
+      appendJsonlRotated(path.join(layout.dataDir, 'memory-samples.jsonl'), { taskId: task.taskId, at: nowMs(), ...tree }, diagnosticLogOptions())
     } catch { /* diagnostics only */ }
     const low = Math.min(...list.map((sample) => Number(sample.commitMB) || 0))
     const current = Number(tree.commitMB) || 0
-    const overKill = current >= Number(cfg.memoryKillCommitMB)
-    const overGrowth = current - low >= Number(cfg.memoryGrowCommitMB)
+    const limits = memoryPolicySnapshot()
+    const overKill = current >= Number(limits.memoryKillCommitMB)
+    const overGrowth = current - low >= Number(limits.memoryGrowCommitMB)
     if (overKill && overGrowth) {
       try { forker()?.stop?.(task.taskId) } catch { /* best effort */ }
       try { await killProcessTree(rootPid) } catch { /* PID may already be gone */ }
@@ -947,24 +1506,58 @@ export function apply(ctx, config) {
       task.port = null
       task.url = null
       task.adapter = { ok: false, error: 'memory-watchdog-killed' }
-      task.memoryKill = { at: nowMs(), commitMB: current, lowMB: low, pids: tree.pids }
-      audit('fork-memory-killed', { taskId: task.taskId, commitMB: current, lowMB: low, pids: tree.pids })
+      task.memoryKill = { at: nowMs(), commitMB: current, lowMB: low, limitMB: limits.memoryKillCommitMB, growMB: limits.memoryGrowCommitMB, source: limits.source, pids: tree.pids }
+      audit('fork-memory-killed', { taskId: task.taskId, commitMB: current, lowMB: low, limitMB: limits.memoryKillCommitMB, growMB: limits.memoryGrowCommitMB, source: limits.source, pids: tree.pids })
       persist()
       return { ...tree, killed: true }
     }
     return tree
   }
 
-  const taskIdleForClose = (task) => {
-    const live = forker()?.status?.(task.taskId)
-    if (!live?.running) return true
-    if (task.adapter?.busy === true) return false
-    // Conservative: without an explicit idle signal, never auto-close a live fork page.
-    return task.adapter?.idle === true
+  const forkActivityCache = new Map()
+  async function fetchTaskActivity(task) {
+    const cached = forkActivityCache.get(task.taskId)
+    if (cached && nowMs() - Number(cached.fetchedAt) < 5000) return cached
+    try {
+      const client = await remoteFor(task)
+      if (!client || typeof client.activity !== 'function') {
+        const value = { ok: false, error: 'activity-endpoint-unavailable', fetchedAt: nowMs() }
+        forkActivityCache.set(task.taskId, value)
+        return value
+      }
+      let res = null
+      try { res = await client.activity() } catch (e) { res = { ok: false, error: String(e?.message ?? e) } }
+      const data = res?.ok === true ? (res.data?.activity ?? res.data ?? null) : null
+      const value = data && typeof data === 'object'
+        ? { ...data, fetchedAt: nowMs(), remoteOk: res.ok === true }
+        : { ok: false, error: res?.status === 404 ? 'activity-endpoint-unavailable' : (res?.error ?? res?.kind ?? 'activity-unavailable'), fetchedAt: nowMs() }
+      forkActivityCache.set(task.taskId, value)
+      return value
+    } catch (e) {
+      const value = { ok: false, error: 'activity-fetch-failed', detail: String(e?.message ?? e), fetchedAt: nowMs() }
+      forkActivityCache.set(task.taskId, value)
+      return value
+    }
   }
 
-  const browserWatchdogTick = async (table) => {
+  async function taskIdleForClose(task, { hiddenSince = 0, now = nowMs() } = {}) {
+    const live = forker()?.status?.(task.taskId)
+    if (!live?.running) return { close: true, reason: 'fork-not-running', warn: false }
+    if (task.adapter?.busy === true) return { close: false, reason: 'adapter-busy', warn: false }
+    const activity = await fetchTaskActivity(task)
+    return decideIdleClose(activity, {
+      hiddenSince,
+      now,
+      idleMinutes: cfg.autoCloseIdleMinutes,
+      onlyWhenIdle: cfg.idleCloseOnlyWhenIdle,
+      busy: task.adapter?.busy === true,
+    })
+  }
+
+  const browserWatchdogTick = async (table, { freshTable = true } = {}) => {
     if (cfg.managedBrowser !== true || process.platform !== 'win32') return
+    const now = nowMs()
+    const cdpIntervalMs = Math.max(15000, Number(cfg.browserCdpSampleIntervalMs) || 45000)
     for (const task of tasks.values()) {
       const browser = task.browser
       if (!browser?.pid) continue
@@ -975,33 +1568,111 @@ export function apply(ctx, config) {
         persist()
         continue
       }
-      const tree = sumProcessTree(selectProcessTree(table.rows, browser.pid))
-      const sample = await sampleManagedBrowser(browser.port)
-      const nodes = Number(sample?.nodes) || 0
-      const heapMB = Math.round((Number(sample?.heapBytes) || 0) / 1048576)
-      browser.last = { at: nowMs(), ...tree, nodes, heapMB, visibility: sample?.visibility ?? 'unknown', documents: Number(sample?.documents) || 0, listeners: Number(sample?.listeners) || 0 }
+      let cdpAt = Number(browser.cdpAt) || 0
+      const cdpDue = !cdpAt || now - cdpAt >= cdpIntervalMs
+      // On cached-table ticks, only browsers whose CDP window elapsed need work.
+      if (!freshTable && !cdpDue) continue
+      const tree = freshTable
+        ? sumProcessTree(selectProcessTree(table.rows, browser.pid))
+        : {
+            pids: Array.isArray(browser.last?.pids) ? browser.last.pids : [],
+            count: Number(browser.last?.count) || 0,
+            workingSetMB: Number(browser.last?.workingSetMB) || 0,
+            commitMB: Number(browser.last?.commitMB) || 0,
+          }
+      let nodes = Number(browser.last?.nodes) || 0
+      let heapMB = Number(browser.last?.heapMB) || 0
+      let visibility = browser.last?.visibility ?? 'unknown'
+      let documents = Number(browser.last?.documents) || 0
+      let listeners = Number(browser.last?.listeners) || 0
+      let layoutCount = Number(browser.last?.layoutCount) || 0
+      let cdpOk = Boolean(browser.last && cdpAt)
+      if (cdpDue) {
+        const sample = await sampleManagedBrowser(browser.port)
+        if (sample?.ok === true) {
+          cdpOk = true
+          browser.cdpAt = now
+          cdpAt = now
+          browser.cdpError = null
+          nodes = Number(sample.nodes) || 0
+          heapMB = Math.round((Number(sample.heapBytes) || 0) / 1048576)
+          visibility = sample.visibility ?? 'unknown'
+          documents = Number(sample.documents) || 0
+          listeners = Number(sample.listeners) || 0
+          layoutCount = Number(sample.layoutCount) || 0
+        } else {
+          cdpOk = false
+          browser.cdpError = String(sample?.error ?? 'browser-cdp-sample-failed')
+        }
+      }
+      browser.last = {
+        at: now,
+        ...tree,
+        nodes,
+        heapMB,
+        visibility,
+        documents,
+        listeners,
+        layoutCount,
+        cdpAt: cdpAt || null,
+        cdpAgeMs: cdpAt ? now - cdpAt : null,
+        cdpSampled: cdpDue && cdpOk,
+      }
+      if (cdpDue && cdpOk) {
+        browser.metricsHistory = appendBrowserMetricHistory(browser.metricsHistory, {
+          at: cdpAt,
+          documents,
+          listeners,
+          layoutCount,
+        })
+      }
       try {
-        fs.appendFileSync(path.join(layout.dataDir, 'browser-samples.jsonl'), JSON.stringify({ taskId: task.taskId, ...browser.last }) + '\n')
+        appendJsonlRotated(path.join(layout.dataDir, 'browser-samples.jsonl'), { taskId: task.taskId, ...browser.last }, diagnosticLogOptions())
       } catch { /* diagnostics only */ }
-      const overMemory = Number(tree.commitMB) >= Number(cfg.browserMemoryLimitMB)
-      const overHeap = heapMB >= Number(cfg.browserHeapLimitMB)
-      const overDom = nodes >= Number(cfg.browserDomNodeLimit)
+      const limits = memoryPolicySnapshot()
+      const overMemory = Number(tree.commitMB) >= Number(limits.browserMemoryLimitMB)
+      const overHeap = cdpOk && heapMB >= Number(limits.browserHeapLimitMB)
+      const overDom = cdpOk && nodes >= Number(cfg.browserDomNodeLimit)
       if (overMemory || overHeap || overDom) {
         const reason = overMemory ? 'browser-memory-limit' : overHeap ? 'browser-heap-limit' : 'browser-dom-limit'
-        audit('fork-browser-memory-guard', { taskId: task.taskId, commitMB: tree.commitMB, nodes, heapMB, overMemory, overHeap, overDom })
+        audit('fork-browser-memory-guard', { taskId: task.taskId, commitMB: tree.commitMB, nodes, heapMB, overMemory, overHeap, overDom, memoryLimitMB: limits.browserMemoryLimitMB, heapLimitMB: limits.browserHeapLimitMB, source: limits.source })
         await quarantineTask(task, reason)
         continue
       }
       if (cfg.autoCloseIdleMinutes > 0) {
-        if (sample?.ok === true && sample.visibility === 'hidden') {
-          if (!browser.hiddenSince) browser.hiddenSince = nowMs()
-          const idleMs = nowMs() - Number(browser.hiddenSince)
-          if (idleMs >= Number(cfg.autoCloseIdleMinutes) * 60_000 && (!cfg.idleCloseOnlyWhenIdle || taskIdleForClose(task))) {
-            await closeTaskBrowser(task, 'idle-hidden')
-            continue
+        if (cdpOk && visibility === 'hidden') {
+          if (!browser.hiddenSince) browser.hiddenSince = now
+          const idleMs = now - Number(browser.hiddenSince)
+          if (idleMs >= Number(cfg.autoCloseIdleMinutes) * 60_000) {
+            const decision = await taskIdleForClose(task, { hiddenSince: browser.hiddenSince, now })
+            if (decision.close) {
+              browser.idleClose = { at: now, action: 'closed', reason: decision.reason }
+              await closeTaskBrowser(task, 'idle-hidden')
+              continue
+            }
+            browser.idleClose = {
+              at: now, action: 'skipped', reason: decision.reason,
+              lastActivityAt: decision.activity?.lastActivityAt ?? null,
+              turnRunning: decision.activity?.turnRunning ?? null,
+              sessionId: decision.activity?.sessionId ?? null,
+            }
+            const warnAt = Number(browser.idleCloseWarnAt) || 0
+            if (decision.warn && now - warnAt >= 60_000) {
+              browser.idleCloseWarnAt = now
+              audit('fork-idle-close-skipped', {
+                taskId: task.taskId,
+                reason: decision.reason,
+                hiddenForMs: idleMs,
+                lastActivityAt: decision.activity?.lastActivityAt ?? null,
+                turnRunning: decision.activity?.turnRunning ?? null,
+                signal: decision.activity?.signal ?? 'none',
+                sessionId: decision.activity?.sessionId ?? null,
+              })
+            }
           }
-        } else if (sample?.ok === true) {
+        } else if (cdpOk) {
           browser.hiddenSince = null
+          browser.idleClose = null
         }
       }
     }
@@ -1010,17 +1681,27 @@ export function apply(ctx, config) {
   const memoryWatchdogTick = async () => {
     if (cfg.memoryWatchdog !== true || process.platform !== 'win32') return
     const running = [...tasks.values()].filter((task) => task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)
-    const hasBrowser = [...tasks.values()].some((task) => task.browser?.pid)
+    const hasBrowser = [...tasks.values(), ...runtimeBrowsers.values()].some((task) => task.browser?.pid)
     if (!running.length && !hasBrowser) return
-    const table = await readProcessTable()
+    const table = await readProcessTable({
+      detailed: false,
+      cacheMs: Math.max(10000, Number(cfg.memoryProcessScanIntervalMs) || 30000),
+    })
     if (!table.ok) return
-    for (const task of running) {
-      const rootPid = Number(forker()?.status?.(task.taskId)?.pid ?? task.pid)
-      if (rootPid > 0) await recordForkMemory(task, rootPid, table)
+    const freshTable = table.cached !== true
+    if (freshTable) {
+      for (const task of running) {
+        const rootPid = Number(forker()?.status?.(task.taskId)?.pid ?? task.pid)
+        if (rootPid > 0) await recordForkMemory(task, rootPid, table)
+      }
     }
-    await browserWatchdogTick(table)
+    await browserWatchdogTick(table, { freshTable })
+    // On a cached tick only liveness and due CDP samples run; memory thresholds
+    // are evaluated on the next fresh full-table snapshot.
+    if (!freshTable) return
     // Red line: aggregate fork+browser commit must stay below the configured share.
-    const memory = await readSystemMemory()
+    const memory = rememberMemory(await readSystemMemory())
+    notePagefile(memory, 'memory-watchdog')
     if (memory.ok && Number(memory.commitLimitMB) > 0) {
       let total = 0
       for (const task of tasks.values()) {
@@ -1028,6 +1709,9 @@ export function apply(ctx, config) {
           total += sumProcessTree(selectProcessTree(table.rows, Number(forker()?.status?.(task.taskId)?.pid ?? task.pid))).commitMB
         }
         if (task.browser?.pid) total += sumProcessTree(selectProcessTree(table.rows, Number(task.browser.pid))).commitMB
+      }
+      for (const runtime of runtimeBrowsers.values()) {
+        if (runtime.browser?.pid) total += sumProcessTree(selectProcessTree(table.rows, Number(runtime.browser.pid))).commitMB
       }
       const limit = Number(memory.commitLimitMB) * Number(cfg.forkCommitShareLimit)
       if (total > limit) {
@@ -1042,7 +1726,14 @@ export function apply(ctx, config) {
   let lastHostWarnAt = 0
   const hostWatchdogTick = async () => {
     if (process.platform !== 'win32' || hostPanic) return
-    const memory = await readSystemMemory()
+    // No fork/browser means hostEmergency has nothing to close; skip the
+    // PowerShell memory query entirely (low-end machines idle cost = 0).
+    const active = [...tasks.values(), ...runtimeBrowsers.values()].some((task) => task.browser?.pid
+      || (Number(task.pid) > 0
+        && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)))
+    if (!active) return
+    const memory = rememberMemory(await readSystemMemory())
+    notePagefile(memory, 'memory-watchdog')
     if (!memory.ok) return
     const free = Number(memory.commitFreeMB) || 0
     if (free < Number(cfg.hostWarnFreeMB) && nowMs() - lastHostWarnAt > 60_000) {
@@ -1053,6 +1744,94 @@ export function apply(ctx, config) {
     if (free < Number(cfg.hostCriticalFreeMB)) {
       await hostEmergency('commit-free-critical', { safe: true })
     }
+  }
+
+
+  /**
+   * Record the spawned process's CreationDate + CommandLine hash. Orphan cleanup uses
+   * this to distinguish the original fork from a recycled PID. Never blocks a spawn
+   * forever: a failed/unsupported capture leaves pidIdentity=null and the cleanup
+   * falls back to the stricter profile+port argv check.
+   */
+  const captureTaskProcessIdentity = async (task) => {
+    task.pidIdentity = null
+    task.pidIdentityError = null
+    task.pidStartedAt = null
+    const pid = Number(task?.pid)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      task.pidIdentityError = 'bad-pid'
+      return { ok: false, error: 'bad-pid' }
+    }
+    if (process.platform !== 'win32') {
+      task.pidIdentityError = 'unsupported-platform'
+      return { ok: false, error: 'unsupported-platform' }
+    }
+    const identity = await readProcessIdentity(pid).catch((error) => ({ ok: false, error: String(error?.message ?? error), row: null }))
+    if (!identity.ok || !identity.row || Number(identity.row.pid) !== pid) {
+      task.pidIdentityError = identity?.error ?? (identity?.row ? 'pid-mismatch' : 'not-found')
+      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError })
+      return { ok: false, error: task.pidIdentityError }
+    }
+    const tokenCheck = matchesProcessIdentity(identity.row, { pid, taskId: task.taskId, profile: task.profile, port: task.port })
+    if (!tokenCheck.ok) {
+      task.pidIdentityError = `identity-token-mismatch:${tokenCheck.reason}`
+      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError })
+      return { ok: false, error: task.pidIdentityError }
+    }
+    task.pidIdentity = {
+      pid,
+      startedAt: identity.row.createdAt ?? null,
+      commandLineHash: hashCommandLine(identity.row.commandLine),
+      profile: task.profile,
+      port: task.port,
+      capturedAt: nowMs(),
+      source: 'cim',
+    }
+    task.pidStartedAt = identity.row.createdAt ?? null
+    if (!Number.isFinite(task.pidStartedAt)) {
+      task.pidIdentityError = 'creation-time-missing'
+      audit('fork-pid-identity-unavailable', { taskId: task.taskId, pid, error: task.pidIdentityError })
+      return { ok: false, error: task.pidIdentityError }
+    }
+    return { ok: true }
+  }
+
+  /** Capture identity off the critical spawn path; persist once it settles. */
+  const scheduleTaskProcessIdentity = (task) => {
+    void captureTaskProcessIdentity(task)
+      .then(() => { try { writeWatchdog(); persist() } catch { /* best effort */ } })
+      .catch(() => { /* captureTaskProcessIdentity already records the error */ })
+  }
+
+  /** Browser targets need the same PID-reuse guard as forks. */
+  const scheduleBrowserProcessIdentity = (task) => {
+    const browser = task?.browser
+    if (!browser?.pid) return
+    const pid = Number(browser.pid)
+    const tokens = browser.profileDir && Number(browser.port) > 0
+      ? [`--user-data-dir=${browser.profileDir}`, `--remote-debugging-port=${browser.port}`]
+      : []
+    void readProcessIdentity(pid)
+      .then((identity) => {
+        if (!identity.ok || !identity.row || Number(identity.row.pid) !== pid) return
+        const tokenCheck = matchesProcessIdentity(identity.row, { pid, tokens })
+        if (!tokenCheck.ok) {
+          audit('watchdog-target-identity-unavailable', { taskId: task.taskId, kind: 'browser', pid, error: tokenCheck.reason })
+          return
+        }
+        if (task.browser !== browser) return
+        browser.pidIdentity = {
+          pid,
+          startedAt: identity.row.createdAt ?? null,
+          commandLineHash: hashCommandLine(identity.row.commandLine),
+          tokens,
+          capturedAt: nowMs(),
+          source: 'cim',
+        }
+        writeWatchdog()
+        persist()
+      })
+      .catch(() => { /* sidecar falls back to startedAt + tokens */ })
   }
 
 
@@ -1067,11 +1846,54 @@ export function apply(ctx, config) {
       if (!(rootPid > 0)) continue
       const tree = selectProcessTree(table.rows, rootPid)
       if (!tree.length) continue
-      const marker = String(task.taskId)
-      const looksLikeFork = tree.some((row) => row.commandLine.includes(marker) || (task.profile && row.commandLine.includes(String(task.profile))))
-      if (!looksLikeFork) continue
+      const root = tree.find((row) => row.pid === rootPid)
+      if (!root) continue
+      if (task.pidIdentity && (task.pidIdentity.startedAt === null || task.pidIdentity.startedAt === undefined || !Number.isFinite(Number(task.pidIdentity.startedAt)))) {
+        const previous = Number(task.orphanSkipWarnAt) || 0
+        if (nowMs() - previous >= 10 * 60_000) {
+          task.orphanSkipWarnAt = nowMs()
+          audit('fork-orphan-kill-skipped', { taskId: task.taskId, pid: rootPid, phase: 'preflight', reason: 'identity-start-time-missing' })
+        }
+        continue
+      }
+      const identity = {
+        pid: rootPid,
+        taskId: task.taskId,
+        profile: task.profile,
+        port: task.port,
+        startedAt: task.pidIdentity?.startedAt ?? null,
+        commandLineHash: task.pidIdentity?.commandLineHash ?? null,
+      }
+      const matched = matchesProcessIdentity(root, identity)
+      if (!matched.ok) {
+        const previous = Number(task.orphanSkipWarnAt) || 0
+        if (nowMs() - previous >= 10 * 60_000) {
+          task.orphanSkipWarnAt = nowMs()
+          audit('fork-orphan-kill-skipped', { taskId: task.taskId, pid: rootPid, phase: 'preflight', reason: matched.reason, detail: matched.detail ?? null })
+        }
+        continue
+      }
+      // Re-read immediately before taskkill: PID may have been recycled between the
+      // sweep snapshot and this kill, so start time + command-line hash must still match.
+      const recheck = await readProcessTable()
+      if (!recheck.ok) {
+        audit('fork-orphan-kill-skipped', { taskId: task.taskId, pid: rootPid, phase: 'recheck-failed', reason: recheck.error })
+        continue
+      }
+      if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) continue
+      const currentRoot = recheck.rows.find((row) => row.pid === rootPid) ?? null
+      const rechecked = matchesProcessIdentity(currentRoot, identity)
+      if (!rechecked.ok) {
+        audit('fork-orphan-kill-skipped', { taskId: task.taskId, pid: rootPid, phase: 'pre-taskkill', reason: rechecked.reason, detail: rechecked.detail ?? null })
+        continue
+      }
       const result = await killProcessTree(rootPid)
-      if (result.ok) { killed.push(task.taskId); audit('fork-orphan-killed', { taskId: task.taskId, pid: rootPid }) }
+      if (result.ok) {
+        killed.push(task.taskId)
+        audit('fork-orphan-killed', { taskId: task.taskId, pid: rootPid, createdAt: currentRoot?.createdAt ?? null })
+      } else {
+        audit('fork-orphan-kill-failed', { taskId: task.taskId, pid: rootPid, error: result.error ?? 'taskkill-failed' })
+      }
     }
     return { ok: true, killed }
   }
@@ -1133,7 +1955,14 @@ export function apply(ctx, config) {
       port: f.port ?? null,
       url: f.url ?? null,
       token: f.token ?? (f.url ? extractTokenSafe(f.url) : ''),
+      pidIdentity: f.pidIdentity ?? null,
+      pidStartedAt: f.pidStartedAt ?? null,
+      pidIdentityError: f.pidIdentityError ?? null,
+      orphanSkipWarnAt: f.orphanSkipWarnAt ?? null,
       adapter: f.adapter ?? { ok: false, error: 'not-handshaked' },
+      browserClosed: f.browserClosed ?? null,
+      closeWarning: f.closeWarning ?? null,
+      memoryGuard: f.memoryGuard ?? null,
       collaborators: Array.isArray(f.collaborators) ? f.collaborators : [],
       template: f.template ?? '',
       essenceId: f.essenceId ?? null,
@@ -1286,6 +2115,8 @@ export function apply(ctx, config) {
         }
       })(),
       pid: running ? (live?.pid ?? t.pid ?? null) : null,
+      pidStartedAt: t.pidStartedAt ?? t.pidIdentity?.startedAt ?? null,
+      pidIdentityError: t.pidIdentityError ?? null,
       port: running ? (t.port ?? null) : null,
       url: running ? stripUrlToken(t.url) : null,
       homeDir: t.homeDir,
@@ -1293,9 +2124,56 @@ export function apply(ctx, config) {
       createdAt: t.createdAt,
       restarts: t.restarts ?? 0,
       adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', protocol: t.adapter?.protocol ?? 0, error: t.adapter?.error ?? '' },
+      activity: (() => {
+        const cached = forkActivityCache.get(t.taskId)
+        if (!cached) return null
+        return {
+          ok: cached.ok !== false,
+          lastActivityAt: cached.lastActivityAt ?? null,
+          lastActivityISO: cached.lastActivityISO ?? null,
+          turnRunning: cached.turnRunning ?? null,
+          signal: cached.signal ?? 'none',
+          sessionId: cached.sessionId ?? null,
+          messages: cached.messages ?? null,
+          degraded: cached.degraded ?? [],
+          source: cached.source ?? 'session-log',
+          fetchedAt: cached.fetchedAt ?? null,
+          error: cached.error ?? null,
+        }
+      })(),
+      browser: t.browser ? {
+        pid: t.browser.pid ?? null,
+        port: t.browser.port ?? null,
+        visibility: t.browser.last?.visibility ?? 'unknown',
+        hiddenSince: t.browser.hiddenSince ?? null,
+        idleClose: t.browser.idleClose ?? null,
+        metrics: t.browser.last ? {
+          at: t.browser.last.cdpAt ?? t.browser.last.at ?? null,
+          documents: Number(t.browser.last.documents) || 0,
+          listeners: Number(t.browser.last.listeners) || 0,
+          layoutCount: Number(t.browser.last.layoutCount) || 0,
+          nodes: Number(t.browser.last.nodes) || 0,
+          heapMB: Number(t.browser.last.heapMB) || 0,
+          cdpAgeMs: t.browser.last.cdpAgeMs ?? null,
+          cdpSampled: t.browser.last.cdpSampled === true,
+        } : null,
+        history: Array.isArray(t.browser.metricsHistory)
+          ? t.browser.metricsHistory.slice(-60).map((point) => ({
+            at: Number(point.at) || null,
+            documents: Number(point.documents) || 0,
+            listeners: Number(point.listeners) || 0,
+            layoutCount: Number(point.layoutCount) || 0,
+          }))
+          : [],
+      } : null,
+      browserClosed: t.browserClosed ?? null,
+      closeWarning: t.closeWarning ?? null,
+      memoryGuard: t.memoryGuard ?? null,
       collaborators: t.collaborators ?? [],
       seed: t.seed ?? null,
       importedSession: t.importedSession ?? null,
+      workspaceMap: t.workspaceMapping ?? null,
+      jobObject: live?.jobObject ?? null,
       archivedAt: t.archivedAt ?? null,
       archiveRemote: t.archiveRemote ?? null,
     }
@@ -1312,12 +2190,26 @@ export function apply(ctx, config) {
     let bytes = 0
     try { bytes = fs.statSync(sourceFile).size } catch { return { ok: false, reason: 'source-missing' } }
     if (bytes > cfg.importMaxBytes) return { ok: false, reason: 'too-large', bytes, limit: cfg.importMaxBytes }
-    const workspacePath = String(meta?.workspacePath ?? '').trim() || 'imported-session'
+    const requestedWorkspace = String(meta?.workspacePath ?? '').trim() || 'imported-session'
+    // P0: E:\DSH\DS and other shared host/project roots are redirected into
+    // this fork's own home before the copied session is registered. The header
+    // is rewritten too, so DSH does not resume with the old cwd.
+    const workspaceMap = mapWorkspacePathForFork(homeDir, requestedWorkspace, {
+      roots: cfg.forbiddenDataRoots,
+      forkId: String(meta?.taskId ?? meta?.forkId ?? ''),
+    })
+    if (workspaceMap.ok !== true) return { ok: false, reason: 'workspace-map-failed', detail: workspaceMap }
+    const workspacePath = workspaceMap.path || 'imported-session'
     const workspaceKey = encodeWorkspaceKey(workspacePath)
-    const workspaceTitle = String(meta?.workspaceTitle ?? '').trim() || '导入的会话'
+    const workspaceTitle = workspaceMap.mapped
+      ? (String(meta?.workspaceTitle ?? '').trim() ? `${meta.workspaceTitle}（已隔离）` : '旧工作区（已隔离）')
+      : (String(meta?.workspaceTitle ?? '').trim() || '导入的会话')
     const destDir = path.join(homeDir, 'sessions', workspaceKey, sessionId)
     ensureDir(destDir)
     fs.copyFileSync(sourceFile, path.join(destDir, 'session.v4.jsonl.zstd'))
+    const headerRewrite = workspaceMap.mapped
+      ? prepareImportedSession(homeDir, { sessionId, workspacePath: requestedWorkspace, roots: workspaceMigrationRoots(cfg), forkId: String(meta?.taskId ?? meta?.forkId ?? '') })
+      : null
 
     const storagesDir = path.join(homeDir, 'storages')
     ensureDir(storagesDir)
@@ -1346,7 +2238,13 @@ export function apply(ctx, config) {
     if (!doc.global.defaultWorkspaceId) doc.global.defaultWorkspaceId = workspaceId
     doc.global.initialized = true
     writeJsonAtomic(indexFile, doc)
-    return { ok: true, bytes, sessionId, workspacePath, workspaceKey, workspaceTitle, indexFile }
+    return {
+      ok: true, bytes, sessionId, workspacePath, workspaceKey, workspaceTitle, indexFile,
+      workspaceMap: workspaceMap.mapped ? {
+        mapped: true, originalPath: workspaceMap.original, mappedPath: workspaceMap.path,
+        headerRewrite: headerRewrite?.header ?? null,
+      } : { mapped: false },
+    }
   }
 
   // v3.1.35：分身会话数约束 1..3（用户规格）。
@@ -1554,6 +2452,114 @@ export function apply(ctx, config) {
     }
   }
 
+    /**
+     * fang-meta fallback for task-state transitions where the forker record is
+     * missing. Merge the prior doc so crash counters survive; never write the
+     * tokenized URL.
+     */
+    const syncTaskMeta = (task, overrides = {}) => {
+      if (!task?.homeDir) return false
+      try {
+        const previous = readForkMeta(task.homeDir) ?? {}
+        return writeForkMeta(task.homeDir, {
+          ...previous,
+          forkId: task.taskId,
+          status: overrides.status ?? task.status,
+          pid: overrides.pid !== undefined ? overrides.pid : (task.pid ?? null),
+          port: overrides.port !== undefined ? overrides.port : (task.port ?? null),
+          url: overrides.url !== undefined ? overrides.url : stripUrlToken(task.url),
+          profile: task.profile ?? previous.profile ?? null,
+          taskStatus: overrides.status ?? task.status,
+          lastError: overrides.lastError ?? task.adapter?.error ?? previous.lastError ?? null,
+        })
+      } catch {
+        return false
+      }
+    }
+
+    /** Loopback bind probe; falls back to the browser-guard scanner when an older forker lacks portFree. */
+    const portIsFree = async (port) => {
+      const n = Math.floor(Number(port))
+      if (!Number.isInteger(n) || n < 1 || n > 65535) return true
+      const f = forker()
+      if (f && typeof f.portFree === 'function') {
+        try { return (await f.portFree(n)) === true } catch { return false }
+      }
+      try { return (await freePort(n, n)) === n } catch { return false }
+    }
+
+    /**
+     * Open-fork preflight: reconcile the three state stores before restore/open.
+     * A task or fang-meta can still say running/pid/port after the process died,
+     * while the same port is owned by the essence runtime (18000). Reusing that
+     * URL opens the mother page and hides the real task failure behind a generic
+     * handler-threw. This function only clears stale state; it never kills a
+     * process that the forker still reports as genuinely alive.
+     */
+    const reconcileOpenState = async (task, reason = 'open-fork') => {
+      if (!task || task.status === TASK_STATUS.ARCHIVED) return { ok: true, changed: false }
+      const id = task.taskId
+      const f = forker()
+      let live = null
+      try { live = f?.status?.(id) ?? null } catch { live = null }
+      let liveAlive = false
+      try { if (f && typeof f.alive === 'function') liveAlive = f.alive(id) === true } catch { liveAlive = false }
+      if (!liveAlive && live?.running === true && Number(live.pid) > 0) liveAlive = isPidAlive(Number(live.pid))
+      if (liveAlive) {
+        // Keep the task row aligned with the process that actually owns the URL.
+        const nextPid = Number(live?.pid) || task.pid || null
+        const nextPort = Number(live?.port) || task.port || null
+        const nextUrl = typeof live?.url === 'string' && live.url ? live.url : task.url
+        let changed = false
+        if (nextPid !== task.pid) { task.pid = nextPid; changed = true }
+        if (nextPort !== task.port) { task.port = nextPort; changed = true }
+        if (nextUrl && nextUrl !== task.url) { task.url = nextUrl; changed = true }
+        if (task.status !== TASK_STATUS.RUNNING && task.status !== TASK_STATUS.READY) {
+          task.status = TASK_STATUS.RUNNING
+          changed = true
+        }
+        if (changed) {
+          persist()
+          syncTaskMeta(task)
+          audit('fork-open-state-adopted-live', { taskId: id, reason, pid: task.pid, port: task.port })
+        }
+        return { ok: true, changed, live: true, pid: task.pid, port: task.port }
+      }
+      const liveStatus = String(task.status ?? '')
+      const suspect = Boolean(task.pid || task.port || task.url)
+        || liveStatus === TASK_STATUS.RUNNING
+        || liveStatus === TASK_STATUS.READY
+        || liveStatus === TASK_STATUS.PROVISIONING
+      if (!suspect) return { ok: true, changed: false, live: false }
+      const before = { status: task.status, pid: task.pid ?? null, port: task.port ?? null, url: task.url ?? null }
+      let portFree = true
+      if (task.port) portFree = await portIsFree(task.port)
+      // Stop a stale forker record; stopRecord is safe when nothing is running and
+      // rewrites fang-meta with pid/port/url=null.
+      try { await f?.stop?.(id) } catch { /* meta repair is best effort */ }
+      // Never flush through the stale URL: it may now point at the essence runtime.
+      try {
+        if (task.browser?.pid) {
+          const closed = await closeManagedBrowser({ pid: task.browser.pid, port: task.browser.port, graceMs: cfg.gracefulBrowserCloseMs })
+          task.browser = null
+          audit('fork-open-stale-browser-closed', { taskId: id, reason, ok: closed?.ok === true })
+        }
+      } catch (error) {
+        audit('fork-open-stale-browser-close-failed', { taskId: id, reason, error: String(error?.message ?? error) })
+      }
+      const portConflict = Boolean(task.port) && !portFree
+      task.status = TASK_STATUS.FAILED
+      task.pid = null
+      task.port = null
+      task.url = null
+      task.token = ''
+      task.adapter = { ok: false, error: portConflict ? 'stale-port-conflict' : 'stale-process' }
+      persist()
+      syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: task.adapter.error })
+      audit('fork-open-state-reconciled', { taskId: id, reason, before, portFree, live: Boolean(live) })
+      return { ok: true, changed: true, live: false, portFree, before }
+    }
+
   const service = {
     role,
     version: FANG_VERSION,
@@ -1561,6 +2567,7 @@ export function apply(ctx, config) {
 
     /** v2 主入口：派生一个任务（= 一个分身）。 */
     async createTask(input = {}) {
+      await bootPagefileGate
       if (safeMode) return { ok: false, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       if (isolationBlocked) return { ok: false, error: 'data-root-forbidden', detail: isolationChecks }
       const title = String(input.title ?? input.taskTitle ?? '').trim() || `任务 ${tasks.size + 1}`
@@ -1692,6 +2699,7 @@ export function apply(ctx, config) {
         if (!forkBundle) {
           task.status = TASK_STATUS.FAILED
           tasks.delete(taskId)
+          forkActivityCache.delete(taskId)
           persist()
           try { await f.reap(taskId) } catch { /* 回收失败不改变结论 */ }
           audit(AUDIT.FORK_CRASHED, { taskId, error: 'fork-bundle-unavailable', forkProfileDir })
@@ -1754,6 +2762,24 @@ export function apply(ctx, config) {
           }
         }
 
+        // P0: existing imported/copied sessions may still carry E:\DSH\DS in
+        // workspace.json or the session header. Redirect them before the fork
+        // host starts; this is metadata-only (old workspace files stay untouched).
+        try {
+          const workspaceMap = migrateForkWorkspace(homeDir, { roots: workspaceMigrationRoots(cfg), forkId: taskId })
+          task.workspaceMapping = workspaceMap
+          if (workspaceMap.changed || workspaceMap.conflicts.length > 0) {
+            audit('fork-workspace-migrated', {
+              taskId, changed: workspaceMap.changed, mappings: workspaceMap.mappings.length,
+              moved: workspaceMap.moved.length, conflicts: workspaceMap.conflicts.slice(0, 5),
+              manifestFile: workspaceMap.manifestFile ?? null,
+            })
+          }
+        } catch (error) {
+          task.workspaceMapping = { ok: false, error: String(error?.message ?? error) }
+          audit('fork-workspace-migration-failed', { taskId, error: task.workspaceMapping.error })
+        }
+
         // v3.1.35：分身会话下限 1 —— 没有导入会话时补一个空会话，
         // 让分身 Web 打开就有可用的会话（用户规格：默认不能为 0）。
         if (coreMode === 'accelerated') {
@@ -1813,6 +2839,7 @@ export function apply(ctx, config) {
         task.port = started.port ?? null
         task.url = started.url ?? null
         task.token = started.token ?? extractTokenSafe(task.url)
+        scheduleTaskProcessIdentity(task)
         persist()
         writeWatchdog()
         void lowerProcessPriority(task.pid)
@@ -2014,6 +3041,10 @@ export function apply(ctx, config) {
         const res = await client.status()
         adapterStatus = res.ok ? res.data : { ok: false, error: res.error ?? res.kind }
       }
+      if (adapterStatus && adapterStatus.activity && typeof adapterStatus.activity === 'object') {
+        forkActivityCache.set(task.taskId, { ...adapterStatus.activity, fetchedAt: nowMs(), remoteOk: true })
+      }
+      const activity = forkActivityCache.get(task.taskId) ?? null
       return {
         ok: true,
         taskId: task.taskId,
@@ -2025,6 +3056,7 @@ export function apply(ctx, config) {
         },
         adapter: view.adapter,
         adapterStatus,
+        activity,
       }
     },
 
@@ -2044,6 +3076,8 @@ export function apply(ctx, config) {
         url: status.fork.url,
         probe,
         adapter: status.adapter,
+        activity: status.activity ?? null,
+        adapterStatus: status.adapterStatus ?? null,
       }
     },
 
@@ -2388,9 +3422,19 @@ export function apply(ctx, config) {
       task.token = ''
       task.adapter = { ok: false, error: 'archived', at: nowMs() }
       persist()
+      syncTaskMeta(task, { status: TASK_STATUS.ARCHIVED, pid: null, port: null, url: null, lastError: 'archived' })
       remoteCache.delete(id)
       audit(AUDIT.TASK_ARCHIVED, { taskId: id, title: task.title, remote, stopped: true, homeKept: true })
       bus.emit('fang/task-archived', { taskId: id, title: task.title })
+      // EB-01: compaction is only for an already-archived task, keeps a hard-link
+      // backup, and never moves the session. Run after the archive response so a
+      // large 60 MB log does not delay the UI.
+      setTimeout(() => {
+        try { compactArchivedTaskSessions(task) } catch { /* audited inside */ }
+        if (cfg.browserCacheCleanupEnabled === true) {
+          try { browserCacheCleanup(task) } catch { audit('browser-cache-cleanup-failed', { taskId: id }) }
+        }
+      }, 0)
       return {
         ok: true,
         archived: true,
@@ -2401,6 +3445,30 @@ export function apply(ctx, config) {
         stopped: true,
         homeKept: true,
       }
+    },
+    async compactSessions(taskId = '') {
+      const id = String(taskId ?? '')
+      if (id) {
+        const task = tasks.get(id)
+        if (!task) return { ok: false, error: 'unknown-task' }
+        if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived' }
+        return compactArchivedTaskSessions(task)
+      }
+      await sessionCompactTick()
+      return { ok: true, snapshot: sessionCompactSnapshot }
+    },
+    diskHygiene() {
+      return refreshDiskHygiene(false) || { ok: false, error: 'disabled' }
+    },
+    refreshDiskHygiene() {
+      return refreshDiskHygiene(true) || { ok: false, error: 'disabled' }
+    },
+    cleanupBrowserCache(taskId, options = {}) {
+      if (options?.confirm !== true) return { ok: false, error: 'confirmation-required' }
+      const task = tasks.get(String(taskId ?? ''))
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.status !== TASK_STATUS.ARCHIVED) return { ok: false, error: 'not-archived' }
+      return browserCacheCleanup(task)
     },
 
     /** 还原存档：用原 home/profile 重新 spawn（新端口 + 新 token），再握手。 */
@@ -2460,21 +3528,48 @@ export function apply(ctx, config) {
     },
 
     async restoreTask(taskId, options = {}) {
+      await bootPagefileGate
       const preserveProfile = options?.preserveProfile === true
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
       if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
+      const wasQuarantined = Boolean(task.quarantined)
       const f = forker()
       if (!f || typeof f.spawn !== 'function') return { ok: false, error: 'forker-unavailable', taskId: id }
-      const memory = await memoryGate('restore-fork')
-      if (memory.ok !== true) return { ok: false, taskId: id, ...memory }
-      const paused = await pauseOtherForks(id, 'restore-fork')
+      const failRestoreStep = (step, error, extra = {}) => {
+        const detail = String(error?.message ?? error)
+        try { f.stop?.(id) } catch { /* best effort */ }
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        task.token = ''
+        task.adapter = { ok: false, error: `${step}-threw` }
+        persist()
+        syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: task.adapter.error })
+        audit('fork-restore-step-failed', { taskId: id, step, detail, ...extra })
+        return { ok: false, taskId: id, step, error: `${step}-threw`, detail, ...extra }
+      }
+      // Never restore through a stale task/pid/port row. This also releases a
+      // port that the essence runtime (18000) owns before spawn allocates a new one.
+      try { await reconcileOpenState(task, 'restore-fork') } catch (error) {
+        return failRestoreStep('reconcile-state', error)
+      }
+      const memory = await (async () => {
+        try { return await memoryGate('restore-fork') } catch (error) { return { ok: false, error: 'memory-gate-threw', detail: String(error?.message ?? error) } }
+      })()
+      if (memory.ok !== true) return { ok: false, taskId: id, step: 'memory-gate', error: memory.error, detail: memory.detail ?? null }
+      let paused
+      try { paused = await pauseOtherForks(id, 'restore-fork') } catch (error) {
+        return failRestoreStep('pause-other-forks', error)
+      }
       // 2026-11-22：任务可能停在 ready/running，但子进程已经死了（宿主重启、手动 kill、
       // 端口丢失）。客户端「启动」仍会调用 restore；旧逻辑返回 not-archived，导致
       // 真机界面一直显示“启动失败”。这里允许恢复 stale 的 ready/running。
       if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) {
-        const live = f.status?.(id) ?? null
+        let live = null
+        try { live = f.status?.(id) ?? null } catch (error) { return failRestoreStep('inspect-live-fork', error) }
         if (live?.running === true && task.adapter?.ok === true) {
           return { ok: true, alreadyRunning: true, taskId: id, url: task.url, port: task.port, adapter: task.adapter }
         }
@@ -2484,12 +3579,30 @@ export function apply(ctx, config) {
         task.port = null
         task.url = null
         persist()
+        syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'stale-process' })
       }
       if (!task.homeDir || !exists(task.homeDir)) {
         return { ok: false, error: 'archive-home-missing', taskId: id, homeDir: task.homeDir ?? '' }
       }
       try { assertInside(layout.forkHomesDir, task.homeDir, 'fork-home') } catch (error) {
         return { ok: false, error: 'path-escape', taskId: id, detail: String(error?.message ?? error) }
+      }
+      // P0: restore is the last checkpoint before the fork host opens its
+      // sessions. Redirect legacy E:\DSH\DS metadata here even for tasks that
+      // were created before this release.
+      try {
+        const workspaceMap = migrateForkWorkspace(task.homeDir, { roots: workspaceMigrationRoots(cfg), forkId: id })
+        task.workspaceMapping = workspaceMap
+        if (workspaceMap.changed || workspaceMap.conflicts.length > 0) {
+          audit('fork-workspace-migrated', {
+            taskId: id, changed: workspaceMap.changed, mappings: workspaceMap.mappings.length,
+            moved: workspaceMap.moved.length, conflicts: workspaceMap.conflicts.slice(0, 5),
+            manifestFile: workspaceMap.manifestFile ?? null,
+          })
+        }
+      } catch (error) {
+        task.workspaceMapping = { ok: false, error: String(error?.message ?? error) }
+        audit('fork-workspace-migration-failed', { taskId: id, error: task.workspaceMapping.error })
       }
       const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
       const forkBundle = forkBundlePath(forkProfileDir)
@@ -2502,8 +3615,12 @@ export function apply(ctx, config) {
       const syncSourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
       let configReset = null
       if (!preserveProfile) {
-        captureEssenceRuntimeIfPresent(syncSourceId)
-        if (syncSourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+        try {
+          captureEssenceRuntimeIfPresent(syncSourceId)
+          if (syncSourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+        } catch (error) {
+          return failRestoreStep('capture-source-profile', error)
+        }
         try { configReset = await service.resetForkConfig(id) } catch (error) {
           configReset = { ok: false, error: String(error?.message ?? error) }
         }
@@ -2516,42 +3633,81 @@ export function apply(ctx, config) {
       // 开关不是热更新：重新打开分身时按当前开关换核（重新 provision profile；会话目录不动）。
       // resetForkConfig 刚把 profile 重置回 stock 形状；即使 coreMode 未变也必须强制 reprovision，
       // 否则加速分身会以 stock 配置 + accelerated CLI 启动而永远不 ready（2026-11-22 实测 timeout）。
-      const coreSync = preserveProfile
-        ? { ok: true, switched: false, coreMode: task.coreMode === 'accelerated' ? 'accelerated' : 'stock' }
-        : await syncForkCoreMode(task, { force: true })
-      if (coreSync.ok !== true) {        task.status = TASK_STATUS.FAILED
+      let coreSync
+      try {
+        coreSync = preserveProfile
+          ? { ok: true, switched: false, coreMode: task.coreMode === 'accelerated' ? 'accelerated' : 'stock' }
+          : await syncForkCoreMode(task, { force: true })
+      } catch (error) {
+        return failRestoreStep('sync-fork-core-mode', error)
+      }
+      if (coreSync.ok !== true) {
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        task.token = ''
+        task.adapter = { ok: false, error: coreSync.error ?? 'sync-fork-core-mode-failed' }
         persist()
+        syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: task.adapter.error })
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: coreSync.error })
-        return { ok: false, error: coreSync.error, detail: coreSync.detail ?? null, taskId: id }
+        return { ok: false, taskId: id, step: 'sync-fork-core-mode', error: coreSync.error, detail: coreSync.detail ?? null }
       }
       // 老/空白分身重新打开时补齐官方实验性插件表面；先整体对齐来源元主的完整插件面。
       // 完整来源插件面对齐：默认开启；e2e 已证 125/125（node-compat 复制关闭后）。
-      const sourceSurface = preserveProfile
-        ? { ok: true, skipped: 'preserve-imported-profile' }
-        : process.env.DSH_FANG_SOURCE_SURFACE === '0'
-          ? { ok: true, skipped: 'disabled' }
-          : applySourcePluginSurface(task, forkProfileDir)
+      let sourceSurface
+      try {
+        sourceSurface = preserveProfile
+          ? { ok: true, skipped: 'preserve-imported-profile' }
+          : process.env.DSH_FANG_SOURCE_SURFACE === '0'
+            ? { ok: true, skipped: 'disabled' }
+            : applySourcePluginSurface(task, forkProfileDir)
+      } catch (error) {
+        return failRestoreStep('apply-source-plugin-surface', error)
+      }
       if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-restore-profile')) } catch { /* debug */ } }
       if (sourceSurface.ok === false) audit('fork-source-surface-failed', { taskId: id, error: sourceSurface.error })
-      const experimentalSurface = preserveProfile
-        ? { ok: true, skipped: 'preserve-imported-profile' }
-        : applyOfficialExperimentalSurface(forkProfileDir, { coreMode: coreSync.coreMode })
+      else if (Number(sourceSurface.coreUiForced) > 0) audit('fork-core-ui-enabled', { taskId: id, coreUiForced: Number(sourceSurface.coreUiForced) })
+      let experimentalSurface
+      try {
+        experimentalSurface = preserveProfile
+          ? { ok: true, skipped: 'preserve-imported-profile' }
+          : applyOfficialExperimentalSurface(forkProfileDir, { coreMode: coreSync.coreMode })
+      } catch (error) {
+        return failRestoreStep('apply-experimental-surface', error)
+      }
       if (experimentalSurface.ok === false) audit('fork-experimental-surface-failed', { taskId: id, error: experimentalSurface.error })
-      const started = await f.spawn({
+      let started
+      try {
+        started = await f.spawn({
         forkId: id,
         homeDir: task.homeDir,
         profile: task.profile,
         ...(coreSync.coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
         coreMode: coreSync.coreMode,
-        env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
-      })
+          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: id, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(id) },
+        })
+      } catch (error) {
+        return failRestoreStep('spawn', error)
+      }
       if (!started || started.ok === false) {
-        audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: started?.error ?? 'spawn-failed' })
+        const error = started?.error === 'accelerated-cli-missing' ? 'accelerated-cli-missing' : 'spawn-failed'
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        task.token = ''
+        task.adapter = { ok: false, error }
+        persist()
+        syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: error })
+        try { f.stop?.(id) } catch { /* best effort */ }
+        audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error, step: 'spawn' })
         return {
           ok: false,
-          error: started?.error === 'accelerated-cli-missing' ? 'accelerated-cli-missing' : 'spawn-failed',
-          detail: started?.error ?? 'unknown',
           taskId: id,
+          step: 'spawn',
+          error,
+          detail: started?.error ?? 'unknown',
           ...(Array.isArray(started?.searched) ? { searched: started.searched } : {}),
         }
       }
@@ -2563,20 +3719,31 @@ export function apply(ctx, config) {
       task.url = started.url ?? null
       task.token = started.token ?? extractTokenSafe(task.url)
       task.adapter = { ok: false, error: 'handshaking' }
+      scheduleTaskProcessIdentity(task)
       persist()
       writeWatchdog()
       void lowerProcessPriority(task.pid)
       audit(AUDIT.FORK_STARTED, { taskId: id, pid: task.pid, port: task.port, profile: task.profile, restored: true })
-      const adapter = await handshake(task)
+      let adapter
+      try {
+        adapter = await handshake(task)
+      } catch (error) {
+        const detail = String(error?.message ?? error)
+        task.status = TASK_STATUS.RUNNING
+        task.adapter = { ok: false, error: 'handshake-threw' }
+        persist()
+        audit('fork-restore-step-failed', { taskId: id, step: 'handshake', detail })
+        return { ok: false, taskId: id, step: 'handshake', error: 'handshake-threw', detail, url: stripUrlToken(task.url), port: task.port, pid: task.pid }
+      }
       task.status = adapter.ok ? TASK_STATUS.READY : TASK_STATUS.RUNNING
       persist()
       audit(AUDIT.TASK_RESTORED, { taskId: id, ok: true, adapter })
       bus.emit('fang/task-restored', { taskId: id, url: task.url, port: task.port })
       if (task.quarantined) {
         task.quarantined = null
-        audit('fork-quarantine-cleared', { taskId: id, by: 'restore' })
+        audit('fork-quarantine-cleared', { taskId: id, by: 'restore', tokenRotated: true })
       }
-      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard, paused }
+      return { ok: true, restored: true, taskId: id, title: task.title, url: task.url, port: task.port, adapter, configReset, sessionGuard, paused, tokenRotated: true, quarantineCleared: wasQuarantined }
     },
 
     /**
@@ -2585,40 +3752,84 @@ export function apply(ctx, config) {
      * fingerprint 变化时停止旧分身并按新 merged profile 重新 provision + spawn。
      */
     async syncTaskOnOpen(taskId) {
+      await bootPagefileGate
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
       if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       if (task.quarantined) return { ok: false, taskId: id, error: 'fork-quarantined', detail: task.quarantined.reason ?? 'guard' }
-      const memory = await memoryGate('open-fork')
-      if (memory.ok !== true) return { ok: false, taskId: id, ...memory }
-      const paused = await pauseOtherForks(id, 'open-fork')
-      const sourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
-      captureEssenceRuntimeIfPresent(sourceId)
-      if (sourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
-      await essenceManager.ensureFresh(sourceId)
-      const fingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
-      const changed = Boolean(fingerprint && task.configSourceFingerprint !== fingerprint)
-      const live = forker()?.status?.(id) ?? null
-      if (changed) {
-        if (live?.running === true) {
-          try { forker().stop?.(id) } catch { /* best effort */ }
+
+      const failOpenStep = (step, error, extra = {}) => {
+        const detail = String(error?.message ?? error)
+        const f = forker()
+        let live = null
+        try { live = f?.status?.(id) ?? null } catch { live = null }
+        const stillRunning = live?.running === true
+        if (!stillRunning) {
+          task.status = TASK_STATUS.FAILED
+          task.pid = null
+          task.port = null
+          task.url = null
+          task.token = ''
+          try { f?.stop?.(id) } catch { /* best effort */ }
         }
-        task.status = TASK_STATUS.FAILED
-        task.pid = null
-        task.port = null
-        task.url = null
+        task.adapter = { ok: false, error: `${step}-threw` }
         persist()
-        const restored = await service.restoreTask(id)
-        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint, paused }
+        syncTaskMeta(task, { status: task.status, pid: task.pid ?? null, port: task.port ?? null, url: stripUrlToken(task.url), lastError: task.adapter.error })
+        audit('fork-open-step-failed', { taskId: id, step, detail, ...extra })
+        return {
+          ok: false, taskId: id, step, error: `${step}-threw`, detail,
+          ...(stillRunning ? { url: stripUrlToken(task.url), port: task.port, pid: task.pid } : {}),
+          ...extra,
+        }
       }
-      if (task.status === TASK_STATUS.FAILED) {
-        const restored = await service.restoreTask(id)
-        return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint, paused }
+
+      let step = 'reconcile-state'
+      try {
+        await reconcileOpenState(task, 'open-fork')
+        step = 'memory-gate'
+        const memory = await memoryGate('open-fork')
+        if (memory.ok !== true) return { ok: false, taskId: id, step, error: memory.error, detail: memory.detail ?? null }
+        step = 'pause-other-forks'
+        const paused = await pauseOtherForks(id, 'open-fork')
+        const sourceId = String(task.essenceId || task.syncSourceId || OFFICIAL_ESSENCE_ID)
+        step = 'capture-source-profile'
+        captureEssenceRuntimeIfPresent(sourceId)
+        step = 'repair-official-essence'
+        if (sourceId === OFFICIAL_ESSENCE_ID) await repairOfficialEssenceNow()
+        step = 'ensure-fresh'
+        await essenceManager.ensureFresh(sourceId)
+        step = 'fingerprint'
+        const fingerprint = essenceManager.getMeta(sourceId)?.lastMergedFingerprint ?? null
+        const changed = Boolean(fingerprint && task.configSourceFingerprint !== fingerprint)
+        if (changed) {
+          step = 'stop-stale'
+          // Stop unconditionally: a stopped record still carries stale meta fields.
+          try { await forker()?.stop?.(id) } catch { /* best effort */ }
+          task.status = TASK_STATUS.FAILED
+          task.pid = null
+          task.port = null
+          task.url = null
+          task.token = ''
+          task.adapter = { ok: false, error: 'source-fingerprint-changed' }
+          persist()
+          syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: task.adapter.error })
+          step = 'restore'
+          const restored = await service.restoreTask(id)
+          return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint, paused }
+        }
+        if (task.status === TASK_STATUS.FAILED) {
+          step = 'restore'
+          const restored = await service.restoreTask(id)
+          return { ...restored, synced: true, restarted: true, sourceFingerprint: fingerprint, paused }
+        }
+        step = 'open-url'
+        const out = forker()?.openUrl?.(id) ?? null
+        if (!out || out.ok !== true) return { ok: false, taskId: id, step, error: out?.error ?? 'not-running' }
+        return { ...out, synced: true, restarted: false, sourceFingerprint: fingerprint, paused }
+      } catch (error) {
+        return failOpenStep(step, error)
       }
-      const out = forker()?.openUrl?.(id) ?? null
-      if (!out || out.ok !== true) return { ok: false, error: out?.error ?? 'not-running' }
-      return { ...out, synced: true, restarted: false, sourceFingerprint: fingerprint, paused }
     },
 
     /**
@@ -2691,6 +3902,14 @@ export function apply(ctx, config) {
      * @param {{taskIds?: string[]}} [input]
      */
     async autostartForks(input = {}) {
+      // Boot pagefile gate is authoritative: a missing/disabled page file enters
+      // Safe Mode and no fork/browser may be spawned automatically.
+      await bootPagefileGate
+      if (safeMode) {
+        const skipped = [...tasks.values()].map(task => ({ taskId: task.taskId, reason: 'safe-mode' }))
+        audit('autostart-refused', { reason: safeModeReason || 'host-safe-mode', skipped: skipped.length })
+        return { ok: false, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode', started: [], failed: [], skipped }
+      }
       const f = forker()
       if (!f || typeof f.spawn !== 'function') {
         return { ok: false, error: 'forker-unavailable', started: [], failed: [], skipped: [] }
@@ -2759,6 +3978,7 @@ export function apply(ctx, config) {
         task.url = started.url ?? null
         task.token = started.token ?? extractTokenSafe(task.url)
         task.adapter = { ok: false, error: 'handshaking' }
+        scheduleTaskProcessIdentity(task)
         persist()
         audit(AUDIT.FORK_STARTED, { taskId: id, pid: task.pid, port: task.port, profile: task.profile, reason: 'autostart' })
         bus.emit('fang/fork-started', { taskId: id, forkId: id, pid: task.pid, port: task.port })
@@ -2802,6 +4022,7 @@ export function apply(ctx, config) {
       }
       tasks.delete(id)
       remoteCache.delete(id)
+      forkActivityCache.delete(id)
       persist()
       audit(AUDIT.FORK_REAPED, { taskId: id, title: task.title, archivedDelete: true })
       bus.emit('fang/fork-reaped', { forkId: id })
@@ -2825,6 +4046,7 @@ export function apply(ctx, config) {
       }
       tasks.delete(task.taskId)
       remoteCache.delete(task.taskId)
+      forkActivityCache.delete(task.taskId)
       persist()
       audit(AUDIT.FORK_REAPED, { taskId: task.taskId })
       bus.emit('fang/fork-reaped', { forkId: task.taskId })
@@ -2846,6 +4068,7 @@ export function apply(ctx, config) {
           canonicalFangHome: layout.canonicalFangHome || DEFAULT_FANG_DATA_ROOT,
           legacyDataDetected: layout.legacyDataDetected === true,
           legacyDataDir: layout.legacyDataDir || '',
+          migrationReport,
           dataIsolationBlocked: isolationBlocked,
           dataIsolationErrors: isolationChecks,
           dataDir: layout.dataDir,
@@ -2890,9 +4113,64 @@ export function apply(ctx, config) {
         },
         // 重启守卫摘要（只读）：Client Header 用它显示 mode/红灯策略；无守卫时 available:false。
         restart: restartSummary(restartView()),
+        // 2026-11-25: pagefile / Commit 快照。由 memoryGate、host/memory watchdog
+        // 和启动探针刷新；status 本身不做 PowerShell 查询，避免拉高采样成本。
+        memory: memorySnapshot,
+        memoryPolicy: memoryPolicySnapshot(),
+        sessionCompact: sessionCompactSnapshot,
+        diskHygiene: diskHygieneSnapshot,
       }
     },
 
+    openManagedBrowser: async (taskId, url) => {
+      const task = tasks.get(String(taskId ?? ''))
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (task.quarantined) return { ok: false, error: 'fork-quarantined', detail: task.quarantined.reason ?? 'guard' }
+      return launchTaskBrowser(task, String(url ?? task.url ?? ''))
+    },
+    closeManagedBrowser: async (taskId, reason = 'user') => {
+      const task = tasks.get(String(taskId ?? ''))
+      if (!task) return { ok: false, error: 'unknown-task' }
+      return closeTaskBrowser(task, reason)
+    },
+    probeMemory: async () => {
+      const memory = rememberMemory(await readSystemMemory({ force: true }))
+      notePagefile(memory, 'manual-probe')
+      return { ok: memory?.ok !== false, memory: memorySnapshot, memoryPolicy: memoryPolicySnapshot() }
+    },
+    safeModeStatus: () => ({ ok: true, safeMode, reason: safeModeReason }),
+    panic: async () => hostEmergency('manual-panic', { safe: true }),
+    resetSafeMode: async () => {
+      let memory = null
+      try {
+        memory = rememberMemory(await readSystemMemory({ force: true }))
+        notePagefile(memory, 'safe-mode-reset')
+      } catch (error) {
+        const detail = String(error?.message ?? error)
+        audit('safe-mode-reset-refused', { reason: 'memory-probe-threw', detail })
+        return { ok: false, error: 'memory-probe-threw', detail }
+      }
+      const decision = evaluateSafeModeReset(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
+      if (decision.ok !== true) {
+        audit('safe-mode-reset-refused', {
+          reason: decision.error,
+          pageFileMB: decision.pageFileMB,
+          commitFreeMB: decision.commitFreeMB,
+          minFreeMB: decision.minFreeMB,
+        })
+        return {
+          ok: false,
+          error: decision.error,
+          detail: decision.detail,
+          memory: memorySnapshot,
+        }
+      }
+      safeMode = false
+      safeModeReason = ''
+      persistSafeMode()
+      audit('host-safe-mode-reset', { pageFileMB: decision.pageFileMB, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
+      return { ok: true, safeMode: false }
+    },
     /** v3.3.8：手动/启动后检测默认元主是否落后，旧则自动 capture 并 setDefault。 */
     refreshDefaultEssence: () => refreshStaleDefaultEssenceIfNeeded(),
 
@@ -2952,6 +4230,24 @@ export function apply(ctx, config) {
     const timer = setInterval(() => { void cleanupOrphanForks() }, Number(cfg.orphanSweepMinutes) * 60_000)
     timer.unref?.()
     try { ctx.effect(() => () => clearInterval(timer)) } catch { /* fake ctx */ }
+  }
+  // P2 #2: only archived tasks; first sweep is delayed so boot and a just-archived
+  // task do not both decode the same 60 MB log.
+  if (cfg.sessionCompactEnabled === true && Number(cfg.sessionCompactIntervalMs) > 0) {
+    const first = setTimeout(() => { void sessionCompactTick() }, 60_000)
+    first.unref?.()
+    const timer = setInterval(() => { void sessionCompactTick() }, Number(cfg.sessionCompactIntervalMs))
+    timer.unref?.()
+    try { ctx.effect(() => () => { clearTimeout(first); clearInterval(timer) }) } catch { /* fake ctx */ }
+  }
+  // P2 #3: read-only disk snapshot first (no cache movement unless the user
+  // explicitly turns browserCacheCleanupEnabled on).
+  if (cfg.diskHygieneEnabled === true) {
+    const first = setTimeout(() => { try { refreshDiskHygiene(true) } catch { /* read-only best effort */ } }, 90_000)
+    first.unref?.()
+    const timer = setInterval(() => { try { refreshDiskHygiene(true) } catch { /* read-only best effort */ } }, Number(cfg.diskHygieneIntervalMs))
+    timer.unref?.()
+    try { ctx.effect(() => () => { clearTimeout(first); clearInterval(timer) }) } catch { /* fake ctx */ }
   }
   // v3.3.8：启动后异步自愈默认元主；不阻塞 boot，不 unref 也不会阻止退出。
   {
@@ -3412,6 +4708,7 @@ export function apply(ctx, config) {
     let modulesSync = { copied: [], missing: [] }
     try { modulesSync = syncProfileModulesFromMother(essenceManager.mergedProfileDir(OFFICIAL_ESSENCE_ID), templateDir()) } catch { /* best effort */ }
     if (repaired?.ok !== true) audit('official-essence-repair-failed', { repaired })
+    else if (Number(repaired.coreUiForced) > 0) audit('official-core-ui-enabled', { coreUiForced: Number(repaired.coreUiForced) })
     return { repaired, modulesSync }
   }
   const applyOfficialExperimentalSurface = (profileDir, options = {}) => {
@@ -3472,9 +4769,13 @@ export function apply(ctx, config) {
       const sourceDir = essenceManager.mergedProfileDir(sourceId)
       const sourcePkg = readJson(path.join(sourceDir, 'package.json'), null)
       if (!sourcePkg) return { ok: false, error: 'source-profile-missing', sourceId }
-      const sourcePatch = parsePatchEntries(
+      const sourcePatchRaw = parsePatchEntries(
         exists(path.join(sourceDir, 'cordis.patch.yml')) ? fs.readFileSync(path.join(sourceDir, 'cordis.patch.yml'), 'utf8') : '',
       ).entries
+      // A source essence may still carry an old `ui-theme disabled: true` row.
+      // Copying it into a fork reproduces the exact "waiting for service: theme"
+      // boot failure; force required UI rows on this merge path too.
+      const sourcePatch = enforceCoreUiEntries(sourcePatchRaw).entries
       const pkgFile = path.join(String(profileDir), 'package.json')
       const patchFile = path.join(String(profileDir), 'cordis.patch.yml')
       const forkPkg = readJson(pkgFile, null)
@@ -3500,10 +4801,14 @@ export function apply(ctx, config) {
       const forkPatch = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '').entries
       const lockIds = new Set(['tool-plugin-manager', 'ui-settings-plugin-inventory'])
       const locks = forkPatch.filter((entry) => lockIds.has(String(entry?.id ?? '')))
-      const merged = [...sourcePatch]
-      for (const row of locks) if (!merged.some((entry) => entry?.id === row.id)) merged.push(row)
-      fs.writeFileSync(patchFile, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
-      return { ok: true, sourceId, bundles: forkPkg.dsh.profile.bundles.length, rows: merged.length }
+      const mergedRaw = [...sourcePatch]
+      for (const row of locks) if (!mergedRaw.some((entry) => entry?.id === row.id)) mergedRaw.push(row)
+      const merged = enforceCoreUiEntries(mergedRaw)
+      fs.writeFileSync(patchFile, `${JSON.stringify(merged.entries, null, 2)}\n`, 'utf8')
+      return {
+        ok: true, sourceId, bundles: forkPkg.dsh.profile.bundles.length,
+        rows: merged.entries.length, coreUiForced: merged.forced,
+      }
     } catch (error) {
       return { ok: false, error: String(error?.message ?? error) }
     }
@@ -3672,7 +4977,16 @@ export function apply(ctx, config) {
     if (index.ok === false) {
       try { audit('workspace-index-merge-failed', { homeDir, error: index.error }) } catch { /* ignore */ }
     }
-    return imported
+    // Index merge copies the mother's E:\DSH\DS path by design; redirect it
+    // now, before the fork host can open the session with the shared cwd.
+    const workspaceMap = migrateForkWorkspace(homeDir, { roots: workspaceMigrationRoots(cfg) })
+    if (workspaceMap.changed || workspaceMap.conflicts.length > 0) {
+      try { audit('fork-workspace-migrated', { homeDir, ...workspaceMap }) } catch { /* ignore */ }
+    }
+    return imported.map((row) => {
+      const mapping = workspaceMap.mappings.find((item) => item.oldKey === row.workspaceKey)
+      return mapping ? { ...row, workspaceKey: mapping.newKey, workspaceMap: mapping } : row
+    })
   }
 
   const mirrorService = {
@@ -4024,6 +5338,20 @@ export function apply(ctx, config) {
         coreMode: 'stock',
       })
       if (!provisioned.ok) throw new Error(String(provisioned.error ?? 'runtime-provision-failed'))
+      // Direct self-heal for an existing runtime profile: provision only clones
+      // package.json/cordis*.yml, and a stale runtime copy may still say
+      // ui-theme disabled: true. Fix the file before the CLI boots, otherwise
+      // layout/sidebar/chat pend and the page fails with required-entries.
+      try {
+        const patchFile = path.join(runtimeProfileDir, 'cordis.patch.yml')
+        const enforced = enforceCoreUiEntries(parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '').entries)
+        if (enforced.forced > 0) {
+          fs.writeFileSync(patchFile, `${JSON.stringify(enforced.entries, null, 2)}\n`, 'utf8')
+          audit('runtime-core-ui-enabled', { essenceId: id, coreUiForced: enforced.forced })
+        }
+      } catch (error) {
+        audit('runtime-core-ui-repair-failed', { essenceId: id, error: String(error?.message ?? error) })
+      }
       // 历史版本把生产盘锁写进了 essence-runtime；配置实例必须能管理插件，升级后清掉。
       try { clearForkConfigLock(runtimeProfileDir) } catch { /* best effort */ }
       // v3.1.7：运行态 profile 的 node_modules 必须是 per-entry mirror（不是整树 junction）。
@@ -4090,26 +5418,6 @@ export function apply(ctx, config) {
       }
     },
 
-    openManagedBrowser: async (taskId, url) => {
-      const task = tasks.get(String(taskId ?? ''))
-      if (!task) return { ok: false, error: 'unknown-task' }
-      if (task.quarantined) return { ok: false, error: 'fork-quarantined', detail: task.quarantined.reason ?? 'guard' }
-      return launchTaskBrowser(task, String(url ?? task.url ?? ''))
-    },
-    closeManagedBrowser: async (taskId, reason = 'user') => {
-      const task = tasks.get(String(taskId ?? ''))
-      if (!task) return { ok: false, error: 'unknown-task' }
-      return closeTaskBrowser(task, reason)
-    },
-    safeModeStatus: () => ({ ok: true, safeMode, reason: safeModeReason }),
-    panic: async () => hostEmergency('manual-panic', { safe: true }),
-    resetSafeMode: () => {
-      safeMode = false
-      safeModeReason = ''
-      persistSafeMode()
-      audit('host-safe-mode-reset', {})
-      return { ok: true, safeMode: false }
-    },
     stopEssenceRuntime: async (essenceId) => {
       const id = String(essenceId ?? '').trim()
       const f = forker()
@@ -4181,13 +5489,18 @@ export function apply(ctx, config) {
         logs,
       }
     },
-    /** 打开运行态：返回带临时 token 的 URL（仅内存，不落盘）。 */    openEssenceRuntime: (essenceId) => {
+    /** 打开运行态：URL 只进托管浏览器，成功后才算 open；绝不回退外部浏览器。 */
+    openEssenceRuntime: async (essenceId) => {
       const id = String(essenceId ?? '').trim()
       const f = forker()
       if (!f || typeof f.openUrl !== 'function') return { ok: false, error: 'forker-unavailable' }
       const out = f.openUrl(runtimeForkId(id))
       if (!out || out.ok === false) return { ok: false, error: out?.error ?? 'not-running' }
-      return { ok: true, essenceId: id, url: out.url, port: out.port ?? null }
+      const browser = await openRuntimeManagedBrowser(id, out.url)
+      if (browser.ok !== true) {
+        return { ok: false, error: browser.error ?? 'browser-open-failed', browserError: browser.error ?? 'browser-open-failed', managed: false, essenceId: id }
+      }
+      return { ok: true, essenceId: id, url: out.url, port: out.port ?? null, managed: true, browserPid: browser.pid ?? null }
     },
     // v3.0.9 升级链路 2.1：把本机母体 profile（PC 客户端那份）克隆成镜像基础层。
     cloneMotherProfile: (input = {}) => {
@@ -4451,7 +5764,15 @@ export function apply(ctx, config) {
         const origin = typeof webServer.getOrigin === 'function' ? webServer.getOrigin() : ''
         if (origin) {
           fs.mkdirSync(layout.dataDir, { recursive: true })
-          fs.writeFileSync(path.join(layout.dataDir, 'endpoint.json'), JSON.stringify({ url: origin, updatedAt: new Date().toISOString() }) + '\n')
+          fs.writeFileSync(path.join(layout.dataDir, 'endpoint.json'), JSON.stringify({
+            url: origin,
+            pid: process.pid,
+            instanceId,
+            version: FANG_VERSION,
+            role,
+            dataDir: layout.dataDir,
+            updatedAt: new Date().toISOString(),
+          }) + '\n')
         }
       } catch { /* endpoint discovery is best-effort */ }
       const prefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
@@ -4479,6 +5800,7 @@ export function apply(ctx, config) {
         path: pathname,
         method,
         handler: async (req, res) => {
+          try { res.setHeader?.('x-fang-instance', instanceId) } catch { /* fake res */ }
           // v3.0.5/B1：loopback Host + Origin/CSRF + 安装 token（fail-closed）。
           // Auth must run before the method check: a token-less POST is 401, not 405.
           const decision = checkRequestAuth(req, {
@@ -4505,6 +5827,7 @@ export function apply(ctx, config) {
         path: pathname,
         method: Object.keys(handlers).join(','),
         handler: async (req, res) => {
+          try { res.setHeader?.('x-fang-instance', instanceId) } catch { /* fake res */ }
           const decision = checkRequestAuth(req, {
             token: authToken,
             publicRoute: authToken.length === 0 || routeOptions?.public === true,
@@ -5221,37 +6544,73 @@ export function apply(ctx, config) {
         if (safeMode) return json(res, 423, { ok: false, error: 'safe-mode', detail: safeModeReason })
         const guardTask = tasks.get(taskId)
         if (guardTask?.quarantined) return json(res, 423, { ok: false, error: 'fork-quarantined', detail: guardTask.quarantined.reason ?? 'guard' })
-        const out = forker()?.openUrl?.(taskId) ?? null
-        if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running', taskId })
-        return json(res, 200, out)
+        try {
+          const out = forker()?.openUrl?.(taskId) ?? null
+          if (!out || out.ok !== true) return json(res, 404, { ok: false, error: out?.error ?? 'not-running', taskId })
+          return json(res, 200, out)
+        } catch (error) {
+          const detail = String(error?.message ?? error)
+          audit('fork-open-url-failed', { taskId, detail })
+          return json(res, 500, { ok: false, error: 'open-url-threw', step: 'open-url', taskId, detail })
+        }
       })
       route('POST', `${prefix}/api/tasks/open`, async (req, res) => {
         const body = await readBody(req)
         const taskId = String(body?.taskId ?? '').trim()
         if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
         if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
-        const out = await service.syncTaskOnOpen(taskId)
+        let out = null
+        try {
+          out = await service.syncTaskOnOpen(taskId)
+        } catch (error) {
+          const detail = String(error?.message ?? error)
+          audit('fork-open-handler-failed', { taskId, step: 'sync-task-on-open', detail })
+          return json(res, 500, { ok: false, error: 'open-fork-threw', step: 'sync-task-on-open', taskId, detail })
+        }
         if (!out || out.ok !== true) {
           const status = out?.error === 'unknown-task' ? 404 : out?.error === 'not-running' ? 404 : out?.error === 'safe-mode' || out?.error === 'fork-quarantined' ? 423 : 409
           return json(res, status, { ok: false, error: out?.error ?? 'not-running', ...out })
         }
-        let managed = { ok: true, managed: false }
-        if (out.url) {
-          try {
-            const browser = await service.openManagedBrowser(taskId, out.url)
-            if (browser?.ok === true) managed = browser
-            else managed = { ok: true, managed: false, browserError: browser?.error ?? 'browser-unavailable' }
-          } catch (error) {
-            managed = { ok: true, managed: false, browserError: String(error?.message ?? error) }
-            audit('fork-browser-open-handler-failed', { taskId, error: String(error?.message ?? error) })
-          }
+        if (!out.url) return json(res, 409, { ...out, ok: false, error: 'fork-url-missing' })
+        // P0: no silent external-browser fallback. A fork URL is only deliverable
+        // through the managed, measurable browser. If it cannot start, fail the
+        // open explicitly and keep the URL server-side for a later retry.
+        try {
+          const browser = await service.openManagedBrowser(taskId, out.url)
+          if (browser?.ok === true) return json(res, 200, { ...out, ...browser, managed: true })
+          const error = browser?.error ?? 'browser-unavailable'
+          audit('fork-browser-open-refused', { taskId, error })
+          return json(res, 503, { ...out, ok: false, error, browserError: error, managed: false })
+        } catch (error) {
+          const detail = String(error?.message ?? error)
+          audit('fork-browser-open-handler-failed', { taskId, error: detail })
+          return json(res, 503, { ...out, ok: false, error: 'browser-open-failed', browserError: detail, managed: false })
         }
-        return json(res, 200, { ...out, ...managed })
       })
       route('GET', `${prefix}/api/safe-mode`, async (req, res) => json(res, 200, service.safeModeStatus()))
+      route('POST', `${prefix}/api/memory/probe`, async (req, res) => {
+        await readBody(req)
+        return json(res, 200, await service.probeMemory())
+      })
+      route('POST', `${prefix}/api/sessions/compact`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.compactSessions(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
+      route('GET', `${prefix}/api/disk-hygiene`, async (req, res) => json(res, 200, service.diskHygiene()))
+      route('POST', `${prefix}/api/disk-hygiene/refresh`, async (req, res) => {
+        await readBody(req)
+        return json(res, 200, service.refreshDiskHygiene())
+      })
+      route('POST', `${prefix}/api/disk-hygiene/cleanup`, async (req, res) => {
+        const body = await readBody(req)
+        const out = service.cleanupBrowserCache(String(body?.taskId ?? ''), { confirm: body?.confirm === true })
+        return json(res, out.ok ? 200 : 409, out)
+      })
       route('POST', `${prefix}/api/safe-mode/reset`, async (req, res) => {
         await readBody(req)
-        return json(res, 200, service.resetSafeMode())
+        const out = await service.resetSafeMode()
+        return json(res, out.ok ? 200 : 409, out)
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
         const body = await readBody(req)
@@ -5260,7 +6619,14 @@ export function apply(ctx, config) {
       })
       route('POST', `${prefix}/api/tasks/restore`, async (req, res) => {
         const body = await readBody(req)
-        const out = await service.restoreTask(String(body?.taskId ?? ''))
+        let out
+        try {
+          out = await service.restoreTask(String(body?.taskId ?? ''))
+        } catch (error) {
+          const detail = String(error?.message ?? error)
+          audit('fork-restore-handler-failed', { taskId: body?.taskId ?? '', detail })
+          return json(res, 500, { ok: false, error: 'restore-fork-threw', step: 'restore', taskId: body?.taskId ?? '', detail })
+        }
         const status = out.ok ? 200 : out?.error === 'safe-mode' ? 423 : out?.error === 'fork-quarantined' ? 423 : 409
         return json(res, status, out)
       })
@@ -5295,7 +6661,14 @@ export function apply(ctx, config) {
         const taskId = String(body?.taskId ?? '').trim()
         if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
         if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
-        const out = await service.repairTask(taskId)
+        let out
+        try {
+          out = await service.repairTask(taskId)
+        } catch (error) {
+          const detail = String(error?.message ?? error)
+          audit('fork-repair-handler-failed', { taskId, detail })
+          return json(res, 500, { ok: false, error: 'repair-fork-threw', step: 'repair', taskId, detail })
+        }
         return json(res, out.ok ? 200 : 409, out)
       })
       // v3.0.9：强制单会话（运行中拒绝；停止/归档态把多余会话隔离到 quarantine-sessions/）
@@ -5515,9 +6888,10 @@ export function apply(ctx, config) {
         }
       })
       route('GET', `${prefix}/api/essence/open/candidates`, (req, res) => json(res, 200, mirrorService.essenceOpenCandidates()))
-      route('GET', `${prefix}/api/essence/runtime/open`, (req, res) => {
+      route('GET', `${prefix}/api/essence/runtime/open`, async (req, res) => {
         const query = new URL(String(req.url ?? '/'), 'http://x').searchParams
-        return json(res, 200, mirrorService.openEssenceRuntime(query.get('essenceId')))
+        const out = await mirrorService.openEssenceRuntime(query.get('essenceId'))
+        return json(res, out?.ok === true ? 200 : 503, out)
       })
       route('POST', `${prefix}/api/essence/backup`, async (req, res) => {
         const body = await readBody(req)
@@ -5804,6 +7178,7 @@ export function apply(ctx, config) {
       webServer.register({
         kind: 'prefix',
         path: `${prefix}/api`,        handler: async (req, res) => {
+          try { res.setHeader?.('x-fang-instance', instanceId) } catch { /* fake res */ }
           const decision = checkRequestAuth(req, {
             token: authToken,
             publicRoute: authToken.length === 0,

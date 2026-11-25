@@ -201,7 +201,11 @@ function withinPath(child, parent) {
 function resolvePathValue(value, root) {
   if (typeof value !== 'string' || value.length === 0) return null
   try {
-    const abs = path.isAbsolute(value) ? value : path.resolve(root, value)
+    // A Windows drive path is absolute even when the current process is Linux (CI).
+    // Resolve it instead of nesting it under a POSIX root; otherwise policy roots
+    // and action targets land in different directories and every buffer check fails.
+    const driveAbsolute = /^[A-Za-z]:[\\/]/.test(value)
+    const abs = path.isAbsolute(value) || driveAbsolute ? path.resolve(value) : path.resolve(root, value)
     return path.normalize(abs)
   } catch {
     return null

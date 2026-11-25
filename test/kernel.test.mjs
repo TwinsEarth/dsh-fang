@@ -156,8 +156,8 @@ test('paths: profile tag and DSH_HOME resolution precedence', () => {
   assert.ok(layout.forksFile.endsWith('forks.json'))
 
   const derived = resolveFangLayout({ env: { DSH_HOME: 'C:\\home', DSH_PROFILE: 'pp', FANG_HOME: 'C:\\fanghome' } })
-  assert.equal(derived.dataDir, path.resolve('C:\\fanghome\\mirror\\pp'))
-  assert.equal(derived.essenceRoot, path.resolve('C:\\fanghome\\essence'))
+  assert.equal(derived.dataDir, path.resolve('C:\\fanghome', 'mirror', 'pp'))
+  assert.equal(derived.essenceRoot, path.resolve('C:\\fanghome', 'essence'))
 })
 
 test('rounds: begin round snapshots, reset restores the pre-image', () => {
@@ -217,7 +217,7 @@ test('core: resource diff and shared vocabulary', () => {
   assert.equal(diff.leakedRefed, 2)
   assert.equal(totalResources({ a: 1, b: 2 }), 3)
   assert.equal(EXIT.RESTART, 75)
-  assert.equal(FANG_VERSION, '3.8.2')
+  assert.equal(FANG_VERSION, '3.8.4')
   assert.equal(SERVICE.orchestrator, 'fang')
   assert.equal(ROW.orchestrator, 'fang-orchestrator')
   assert.equal(FORK_STATUS.RUNNING, 'running')

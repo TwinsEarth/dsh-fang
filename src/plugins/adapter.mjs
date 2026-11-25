@@ -58,6 +58,7 @@ import {
   totalResources,
 } from '../kernel/index.mjs'
 import { authErrorBody, checkRequestAuth } from '../lib/http-auth.mjs'
+import { readForkActivity } from '../lib/fork-activity.mjs'
 import {
   CommandCache,
   EventLog,
@@ -84,6 +85,8 @@ const TASK_ID_ENVS = ['DSH_FANG_TASK_ID', 'DSH_FANG_FORK_ID', 'DSH_FANG_FORK', '
 const DEFAULTS = Object.freeze({
   prefix: '/fang',
   taskId: '',
+  homeDir: '',
+  activityCacheMs: 2000,
   auditLimit: 500,
   commandTimeoutMs: 10000,
   token: '',
@@ -97,6 +100,10 @@ export const Config = z.object({
     .description('HTTP 路由前缀（与母体 Remote 的 prefix 一致）'),
   taskId: z.string().default('')
     .description('任务 id；留空 = 环境变量 DSH_FANG_TASK_ID / forkId'),
+  homeDir: z.string().default('')
+    .description('分身 $DSH_HOME（用于读会话活动）；留空 = 环境变量 DSH_HOME'),
+  activityCacheMs: z.number().min(0).max(60000).default(2000)
+    .description('活动信号缓存毫秒；0 = 每次重新读会话日志尾部'),
   auditLimit: z.number().min(1).max(100000).default(500)
     .description('单次审计拉取上限（HTTP ?limit= 会被夹在此值内）'),
   commandTimeoutMs: z.number().min(1).max(600000).default(10000)
@@ -150,7 +157,7 @@ export function resolveInside(root, relative) {
   if (!raw) return { ok: false, code: 'bad-request', error: 'empty-path' }
   if (raw.includes('\0')) return { ok: false, code: 'path-escape', error: 'nul-byte-in-path' }
   if (/^[A-Za-z]:/.test(raw)) return { ok: false, code: 'path-escape', error: `absolute-path:${raw}` }
-  if (raw.startsWith('\\\\') || raw.startsWith('//')) {
+  if (raw.startsWith('\\') || raw.startsWith('//')) {
     return { ok: false, code: 'path-escape', error: `unc-path:${raw}` }
   }
   if (path.isAbsolute(raw)) return { ok: false, code: 'path-escape', error: `absolute-path:${raw}` }
@@ -675,6 +682,28 @@ export function apply(ctx, config) {
     capabilities: Object.values(ADAPTER_OP),
   })
 
+  const activityHome = () => String(cfg.homeDir || process.env?.DSH_HOME || '').trim()
+  let activityCache = { at: 0, value: null }
+  /**
+   * 最近活动 + 运行中 turn。读失败/无会话时仍返回结构化 none，由母体决定不关。
+   * 缓存只影响 UI 轮询，不改变「无信号不关」的最终判断。
+   */
+  const activitySnapshot = ({ force = false } = {}) => {
+    const ttl = clampInt(cfg.activityCacheMs, 0, 60000, 2000)
+    if (!force && activityCache.value && nowMs() - activityCache.at < ttl) return activityCache.value
+    let value
+    try {
+      value = readForkActivity(activityHome(), { now: nowMs() })
+    } catch (e) {
+      value = {
+        ok: false, error: 'activity-read-failed', detail: msgOf(e), at: nowMs(),
+        lastActivityAt: null, turnRunning: null, signal: 'none', source: 'session-log',
+      }
+    }
+    activityCache = { at: nowMs(), value }
+    return value
+  }
+
   const status = () => {
     const items = approvalItems()
     return {
@@ -688,8 +717,94 @@ export function apply(ctx, config) {
       buffer: bufferView(),
       approvals: { pending: items ? items.length : 0 },
       audit: auditHead(),
+      activity: activitySnapshot(),
       startedAt,
       archived: archivedAt !== null,
+    }
+  }
+
+  /** 单独的轻量活动接口，避免母体为了关空闲浏览器拉整份 status。 */
+  const activity = () => ({
+    ok: true,
+    taskId,
+    role,
+    at: iso(),
+    activity: activitySnapshot(),
+  })
+
+  /**
+   * 关闭浏览器前的会话持久化屏障。
+   *
+   * DSH 没有对外的 HTTP flush/save 路由；官方入口是宿主内 `ctx.sessions.flush(session)`
+   * （见官方 Session API）。这个 handler 在分身宿主进程里调用同一入口，再把结果
+   * 显式回给母体：`saved === true` 才代表至少一个会话的持久化监听器完成了落盘。
+   * 读会话（read-only）不需要落盘，跳过；没有持久化监听器的活会话视为未保存。
+   */
+  const flushSessions = async (payload = {}) => {
+    const sessions = safeGet('sessions')
+    if (!sessions || typeof sessions.flush !== 'function' || typeof sessions.list !== 'function') {
+      return { ok: false, code: 'service-unavailable', error: 'sessions.flush unavailable in this instance', saved: false }
+    }
+    const requested = String(payload?.sessionId ?? '').trim()
+    let live
+    try {
+      live = sessions.list()
+    } catch (e) {
+      return { ok: false, code: 'session-flush-failed', error: `sessions.list failed: ${msgOf(e)}`, saved: false }
+    }
+    if (!Array.isArray(live)) {
+      return { ok: false, code: 'session-flush-failed', error: 'sessions.list did not return an array', saved: false }
+    }
+    const all = live
+    const targets = requested ? all.filter(session => String(session?.id ?? '') === requested) : all
+    if (requested && targets.length === 0) {
+      return { ok: false, code: 'session-not-live', error: `session is not live: ${requested}`, sessionId: requested, saved: false }
+    }
+    const flushed = []
+    const skipped = []
+    const failed = []
+    for (const session of targets) {
+      const id = String(session?.id ?? '')
+      try {
+        const participated = await sessions.flush(session)
+        if (participated === false) {
+          failed.push({ id, code: 'no-persistence-listener', error: 'session has no persistence listener' })
+        } else {
+          flushed.push(id)
+        }
+      } catch (e) {
+        const message = msgOf(e)
+        if (/read[- ]?only|SessionReadOnlyError/i.test(message)) skipped.push({ id, reason: 'read-only' })
+        else failed.push({ id, code: 'flush-threw', error: message })
+      }
+    }
+    const at = iso()
+    const saved = failed.length === 0
+    if (!saved) {
+      appendAudit('session-flush', { at, requested: requested || null, flushed, skipped, failed, saved: false })
+      return {
+        ok: false,
+        code: 'session-flush-failed',
+        error: failed[0]?.error ?? 'session flush failed',
+        taskId,
+        at,
+        live: targets.length,
+        flushed,
+        skipped,
+        failed,
+        saved: false,
+      }
+    }
+    appendAudit('session-flush', { at, requested: requested || null, flushed, skipped, failed: [], saved: true })
+    return {
+      ok: true,
+      taskId,
+      at,
+      live: targets.length,
+      flushed,
+      skipped,
+      failed: [],
+      saved: true,
     }
   }
 
@@ -805,6 +920,10 @@ export function apply(ctx, config) {
     [ADAPTER_OP.PING, () => ({ pong: true, at: iso(), pid: process.pid, taskId, uptimeMs: nowMs() - startedAt })],
 
     [ADAPTER_OP.STATUS, () => status()],
+
+    [ADAPTER_OP.ACTIVITY, () => activity()],
+
+    [ADAPTER_OP.FLUSH_SESSION, (payload) => flushSessions(payload)],
 
     [ADAPTER_OP.FLUSH_BUFFER, (payload) => flushBuffer(payload)],
 
@@ -1127,6 +1246,7 @@ export function apply(ctx, config) {
     identity,
     reportClient,
     status,
+    activity,
     approvals,
     audit,
     command,
@@ -1316,6 +1436,18 @@ export function apply(ctx, config) {
     route('GET', `${prefix}${ADAPTER_ROUTE.HELLO}`, (req, res) => json(res, 200, hello()))
 
     route('GET', `${prefix}${ADAPTER_ROUTE.STATUS}`, (req, res) => json(res, 200, status()))
+
+    route('GET', `${prefix}${ADAPTER_ROUTE.ACTIVITY}`, (req, res) => json(res, 200, activity()))
+
+    route('POST', `${prefix}${ADAPTER_ROUTE.FLUSH_SESSION}`, async (req, res) => {
+      const parsed = await readJsonBody(req)
+      if (parsed.error) {
+        const code = parsed.error === 'body-too-large' ? 'body-too-large' : 'bad-request'
+        return json(res, statusForCode(code), { ok: false, code, error: parsed.error })
+      }
+      const out = await flushSessions(parsed.body ?? {})
+      return sendResult(res, out)
+    })
 
     route('GET', `${prefix}${ADAPTER_ROUTE.APPROVALS}`, (req, res) => sendResult(res, approvals()))
 

@@ -17,21 +17,160 @@ const CHROME_CANDIDATES = [
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
 ]
 
-export async function lowerProcessPriority(pid) {
-  const value = Number(pid)
-  if (process.platform !== 'win32' || !Number.isInteger(value) || value <= 0) return { ok: false, error: 'unsupported' }
+export function isLoweredPriorityClass(value) {
+  const text = String(value ?? '').trim().toLowerCase()
+  return text === 'idle' || text === 'belownormal'
+}
+
+function parsePowerShellJson(text) {
+  const trimmed = String(text ?? '').trim()
+  if (!trimmed) return null
+  try { return JSON.parse(trimmed) } catch { /* fall through */ }
+  const start = trimmed.search(/[[{]/)
+  const end = Math.max(trimmed.lastIndexOf('}'), trimmed.lastIndexOf(']'))
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(trimmed.slice(start, end + 1)) } catch { /* ignore */ }
+  }
+  return null
+}
+
+/** Pure summary used by tests and by the browser audit path. */
+export function summarizePriorityRows(rows = [], rootPid = 0) {
+  const list = (Array.isArray(rows) ? rows : []).map((row) => {
+    const rawError = row?.error ?? row?.Error
+    return {
+      pid: Number(row?.pid ?? row?.Id),
+      name: String(row?.name ?? row?.Name ?? ''),
+      exists: row?.exists !== false && row?.Exists !== false,
+      before: String(row?.before ?? row?.Before ?? ''),
+      after: String(row?.after ?? row?.After ?? ''),
+      changed: row?.changed === true || row?.Changed === true,
+      skipped: row?.skipped === true || row?.Skipped === true,
+      error: rawError == null || rawError === '' ? null : String(rawError),
+    }
+  })
+  const root = list.find((row) => row.pid === Number(rootPid))
+  const alive = list.filter((row) => row.exists)
+  const lowered = alive.filter((row) => isLoweredPriorityClass(row.after))
+  const rootOk = Boolean(root?.exists)
+  return {
+    ok: rootOk,
+    partial: rootOk && lowered.length < alive.length,
+    rootPid: Number(rootPid) || 0,
+    count: list.length,
+    lowered: lowered.length,
+    changed: alive.filter((row) => row.changed).length,
+    alreadyLow: alive.filter((row) => row.skipped || (isLoweredPriorityClass(row.before) && !row.changed)).length,
+    missing: list.length - alive.length,
+    failed: alive.filter((row) => row.error).length,
+    notLowered: alive.filter((row) => !isLoweredPriorityClass(row.after)).length,
+    rootOnly: list.length <= 1,
+    rows: list,
+    error: rootOk ? null : 'root-not-found',
+  }
+}
+
+/** Build the PowerShell one-shot tree sampler. Exported so tests can assert recursion and safety. */
+export function buildPriorityTreeScript(rootPid) {
+  const root = Math.floor(Number(rootPid))
+  if (!Number.isInteger(root) || root <= 0) throw new Error('invalid-pid')
+  return [
+    `$root = ${root}`,
+    '$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId',
+    '$byParent = @{}',
+    'foreach ($item in $all) {',
+    '  $key = [string]([int]$item.ParentProcessId)',
+    '  if (-not $byParent.ContainsKey($key)) { $byParent[$key] = New-Object System.Collections.Generic.List[object] }',
+    '  [void]$byParent[$key].Add($item)',
+    '}',
+    '$targets = New-Object System.Collections.Generic.List[int]',
+    '[void]$targets.Add([int]$root)',
+    '$stack = New-Object System.Collections.Generic.Stack[int]',
+    '$stack.Push([int]$root)',
+    '$seen = @{}',
+    'while ($stack.Count -gt 0) {',
+    '  $id = [int]$stack.Pop()',
+    '  if ($seen.ContainsKey($id)) { continue }',
+    '  $seen[$id] = $true',
+    '  $children = $byParent[[string]$id]',
+    '  if ($null -ne $children) {',
+    '    foreach ($child in $children) {',
+    '      $cid = [int]$child.ProcessId',
+    '      if (-not $seen.ContainsKey($cid) -and -not $targets.Contains($cid)) {',
+    '        [void]$targets.Add($cid)',
+    '        $stack.Push($cid)',
+    '      }',
+    '    }',
+    '  }',
+    '}',
+    '$rows = @()',
+    'foreach ($id in $targets) {',
+    '  $p = Get-Process -Id $id -ErrorAction SilentlyContinue',
+    '  if ($null -eq $p) {',
+    '    $rows += [pscustomobject]@{ Id=$id; Name=""; Exists=$false; Before=""; After=""; Changed=$false; Skipped=$false; Error="not-found" }',
+    '    continue',
+    '  }',
+    '  $before = [string]$p.PriorityClass',
+    '  $changed = $false; $skipped = $false; $setError = $null',
+    '  if ($before -in @("Idle","BelowNormal")) { $skipped = $true }',
+    '  else {',
+    '    try { $p.PriorityClass = "BelowNormal"; $changed = $true } catch { $setError = $_.Exception.Message }',
+    '    try { $p.Refresh() } catch {}',
+    '  }',
+    '  $after = [string]$p.PriorityClass',
+    '  $rows += [pscustomobject]@{ Id=$id; Name=$p.ProcessName; Exists=$true; Before=$before; After=$after; Changed=$changed; Skipped=$skipped; Error=$setError }',
+    '}',
+    '$rows | ConvertTo-Json -Compress -Depth 4',
+  ].join('\n')
+}
+
+function setRootPriorityFallback(pid) {
   return new Promise((resolve) => {
     try {
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${value} -ErrorAction Stop).PriorityClass = 'BelowNormal'`], { windowsHide: true, timeout: 5000 }, (error) => {
-        resolve(error ? { ok: false, error: String(error.message ?? error) } : { ok: true })
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).PriorityClass = 'BelowNormal'`], { windowsHide: true, timeout: 5000 }, (error) => {
+        resolve(error ? { ok: false, error: String(error.message ?? error), rootOnly: true, partial: true } : { ok: true, rootOnly: true, partial: true })
+      })
+    } catch (error) { resolve({ ok: false, error: String(error?.message ?? error), rootOnly: true, partial: true }) }
+  })
+}
+
+/**
+ * Lower the browser/fork process tree, not only the root. Chromium renderer/GPU
+ * children may or may not inherit the root priority; the tree is sampled before
+ * and after so callers can audit what actually changed.
+ */
+export async function lowerProcessPriority(pid, { timeoutMs = 10000 } = {}) {
+  const value = Number(pid)
+  if (process.platform !== 'win32' || !Number.isInteger(value) || value <= 0) return { ok: false, error: 'unsupported' }
+  let script = ''
+  try { script = buildPriorityTreeScript(value) } catch (error) { return { ok: false, error: String(error?.message ?? error) } }
+  const output = await new Promise((resolve) => {
+    try {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
+        if (error) { resolve({ ok: false, error: String(error.message ?? error) }); return }
+        resolve({ ok: true, stdout: String(stdout ?? '') })
       })
     } catch (error) { resolve({ ok: false, error: String(error?.message ?? error) }) }
   })
+  if (!output.ok) {
+    const fallback = await setRootPriorityFallback(value)
+    return { ...fallback, tree: false, detail: output.error }
+  }
+  const parsed = parsePowerShellJson(output.stdout)
+  if (parsed === null) {
+    const fallback = await setRootPriorityFallback(value)
+    return { ...fallback, tree: false, detail: 'priority-json-parse-failed' }
+  }
+  const rows = Array.isArray(parsed) ? parsed : [parsed]
+  return { ...summarizePriorityRows(rows, value), tree: true }
 }
 
 export function findBrowserPath(configured = '') {
   const explicit = String(configured || '').trim()
-  if (explicit && fs.existsSync(explicit)) return explicit
+  // An explicitly configured browser path is authoritative. If it is stale,
+  // failing closed is safer than silently substituting another browser: the
+  // caller asked for a specific managed executable, not "any browser".
+  if (explicit) return fs.existsSync(explicit) ? explicit : ''
   for (const candidate of [...EDGE_CANDIDATES, ...CHROME_CANDIDATES]) if (fs.existsSync(candidate)) return candidate
   return ''
 }
@@ -105,8 +244,9 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
     try { await closeManagedBrowser({ pid, port }) } catch { /* ignore */ }
     return { ok: false, error: 'browser-cdp-timeout', pid }
   }
-  try { await lowerProcessPriority(pid) } catch { /* best effort */ }
-  return { ok: true, pid, port, profileDir, logFile, crashDir, exe }
+  let priority = null
+  try { priority = await lowerProcessPriority(pid) } catch (error) { priority = { ok: false, error: String(error?.message ?? error) } }
+  return { ok: true, pid, port, profileDir, logFile, crashDir, exe, priority }
 }
 
 export async function closeManagedBrowser({ pid, port, graceMs = 3000, timeoutMs = 3000 }) {
