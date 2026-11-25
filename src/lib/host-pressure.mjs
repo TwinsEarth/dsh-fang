@@ -21,7 +21,7 @@ export const SESSION_FOOTPRINT_DEFAULTS = Object.freeze({
   emergencyMB: 2048,
   fileWarnMB: 16,
   fileCriticalMB: 32,
-  fileEmergencyMB: 48,
+  fileEmergencyMB: 64,
 })
 
 function positiveMB(value, fallback) {
@@ -171,7 +171,7 @@ export function evaluateSessionFootprint(footprint = {}, limits = {}) {
     reasons,
     // A hard gate is driven by the largest single file, not by total bytes.
     // Many small archived sessions can make the total large without making the
-    // next Host open dangerous; one 48 MB+ log is the actual heap risk.
+    // next Host open dangerous; one 64 MB+ log is the actual heap risk.
     gate: fileLevel === 'emergency',
     totalGate: totalLevel === 'emergency',
     thresholds,

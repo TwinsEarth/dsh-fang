@@ -59,6 +59,8 @@ test('v3.8.14 host heap levels map to warn/critical/emergency', () => {
 
 test('v3.8.14 session footprint uses total and largest file independently', () => {
   const thresholds = { ...SESSION_FOOTPRINT_DEFAULTS }
+  assert.equal(SESSION_FOOTPRINT_DEFAULTS.fileEmergencyMB, 64)
+
   const total = evaluateSessionFootprint({ bytes: 5000 * 1024 * 1024, files: 3, largestBytes: 10 * 1024 * 1024 }, thresholds)
   assert.equal(total.level, 'emergency')
   assert.equal(total.gate, false)
@@ -67,6 +69,17 @@ test('v3.8.14 session footprint uses total and largest file independently', () =
   const single = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: 40 * 1024 * 1024 }, thresholds)
   assert.equal(single.level, 'critical')
   assert.equal(single.gate, false)
+
+  // B2 boundary: the observed 60.91 MB session must not trip the single-file gate.
+  const observed6091 = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: Math.round(60.91 * 1024 * 1024) }, thresholds)
+  assert.equal(observed6091.level, 'critical')
+  assert.equal(observed6091.gate, false)
+
+  // 64 MB is the new single-file emergency line; total gate remains independent.
+  const at64 = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: 64 * 1024 * 1024 }, thresholds)
+  assert.equal(at64.level, 'emergency')
+  assert.equal(at64.gate, true)
+  assert.equal(at64.totalGate, false)
 
   const fileEmergency = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: 70 * 1024 * 1024 }, thresholds)
   assert.equal(fileEmergency.level, 'emergency')
@@ -170,6 +183,7 @@ test('v3.8.14 source wiring: host heap/session scan, gate, and all-drive probe',
   assert.match(orchestrator, /hostJsHeapEmergencyStreak: z\.number\(\)/)
   assert.match(orchestrator, /sessionFootprintEnabled: z\.boolean\(\)/)
   assert.match(orchestrator, /sessionFileCriticalMB: z\.number\(\)/)
+  assert.match(orchestrator, /sessionFileEmergencyMB: z\.number\(\)\.min\(0\)\.max\(1048576\)\.default\(64\)/)
   assert.match(orchestrator, /const sampleHostHeap = \(\) =>/)
   assert.match(orchestrator, /v8\.getHeapStatistics\(\)/)
   assert.match(orchestrator, /scanSessionFootprint\(/)

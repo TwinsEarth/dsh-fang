@@ -338,7 +338,7 @@ export const Config = z.object({
     .description('单个 session.v4 文件警告阈值（MB）'),
   sessionFileCriticalMB: z.number().min(0).max(1048576).default(32)
     .description('单个 session.v4 文件严重阈值（MB）'),
-  sessionFileEmergencyMB: z.number().min(0).max(1048576).default(48)
+  sessionFileEmergencyMB: z.number().min(0).max(1048576).default(64)
     .description('单个 session.v4 文件紧急阈值（MB）；超过后拒绝新分身/新浏览器'),
   memoryWatchdog: z.boolean().default(true)
     .description('定时采样每个分身的 PID 树/Commit，异常增长时只杀该分身'),
