@@ -7,7 +7,7 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
-> 当前发布线：**v3.8.13**（2026-11-25，在 v3.8.12 基础上收口 maxForks 硬拒 >1、fork 总 Commit 的 4 GB 宿主余量、sidecar spawn 当刻登记 PID，并把“无 pagefile 强制 Safe Mode”纠正为内存余量 advisory）。v3.8.2 改变了数据根，升级前先读
+> 当前发布线：**v3.9.0**（2026-11-26，将 v3.8.14 的 Host JS heap / session 文件体量守卫与全盘 pagefile/commit 探针提升为正式发布版本）。v3.8.2 改变了数据根，升级前先读
 > [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
 
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。
@@ -168,7 +168,7 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 | 你要做什么 | 先读 |
 |---|---|
 | 安装、升级、v3.8.2 数据根迁移 | [docs/INSTALL.md](docs/INSTALL.md) · [v3.8.2 变更](docs/CHANGELOG.md) |
-| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.13.md](docs/RELEASE-v3.8.13.md) · [docs/RELEASE-v3.8.12.md](docs/RELEASE-v3.8.12.md) · [docs/RELEASE-v3.8.11.md](docs/RELEASE-v3.8.11.md) · [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
+| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.9.0.md](docs/RELEASE-v3.9.0.md) · [docs/RELEASE-v3.8.14.md](docs/RELEASE-v3.8.14.md) · [docs/RELEASE-v3.8.13.md](docs/RELEASE-v3.8.13.md) · [docs/RELEASE-v3.8.12.md](docs/RELEASE-v3.8.12.md) · [docs/RELEASE-v3.8.11.md](docs/RELEASE-v3.8.11.md) · [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
 | P0 加固实现与真机证据 | [docs/P0-HARDENING.md](docs/P0-HARDENING.md) |
 | 真实宿主回归 smoke（v3.8.0/3.8.1） | [docs/HOST-SMOKE.md](docs/HOST-SMOKE.md) |
 | 防崩溃、Safe Mode、升级红线 | [docs/CRASH-SAFETY.md](docs/CRASH-SAFETY.md) |

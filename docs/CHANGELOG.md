@@ -1,3 +1,18 @@
+## v3.9.0（2026-11-26）
+**主题：将 v3.8.14 宿主守卫提升为正式发布版本（Host JS heap + session 文件体量 + 全盘 pagefile）**
+
+### 发布
+
+- 以 `98a8b83`（v3.8.14）为源码基线，仅提升版本号与发布材料；不并入未选择的 B/C/D/E 审计项。
+- 正式发布三方：GitHub `v3.9.0` tag / Release、npm `@twinsearth/fang-dsh-plugin@3.9.0`、项目目录发布报告与校验和。
+- 代码能力与 v3.8.14 相同：Host heap 1024/1536/2048 MB 三级阈值并按 V8 `heap_size_limit` 65%/80%/90% 收紧；session 单文件 16/32/48 MB、合计 512/1024/2048 MB；pagefile/commit 覆盖所有活动/配置分页文件与所有卷。
+- `openMigrationReport` 仍未修，发布文案不得写成已修；真实 Windows DSH 宿主 E2E 未跑，preflight 为 `skipped:true / green:false`，不得写成门禁 GREEN。
+
+### 测试与构建
+
+- 全量回归与构建结果见 `docs/AUDIT-v3.9.0.md`；v3.8.14 的 6 项宿主守卫测试继续纳入全量。
+- v3.8.14 真机证据仍有效：TOFUTURE 页面文件在 D:、`CommitLimitOSMB=44821`、Host session 206 个合计 222.56 MB、最大单文件 60.91 MB，见 `docs/evidence/memory-probe-all-drives-2026-11-26.md`。
+
 ## v3.8.14（2026-11-26）
 **主题：宿主守卫改看 Host JS heap + session 文件体量；pagefile/commit 全盘探测**
 
