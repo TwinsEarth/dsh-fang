@@ -1,3 +1,18 @@
+## v3.8.14（2026-11-26）
+**主题：宿主守卫改看 Host JS heap + session 文件体量；pagefile/commit 全盘探测**
+
+### 修复
+
+- **Host JS heap 独立采样**：5s host tick 读取 `process.memoryUsage().heapUsed` 与 `v8.getHeapStatistics().heap_size_limit`；默认 1024 MB 警告、1536 MB 严重、2048 MB 紧急，且按 V8 上限 65%/80%/90% 收紧。达到严重阈值即拒绝新分身/新浏览器；连续 3 次采样达到紧急阈值才按宿主紧急处置。即使 PowerShell/CIM 内存探针失败，heap 仍继续采样。
+- **session 文件体量**：新增只读扫描 `src/lib/session-footprint.mjs`，对 Host `$DSH_HOME/sessions` 与每个任务 home 的 `sessions/`、`quarantine-sessions/` 统计 `session.v4.jsonl.zstd`；默认合计 512/1024/2048 MB、单文件 16/32/48 MB 三级阈值，60s 缓存，不读、不解压会话内容。单文件达到 48 MB 时拒绝新分身/新浏览器；客户端新增宿主压力横幅，显示 top 文件与总/单文件阈值。
+- **pagefile/commit 全盘**：`readSystemMemory()` 现在同时读 `Win32_PageFileUsage`（每个活动分页文件）、`Win32_PageFileSetting`（每个配置分页文件）、`Win32_LogicalDisk`（所有固定/可移动卷）与 `PagingFiles` 注册表；输出 `pageFileDrives`、`pageFileOffSystemDrive`、`pageFileDetails`、`pageFileUsageMB`、`volumes`。Commit 上限取 `max(OS TotalVirtualMemorySize, 物理内存 + 所有活动分页文件)`，不再可能只按 C 盘分页文件估算。
+- **`openMigrationReport` 不动**：作为独立客户端 API 问题保留原防御，不并入本次宿主 OOM 修复，也不通过重装客户端/改 asar 解释或掩盖。
+
+### 测试
+
+- 新增 `test/v3814-host-guard.test.mjs` 6/6：阈值钳制、heap 分级、session 总/单文件分级、临时 home 扫描、C+D 双分页文件映射、源码接线。
+- 全量回归见 `docs/AUDIT-v3.8.14.md`；真机 pagefile 全盘证据见 `docs/evidence/memory-probe-all-drives-2026-11-26.md`。真实 DSH 宿主内的 heap/session 实时读数仍需安装本版后跑一次（本轮只验证纯逻辑与 Windows PowerShell 探针）。
+
 ## v3.8.13（2026-11-25）
 **主题：三条宿主红线收口 + 页面文件语义纠正**
 

@@ -4,10 +4,11 @@
 
 > **v3.8.5–v3.8.12 tag 说明**：仓库为 shallow clone，早期无逐版 commit；本次按各版 tarball 重建了独立源码快照 commit（不含 `test/` 与 release tooling），并让它们成为 `main` 的线性祖先。v3.8.13 为完整开发树。每个 tag 对应唯一 commit，详见 [RELEASE-v3.8.13](RELEASE-v3.8.13.md)。
 
-> **发布门禁状态（2026-11-26）**：v3.8.13 及之前的 tarball 均走 `--skip-preflight`；`dist/manifest.json` 的 `preflight` 必须记录 `skipped:true / green:false`，不得被解读为“preflight GREEN / 发布门禁通过”。真实 Windows DSH 宿主的 flush 3s 端到端、`browser-health.jsonl` 真机采样、健康预检/单 app 窗口/崩溃闩锁 E2E 仍待补跑。native helper 分版本：v3.8.5–v3.8.9 仍是 28KB/24KB 旧二进制；v3.8.10–v3.8.13 为 82KB/54KB 新 helper，其 kill-on-close 与 64MB Job/进程内存上限已于 2026-11-26 Windows 11 真机三例 PASS（证据 `docs/evidence/job-object-e2e-2026-11-26.md`）；browser Job Object 也已用 headless Edge 真机验证 root + 13 子进程全部随 helper 退出（证据 `docs/evidence/browser-job-e2e-2026-11-26.md`）。仍差的是 DSH orchestrator 拉起 browser/fork 的完整链路；Windows 上的 `E:\DB\Fang` 是独立 v3.8.3 脏工作树，不能代表 3.8.13 发布包。
+> **发布门禁状态（2026-11-26）**：v3.8.13 及之前的 tarball 均走 `--skip-preflight`；`dist/manifest.json` 的 `preflight` 必须记录 `skipped:true / green:false`，不得被解读为“preflight GREEN / 发布门禁通过”。v3.8.14 已构建本地 tarball（preflight skipped），未打 tag、未推送、未发布 npm。真实 Windows DSH 宿主的 flush 3s 端到端、`browser-health.jsonl` 真机采样、健康预检/单 app 窗口/崩溃闩锁 E2E 仍待补跑。native helper 分版本：v3.8.5–v3.8.9 仍是 28KB/24KB 旧二进制；v3.8.10–v3.8.13 为 82KB/54KB 新 helper，其 kill-on-close 与 64MB Job/进程内存上限已于 2026-11-26 Windows 11 真机三例 PASS（证据 `docs/evidence/job-object-e2e-2026-11-26.md`）；browser Job Object 也已用 headless Edge 真机验证 root + 13 子进程全部随 helper 退出（证据 `docs/evidence/browser-job-e2e-2026-11-26.md`）。仍差的是 DSH orchestrator 拉起 browser/fork 的完整链路；Windows 上的 `E:\DB\Fang` 是独立 v3.8.3 脏工作树，不能代表 3.8.13/3.8.14 发布包。
 
 | 版本 | 主题 | 发布记录 | 审计 |
 |---|---|---|---|
+| v3.8.14 | 宿主守卫改看 Host JS heap + session 文件体量；pagefile/commit 全盘探测 | [RELEASE-v3.8.14](RELEASE-v3.8.14.md) | [AUDIT-v3.8.14](AUDIT-v3.8.14.md) |
 | v3.8.13 | 三条宿主红线收口：maxForks 硬拒 >1 / fork 总 Commit 4 GB 余量 / sidecar spawn 当刻 PID；页面文件改为 advisory | [RELEASE-v3.8.13](RELEASE-v3.8.13.md) | [AUDIT-v3.8.13](AUDIT-v3.8.13.md) |
 | v3.8.12 | 页面文件缺失时 Safe Mode 解除硬门：服务端下发 canReset / 客户端 fail-closed / 解除前二次探测 | [RELEASE-v3.8.12](RELEASE-v3.8.12.md) | [AUDIT-v3.8.12](AUDIT-v3.8.12.md) |
 | v3.8.11 | 状态对账：meta 自动修复 / 旧端口拒绝复用 / 暂停等待停止 / handler-threw 带 route+requestId | [RELEASE-v3.8.11](RELEASE-v3.8.11.md) | [AUDIT-v3.8.11](AUDIT-v3.8.11.md) |

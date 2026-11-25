@@ -11,6 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import v8 from 'node:v8'
 import { spawn } from 'node:child_process'
 
 import {
@@ -32,6 +33,8 @@ import { evaluateMemoryGuard, evaluatePagefileSingleFork, isPagefileMissing, kil
 import { resolveMemoryThresholds } from '../lib/memory-policy.mjs'
 import { hashCommandLine, matchesProcessIdentity } from '../lib/process-identity.mjs'
 import { compactTaskSessions, compactLegacySessions } from '../lib/session-compaction.mjs'
+import { scanSessionFootprint } from '../lib/session-footprint.mjs'
+import { evaluateHostHeap, evaluateSessionFootprint, resolveHostHeapLimits } from '../lib/host-pressure.mjs'
 import { cleanupBrowserCaches, scanDiskHygiene } from '../lib/disk-hygiene.mjs'
 import { cleanupWatchdogFiles, pruneHostCrashHistory } from '../lib/host-housekeeping.mjs'
 import { appendBrowserMetricHistory } from '../lib/browser-metrics.mjs'
@@ -304,7 +307,7 @@ export const Config = z.object({
   allowMultiFork: z.boolean().default(false)
     .description('v3.8.13 起失效：仅保留兼容字段；maxForks>1 一律拒绝，不再提供二次确认旁路'),
   memoryGuard: z.boolean().default(true)
-    .description('创建/打开/还原分身前检查 Windows CommitFree 余量'),
+    .description('创建/打开/还原分身前检查 CommitFree、Host JS heap 与 session 文件体量'),
   memoryMinFreeMB: z.number().min(0).max(1048576).default(3000)
     .description('创建/打开/还原分身前检查 Windows CommitFree 余量；v3.8.13 默认 3000 MB，不再因页面文件缺失而拒绝'),
   hostWarnFreeMB: z.number().min(0).max(1048576).default(8192)
@@ -313,6 +316,30 @@ export const Config = z.object({
     .description('宿主紧急阈值（MB）：先杀托管浏览器，再停所有分身'),
   hostEmergencyFreeMB: z.number().min(0).max(1048576).default(2048)
     .description('宿主最低保留（MB）；低于此值进入 Safe Mode 并隔离'),
+  hostJsHeapWarnMB: z.number().min(32).max(1048576).default(1024)
+    .description('Host JS heap 警告阈值（MB）；超过只审计/提示，不阻止已有任务'),
+  hostJsHeapCriticalMB: z.number().min(33).max(1048576).default(1536)
+    .description('Host JS heap 严重阈值（MB）；超过后拒绝新分身/新浏览器，避免继续加载大 session'),
+  hostJsHeapEmergencyMB: z.number().min(34).max(1048576).default(2048)
+    .description('Host JS heap 紧急阈值（MB）；连续 N 个 5s 采样超过后按宿主紧急处置'),
+  hostJsHeapEmergencyStreak: z.number().min(1).max(30).default(3)
+    .description('Host JS heap 连续超过紧急阈值的采样次数；默认 3 次（约 15s）'),
+  sessionFootprintEnabled: z.boolean().default(true)
+    .description('是否周期盘点 Host/分身 sessions 下的 session.v4.jsonl.zstd 体量（只读 stat）'),
+  sessionFootprintIntervalMs: z.number().min(5000).max(86400000).default(60000)
+    .description('session 体量盘点间隔（毫秒）；默认 60s，避免每次 5s tick 都扫目录'),
+  sessionFootprintWarnMB: z.number().min(0).max(1048576).default(512)
+    .description('全部 session 文件合计警告阈值（MB）'),
+  sessionFootprintCriticalMB: z.number().min(0).max(1048576).default(1024)
+    .description('全部 session 文件合计严重阈值（MB）'),
+  sessionFootprintEmergencyMB: z.number().min(0).max(1048576).default(2048)
+    .description('全部 session 文件合计紧急阈值（MB）；超过后只审计/横幅提示，单文件紧急线才拒绝新分身/新浏览器'),
+  sessionFileWarnMB: z.number().min(0).max(1048576).default(16)
+    .description('单个 session.v4 文件警告阈值（MB）'),
+  sessionFileCriticalMB: z.number().min(0).max(1048576).default(32)
+    .description('单个 session.v4 文件严重阈值（MB）'),
+  sessionFileEmergencyMB: z.number().min(0).max(1048576).default(48)
+    .description('单个 session.v4 文件紧急阈值（MB）；超过后拒绝新分身/新浏览器'),
   memoryWatchdog: z.boolean().default(true)
     .description('定时采样每个分身的 PID 树/Commit，异常增长时只杀该分身'),
   memoryAdaptiveThresholds: z.boolean().default(true)
@@ -781,6 +808,68 @@ export function apply(ctx, config) {
   const hostStartedAt = new Date().toISOString()
   let lastHostMetrics = null
   let lastProcessCount = 0
+  let lastHostHeapDecision = null
+  let lastSessionFootprint = null
+  let lastSessionFootprintDecision = null
+  let lastSessionFootprintAt = 0
+  let hostHeapPressureGate = false
+  let sessionFootprintGate = false
+  let hostHeapEmergencyCount = 0
+  let lastHostHeapWarnAt = 0
+  let lastHostHeapCriticalAt = 0
+  let lastHostHeapEmergencyAt = 0
+  let lastSessionWarnAt = 0
+  let lastSessionCriticalAt = 0
+  const mb = (bytes) => Math.round((Number(bytes) || 0) / 1048576 * 10) / 10
+  const sampleHostHeap = () => {
+    const self = process.memoryUsage()
+    let stats = null
+    try { stats = v8.getHeapStatistics() } catch { /* metrics only */ }
+    return {
+      at: nowMs(),
+      heapUsedMB: mb(self.heapUsed),
+      heapTotalMB: mb(self.heapTotal),
+      heapLimitMB: stats ? mb(stats.heap_size_limit) : 0,
+      externalMB: mb(self.external),
+      arrayBuffersMB: mb(self.arrayBuffers),
+    }
+  }
+  const hostHeapLimits = (heapLimitMB = 0) => resolveHostHeapLimits(cfg, heapLimitMB)
+  const sessionFootprintLimits = () => ({
+    sessionFootprintWarnMB: Number(cfg.sessionFootprintWarnMB),
+    sessionFootprintCriticalMB: Number(cfg.sessionFootprintCriticalMB),
+    sessionFootprintEmergencyMB: Number(cfg.sessionFootprintEmergencyMB),
+    sessionFileWarnMB: Number(cfg.sessionFileWarnMB),
+    sessionFileCriticalMB: Number(cfg.sessionFileCriticalMB),
+    sessionFileEmergencyMB: Number(cfg.sessionFileEmergencyMB),
+  })
+  const currentPressureGate = () => {
+    if (hostHeapPressureGate) {
+      return {
+        ok: false,
+        error: 'host-js-heap-pressure',
+        detail: `Host JS heap ${lastHostHeapDecision?.heapUsedMB ?? '?'} MB 已达到严重阈值 ${lastHostHeapDecision?.criticalMB ?? cfg.hostJsHeapCriticalMB} MB；先释放/重启宿主，再打开新任务。`,
+        heap: lastHostHeapDecision,
+      }
+    }
+    if (sessionFootprintGate) {
+      return {
+        ok: false,
+        error: 'session-footprint-pressure',
+        detail: `session 文件体量 ${lastSessionFootprintDecision?.totalMB ?? '?'} MB / 单文件 ${lastSessionFootprintDecision?.largestMB ?? '?'} MB 已达到紧急阈值；先归档或压缩会话，再打开新任务。`,
+        session: lastSessionFootprintDecision,
+      }
+    }
+    return { ok: true }
+  }
+  const currentPressurePolicy = () => ({
+    heap: hostHeapLimits(Number(lastHostMetrics?.heapLimitMB) || 0),
+    session: sessionFootprintLimits(),
+    stack: {
+      heapGate: hostHeapPressureGate,
+      sessionGate: sessionFootprintGate,
+    },
+  })
   let hostCleanExit = false
   const now = nowMs()
   const crashDoc = readJsonFile(hostCrashFile)
@@ -1242,6 +1331,11 @@ export function apply(ctx, config) {
     })()
   }
   const memoryGate = async (action) => {
+    const pressure = currentPressureGate()
+    if (pressure.ok !== true) {
+      audit('host-pressure-admission-refused', { action, error: pressure.error, detail: pressure.detail, heap: pressure.heap ?? null, session: pressure.session ?? null })
+      return pressure
+    }
     if (cfg.memoryGuard !== true) return { ok: true, skipped: 'disabled' }
     const memory = rememberMemory(await readSystemMemory({ force: true }))
     notePagefile(memory, action)
@@ -1773,6 +1867,11 @@ export function apply(ctx, config) {
 
   const launchTaskBrowser = async (task, url) => {
     if (hostAdmissionClosed) return { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
+    const pressure = currentPressureGate()
+    if (pressure.ok !== true) {
+      audit('host-pressure-admission-refused', { action: 'open-browser', taskId: task?.taskId ?? null, error: pressure.error, detail: pressure.detail })
+      return pressure
+    }
     if (cfg.managedBrowser !== true) return { ok: false, error: 'managed-browser-disabled', managed: false, url }
     if (!task || !url) return { ok: false, error: 'browser-url-required' }
     // Reusing an already-open managed page is not a new open; the watchdog still
@@ -1975,6 +2074,12 @@ export function apply(ctx, config) {
         commitFreeMB: record.metrics?.commitFreeMB ?? null,
         selfRssMB: record.metrics?.selfRssMB ?? null,
         selfPrivateMB: record.metrics?.selfPrivateMB ?? null,
+        hostJsHeapUsedMB: record.metrics?.heapUsedMB ?? null,
+        hostJsHeapLimitMB: record.metrics?.heapLimitMB ?? null,
+        hostJsHeapPressure: record.metrics?.heapPressure ?? null,
+        sessionFootprintMB: record.metrics?.sessionFootprintMB ?? null,
+        largestSessionMB: record.metrics?.largestSessionMB ?? null,
+        largestSessionFile: record.metrics?.largestSessionFile ?? null,
         forkCommitMB: record.metrics?.forkCommitMB ?? null,
         browserCommitMB: record.metrics?.browserCommitMB ?? null,
         totalCommitMB: record.metrics?.totalCommitMB ?? null,
@@ -2392,23 +2497,112 @@ export function apply(ctx, config) {
   let lastHostSevereAt = 0
   let lastCommitWarnAt = 0
   let lastCommitSevereAt = 0
+  const scanHostSessionFootprint = () => {
+    if (cfg.sessionFootprintEnabled !== true) return null
+    const at = nowMs()
+    if (lastSessionFootprint && at - lastSessionFootprintAt < Number(cfg.sessionFootprintIntervalMs)) return lastSessionFootprint
+    lastSessionFootprintAt = at
+    const roots = [{ label: 'host', homeDir: layout.dshHome }]
+    for (const task of tasks.values()) {
+      if (task?.homeDir) roots.push({ label: `task:${task.taskId}`, taskId: task.taskId, homeDir: task.homeDir })
+    }
+    let footprint
+    try {
+      footprint = scanSessionFootprint(roots, { top: 8 })
+    } catch (error) {
+      audit('session-footprint-scan-failed', { error: String(error?.message ?? error) })
+      return lastSessionFootprint
+    }
+    const decision = evaluateSessionFootprint(footprint, sessionFootprintLimits())
+    lastSessionFootprint = footprint
+    lastSessionFootprintDecision = decision
+    sessionFootprintGate = decision.gate
+    const evidence = {
+      level: decision.level,
+      totalMB: decision.totalMB,
+      files: decision.files,
+      largestMB: decision.largestMB,
+      largestFile: decision.largestFile,
+      largestSessionId: decision.largestSessionId,
+      reasons: decision.reasons,
+      top: Array.isArray(footprint.top) ? footprint.top.slice(0, 5) : [],
+    }
+    if (decision.level === 'critical' && nowMs() - lastSessionCriticalAt > 60_000) {
+      lastSessionCriticalAt = nowMs()
+      audit('session-footprint-critical', evidence)
+    } else if (decision.level === 'warn' && nowMs() - lastSessionWarnAt > 60_000) {
+      lastSessionWarnAt = nowMs()
+      audit('session-footprint-warning', evidence)
+    }
+    if (decision.gate === true) audit('session-footprint-emergency', evidence)
+    return footprint
+  }
   const hostWatchdogTick = async () => {
     if (process.platform !== 'win32' || hostPanic) return
+    // v3.8.14: Host JS heap and session body are sampled even when the
+    // PowerShell/CIM memory probe fails. CommitFree alone missed the V8 heap
+    // spike that preceded the observed host OOM.
+    const heapSample = sampleHostHeap()
+    const heapLimits = hostHeapLimits(heapSample.heapLimitMB)
+    const heapDecision = evaluateHostHeap(heapSample, heapLimits)
+    lastHostHeapDecision = heapDecision
+    hostHeapPressureGate = heapDecision.level === 'critical' || heapDecision.level === 'emergency'
+    if (heapDecision.level === 'emergency') {
+      hostHeapEmergencyCount += 1
+      if (hostHeapEmergencyCount >= heapLimits.emergencyStreak) {
+        audit('host-js-heap-emergency', { ...heapDecision, streak: hostHeapEmergencyCount })
+        await hostEmergency('host-js-heap-emergency', { safe: true, allTasks: true })
+        return
+      }
+      if (nowMs() - lastHostHeapEmergencyAt > 60_000) {
+        lastHostHeapEmergencyAt = nowMs()
+        audit('host-js-heap-emergency-pending', { ...heapDecision, streak: hostHeapEmergencyCount, required: heapLimits.emergencyStreak })
+      }
+    } else {
+      hostHeapEmergencyCount = 0
+    }
+    if (heapDecision.level === 'critical' && nowMs() - lastHostHeapCriticalAt > 60_000) {
+      lastHostHeapCriticalAt = nowMs()
+      audit('host-js-heap-critical', heapDecision)
+    } else if (heapDecision.level === 'warn' && nowMs() - lastHostHeapWarnAt > 60_000) {
+      lastHostHeapWarnAt = nowMs()
+      audit('host-js-heap-warning', heapDecision)
+    }
+    const footprint = scanHostSessionFootprint()
+    lastHostMetrics = {
+      ...(lastHostMetrics ?? {}),
+      at: nowMs(),
+      ...heapSample,
+      heapLevel: heapDecision.level,
+      heapPressure: heapDecision.pressure,
+      heapLimitMB: heapDecision.heapLimitMB,
+      heapCriticalMB: heapDecision.criticalMB,
+      heapEmergencyMB: heapDecision.emergencyMB,
+      sessionFootprintMB: footprint ? Math.round(footprint.bytes / 1048576) : null,
+      sessionFiles: footprint ? footprint.files : null,
+      largestSessionMB: footprint?.largestBytes ? Math.round(footprint.largestBytes / 1048576) : null,
+      largestSessionFile: footprint?.largestFile ?? null,
+      sessionPressure: lastSessionFootprintDecision?.level ?? null,
+      pressureGate: hostHeapPressureGate ? 'host-js-heap' : (sessionFootprintGate ? 'session-footprint' : null),
+    }
     // Red line: the mother samples self RSS/Private + CommitFree every 5 s even
     // when no fork/browser exists. A DSH host can OOM without any child.
     const memory = rememberMemory(await readSystemMemory())
     notePagefile(memory, 'memory-watchdog')
-    if (!memory.ok) return
+    if (!memory.ok) {
+      writeWatchdog()
+      return
+    }
     const free = Number(memory.commitFreeMB) || 0
     const limitMB = Number(memory.commitLimitMB) || 0
-    const self = process.memoryUsage()
+    const selfNow = process.memoryUsage()
     lastHostMetrics = {
       ...(lastHostMetrics ?? {}),
       at: nowMs(),
       commitFreeMB: free,
       commitLimitMB: limitMB || null,
-      selfRssMB: Number(memory.selfRssMB) || Math.round(self.rss / 1048576),
-      selfPrivateMB: Number(memory.selfPrivateMB) || Math.round((self.heapUsed + self.external) / 1048576),
+      selfRssMB: Number(memory.selfRssMB) || Math.round(selfNow.rss / 1048576),
+      selfPrivateMB: Number(memory.selfPrivateMB) || Math.round((selfNow.heapUsed + selfNow.external) / 1048576),
       processCount: lastProcessCount || lastHostMetrics?.processCount || null,
     }
     // v3.8.13: the 5 s host tick also enforces the aggregate fork budget, so a
@@ -4962,6 +5156,18 @@ export function apply(ctx, config) {
         memoryPolicy: memoryPolicySnapshot(),
         // v3.8.8: mother RSS/private + fork/browser aggregate commit snapshot.
         hostMetrics: lastHostMetrics,
+        // v3.8.14: Host JS heap + session body. These are independent of the
+        // OS Commit probe so a PowerShell failure cannot hide a V8 heap spike.
+        hostPressure: {
+          heap: lastHostHeapDecision,
+          session: lastSessionFootprintDecision,
+          footprint: lastSessionFootprint,
+          policy: currentPressurePolicy(),
+          gate: (() => {
+            const pressure = currentPressureGate()
+            return pressure.ok === true ? null : pressure.error
+          })(),
+        },
         forkCommitPolicy: {
           warnShare: Number(cfg.forkCommitWarnShare),
           severeShare: Number(cfg.forkCommitSevereShare),

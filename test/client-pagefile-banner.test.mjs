@@ -13,7 +13,7 @@ test('pagefile missing renders a persistent red banner independent of Safe Mode'
   assert.match(client, /memory\.commitLimitNearRam === true/)
   assert.match(client, /'data-zone': 'pagefile-banner'/)
   assert.ok(client.includes('未启用页面文件，已强制单分身'))
-  assert.match(client, /function renderNotices\(S, app\)[\s\S]{0,80}renderPagefileBanner/)
+  assert.match(client, /function renderNotices\(S, app\)[\s\S]{0,300}renderPagefileBanner/)
   assert.doesNotMatch(client, /function renderPagefileBanner\(S, app\)[\s\S]{0,300}safeMode/)
 })
 

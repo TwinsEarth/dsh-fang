@@ -136,6 +136,8 @@ window.__ModuleLoader__.load({
       'managed-browser-disabled': '托管浏览器已被配置关闭。已拒绝用外部浏览器打开分身；请先启用 managedBrowser。',
       'browser-cdp-timeout': '托管浏览器启动后没有暴露 CDP 端点，已拒绝打开；请检查浏览器进程与端口。',
       'browser-open-failed': '托管浏览器打开失败，已拒绝回退外部浏览器；详情见通知。',
+      'host-js-heap-pressure': '宿主 JS heap 已达到严重阈值：先关闭/重启宿主或减少大会话，再打开新任务；本轮不是 Commit 不足。',
+      'session-footprint-pressure': 'session.v4 文件体量已达到紧急阈值：先归档或压缩过大会话，再打开新任务；本轮不是重装客户端能解决的问题。',
       'fork-url-missing': '分身没有可用的 Web URL，打开已取消。',
     }
 
@@ -4218,6 +4220,37 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           })))
     }
 
+    function renderHostPressureBanner(S, app) {
+      const pressure = S.status?.data?.hostPressure
+      const heap = pressure?.heap
+      const session = pressure?.session
+      const heapLevel = String(heap?.level ?? '')
+      const sessionLevel = String(session?.level ?? '')
+      const heapVisible = heapLevel === 'warn' || heapLevel === 'critical' || heapLevel === 'emergency'
+      const sessionVisible = sessionLevel === 'warn' || sessionLevel === 'critical' || sessionLevel === 'emergency'
+      if (!heapVisible && !sessionVisible) return null
+      const gate = String(pressure?.gate ?? '')
+      const tone = gate ? 'bad' : 'warn'
+      const lines = []
+      if (heapVisible) {
+        const pct = Number(heap?.pressure)
+        lines.push(`Host JS heap ${Number(heap?.heapUsedMB) || 0} MB / ${Number(heap?.heapLimitMB) || '?'} MB${Number.isFinite(pct) ? `（${Math.round(pct * 100)}%）` : ''}；阈值 ${Number(heap?.warnMB) || '?'} / ${Number(heap?.criticalMB) || '?'} / ${Number(heap?.emergencyMB) || '?'} MB。`)
+      }
+      if (sessionVisible) {
+        lines.push(`session 合计 ${Number(session?.totalMB) || 0} MB · 单文件最大 ${Number(session?.largestMB) || 0} MB${session?.largestFile ? ` · ${session.largestFile}` : ''}；阈值 ${Number(session?.thresholds?.warnMB) || '?'} / ${Number(session?.thresholds?.criticalMB) || '?'} / ${Number(session?.thresholds?.emergencyMB) || '?'} MB。`)
+      }
+      return h('div', { class: `notice notice--${tone} fang-host-pressure-banner`, role: 'status', 'data-zone': 'host-pressure-banner' },
+        h('div', { class: 'notice-main' },
+          h('div', { class: 'notice-title' }, icon('alert', 15), gate ? '宿主压力已封住新任务' : '宿主压力预警'),
+          ...lines.map((line) => h('div', { class: 'notice-text' }, line)),
+          h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } },
+            gate
+              ? '先归档/压缩大会话，或重启宿主释放 JS heap；这不是重装客户端或替换 asar 能解决的问题。'
+              : '继续观察；若升到紧急阈值，插件会拒绝新分身/新浏览器，但不会删除会话。')),
+        h('div', { class: 'notice-actions' },
+          button('重新检测', { size: 'sm', variant: 'ghost', fk: 'host-pressure-probe', onClick: () => void app.probeMemory() })))
+    }
+
     function renderPagefileBanner(S, app) {
       const memory = S.status?.data?.memory
       if (!memory || memory.ok !== true || memory.supported === false) return null
@@ -4289,6 +4322,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
     function renderNotices(S, app) {
       const nodes = []
+      const hostPressureBanner = renderHostPressureBanner(S, app)
+      if (hostPressureBanner) nodes.push(hostPressureBanner)
       const pagefileBanner = renderPagefileBanner(S, app)
       if (pagefileBanner) nodes.push(pagefileBanner)
       const safeBanner = renderSafeModeBanner(S, app)
