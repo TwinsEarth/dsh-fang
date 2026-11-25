@@ -4934,7 +4934,24 @@ export function apply(ctx, config) {
       notePagefile(memory, 'manual-probe')
       return { ok: memory?.ok !== false, memory: memorySnapshot, memoryPolicy: memoryPolicySnapshot() }
     },
-    safeModeStatus: () => ({ ok: true, safeMode, admissionClosed: hostAdmissionClosed, reason: safeModeReason }),
+    safeModeStatus: () => {
+      const guard = evaluateSafeModeReset(memorySnapshot, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
+      const pagefileMissing = memorySnapshot ? isPagefileMissing(memorySnapshot) : false
+      return {
+        ok: true, safeMode, admissionClosed: hostAdmissionClosed, reason: safeModeReason,
+        reset: {
+          canReset: guard.ok === true,
+          error: guard.ok === true ? null : guard.error,
+          detail: guard.ok === true ? null : guard.detail,
+          memoryKnown: memorySnapshot?.ok === true,
+          pagefileMissing,
+          pageFileMB: Number(memorySnapshot?.pageFileMB) || 0,
+          commitFreeMB: Number(memorySnapshot?.commitFreeMB) || 0,
+          minFreeMB: Number(guard.minFreeMB ?? cfg.hostCriticalFreeMB) || 0,
+          checkedAt: memorySnapshot?.checkedAt ?? null,
+        },
+      }
+    },
     panic: async () => hostEmergency('manual-panic', { safe: true, allTasks: true }),
     resetSafeMode: async () => {
       let memory = null
@@ -4961,11 +4978,44 @@ export function apply(ctx, config) {
           memory: memorySnapshot,
         }
       }
+      // Second probe immediately before the latch is released: a pagefile can
+      // disappear between the first probe and this point. Fail closed, not open.
+      let confirmMemory = null
+      try {
+        confirmMemory = rememberMemory(await readSystemMemory({ force: true }))
+        notePagefile(confirmMemory, 'safe-mode-reset-postcheck')
+      } catch (error) {
+        const detail = String(error?.message ?? error)
+        audit('safe-mode-reset-refused', { reason: 'postcheck-probe-threw', detail })
+        return { ok: false, error: 'memory-probe-threw', detail, stage: 'postcheck', memory: memorySnapshot }
+      }
+      const confirmDecision = evaluateSafeModeReset(confirmMemory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
+      if (confirmDecision.ok !== true) {
+        audit('safe-mode-reset-refused', {
+          reason: confirmDecision.error,
+          stage: 'postcheck',
+          pageFileMB: confirmDecision.pageFileMB,
+          commitFreeMB: confirmDecision.commitFreeMB,
+          minFreeMB: confirmDecision.minFreeMB,
+        })
+        return {
+          ok: false,
+          error: confirmDecision.error,
+          detail: confirmDecision.detail,
+          stage: 'postcheck',
+          memory: memorySnapshot,
+        }
+      }
       safeMode = false
       safeModeReason = ''
       hostAdmissionClosed = false
       persistSafeMode()
-      audit('host-safe-mode-reset', { pageFileMB: decision.pageFileMB, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
+      audit('host-safe-mode-reset', {
+        pageFileMB: confirmDecision.pageFileMB,
+        commitFreeMB: confirmDecision.commitFreeMB,
+        minFreeMB: confirmDecision.minFreeMB,
+        postcheck: 'pagefile-present',
+      })
       return { ok: true, safeMode: false }
     },
     /** v3.3.8：手动/启动后检测默认元主是否落后，旧则自动 capture 并 setDefault。 */

@@ -2158,15 +2158,18 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const memory = S.status?.data?.memory || null
         const policy = S.status?.data?.memoryPolicy || {}
         const pageFileMB = Number(memory?.pageFileMB) || 0
-        const pagefileMissing = memory?.ok === true && (
+        const reset = S.safeMode?.data?.reset || null
+        const pagefileMissing = reset?.pagefileMissing === true || (memory?.ok === true && (
           memory?.pagefileMissing === true
           || memory?.pagingFilesEmpty === true
           || memory?.commitLimitNearRam === true
           || memory?.hasPageFile !== true
           || pageFileMB <= 0
-        )
-        const commitLow = memory?.ok === true
-          && Number(memory?.commitFreeMB) < Number(policy.hostCriticalFreeMB ?? 4096)
+        ))
+        const memoryUnknown = reset?.canReset === false && reset?.error === 'memory-probe-unavailable'
+        const commitLow = (reset?.canReset === false && reset?.error === 'commit-low')
+          || (memory?.ok === true && Number(memory?.commitFreeMB) < Number(policy.hostCriticalFreeMB ?? 4096))
+        const resetBlocked = reset?.canReset === false && !pagefileMissing && !memoryUnknown && !commitLow ? reset : null
         lockScroll()
         S.modal = {
           kind: 'safeMode',
@@ -2174,7 +2177,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           legacy: layout.legacyDataDetected === true,
           isolation: layout.dataIsolationBlocked === true,
           pagefileMissing,
+          memoryUnknown,
           commitLow,
+          resetBlocked,
           pageFileMB,
           memory,
           checks: { pagefile: false, migration: false, memory: false, isolation: false },
@@ -2195,6 +2200,16 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         }
         if (modal.commitLow === true) {
           modal.error = 'Commit 余量低于宿主紧急阈值；请先释放内存再重新检测。'
+          render(true)
+          return
+        }
+        if (modal.memoryUnknown === true) {
+          modal.error = '无法读取系统内存状态；不能仅凭勾选解除 Safe Mode。'
+          render(true)
+          return
+        }
+        if (modal.resetBlocked) {
+          modal.error = String(modal.resetBlocked.detail || modal.resetBlocked.error || '解除条件未满足')
           render(true)
           return
         }
@@ -5853,6 +5868,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         .concat(modal.isolation ? ['isolation'] : [])
       const canConfirm = required.every((key) => checks[key] === true) && !modal.busy
         && modal.pagefileMissing !== true && modal.commitLow !== true
+        && modal.memoryUnknown !== true && !modal.resetBlocked
       const checkRow = (key, label, hint, disabled = false) => h('label', { class: 'safe-check' },
         h('input', {
           type: 'checkbox', checked: checks[key] === true, disabled: modal.busy || disabled === true,
@@ -5884,10 +5900,24 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
                   h('div', { class: 'notice-title' }, 'Commit 余量低于宿主紧急阈值'),
                   h('div', { class: 'notice-text' }, `当前 Commit 余量 ${Number(modal.memory?.commitFreeMB) || 0} MB，低于解除阈值 ${Number(S.status?.data?.memoryPolicy?.hostCriticalFreeMB ?? 4096)} MB；请先释放内存。`)))
               : null,
+            modal.memoryUnknown
+              ? h('div', { class: 'notice notice--bad', role: 'alert' },
+                h('div', { class: 'notice-main' },
+                  h('div', { class: 'notice-title' }, '无法读取系统内存状态'),
+                  h('div', { class: 'notice-text' }, '页面文件与 Commit 状态未知，不能仅凭勾选解除 Safe Mode；请先点“重新检测”。')))
+              : null,
+            modal.resetBlocked
+              ? h('div', { class: 'notice notice--bad', role: 'alert' },
+                h('div', { class: 'notice-main' },
+                  h('div', { class: 'notice-title' }, '解除条件未满足'),
+                  h('div', { class: 'notice-text' }, String(modal.resetBlocked.detail || modal.resetBlocked.error || '请先修复系统条件。'))))
+              : null,
             h('div', { class: 'safe-checklist' },
-              checkRow('pagefile', modal.pagefileMissing ? '页面文件缺失/被禁用，不能解除' : '页面文件 / Commit 余量已恢复', modal.pagefileMissing
-                ? '当前系统没有可用页面文件；仅勾选不会通过校验，必须先启用页面文件并重启。'
-                : '任务管理器性能页的“提交”可用量应高于启动阈值；若 pagefile 被禁用，先在系统属性里恢复“系统管理的大小”。', modal.pagefileMissing === true),
+              checkRow('pagefile', modal.memoryUnknown ? '无法读取页面文件状态，不能解除' : modal.pagefileMissing ? '页面文件缺失/被禁用，不能解除' : '页面文件 / Commit 余量已恢复', modal.memoryUnknown
+                ? '内存探测不可用；仅勾选不会通过校验，请先重新检测。'
+                : modal.pagefileMissing
+                  ? '当前系统没有可用页面文件；仅勾选不会通过校验，必须先启用页面文件并重启。'
+                  : '任务管理器性能页的“提交”可用量应高于启动阈值；若 pagefile 被禁用，先在系统属性里恢复“系统管理的大小”。', modal.pagefileMissing === true || modal.memoryUnknown === true),
               modal.legacy
                 ? checkRow('migration', '旧数据已迁移到规范数据根', '完全退出宿主后运行 node tools/migrate-fang-home.mjs --apply；工具只复制不删除。')
                 : null,

@@ -7,7 +7,7 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
-> 当前发布线：**v3.8.11**（2026-11-25，在 v3.8.10 基础上修复 task / fang-meta / 端口三方不一致：meta 自动对账、旧端口被元主运行态占用时拒绝复用、暂停等待真实停止；`handler-threw` 现在返回并审计 route/method/requestId/detail/stack）。v3.8.2 改变了数据根，升级前先读
+> 当前发布线：**v3.8.12**（2026-11-25，在 v3.8.11 基础上补 Safe Mode 解除硬门：页面文件缺失/Commit 不足/内存探测失败时复选框与按钮均 disabled，服务端 `safeModeStatus` 下发 `canReset`，解除前再探测一次）。v3.8.2 改变了数据根，升级前先读
 > [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
 
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。
@@ -168,7 +168,7 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 | 你要做什么 | 先读 |
 |---|---|
 | 安装、升级、v3.8.2 数据根迁移 | [docs/INSTALL.md](docs/INSTALL.md) · [v3.8.2 变更](docs/CHANGELOG.md) |
-| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.11.md](docs/RELEASE-v3.8.11.md) · [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
+| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.12.md](docs/RELEASE-v3.8.12.md) · [docs/RELEASE-v3.8.11.md](docs/RELEASE-v3.8.11.md) · [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
 | P0 加固实现与真机证据 | [docs/P0-HARDENING.md](docs/P0-HARDENING.md) |
 | 真实宿主回归 smoke（v3.8.0/3.8.1） | [docs/HOST-SMOKE.md](docs/HOST-SMOKE.md) |
 | 防崩溃、Safe Mode、升级红线 | [docs/CRASH-SAFETY.md](docs/CRASH-SAFETY.md) |
