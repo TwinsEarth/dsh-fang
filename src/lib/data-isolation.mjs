@@ -7,13 +7,13 @@ import path from 'node:path'
 export const DEFAULT_FANG_DATA_ROOT = 'D:\\ToFuture\\FangData'
 export const DEFAULT_FORBIDDEN_ROOTS = ['E:\\DSH\\DS', 'E:\\DSH\\DS\\Fang', 'D:\\DSH\\DS\\Fang']
 
-function normalize(value) { return path.resolve(String(value ?? '')).replace(/[\\/]+$/, '').toLowerCase() }
+function normalize(value) { return path.resolve(String(value ?? '')).replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase() }
 
 export function isPathInside(child, parent) {
   const c = normalize(child)
   const p = normalize(parent)
   if (!c || !p) return false
-  return c === p || c.startsWith(p + path.sep.toLowerCase())
+  return c === p || c.startsWith(p + '/')
 }
 
 /** Pure guard: returns an error code instead of throwing. */
@@ -39,5 +39,8 @@ export function ensureDataPath(target, options) {
 }
 
 export function workspaceForFork(homeDir) {
-  return path.join(String(homeDir), 'workspace')
+  const home = String(homeDir)
+  // Windows drive paths are still tested on Linux CI; path.join would mix separators there.
+  const joiner = /^[A-Za-z]:\\/.test(home) ? path.win32 : path
+  return joiner.join(home, 'workspace')
 }

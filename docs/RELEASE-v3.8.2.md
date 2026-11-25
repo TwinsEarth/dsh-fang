@@ -8,15 +8,15 @@
 |---|---|
 | 全量 npm test | **1341 pass / 0 fail / 2 skip** |
 | preflight --e2e | **GREEN（e2e 125/125）** |
-| 发布 PR CI | 待回填 |
-| release-order | 待回填 |
+| 发布 PR CI | N/A（本地仓库，未走 PR） |
+| release-order | 未执行（发布未走 release-order） |
 
 ## 发布结果
 
-- tag：待回填
-- GitHub Release：待回填
-- npm：待回填
-- artifact sha256：待回填
+- tag：本地 `v3.8.2` → `c8143738d3063bd2f8cb08d59e0d223faf0c4049`（未 push）
+- GitHub Release：未创建
+- npm：未发布
+- artifact sha256：未构建/未采集
 
 ## 数据迁移
 

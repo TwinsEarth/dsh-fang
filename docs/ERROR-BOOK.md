@@ -250,5 +250,207 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 **防线**：后台 helper 只能用明确的 runtime 可执行文件；禁止把宿主 Electron 当成 Node。
 **教训**：守护进程如果自己启动第二个宿主，比没有守护更危险。
 
+## EB-20 · 2026-11-25 · DSH 客户端启动崩溃：keep-alive 连接被重置后复用（红色）
+
+**错误等级**：红（客户端无法启动，主进程 / web-boot 崩溃；属于启动不可用级故障）
+
+**现象**：安装 DSH `0.2.2-rc.5` 后客户端启动崩溃；日志先出现 `fetch failed` / `read ECONNRESET`，随后插件 bundle 加载失败并触发 web-boot 崩溃。测试实例可启动，但不作为验收依据。
+
+**根因**：启动时的遥测请求和欢迎页请求共用同一条到本地 Host 的 keep-alive 连接；1 秒超时取消响应后，这条连接被重置，后续请求仍复用该连接，于是出现 `ECONNRESET`，再引发插件 bundle 加载失败和 web-boot 崩溃。
+
+**修复**：
+- 只修改本地 Host 请求的三处逻辑：认证、欢迎页 RPC、插件及页面转发请求统一加 `Connection: close`；
+- 每次请求使用独立连接，不再复用被超时取消重置的连接；
+- 没有跳过遥测，没有改动用户配置。
+
+**验证**：
+- 从开始菜单正式入口启动成功，显示 DSH 欢迎/登录界面；
+- 主进程 PID `10856`，窗口标题正常；
+- 启动后没有生成新的 `main` 或 `web-boot` 崩溃日志；
+- 启动日志无 `ECONNRESET`，stderr 为空；
+- 安装包已恢复为原始大小 `209,083,008` 字节；当前安装仍为 `0.2.2-rc.5`。
+
+**文件与回滚**：
+- 已安装：`D:\DSH\resources\app.asar`
+- SHA-256：`43B2298D91F1C0A7D1A8C2ED6F65CABBEF4F603CA84520057F2E14CA3FF3960E`
+- 原始备份：`C:\Users\AU\AppData\Local\Temp\dsh-rc5-fix\app-original.asar`，可随时回滚。
+
+**未执行 / 数据保留**：
+- 未执行删除 `.dsh`、AppData、updater 目录的脚本；
+- `.credentials.yaml`、profile、插件配置、崩溃日志均保留；
+- 系统无可用 `dsh` CLI，因此没有创建 `safe` profile；
+- 临时构建文件未自动清理，避免误删证据或用户数据。
+
+**防线**：
+1. 启动故障禁止先用“删用户目录 / AppData / updater”止损；任何删除必须显式确认，并先保留证据。
+2. 可取消的本地 Host 请求不得复用可能被重置的 keep-alive 连接；对认证、欢迎页、插件/页面转发使用 `Connection: close` 或独立连接，并补一条“超时取消后下一次请求不报 ECONNRESET”的回归测试。
+3. 验收必须从正式开始菜单入口跑，不以测试实例代替；保留原始 `app.asar`、记录 SHA-256 与回滚路径后再报“已修复”。
+
+**教训**：连接池复用不是免费的；一次超时取消可能污染共享连接。启动链路宁可每请求独立连接，也不要让一个被重置的连接拖垮整个 web-boot。
+
+---
+
+## EB-21 · 2026-11-25 · Host 运行期退出：1 / 0xFFFFFFFF / 0xE0000008（红色，未定论）
+
+**错误等级**：红（Host 已正常运行后退出，属于运行期不可用级故障；根因尚未定论，不能按“已修复”关闭）
+
+**现象**：
+- 三份新增 Host 日志属于一个**独立于 EB-20 启动崩溃**的新问题组；
+- 版本均为 `0.2.2-rc.5`，阶段均为 `running`，退出码分别为 `1`、`0xFFFFFFFF`、`0xE0000008`；
+- 三份日志都伴随 Crashpad 管道错误 `0xEA`；
+- 没有 JS 异常，也没有插件调用栈；
+- 三份日志未出现在现有 HSD 和附件机的日志目录中，因此没有强行绑定到某一台安装实例。
+
+**关键判断（未定论）**：
+- 这不是 EB-20 的 `ECONNRESET` 连接复用问题。EB-20 发生在 `startup` / `web-boot` 阶段；这三次发生时 Host 已正常运行。
+- Crashpad `0xEA` 表示命名管道读取的数据超过当前缓冲区，属于崩溃上报链路的异常信息；出现时间早于父进程记录的退出时间，**不能直接当作死因**。
+- `0xE0000008` 可以作为 native 崩溃或内存分配失败的排查线索，但公开案例中的解释并不唯一，必须靠 dump、WER 记录和内存曲线确认。
+- `0xFFFFFFFF` 和 `1` 目前不足以单独定位；缺少 JS/插件栈时，不能把三条退出码直接归为同一个根因。可以按“同一现象组”管理，但不能假定同一故障机制。
+
+**合并报告**：
+- 用户提供的报告已合并前面 5 份 Host 日志和主进程记录；
+- 报告区分了：YAML 配置错误、W2M API 不兼容、连接复用 `ECONNRESET`、以及这组尚未定论的 Host `running` 退出问题；
+- 该报告给出了取证和排查优先级；本条目只登记事实与待证项，不把推测写成结论。
+
+**取证优先级（待执行）**：
+1. **先保留现场**：保留三份 Host 日志原文、Crashpad 日志、WER 记录/队列、`%LOCALAPPDATA%\CrashDumps` 与 DSH 崩溃目录中的 dump；记录文件哈希、采集时间和来源路径。
+2. **补内存证据**：采集 Host 及子进程的 Private/Commit、系统 CommitLimit/CommitFree、页面文件使用曲线；重点核对退出前是否出现内存分配失败或 Commit 耗尽。`0xE0000008` 不能只凭退出码解释。
+3. **对齐时间线**：把 Crashpad `0xEA` 的时间戳、Host 父进程退出时间、WER/Event Log 记录放在同一时间轴上；`0xEA` 早于退出记录，只能作为上报链路异常，不作为死因。
+4. **确认安装身份**：用安装路径、profile、`app.asar` SHA-256、版本号绑定日志与实例；在拿到证据前，不把日志强行归到 HSD、TOFUTURE 或某一台机器。
+5. **隔离复现**：用干净 profile / 禁用第三方插件做对照，分别记录“有无 W2M/YAML 配置”的退出码；不要用删除 `.dsh`、AppData、updater 或崩溃日志的方式“止损”。
+
+**防线（待落地）**：
+1. Host `running` 阶段退出必须保留 dump/WER/退出码/内存曲线，禁止只记录一句“崩溃了”就关闭。
+2. 报告“已修复”前必须给出 native 崩溃或内存分配失败的直接证据；仅有 Crashpad `0xEA` 或 `0xE0000008` 不足以结案。
+3. 该条保持**红色未定论**；在拿到 dump/WER 和内存证据前，不并入 EB-20，也不标记为已解决。
+
+**教训**：启动崩溃修好，不等于运行期崩溃修好；`0xEA` 是上报链路的噪声，不是死因。退出码相同的现象可以分组，根因必须分开证明。
 
 
+
+
+
+---
+
+## EB-22 · 2026-11-25 · 元主运行态 web boot 失败：`ui-theme` 被显式禁用（已定位，代码已修，真机待重启）
+
+**错误等级**：红（元主 Web 完全不可用；不是插件崩溃、不是 OOM）
+
+**现象**：
+- 打开元主运行态（`--profile essence-runtime --port 18000`）后，页面显示
+  `HARNESS / Failed to load plugins / web boot: 3 required entries did not activate`；
+- 列表里大量插件显示 `pending (waiting for service: theme)`；
+- 派生/打开分身随之走不干净的状态链路。
+
+**根因**：
+- 实际 profile 的 `cordis.patch.yml` 保留了
+  `@deepseek-ai/dsh-client-ui-theme` 的 `disabled: true`（字号配置仍在）；
+- theme 服务因此不启动 → `ui-layout` 等 theme → `ui-sidebar`/`ui-chat` 等 layout；
+- 这三项是 required entries，全部 pending，web boot 必然失败；
+- 来源是官方元主/插件面同步时保留了非官方行，没有过滤核心 UI 必需插件的禁用行。
+
+**修复**：
+- 新增 `src/lib/core-ui-plugins.mjs`：识别 `dsh-client-ui-theme/layout/sidebar/chat`，
+  `enforceCoreUiEntries()` 只把 `disabled: true` 翻成 `false`，保留 config；
+- `EssenceManager.repairOfficialEssence()`：官方 overlay 合并后统一强制启用核心 UI 行，
+  即使旧行 id 是 `official-*` 也保留其字号配置；返回/审计 `coreUiForced`；
+- `applySourcePluginSurface()`：来源元主 patch 拷进分身之前强制启用核心 UI 行，
+  防止把 `ui-theme disabled: true` 复制给新分身；
+- `startEssenceRuntime()`：provision 克隆出运行态 `cordis.patch.yml` 后再自愈一次，
+  直接修正在盘上的旧运行态 profile；审计 `runtime-core-ui-enabled` /
+  `runtime-core-ui-repair-failed`。
+
+**回归**：
+- `test/core-ui-plugins.test.mjs`：3/3；
+- `test/official-essence.test.mjs`：7/7（含 `official-ui-theme disabled:true` 保留配置后强制启用）；
+- 组合 27/27 通过（含 accelerated alias）。
+- 修复工具：`tools/repair-core-ui-profile.mjs --profile <dir> [--apply]`（默认 dry-run，apply 先写 `.bak-<ts>`）；
+- 待：TOFUTURE 在线后停 13100、重启元主运行态，确认页面加载；再打开分身。
+
+**防线**：
+1. `dsh-client-ui-*` 的 `disabled: true` 不得作为“用户偏好”保留在任何官方/分身/运行态 patch；
+2. 任何 profile merge 路径都要经过 `enforceCoreUiEntries`；
+3. 验收不能只看“进程起来了”，必须看到 theme 服务启动、required entries 全激活。
+
+
+## EB-23：打开分身后 `handler-threw`（task / fang-meta / 18000 三方状态冲突）
+
+**现象**：
+- `task_mwram4u9ylki` 是 `failed`、`pid=null`、`port=null`，`adapter.error=auto-paused-memory`；
+- 同时 `fang-meta.json` 仍写 `status=running`、`pid=19444`（已死）、`port=18000`；
+- 18000 实际属于元主运行态（PID 13100，`--profile essence-runtime`）；
+- 点“打开分身”只看到 `500 { error:'handler-threw', code:'handler-threw' }`。
+
+**根因**：
+- `syncTaskOnOpen()` 检测官方 fingerprint 变化后先置 failed，再 `restoreTask()`；
+- `restoreTask()` 的 `f.spawn` / `handshake` / `applySourcePluginSurface` / `syncForkCoreMode`
+  等步骤没有逐段兜底，异常被路由统一 catch 成 `handler-threw`；
+- task、`fang-meta`、端口所有权三份状态没有先归位，UI 可能继续拿旧 pid/18000 操作。
+
+**修复**：
+- `reconcileOpenState()`：打开/还原前检查 task pid 是否存活、旧 port 是否已归别人；
+  只清理 stale 状态（task/fang-meta pid/port/url），关闭旧托管窗口，绝不杀 forker 仍认为活着的进程；
+- `syncTaskOnOpen()` / `restoreTask()` 每个关键步骤返回 `{ok:false, step, error, detail}`，
+  审计 `fork-open-step-failed` / `fork-restore-step-failed`；HTTP 路由不再统一吞成 `handler-threw`；
+- `forker.stop()` / 子进程退出 / recover 时把 `fang-meta` 的 pid/port/url 清空；
+  `syncTaskMeta()` 在 task 状态变化时补写/清除旧身份；
+- 回归 `test/open-fork-preflight.test.mjs`：构造“task 旧 port 被别的进程占用 + fang-meta 残留 running”，
+  断言 open 返回 `spawn-threw` + `step=spawn`，task/fang-meta 不再保留旧 pid/port，且 restore 不显式请求旧端口。
+
+**回归**：
+- `test/open-fork-preflight.test.mjs`：1/1；Windows HSD 组合 **57/57**；
+- `test/forker.test.mjs`：29/29（含 stop 后 `fang-meta` pid/port/url 清空）；
+- 待真机：TOFUTURE 上线后按 open-fork 链路复测。
+
+**防线**：
+1. 打开分身前先做状态归位；被别的进程占用的端口不得复用；
+2. 任何 open/restore 的异常都必须带 `step` 和 `detail`，不允许只剩 `handler-threw`；
+3. task 状态变化必须同步 `fang-meta`，旧 pid/port 不能留给 UI。
+
+---
+
+## EB-24 · 2026-11-25 · 页面文件缺失打穿 Host 启动链；迁移报告按钮 `openMigrationReport` 独立 TypeError（红色）
+
+**错误等级**：红（Host/客户端启动不可用；本条目包含两条**独立**故障，禁止合并归因）
+
+**现场时间线（用户核对版）**：
+- `13:12:47–55` Host 连续启动失败 → profile patch 被清空/重建；
+- `13:20:16–53` 插件管理器重新启用 include/bundle → `13:21:48` 记录一次 `unclean-shutdown`；
+- `13:41:19` Renderer 报 `app.openMigrationReport is not a function`；触发条件是页面文件缺失使 migration/pagefile banner 出现，点击“查看迁移报告”调用未定义函数；
+- `13:41` 左右 Safe Mode 显示 `commit-free-critical` → Host 内存守卫把上一宿主标为紧急熔断；
+- `13:45:56` 新 Host 启动 → `13:45:58 safe-mode.json` 重置为 `false` → `13:46:02` 记录 `pagefile-missing`，Commit 余量 `25,310 MB`。
+
+**故障 A：Host 启动阶段被 Commit 打穿（不是 Fang 看门狗没防住）**
+- 现象：DSH 启动时对几乎所有核心插件行报
+  `dsh: disabling profile plugin row "tool-bash": its declared dsh requirements cannot be validated: UNKNOWN: unknown error, read`；
+  随后核心插件逐行被禁用，renderer 崩溃；下一次启动才由 Safe Mode 检测到 `commit-free-critical`。
+- 根因：系统没有页面文件（`Win32_PageFileUsage` 为空，`AutomaticManagedPagefile=False`，`SizeStoredInPagingFiles=0`），Commit 上限等于物理内存约 `31.7 GB`（`TotalVirtualMemorySize=33,255,604 KB`）。Windows 在 Commit 压力下连 profile 文件都读不出来，DSH 只能把插件逐行禁用。
+- 关键边界：崩溃发生在 DSH 自己加载 profile/插件阶段，**Fang 插件尚未获得执行机会**；3.8.3 的看门狗不可能事前阻止，Safe Mode 是事后检测，不是事前拦截。
+- 现场证据：当前 `/fang/api/memory/probe` 返回 `commitLimitMB=32476`、`commitFreeMB=20735`、`physicalFreeMB=19855`、`hasPageFile=false`；用户只读核对 `FreeVirtualMemory=22,820,836 KB`，页面文件为空。
+- 真正修复：启用页面文件，或持续释放 Commit 压力；任何“内存阈值/杀进程”只能降低概率，不能替代页面文件。
+
+**故障 B：Renderer 点击“查看迁移报告”报 `app.openMigrationReport is not a function`**
+- 现象：`Uncaught TypeError: app.openMigrationReport is not a function`；页面文件缺失使 migration/pagefile banner 出现，点击按钮时触发。
+- 根因（Fang 3.8.3）：`client.js` 第 2077 行定义了 `function openMigrationReport()`，第 3576 行 `const app = {...}` 未挂载该函数，第 4098 行按钮调用 `app.openMigrationReport()`；安装版路径 `<profile>\node_modules\@twinsearth\fang-dsh-plugin\client.js`。
+- 归属核对：在 TOFUTURE 整个 profile `node_modules` 执行 `findstr /S /M /C:"openMigrationReport" *.js`，**只有** `@twinsearth\fang-dsh-plugin\client.js` 命中；`@deepseek-ai` 及其他 DSH 插件没有该函数。`3.8.2` 没有该功能，`3.8.3` 新增后漏挂。因此这条是 **Fang 3.8.3 的客户端 API 漏挂**，不是 DSH 0.2.2-rc.5 自带 API；用户此前按 3.8.2 搜索得出“不属于 Fang”的结论，在 3.8.3 上不成立。
+- 与故障 A 的边界：Renderer TypeError 只影响迁移报告按钮/面板，不是 Host `commit-free-critical` 的根因；两者都出现在 13:41，但一个是 renderer 点击异常，一个是 Host 内存守卫，必须分开修、分开验收。
+
+**修复（本次已写代码，TOFUTURE 尚未部署）**：
+- `client.js` 的 `app` 对象补挂 `openMigrationReport`；`test/client-migration-report.test.mjs` 断言 `probeMemory, openPagefileHelp, openMigrationReport, openDiskHygiene`，3/3 pass。
+- Safe Mode 解除改为**硬门**：
+  - `src/plugins/orchestrator.mjs` 的 `resetSafeMode` 改为 async，每次强制 `readSystemMemory({ force: true })`，不再依赖缓存；
+  - 探测异常 → `memory-probe-threw`；`memory.ok !== true` → `memory-probe-unavailable`；`hasPageFile !== true` → `pagefile-missing`；`commitFreeMB < cfg.memoryMinFreeMB` → `commit-low`；全部 409 拒绝，且不修改 `safeMode`；
+  - `POST /fang/api/safe-mode/reset` 改为 `await service.resetSafeMode()`，`ok ? 200 : 409`；
+  - 客户端 `reviewSafeMode()` 识别 `pagefileMissing`，`confirmSafeModeReset()` 直接拒绝；弹窗在页面文件缺失时禁用 checkbox 并显示“页面文件缺失/被禁用，不能解除”，按钮 title 同步；
+  - `test/client-safe-mode.test.mjs` 增加 pagefile-missing 客户端/服务端硬门断言；组合 8/8 pass。
+- 构建：`node tools/release/build.mjs --skip-preflight` 通过 package smoke / crash-safety / allow-list / main-city gate；产物 `dist/dsh-fang-3.8.3.tgz`，835,527 bytes，SHA-256 `38549f08a3b3d3d1e39b136e251200bb9b0aec72e00e0c10570c696daff49d1b`。
+- 未执行：未安装/未重启 TOFUTURE；未改系统页面文件；未 commit/push/tag/publish。
+
+**防线**：
+1. Safe Mode 解除必须有服务端硬校验：页面文件不存在或 Commit 余量低于启动阈值时，客户端勾选不能绕过，HTTP 必须 409；
+2. 看到 `disabling profile plugin row ... UNKNOWN: unknown error, read` 先查 `Win32_PageFileUsage`、`SizeStoredInPagingFiles`、Commit 余量，禁止先归因“插件声明错误”；
+3. 页面文件缺失属于系统级前置条件，Fang 看门狗无法覆盖 DSH 启动加载阶段；不得再报“3.8.3 已防住本次 Host 崩溃”；
+4. renderer 的 `openMigrationReport` TypeError 与 Host `commit-free-critical` 必须各自建回归、各自验收，不允许因为同一分钟出现就合并成一条根因；
+5. 页面文件变更按 G2 处理，必须有用户明确授权、回滚方案和重启验证；不得静默改系统配置。
+
+**教训**：没有页面文件时，Windows 的 Commit 上限就是物理内存；内存压力首先表现为“文件读不出来”，不是漂亮的 OOM 提示。看门狗只能在插件加载后生效，救不了加载前的 Host；客户端按钮报错也不能拿来解释 Host 崩溃。

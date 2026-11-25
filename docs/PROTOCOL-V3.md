@@ -233,7 +233,9 @@ data: {"cursor":"1","sessionId":"s-…","at":1730000000000,"event":{"kind":"comm
 | 方法 | 路径 | 认证 | 幂等 | 用途 |
 |---|---|---|---|---|
 | GET | `${prefix}/adapter/hello` | Bearer（如启用） | 是 | v2 握手：role/taskId/version/capabilities（+protocol/sessionId） |
-| GET | `${prefix}/adapter/status` | 同上 | 是 | v2 服务表/缓冲三态/待批数/审计头 |
+| GET | `${prefix}/adapter/status` | 同上 | 是 | v2 服务表/缓冲三态/待批数/审计头/最近活动 |
+| GET | `${prefix}/adapter/activity` | 同上 | 是 | 最近活动时间 + 运行中 turn（空闲浏览器关闭判据） |
+| POST | `${prefix}/adapter/flush-session` | 同上 | 是（重复 flush 安全） | 分身宿主内调用 DSH `sessions.flush`，返回显式 `saved` |
 | GET | `${prefix}/adapter/approvals` | 同上 | 是 | 待审批项 |
 | GET | `${prefix}/adapter/audit?limit=n` | 同上 | 是 | 审计尾部 |
 | POST | `${prefix}/adapter/command` | 同上 | 否（无 commandId） | v2 控制命令 `{op,payload}` |

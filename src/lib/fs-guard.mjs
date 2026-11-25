@@ -5,6 +5,12 @@ import path from 'node:path'
 
 export function safeJoin(root, ...parts) {
   const base = path.resolve(root)
+  for (const part of parts) {
+    const text = String(part)
+    if (/^[A-Za-z]:[\\/]/.test(text) || text.startsWith('\\') || text.startsWith('//')) {
+      throw new Error('path-escape')
+    }
+  }
   const target = path.resolve(base, ...parts)
   if (target !== base && !target.startsWith(base + path.sep)) throw new Error('path-escape')
   if (String(target).includes('\0')) throw new Error('path-escape')

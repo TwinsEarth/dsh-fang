@@ -192,7 +192,7 @@ function joinRel(base, ...rest) {
 }
 
 /** 帧边界：从 buf 里找 zstd magic 出现的位置。 */
-function findMagicOffsets(bytes) {
+function findMagicOffsets(bytes, limit = 64) {
   const offsets = []
   const b0 = ZSTD_MAGIC[0]
   const b1 = ZSTD_MAGIC[1]
@@ -200,7 +200,7 @@ function findMagicOffsets(bytes) {
   const b3 = ZSTD_MAGIC[3]
   for (let i = 0; i + 3 < bytes.length; i++) {
     if (bytes[i] === b0 && bytes[i + 1] === b1 && bytes[i + 2] === b2 && bytes[i + 3] === b3) offsets.push(i)
-    if (offsets.length >= 64) break // 头读预算内 64 帧足够；再多也只解第一帧
+    if (offsets.length >= limit) break // 头读预算内 64 帧足够；尾读传入更大预算
   }
   return offsets
 }
@@ -364,6 +364,115 @@ export function readBoundedHead(options = {}) {
         /* close 失败不影响已读结果 */
       }
     }
+  }
+}
+
+export const TAIL_DEFAULTS = Object.freeze({
+  maxFrames: 512,
+  maxCompressedBytes: 256 * 1024,
+  maxEvents: 2000,
+})
+
+/**
+ * 有界多帧事件尾读：只读文件最后 maxCompressedBytes，按 zstd magic 切帧并解码最后
+ * maxFrames 帧。用于判断「最近一次活动」和「是否仍在 turn 中」，绝不整文件解压。
+ * 帧边界始终从 magic 开始，因此尾部截断只会丢掉最前面的不完整帧，不会破坏最后一帧。
+ * @returns {{events:object[], lines:string[], degraded:string[], framesDecoded:number, bytesRead:number}}
+ */
+export function readBoundedTailEvents(options = {}) {
+  const {
+    file,
+    maxFrames = TAIL_DEFAULTS.maxFrames,
+    maxCompressedBytes = TAIL_DEFAULTS.maxCompressedBytes,
+    maxEvents = TAIL_DEFAULTS.maxEvents,
+    fsApi,
+    zstdDecompressSync,
+  } = options ?? {}
+  const degraded = []
+  const out = { events: [], lines: [], degraded, framesDecoded: 0, bytesRead: 0 }
+  const note = (tag) => { if (!degraded.includes(tag)) degraded.push(tag) }
+  if (typeof file !== 'string' || !file) { note('no-file'); return out }
+  if (!fsApi || typeof fsApi.openSync !== 'function') { note('no-fs-api'); return out }
+  if (typeof zstdDecompressSync !== 'function') { note('no-zstd'); return out }
+  const frameBudget = clampInt(maxFrames, 1, 4096, TAIL_DEFAULTS.maxFrames)
+  const byteBudget = clampInt(maxCompressedBytes, 4096, 64 * 1024 * 1024, TAIL_DEFAULTS.maxCompressedBytes)
+  const eventBudget = clampInt(maxEvents, 1, 200000, TAIL_DEFAULTS.maxEvents)
+  let fd = null
+  try {
+    let fileSize = null
+    try {
+      const st = fsApi.statSync(file)
+      if (st && Number.isFinite(st.size)) fileSize = st.size
+    } catch { note('stat-failed'); return out }
+    if (fileSize === null) { note('size-unavailable'); return out }
+    if (fileSize === 0) { note('empty'); return out }
+    fd = fsApi.openSync(file, 'r')
+    const toRead = fileSize === null ? byteBudget : Math.min(fileSize, byteBudget)
+    if (!(toRead > 0)) { note('empty'); return out }
+    const buffer = new Uint8Array(toRead)
+    const offset = fileSize === null ? 0 : Math.max(0, fileSize - toRead)
+    const got = fsApi.readSync(fd, buffer, 0, toRead, offset)
+    out.bytesRead = Number.isFinite(got) ? got : 0
+    if (out.bytesRead <= 0) { note('empty'); return out }
+    if (fileSize !== null && out.bytesRead < fileSize) note('compressed-limit')
+    let view = buffer.subarray(0, out.bytesRead)
+    let text = ''
+    const offsets = findMagicOffsets(view, 1 << 20)
+    if (offsets.length === 0) {
+      note('not-zstd')
+      text = decodeUtf8(view)
+    } else {
+      // The read starts in the middle of the file: its first bytes may be the
+      // compressed payload of a frame whose magic is before the window. Drop
+      // that partial prefix and decode only real frame boundaries.
+      const base = offsets[0]
+      if (base > 0) {
+        note('partial-first-frame')
+        view = view.subarray(base)
+        for (let i = 0; i < offsets.length; i++) offsets[i] -= base
+      }
+      const bounds = offsets
+      if (bounds.length === 0) { note('frame-decode-failed'); return out }
+      const start = Math.max(0, bounds.length - frameBudget)
+      if (start > 0) note('frame-limit')
+      for (let i = start; i < bounds.length && out.framesDecoded < frameBudget; i++) {
+        const frame = view.subarray(bounds[i], i + 1 < bounds.length ? bounds[i + 1] : view.length)
+        if (frame.length < 4) continue
+        try {
+          const decoded = zstdDecompressSync(frame)
+          const bytes = decoded instanceof Uint8Array ? decoded : new Uint8Array(decoded)
+          if (bytes.length === 0) { note('frame-empty'); continue }
+          text += decodeUtf8(bytes)
+          out.framesDecoded += 1
+        } catch {
+          note('frame-decode-failed')
+          break
+        }
+      }
+    }
+    const lines = text.split('\n')
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+    for (const line of lines) {
+      if (!line.trim()) continue
+      let parsed = null
+      try { parsed = JSON.parse(line) } catch { note('line-unparsable'); continue }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      out.events.push(parsed)
+      out.lines.push(line)
+      // Tail semantics: keep the newest eventBudget events, not the oldest.
+      // (A frame may legally contain multiple JSONL events.)
+      if (out.events.length > eventBudget) {
+        out.events.shift()
+        out.lines.shift()
+        note('event-limit')
+      }
+    }
+    return out
+  } catch {
+    note('read-failed')
+    return out
+  } finally {
+    if (fd !== null) { try { fsApi.closeSync(fd) } catch { /* ignore */ } }
   }
 }
 
@@ -661,8 +770,10 @@ export const _internals = {
   extractConversation,
   SEED_DEFAULTS,
   readBoundedEvents,
+  readBoundedTailEvents,
   extractSessionTitle,
   TITLE_DEFAULTS,
+  TAIL_DEFAULTS,
   findMagicOffsets,
   firstFrameSlice,
   joinRel,

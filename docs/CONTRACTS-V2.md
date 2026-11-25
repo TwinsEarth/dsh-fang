@@ -69,8 +69,8 @@ resolveCommercial({commercialHooks,provider,capability}) · invokeCommercial({..
 // types.mjs v2 词汇
 FANG_VERSION='2.0.0'
 TASK_STATUS{PROVISIONING,READY,RUNNING,ARCHIVED,FAILED}
-ADAPTER_OP{PING,STATUS,FLUSH_BUFFER,SCORE_PLUGIN,READ_PLUGIN,ROUTE_CONFIRM,APPROVALS,APPROVAL_DECIDE,ARCHIVE}
-ADAPTER_ROUTE{HELLO:'/adapter/hello',STATUS,APPROVALS,AUDIT,COMMAND}
+ADAPTER_OP{PING,STATUS,ACTIVITY,FLUSH_SESSION,FLUSH_BUFFER,SCORE_PLUGIN,READ_PLUGIN,ROUTE_CONFIRM,APPROVALS,APPROVAL_DECIDE,ARCHIVE}
+ADAPTER_ROUTE{HELLO:'/adapter/hello',STATUS,ACTIVITY,FLUSH_SESSION,APPROVALS,AUDIT,COMMAND}
 CONTAINER{DISABLED,UNAVAILABLE,READY}
 ```
 
@@ -83,7 +83,9 @@ CONTAINER{DISABLED,UNAVAILABLE,READY}
 ```
 母体                        分身（adapter）
 POST {forkUrl}/fang/adapter/command?token=…  {"op":"flush-buffer","payload":{…}}
-GET  {forkUrl}/fang/adapter/status?token=…   → { ok, role:'fork', taskId, services, buffer, approvals, audit }
+GET  {forkUrl}/fang/adapter/status?token=…   → { ok, role:'fork', taskId, services, buffer, approvals, audit, activity }
+GET  {forkUrl}/fang/adapter/activity?token=… → { ok, taskId, activity:{ lastActivityAt, turnRunning, signal, sessionId, … } }
+POST {forkUrl}/fang/adapter/flush-session?token=… → { ok, saved, flushed:[], skipped:[], failed:[] }（宿主内 sessions.flush）
 GET  {forkUrl}/fang/adapter/audit?token=…&limit=100
 GET  {forkUrl}/fang/adapter/approvals?token=…
 GET  {forkUrl}/fang/adapter/hello?token=…
@@ -115,14 +117,14 @@ service = {
   approvals() -> { ok, items:[...] },
   audit({limit=100}) -> { ok, records:[...] },
   async command({op, payload}) -> { ok, op, result } | { ok:false, op, error, code },
-     // ping/status/flush-buffer/score-plugin/read-plugin/route-confirm/approvals/approval-decide/archive
+     // ping/status/activity/flush-session/flush-buffer/score-plugin/read-plugin/route-confirm/approvals/approval-decide/archive
   routes                                        // 已注册路径数组（测试用）
 }
 ```
 命令实现必须容错：依赖服务缺失 → `{ok:false,code:'service-unavailable'}`。`read-plugin` 只读 `<fork buffer>/<pluginId>` 下文件并返回 `{files:{relPath:string}}`（文本，最大 2MB，拒绝路径逃逸）。`archive` = flush buffer + 结束（不 kill 自身；kill 由母体 Forker 做）。HTTP 处理器与 service 共用同一实现，方法校验（GET/POST）与错误码：405/400/409/500。
 
 同时 HTTP 路由（`webServer.register({kind:'exact', path})`，前缀来自 Config.prefix）：
-`GET /fang/adapter/hello`、`GET /fang/adapter/status`、`GET /fang/adapter/approvals`、`GET /fang/adapter/audit`、`POST /fang/adapter/command`。
+`GET /fang/adapter/hello`、`GET /fang/adapter/status`、`GET /fang/adapter/activity`、`POST /fang/adapter/flush-session`、`GET /fang/adapter/approvals`、`GET /fang/adapter/audit`、`POST /fang/adapter/command`。
 路径与 `ADAPTER_ROUTE` 常量保持一致。
 
 ### 5.2 Remote 客户端（T5）

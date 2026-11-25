@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "3.8.2",
+  "version": "3.8.4",
   "private": true,
   "type": "module",
   "description": "瓮城：DSH 的第一台虚拟机！插件开发狂魔、多任务并发狂与安全焦虑症患者的隔离沙箱：热更新坏了秒回滚，多开不崩各跑各的，危险代码进审核与独立沙箱。1 编排器 + 12 子插件。",
@@ -59,6 +59,8 @@
     "docs/INBOX-SCROLL.md",
     "docs/TEST-STABILITY-v3.4.0.md",
     "docs/CRASH-SAFETY.md",
+    "docs/INSTALL.md",
+    "docs/HOST-SMOKE.md",
     "docs/DSH-ARCHITECTURE-MAP.md",
     "docs/MAIN-CITY-GATE.md",
     "docs/FORK-SEED.md",
@@ -66,6 +68,7 @@
     "docs/CONTRACT-INTEROP.md",
     "locale/*.json",
     "icon.svg",
+    "native/**/*",
     "LICENSE-CORE",
     "LICENSE-SDK",
     "LICENSE-COMMERCIAL",
@@ -78,7 +81,9 @@
     "vault/package.json",
     "vault/client.js",
     "vault/cordis.patch.yml",
-    "tools/migrate-fang-home.mjs"
+    "tools/migrate-fang-home.mjs",
+    "tools/repair-core-ui-profile.mjs",
+    "tools/release/host-boot-smoke.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -92,6 +97,7 @@
   },
   "scripts": {
     "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "smoke:host": "node tools/release/host-boot-smoke.mjs",
     "test:dom": "node --test --test-concurrency=1 test/client-inbox-dom.test.mjs",
     "check": "node tools/fangctl.mjs verify",
     "doctor": "node tools/fangctl.mjs doctor",

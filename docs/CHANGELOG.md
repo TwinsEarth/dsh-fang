@@ -1,3 +1,44 @@
+## v3.8.4（2026-11-25）
+**主题：页面文件硬门禁 + 启动前 Safe Mode 预检 + 迁移报告 API 防护**
+
+### 安全 / 可靠性
+
+- **Safe Mode 解除硬门禁**：`resetSafeMode` 每次强制 `readSystemMemory({ force: true })`，实际读取 `Win32_PageFileUsage`；只有 `hasPageFile === true` 且 `pageFileMB > 0`、`commitFreeMB >= hostCriticalFreeMB` 才允许解除。页面文件缺失、Commit 低于宿主紧急阈值、探测失败均返回 409 并写 `safe-mode-reset-refused` 审计，不修改 `safeMode`。
+- **启动前页面文件预检**：Fang `apply()` 在 Windows 上启动异步 pagefile gate；检测到页面文件缺失/被禁用时直接进入 Safe Mode（`reason=pagefile-missing`），`createTask` / `restoreTask` / `syncTaskOnOpen` / `autostartForks` 都先等这个 gate，缺失时拒绝自动拉起分身或浏览器。看门狗不再等到插件加载后才反应。
+- **客户端硬拦截**：Safe Mode 弹窗按 `pageFileMB` 与服务端 `memoryPolicy.hostCriticalFreeMB` 判断；页面文件缺失或 Commit 低于紧急阈值时禁用页面文件 checkbox、禁用确认按钮并显示原因，不再只信用户勾选。
+- **迁移报告调用点防护**：横幅点击“查看迁移报告”前做 `typeof app.openMigrationReport !== 'function'` 判断；缺失时提示并单独归为 DSH 客户端 API 问题，不混入 Host/Commit 崩溃修复。`app` 面仍挂回 `openMigrationReport`。
+- **修复旧子进程句柄泄漏**：`stop → 重启` 后上一子进程的晚到 `exit` 事件不得把新 child 句柄置空，否则新分身可能失去句柄控制；`forker` 现在只清理当前 child，旧 spawn 的 promise 单独 settle，避免测试/宿主退出时遗留 `fake-dsh-cli` 进程（V3.8.4 发布门禁发现）。
+- **回归**：新增 `test/pagefile-safety.test.mjs`，用模拟 `Win32_PageFileUsage` 结果断言页面文件缺失/Commit 低不能解除、启动预检进入 Safe Mode；新增 Safe Mode 下 `autostartForks` 不得 spawn 的集成用例；现有 Safe Mode/迁移报告/页面文件 banner 定向测试同步更新。
+- **收录 v3.8.3 未发布内容**：Job Object、旧 workspace 映射、拒绝外部浏览器回退、P1/P2 接线、元主 Web boot 修复、打开分身状态归位、service 面修复、迁移报告漏挂修复一并进入本版。
+
+### 边界
+
+- 不修改 DSH 安装文件、不自动安装/更新插件；部署/重启仍需用户手动二次确认。
+- 页面文件是系统级前置条件，Fang 只能检测并进入 Safe Mode，不能替代启用页面文件。
+- 真实 Windows 宿主上的 pagefile 缺失场景需在用户授权部署后复测；本版代码/单测在 VM 完成。
+- 未 commit/push/tag/publish（发布动作见 v3.8.4 审计/发布记录）。
+
+## v3.8.3（2026-11-25，已并入 v3.8.4，未单独发布）
+**主题：P0 硬保障：Job Object 内核回收、旧 workspace 映射、无托管浏览器拒绝回退**
+
+### 安全 / 可靠性
+
+- **Windows Job Object**：新增 `fang-job-host.exe`，`KILL_ON_JOB_CLOSE` + 宿主心跳；helper 死亡或宿主冻结时内核杀整棵 fork 子树。缺 helper 时 fail-closed，不退化裸 spawn。
+- **旧 workspace 映射**：`E:\DSH\DS` / `E:\DSH` / `E:\DS` 等旧路径映射到各 fork home；启动扫描已有 fork home；仅改 Fang metadata 与 session header，事件帧字节不动，带清单/备份可回滚。
+- **拒绝外部浏览器回退**：托管浏览器不可用时 `POST /fang/api/tasks/open` 返回 503，客户端不再 `window.open`；essence runtime Web 纳入托管浏览器/panic/watchdog；显式 browserPath 失效 fail-closed。
+- **P1**：fork flush 端点、空闲关闭活动判定、sidecar identity、日志轮转、Safe Mode UX。
+- **P2**：会话压缩、缓存治理、阈值自适应、CDP 趋势图、页面文件红色 banner。
+- **修复元主 Web boot**：`ui-theme` 被旧 overlay 禁用导致 layout/sidebar/chat 全部 pending；`repairOfficialEssence`、`applySourcePluginSurface` 与运行态启动路径统一强制启用核心 UI 行并补回归测试。
+- **修复打开分身 `handler-threw`**：打开/还原前归位 task、`fang-meta`、端口三方状态；open/restore 逐步骤返回 `{step,error,detail}`，旧 pid/port 不再残留。
+- **修复 open/safe-mode 路由的 service 面**：`openManagedBrowser`、`probeMemory`、`safeModeStatus`、`resetSafeMode` 等宿主级方法必须挂在 orchestrator service 上，不能混入 mirror service；补 service 面回归断言，避免打开成功后被 `service.openManagedBrowser is not a function` 再次打成 `handler-threw`。
+- **修复迁移报告按钮 TypeError**：`client.js` 的 `app` 面漏挂 `openMigrationReport`，页面文件/迁移横幅点击“查看迁移报告”会报 `app.openMigrationReport is not a function`；已挂回并补客户端回归断言。
+
+### 边界
+
+- 不复制/删除旧 workspace 文件；只 redirect。
+- 真实 DSH 宿主 fork/浏览器端到端待在线复测。
+- 未 commit/push/tag/publish。
+
 ## v3.8.2（2026-11-24）
 **主题：数据根隔离：默认 D:\ToFuture\FangData，禁止与宿主/工程目录混用**
 

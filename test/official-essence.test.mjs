@@ -12,6 +12,7 @@ import {
   EssenceManager,
   parsePatchEntries,
 } from '../src/lib/essence.mjs'
+import { findDisabledCoreUiEntries } from '../src/lib/core-ui-plugins.mjs'
 import { tmpDir } from './helpers.mjs'
 
 function makeFixture() {
@@ -95,6 +96,30 @@ test('official essence: 推荐清单 install/enable 与实验性插件默认开�
   manager.repairOfficialEssence({ installed: [{ name: '@deepseek-ai/dsh-experimental-forge-bundle' }] })
   const again = parsePatchEntries(fs.readFileSync(path.join(essencesRoot, OFFICIAL_ESSENCE_ID, 'overlay', 'cordis.patch.yml'), 'utf8')).entries
   assert.equal(again.filter(entry => entry.name === '@deepseek-ai/dsh-experimental-forge-bundle').length, 1)
+})
+
+test('official essence: repair 强制启用被旧覆盖层禁用的 ui-theme/layout/sidebar/chat', () => {
+  const { manager, essencesRoot } = makeFixture()
+  manager.ensureOfficialEssence()
+  const overlayFile = path.join(essencesRoot, OFFICIAL_ESSENCE_ID, 'overlay', 'cordis.patch.yml')
+  const rows = parsePatchEntries(fs.readFileSync(overlayFile, 'utf8')).entries
+  rows.push(
+    { id: 'official-ui-theme', name: '@deepseek-ai/dsh-client-ui-theme', config: { fontSize: 17, codeFontSize: 13, terminalFontSize: 15 }, disabled: true },
+    { id: 'ui-layout', name: '@deepseek-ai/dsh-client-ui-layout', disabled: true },
+    { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar', disabled: true },
+    { id: 'ui-chat', name: '@deepseek-ai/dsh-client-ui-chat', disabled: true },
+  )
+  fs.writeFileSync(overlayFile, `${JSON.stringify(rows, null, 2)}\n`, 'utf8')
+  const repaired = manager.repairOfficialEssence()
+  assert.equal(repaired.ok, true)
+  assert.ok(repaired.coreUiForced >= 4)
+  const repairedOverlay = parsePatchEntries(fs.readFileSync(overlayFile, 'utf8')).entries
+  const theme = repairedOverlay.find((entry) => entry.name === '@deepseek-ai/dsh-client-ui-theme')
+  assert.equal(theme.disabled, false)
+  assert.deepEqual(theme.config, { fontSize: 17, codeFontSize: 13, terminalFontSize: 15 })
+  const merged = parsePatchEntries(fs.readFileSync(path.join(manager.mergedProfileDir(OFFICIAL_ESSENCE_ID), 'cordis.patch.yml'), 'utf8')).entries
+  assert.equal(findDisabledCoreUiEntries(merged).length, 0)
+  assert.ok(merged.some((entry) => entry.name === '@deepseek-ai/dsh-client-ui-theme' && entry.disabled !== true))
 })
 
 test('official essence: 锁定后 update/remove/setTier 都被拒绝', async () => {

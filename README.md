@@ -7,8 +7,32 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
+> 当前发布线：**v3.8.4**（2026-11-25，页面文件硬门禁 + 启动前 Safe Mode 预检）。v3.8.2 改变了数据根，升级前先读
+> [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
+
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。
 > 我们深知在「自进化 AI」时代，**「如何安全地尝试新事物」比「新事物本身」更重要**。
+
+## 升级到 v3.8.2（数据根迁移，必读）
+
+v3.8.2 把 mirror / essence / forks / sessions 统一到 **`D:\ToFuture\FangData`**。
+迁移工具只复制、不删除、不覆盖；**必须完全退出 DeepSeek Harness 后执行**。
+
+```powershell
+# 1. 先 dry-run，看清楚来源
+node tools/migrate-fang-home.mjs
+
+# 2. 真正复制（源数据保留；目标已有 tasks.json 会拒绝）
+node tools/migrate-fang-home.mjs --apply
+
+# 3. 启动 v3.8.2 后，面板会显示「数据迁移报告」
+#    报告文件：D:\ToFuture\FangData\_migration\migration-<stamp>.json
+```
+
+完整步骤（含部署检查、正式入口验收、回滚）见 **[docs/INSTALL.md](docs/INSTALL.md)**。
+迁移报告现在会进入瓮城面板（复制 / 跳过 / 冲突数量、来源根、目标 tasks.json、冲突文件），
+不再只落一个 JSON 文件。旧数据继续可读的前提是：目标根没有 `tasks.json` 且旧根仍存在；
+工具不会自动搬移或删除会话。
 
 ## 如果你是以下三类人，瓮城就是为你量身定制的
 
@@ -41,7 +65,7 @@
 > 新增 **Adapter** 跨进程桥、任务语义、端口池、干净模板、Router 双阶段、评分环境阈值、
 > 审计汇总、容器执行与申报写代理、商用钩子。
 
-## 当前状态（2026-11-01，v2.3.1）
+## 当前状态（历史快照：2026-11-01，v2.3.1）
 
 - UI：左侧导航「瓮城」（红色城门图标）· 中列控制面板 **3:7 分屏**（左=母体项目&会话，右=分身项目&会话，两栏独立滚动）· dock 徽标双击快速派生；
 - 测试：**292 tests / 291 pass / 0 fail / 1 skip**（skip = `FANG_CONTAINER_LIVE=1` 手动容器探针，已单独跑 **9/9**）；
@@ -133,11 +157,24 @@ node tools/e2e.mjs
 ## 已知限制（v2.0.0，诚实清单）
 
 AppContainer **真实执行**需 `FANG_CONTAINER_LIVE=1` 手动探针（CI 只覆盖降级路径）；
-Job Object 层未接入；分身会话迁移/跨宿主接管未做；Relay 付费五项只有钩子与配置开关。
+旧 workspace 目前只做 metadata redirect、不复制 `E:\DSH\DS` 下的文件；宿主级 fork/浏览器端到端仍需在真实 DSH 上复测；Relay 付费五项只有钩子与配置开关。
 v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由用户确认执行）。
 完整清单见 [ARCHITECTURE-V2.md](docs/ARCHITECTURE-V2.md) §8。
 
 ---
+
+## 文档索引
+
+| 你要做什么 | 先读 |
+|---|---|
+| 安装、升级、v3.8.2 数据根迁移 | [docs/INSTALL.md](docs/INSTALL.md) · [v3.8.2 变更](docs/CHANGELOG.md) |
+| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
+| P0 加固实现与真机证据 | [docs/P0-HARDENING.md](docs/P0-HARDENING.md) |
+| 真实宿主回归 smoke（v3.8.0/3.8.1） | [docs/HOST-SMOKE.md](docs/HOST-SMOKE.md) |
+| 防崩溃、Safe Mode、升级红线 | [docs/CRASH-SAFETY.md](docs/CRASH-SAFETY.md) |
+| UI 改动与发版流程 | [docs/WORKFLOW-UI.md](docs/WORKFLOW-UI.md) |
+| 已犯错误与防线（改任务前必读） | [docs/ERROR-BOOK.md](docs/ERROR-BOOK.md) |
+| 架构、协议、契约 | [docs/ARCHITECTURE-V2.md](docs/ARCHITECTURE-V2.md) · [docs/PROTOCOL-V2.md](docs/PROTOCOL-V2.md) · [docs/CONTRACTS-V2.md](docs/CONTRACTS-V2.md) |
 
 ## 许可证（分层）
 

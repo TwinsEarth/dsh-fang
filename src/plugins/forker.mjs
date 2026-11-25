@@ -68,6 +68,7 @@ import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
 import { loadAcceleratedKnownEventTypes, normalizeCoreMode, pruneAliasStubs, sanitizeAcceleratedForkSessions, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
 import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } from '../lib/essence.mjs'
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
+import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady, resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
 
 /** Repository root of this plugin (used as the @local/dsh-fang junction source). */
 const FANG_ROOT = (() => {
@@ -123,6 +124,9 @@ const DEFAULTS = {
   cleanTemplate: true,
   bundleName: '@local/dsh-fang',
   forkProfileTag: 'web-base',
+  jobObject: true,
+  jobHeartbeatTimeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
+  jobHeartbeatGraceMs: JOB_HEARTBEAT_GRACE_MS,
 }
 
 /** Files cloned from a (clean or mother) template profile: package.json + cordis*.yml only. */
@@ -163,6 +167,12 @@ export const Config = z
     coreMode: z.union([z.const('stock'), z.const('accelerated')]).default('stock').description('new fork uses stock or accelerated DSH core'),
     acceleratedCliPath: z.string().default('').description('accelerated DSH CLI path'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),
+    jobObject: z.boolean().default(true)
+      .description('Windows：用原生 Job Object（KILL_ON_JOB_CLOSE）包住整个分身进程树；缺 helper 时 fail-closed，不退化为裸 spawn'),
+    jobHeartbeatTimeoutMs: z.natural().min(1000).default(JOB_HEARTBEAT_TIMEOUT_MS)
+      .description('Job helper 判定宿主心跳失效的阈值（毫秒）；宿主冻结时据此 TerminateJobObject'),
+    jobHeartbeatGraceMs: z.natural().default(JOB_HEARTBEAT_GRACE_MS)
+      .description('Job helper 对心跳缺失/过期额外宽限（毫秒）'),
     // v3.1.12：新机器/新用户的干净分身默认不带第三方插件；这里按“安装不激活 /
     // 安装并激活”两组清单给每个新分身装默认插件（开关可关；失败不阻塞分身启动）。
     forkSeed: z
@@ -620,6 +630,7 @@ export function apply(ctx, config) {
     exitedAt: rec.exitedAt ?? null,
     exit: rec.exit ?? null,
     lastError: rec.lastError ?? null,
+    jobObject: jobObjectSummary(rec.jobObject),
   })
 
   /** Load the persisted registry lazily, so `apply()` performs no I/O. */
@@ -1075,7 +1086,7 @@ export function apply(ctx, config) {
    * @returns {Promise<{ok:boolean, forkId?:string, pid?:number|null, port?:number, url?:string,
    *   token?:string, error?:string, expectedPort?:number}>}
    */
-  const writeForkMetaOf = (rec) => {
+  const writeForkMetaOf = (rec, overrides = {}) => {
     if (!rec?.homeDir) return false
     return writeForkMeta(rec.homeDir, {
       forkId: rec.forkId, status: rec.status, pid: rec.pid ?? null, port: rec.port ?? null,
@@ -1083,6 +1094,8 @@ export function apply(ctx, config) {
       crashCount: rec.crashCount ?? 0, restartCount: rec.restartCount ?? 0,
       lastError: rec.lastError ?? null, startedAt: rec.startedAt ?? null,
       exitedAt: rec.exitedAt ?? null, restartScheduledAt: rec.restartScheduledAt ?? null,
+      jobObject: jobObjectSummary(rec.jobObject),
+      ...overrides,
     })
   }
 
@@ -1207,6 +1220,7 @@ function applyForkExperimentalSurface(profileDir) {
        * 旧 token 自然失效，孤儿分身不会被接管（PROTOCOL-V3 §3）。
        */
       adapterToken: randomBytes(24).toString('hex'),
+      jobObject: null,
       log: collector,
       catalogCompat: spawnCatalogCompat,
     })
@@ -1327,6 +1341,7 @@ function applyForkExperimentalSurface(profileDir) {
     return new Promise((resolve) => {
       let done = false
       let timer = null
+      let jobReadyTimer = null
       let cleanup = null
 
       const releaseReserved = () => {
@@ -1341,6 +1356,28 @@ function applyForkExperimentalSurface(profileDir) {
           clearTimeout(timer)
           timer = null
         }
+        if (jobReadyTimer) {
+          clearInterval(jobReadyTimer)
+          jobReadyTimer = null
+        }
+        if (cleanup) pendingSpawns.delete(cleanup)
+        resolve({ forkId, ...result })
+        return true
+      }
+      // A previous child can exit after a stop+respawn; its late exit must not clear
+      // the new child handle or mark the new spawn stopped. Resolve the old promise
+      // only, without touching the current record.
+      const finishStale = (result) => {
+        if (done) return false
+        done = true
+        if (timer) {
+          clearTimeout(timer)
+          timer = null
+        }
+        if (jobReadyTimer) {
+          clearInterval(jobReadyTimer)
+          jobReadyTimer = null
+        }
         if (cleanup) pendingSpawns.delete(cleanup)
         resolve({ forkId, ...result })
         return true
@@ -1350,6 +1387,7 @@ function applyForkExperimentalSurface(profileDir) {
         if (done) return
         rec.intentionalStop = true
         killTree(rec)
+        if (jobReadyTimer) { clearInterval(jobReadyTimer); jobReadyTimer = null }
         rec.running = false
         rec.child = null
         rec.starting = false
@@ -1367,6 +1405,47 @@ function applyForkExperimentalSurface(profileDir) {
       const headlessOverlay = coreMode === 'accelerated' ? null : writeHeadlessPickerOverlay(rec.profileDir, { cliPath })
       if (headlessOverlay) patchPaths.push(headlessOverlay)
       const spec = buildLaunchSpec({ cliPath, profile, port: expectedPort, patchPaths })
+      // P0: Windows Job Object. Never fall back to a bare spawn on win32 when
+      // the helper is enabled but unavailable: that would silently drop the
+      // kernel-level kill guarantee. The helper owns the job handle and assigns
+      // the fork host before it is resumed, so descendants cannot escape.
+      let launchCommand = spec.command
+      let launchArgs = spec.args
+      let launchShell = spec.shell
+      let jobObject = null
+      if (process.platform === 'win32') {
+        const enabled = cfg.jobObject !== false && String(process.env.DSH_FANG_JOB_OBJECT ?? '1') !== '0'
+        if (enabled) {
+          const helper = resolveJobHostPath({ packageRoot: FANG_ROOT })
+          if (!helper) {
+            rec.status = FORK_STATUS.CRASHED
+            rec.lastError = 'job-object-unavailable'
+            rec.jobObject = { enabled: true, ready: false, mode: 'kill-on-close', error: 'job-object-helper-missing' }
+            releaseReserved()
+            persist()
+            return finish({ ok: false, error: 'job-object-unavailable', detail: { arch: process.arch, packageRoot: FANG_ROOT } })
+          }
+          const jobPaths = jobObjectPaths(homeDir)
+          try { ensureDir(path.dirname(jobPaths.readyFile)); fs.rmSync(jobPaths.readyFile, { force: true }) } catch { /* best effort */ }
+          const heartbeatFile = layout?.dataDir ? path.join(layout.dataDir, `watchdog-${process.pid}.heartbeat`) : ''
+          jobObject = {
+            enabled: true, ready: false, mode: 'kill-on-close',
+            helperPath: helper, readyFile: jobPaths.readyFile, logFile: jobPaths.logFile,
+            heartbeatFile, helperPid: null, childPid: null, error: null,
+          }
+          launchCommand = helper
+          launchArgs = buildJobHostArgs({
+            spec, forkId, homeDir, heartbeatFile, hostPid: process.pid,
+            timeoutMs: cfg.jobHeartbeatTimeoutMs, graceMs: cfg.jobHeartbeatGraceMs,
+          })
+          launchShell = false
+        } else {
+          jobObject = { enabled: false, ready: false, mode: 'disabled', error: 'job-object-disabled' }
+        }
+      } else {
+        jobObject = { enabled: false, ready: false, mode: 'unsupported-platform', error: null }
+      }
+      rec.jobObject = jobObject
       const env = buildForkChildEnv(process.env, {
         DSH_HOME: homeDir,
         // Fork identity is injected by the forker (a fork must never be able to call itself mother).
@@ -1383,11 +1462,11 @@ function applyForkExperimentalSurface(profileDir) {
       if (spec.nodeScript && env.ELECTRON_RUN_AS_NODE !== '1') env.ELECTRON_RUN_AS_NODE = '1'
       let child = null
       try {
-        child = spawnProcess(spec.command, spec.args, {
+        child = spawnProcess(launchCommand, launchArgs, {
           env,
           ...(exists(homeDir) ? { cwd: homeDir } : {}),
           windowsHide: spec.windowsHide,
-          shell: spec.shell,
+          shell: launchShell,
           stdio: ['ignore', 'pipe', 'pipe'],
         })
       } catch (e) {
@@ -1396,11 +1475,35 @@ function applyForkExperimentalSurface(profileDir) {
         rec.exit = { kind: 'crash', code: null, message: msgOf(e) }
         releaseReserved()
         persist()
-        return finish({ ok: false, error: 'spawn-error', message: msgOf(e), spec })
+        return finish({ ok: false, error: 'spawn-error', message: msgOf(e), spec, jobObject })
       }
 
       rec.child = child
+      rec.wrapperPid = child.pid ?? null
       rec.pid = child.pid ?? null
+      if (jobObject?.enabled) {
+        jobObject.helperPid = child.pid ?? null
+        const refreshJobReady = () => {
+          const ready = readJobReady(jobObject.readyFile)
+          if (!ready.ready) return
+          if (ready.error) {
+            jobObject.error = ready.error
+            rec.lastError = `job-object:${ready.error}`
+          } else if (ready.childPid) {
+            jobObject.ready = true
+            jobObject.childPid = ready.childPid
+            jobObject.jobName = ready.jobName
+            // PID shown in the UI / watchdog is the real fork host, not the wrapper.
+            rec.pid = ready.childPid
+            if (expectedPort > 0) bindPortToPid(expectedPort, forkId, ready.childPid)
+          }
+          if (jobReadyTimer) { clearInterval(jobReadyTimer); jobReadyTimer = null }
+          persist()
+        }
+        jobReadyTimer = setInterval(refreshJobReady, 100)
+        jobReadyTimer.unref?.()
+        refreshJobReady()
+      }
       if (expectedPort > 0 && rec.pid) bindPortToPid(expectedPort, forkId, rec.pid)
       // Note: on a failed launch (ENOENT/EINVAL) `child.pid` is undefined and the
       // `error` event arrives on the next tick — never resolve early here, or that
@@ -1460,6 +1563,10 @@ function applyForkExperimentalSurface(profileDir) {
       }
 
       child.once('error', (e) => {
+        if (rec.child && rec.child !== child) {
+          finishStale({ ok: false, error: 'spawn-error', message: msgOf(e), log: collector.tail(20) })
+          return
+        }
         rec.running = false
         rec.child = null
         rec.starting = false
@@ -1472,7 +1579,24 @@ function applyForkExperimentalSurface(profileDir) {
       })
 
       child.once('exit', (code, signal) => {
+        // A helper can start successfully and still fail to launch the real host
+        // (missing .exe, job assignment failure). Its exit code is then 1/other,
+        // not ENOENT, so surface the helper's own ready error as spawn-error
+        // instead of mislabelling the launch as an ordinary child exit.
+        if (jobObject?.enabled && !jobObject.ready) {
+          const ready = readJobReady(jobObject.readyFile)
+          if (ready.error) {
+            jobObject.error = ready.error
+            rec.lastError = `job-object:${ready.error}`
+          }
+        }
+        const helperLaunchFailed = jobObject?.enabled && !jobObject.ready
+          && ['create-job-failed', 'job-limit-failed', 'create-process-failed', 'job-assign-failed', 'resume-failed'].includes(String(jobObject.error ?? ''))
         const exitInfo = classifyExit(code, signal)
+        if (rec.child && rec.child !== child) {
+          finishStale({ ok: false, error: 'exited', code: exitInfo.code, signal, kind: exitInfo.kind, log: collector.tail(20) })
+          return
+        }
         rec.exit = exitInfo
         rec.exitedAt = nowMs()
         rec.running = false
@@ -1489,7 +1613,8 @@ function applyForkExperimentalSurface(profileDir) {
         if (!rec.intentionalStop) rec.crashCount = (rec.crashCount ?? 0) + 1
         // A reap may already have deleted the record + home; never resurrect it from the exit handler.
         if (records.get(forkId) === rec) {
-          writeForkMetaOf(rec)
+          // Dead child: never leave a stale running pid/port/url in fang-meta.
+          writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null })
           persist()
         }
         if (!rec.intentionalStop && runtimeSupervise && !disposed) {
@@ -1513,7 +1638,9 @@ function applyForkExperimentalSurface(profileDir) {
             emit(EVENTS.restartFailed, { forkId, error: rec.lastError, terminal: true })
           }
         }
-        finish({ ok: false, error: 'exited', code: exitInfo.code, signal, kind: exitInfo.kind, log: collector.tail(20) })
+        finish(helperLaunchFailed
+          ? { ok: false, error: 'spawn-error', code: exitInfo.code, signal, kind: exitInfo.kind, jobObject, log: collector.tail(20) }
+          : { ok: false, error: 'exited', code: exitInfo.code, signal, kind: exitInfo.kind, log: collector.tail(20) })
       })
 
       timer = setTimeout(() => {
@@ -1565,6 +1692,11 @@ function applyForkExperimentalSurface(profileDir) {
     const rec = records.get(id)
     if (!rec) return { ok: false, error: 'not-found', forkId: id }
     const res = stopRecord(rec)
+    // A stopped fork must not leave a running/pid/port row behind for the next
+    // open-fork click (the 3.8.0 `task=failed, fang-meta=running, 18000=mother`
+    // three-way conflict). Keep the registry's historical port for diagnostics,
+    // but clear the process identity in fang-meta.
+    writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null })
     persist()
     return res
   }
@@ -1578,7 +1710,7 @@ function applyForkExperimentalSurface(profileDir) {
     if (!rec) return { ok: false, error: 'not-found', forkId: id }
     stop(id)
     rec.status = FORK_STATUS.REAPED
-    writeForkMetaOf(rec)
+    writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null })
     const homeDir = rec.homeDir ? path.resolve(rec.homeDir) : ''
     let removed = false
     if (homeDir && isSafeToRemove(homeDir)) removed = exists(homeDir) ? removeTree(homeDir) : false
@@ -1632,6 +1764,10 @@ function applyForkExperimentalSurface(profileDir) {
     ensureRegistry()
     const rec = records.get(String(forkId ?? '').trim())
     if (!rec || !rec.running || !rec.url) return { ok: false, error: 'not-running' }
+    // Never hand a dead pid's URL to the UI. After a host restart or crash the
+    // record can still say running while the child is gone; that URL may now
+    // belong to the essence runtime (the 18000 conflict in EB-23).
+    if (!isPidAlive(rec.pid ?? rec.child?.pid ?? null)) return { ok: false, error: 'stale-process' }
     return { ok: true, forkId: rec.forkId, url: rec.url, port: rec.port ?? null }
   }
 
@@ -1692,7 +1828,7 @@ function applyForkExperimentalSurface(profileDir) {
       rec.status = FORK_STATUS.CRASHED
       rec.lastError = `orphaned:${action.reason}`
       if (rec.port) releaseOwnedPort(rec.port, rec.forkId)
-      writeForkMetaOf(rec)
+      writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null })
     }
     persist()
     return { ok: true, actions, forks: actions.filter((a) => a.action === 'mark-crashed').length }
@@ -1729,6 +1865,12 @@ function applyForkExperimentalSurface(profileDir) {
     },
     allocatePort,
     releasePort,
+    /** Loopback bind probe used by the orchestrator's open-fork preflight. */
+    portFree: async (port) => {
+      const n = Math.floor(Number(port))
+      if (!Number.isInteger(n) || n < 1 || n > 65535) return false
+      return probePortFree(n)
+    },
     ensureTemplate,
     portPool: () => ({ ...portPool }),
     ports: () => {
@@ -1806,6 +1948,7 @@ function applyForkExperimentalSurface(profileDir) {
       if (rec.running || rec.child || rec.starting) {
         rec.intentionalStop = true
         killTree(rec)
+        if (jobReadyTimer) { clearInterval(jobReadyTimer); jobReadyTimer = null }
         rec.running = false
         rec.child = null
         rec.starting = false

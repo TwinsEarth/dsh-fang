@@ -327,6 +327,11 @@ export function createRemote({
       return request('GET', ADAPTER_ROUTE.STATUS)
     },
 
+    /** 最近活动时间 + 运行中 turn：GET /fang/adapter/activity */
+    activity() {
+      return request('GET', ADAPTER_ROUTE.ACTIVITY)
+    },
+
     /** 分身本地待审批项：GET /fang/adapter/approvals */
     approvals() {
       return request('GET', ADAPTER_ROUTE.APPROVALS)

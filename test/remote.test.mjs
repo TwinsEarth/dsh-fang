@@ -93,6 +93,7 @@ test('hello(): GET /fang/adapter/hello with token; ok envelope', async () => {
 test('status/approvals/audit: paths, methods and limit query', async () => {
   const responses = {
     '/fang/adapter/status': { ok: true, taskId: 't', role: 'fork', audit: { records: 3 } },
+    '/fang/adapter/activity': { ok: true, taskId: 't', activity: { turnRunning: false, lastActivityAt: 123 } },
     '/fang/adapter/approvals': { ok: true, items: [{ id: 'a1' }] },
     '/fang/adapter/audit': { ok: true, records: [{ kind: 'boot' }] },
   }
@@ -105,19 +106,24 @@ test('status/approvals/audit: paths, methods and limit query', async () => {
   assert.equal(parsed(fetchImpl.calls[0].url).pathname, '/fang/adapter/status')
   assert.equal(fetchImpl.calls[0].init.method, 'GET')
 
+  const activity = await remote.activity()
+  assert.equal(activity.ok, true)
+  assert.equal(activity.data.activity.turnRunning, false)
+  assert.equal(parsed(fetchImpl.calls[1].url).pathname, '/fang/adapter/activity')
+
   const approvals = await remote.approvals()
   assert.equal(approvals.ok, true)
   assert.equal(approvals.data.items.length, 1)
 
   const audit = await remote.audit({ limit: 7 })
   assert.equal(audit.ok, true)
-  const auditUrl = parsed(fetchImpl.calls[2].url)
+  const auditUrl = parsed(fetchImpl.calls[3].url)
   assert.equal(auditUrl.pathname, '/fang/adapter/audit')
   assert.equal(auditUrl.searchParams.get('limit'), '7')
   assert.equal(auditUrl.searchParams.get('token'), null, 'v3.0.5/B4：query 请求也不带 token')
 
   await remote.audit()
-  assert.equal(parsed(fetchImpl.calls[3].url).searchParams.get('limit'), '100', 'audit default limit is 100')
+  assert.equal(parsed(fetchImpl.calls[4].url).searchParams.get('limit'), '100', 'audit default limit is 100')
 })
 
 test('command()/ping(): POST JSON {op,payload}', async () => {

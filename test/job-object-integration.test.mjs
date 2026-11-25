@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+import * as forker from '../src/plugins/forker.mjs'
+import { resolveJobHostPath } from '../src/lib/job-object.mjs'
+import { removeTree } from '../src/kernel/index.mjs'
+import { makeCtx } from './helpers.mjs'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const FIXTURE = path.join(HERE, 'fixtures', 't1', 'mother-profile')
+const PACKAGE_ROOT = path.resolve(HERE, '..')
+
+const alive = (pid) => {
+  const value = Number(pid)
+  if (!Number.isInteger(value) || value <= 0) return false
+  try { process.kill(value, 0); return true } catch { return false }
+}
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('real forker+helper: killing the helper (host freeze) kills fork child and grandchild', {
+  skip: process.platform !== 'win32' || !resolveJobHostPath({ packageRoot: PACKAGE_ROOT }),
+}, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-job-integration-'))
+  const template = path.join(root, 'mother-profile')
+  fs.mkdirSync(path.join(template, 'node_modules'), { recursive: true })
+  for (const name of ['package.json', 'cordis.patch.yml', 'README.md']) {
+    fs.copyFileSync(path.join(FIXTURE, name), path.join(template, name))
+  }
+  fs.writeFileSync(path.join(template, 'node_modules', 'mother-dep.txt'), 'mother-only\n')
+  const homeDir = path.join(root, 'fork-home')
+  const dataRoot = path.join(root, 'data')
+  const marker = path.join(root, 'grandchild.json')
+  const cli = path.join(root, 'fake-cli.mjs')
+  fs.writeFileSync(cli, `
+import fs from 'node:fs'
+import { spawn } from 'node:child_process'
+const args = process.argv.slice(2)
+const i = args.indexOf('--port')
+const port = i >= 0 ? Number(args[i + 1]) : 0
+const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true })
+fs.writeFileSync(process.env.GRANDCHILD_FILE, JSON.stringify({ pid: grandchild.pid, parent: process.pid, args, port }))
+console.log('dsh web: http://127.0.0.1:' + port + '/?token=job-kill-test')
+setInterval(() => {}, 1000)
+`)
+  const ctx = makeCtx()
+  const service = forker.apply(ctx, { forkSeed: { enabled: false }, maxForks: 1, dataRoot, allocatePorts: true })
+  try {
+    service.provision({ forkId: 'f-job-kill', homeDir, profile: 'web', profileTemplate: template })
+    const spawn = await service.spawn({
+      forkId: 'f-job-kill', homeDir, profile: 'web', cliPath: cli,
+      env: { GRANDCHILD_FILE: marker }, timeoutMs: 20000,
+    })
+    assert.equal(spawn.ok, true, JSON.stringify(spawn))
+    await wait(300)
+    const row = JSON.parse(fs.readFileSync(marker, 'utf8'))
+    const status = service.status('f-job-kill')
+    assert.equal(status.jobObject?.ready, true)
+    assert.equal(Number(status.jobObject.childPid), Number(spawn.pid))
+    assert.ok(alive(row.pid), 'grandchild should be alive before the helper is killed')
+
+    // Simulate a frozen/dying host: kill only the helper. No taskkill /T, no
+    // stopRecord; KILL_ON_JOB_CLOSE must reap the child and its grandchild.
+    process.kill(Number(status.jobObject.helperPid))
+    await wait(2000)
+    assert.equal(alive(Number(spawn.pid)), false, 'fork child must die with the helper')
+    assert.equal(alive(Number(row.pid)), false, 'grandchild must die with the helper')
+  } finally {
+    try { ctx.dispose() } catch { /* ignore */ }
+    try { removeTree(root) } catch { /* ignore */ }
+  }
+})

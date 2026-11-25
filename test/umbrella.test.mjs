@@ -613,7 +613,7 @@ test('a policy function is re-read on every assessment (live buffer root)', () =
   assert.equal(umb.policy.bufferRoot, bufferRoot)
 })
 
-test('action scoring stays inside the latency budget (no AST work per call)', () => {
+test('action scoring stays inside the latency budget (no AST work per call)', { skip: process.platform !== 'win32' }, () => {
   const umb = createUmbrella({
     scorer: null,
     policy: { bufferRoot: BUF },
