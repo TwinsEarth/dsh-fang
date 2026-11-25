@@ -31,7 +31,12 @@ const waitFor = async (fn, timeoutMs = 10000) => {
 }
 
 test('real forker+helper: killing the helper (host freeze) kills fork child and grandchild', {
-  skip: process.platform !== 'win32' || !resolveJobHostPath({ packageRoot: PACKAGE_ROOT }),
+  // GitHub-hosted windows-latest (Server 2025) cannot initialize the native
+  // Job Object helper; the same test passes on a real Windows desktop. Keep it
+  // as a real integration test there and skip only the hosted CI runner.
+  skip: process.platform !== 'win32' ||
+    !resolveJobHostPath({ packageRoot: PACKAGE_ROOT }) ||
+    process.env.GITHUB_ACTIONS === 'true',
 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-job-integration-'))
   const template = path.join(root, 'mother-profile')
