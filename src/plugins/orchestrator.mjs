@@ -55,6 +55,7 @@ import { enforceCoreUiEntries } from '../lib/core-ui-plugins.mjs'
 import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
 import { decideIdleClose } from '../lib/fork-activity.mjs'
 import { classifyCloseReason } from '../lib/browser-close-reason.mjs'
+import { effectiveBrowserAutoCloseLimits, evaluateBrowserAutoClose } from '../lib/browser-auto-close.mjs'
 import { resolveFlushEndpoint, flushResultFromResponse, flushRequestHeaders, unsavedCloseWarning } from '../lib/fork-flush.mjs'
 import { DEFAULT_ESSENCE_NAME, planDefaultEssence } from '../lib/default-essence.mjs'
 import { MirrorUpgradeCoordinator } from '../lib/upgrade-coordinator.mjs'
@@ -341,14 +342,16 @@ export const Config = z.object({
     .description('启动新分身时暂停其他运行中的分身，避免同时打开多个 Electron renderer'),
   managedBrowser: z.boolean().default(true)
     .description('由 Fang 启动独立 Chromium 窗口并纳入 PID/CDP 监控'),
+  autoClose: z.boolean().default(true)
+    .description('内存/空闲触发时自动关闭托管浏览器，默认 true，不再二次确认；只清进程，home 与会话文件保留'),
   browserPath: z.string().default('')
     .description('托管浏览器 exe；留空自动找 Edge/Chrome'),
   maxOpenForkBrowsers: z.number().min(1).max(16).default(1)
     .description('同时存活的托管浏览器窗口上限'),
   browserMemoryLimitMB: z.number().min(256).max(1048576).default(2048)
-    .description('固定兜底：单个托管浏览器 PID 树 Commit 上限（MB）；自适应开启时按宿主内存计算'),
+    .description('托管浏览器 PID 树 Commit 硬上限（MB）；默认 2048，自适应阈值只能更严不能放宽'),
   browserHeapLimitMB: z.number().min(128).max(1048576).default(1536)
-    .description('固定兜底：托管浏览器 JS heap 上限（MB）；自适应开启时按宿主内存计算'),
+    .description('托管浏览器 JS heap 硬上限（MB）；默认 1536，自适应阈值只能更严不能放宽'),
   browserJobObject: z.boolean().default(true)
     .description('Windows 下用 Job Object 托管浏览器进程树，宿主被杀/冻结时内核回收'),
   browserJobProcessMemoryMB: z.number().min(256).max(1048576).default(2048)
@@ -374,9 +377,9 @@ export const Config = z.object({
   forkCommitSevereShare: z.number().min(0.05).max(1).default(0.35)
     .description('聚合 Commit 严重阈值'),
   browserDomNodeLimit: z.number().min(1000).max(10000000).default(200000)
-    .description('托管浏览器 DOM 节点上限，超过即关闭'),
+    .description('托管浏览器 DOM 节点硬上限，默认 200000，达到即关闭'),
   autoCloseIdleMinutes: z.number().min(0).max(1440).default(10)
-    .description('浏览器页面隐藏超过该分钟数自动关闭（0=不关）'),
+    .description('页面隐藏且无运行任务超过该分钟数自动关闭浏览器（0=不关；home 保留）'),
   quarantineOnGuard: z.boolean().default(true)
     .description('内存护栏触发后隔离任务，禁止自动重连'),
   safeModeAfterCrash: z.boolean().default(true)
@@ -2060,6 +2063,9 @@ export function apply(ctx, config) {
           browser.cdpError = String(sample?.error ?? 'browser-cdp-sample-failed')
         }
       }
+      const hostCommitFreeMB = memorySnapshot?.ok === true && Number(memorySnapshot.commitFreeMB) > 0
+        ? Number(memorySnapshot.commitFreeMB)
+        : null
       browser.last = {
         at: now,
         ...tree,
@@ -2069,6 +2075,7 @@ export function apply(ctx, config) {
         documents,
         listeners,
         layoutCount,
+        hostCommitFreeMB,
         cdpAt: cdpAt || null,
         cdpAgeMs: cdpAt ? now - cdpAt : null,
         cdpSampled: cdpDue && cdpOk,
@@ -2096,13 +2103,42 @@ export function apply(ctx, config) {
         }
       }
       const limits = memoryPolicySnapshot()
-      const overMemory = Number(tree.commitMB) >= Number(limits.browserMemoryLimitMB)
-      const overHeap = cdpOk && heapMB >= Number(limits.browserHeapLimitMB)
-      const overDom = cdpOk && nodes >= Number(cfg.browserDomNodeLimit)
-      if (overMemory || overHeap || overDom) {
-        const reason = overMemory ? 'browser-memory-limit' : overHeap ? 'browser-heap-limit' : 'browser-dom-limit'
-        audit('fork-browser-memory-guard', { taskId: task.taskId, commitMB: tree.commitMB, nodes, heapMB, overMemory, overHeap, overDom, memoryLimitMB: limits.browserMemoryLimitMB, heapLimitMB: limits.browserHeapLimitMB, source: limits.source })
-        await quarantineTask(task, reason)
+      // v3.8.9: hard 2 GB commit / 1.5 GB heap / 200k DOM / 4 GB host-free
+      // ceilings. Host-free closes the browser only; own browser overrun also
+      // stops the fork and revokes the port/token.
+      const autoCloseDecision = evaluateBrowserAutoClose({
+        autoClose: cfg.autoClose === true,
+        commitMB: tree.commitMB,
+        heapMB,
+        nodeCount: nodes,
+        cdpOk,
+        hostCommitFreeMB,
+        config: cfg,
+        policy: limits,
+      })
+      browser.last.autoClose = autoCloseDecision
+      if (autoCloseDecision.close) {
+        audit('fork-browser-auto-close', {
+          taskId: task.taskId,
+          reason: autoCloseDecision.reason,
+          scope: autoCloseDecision.scope,
+          trigger: autoCloseDecision.trigger,
+          commitMB: tree.commitMB,
+          nodes,
+          heapMB,
+          hostCommitFreeMB,
+          memoryLimitMB: autoCloseDecision.limits.treeCommitMB,
+          heapLimitMB: autoCloseDecision.limits.jsHeapMB,
+          domNodeLimit: autoCloseDecision.limits.domNodes,
+          hostFreeLimitMB: autoCloseDecision.limits.hostCommitFreeMB,
+          limits: autoCloseDecision.limits,
+        })
+        // Browser first, then fork; quarantineTask clears port/token and keeps home.
+        if (autoCloseDecision.scope === 'task' && cfg.quarantineOnGuard !== false) {
+          await quarantineTask(task, autoCloseDecision.reason)
+        } else {
+          await closeTaskBrowser(task, autoCloseDecision.reason)
+        }
         continue
       }
       // Experimental pause: freeze a hidden renderer at the CDP lifecycle layer.
@@ -2127,7 +2163,7 @@ export function apply(ctx, config) {
           }
         }
       }
-      if (cfg.autoCloseIdleMinutes > 0) {
+      if (cfg.autoClose === true && cfg.autoCloseIdleMinutes > 0) {
         if (cdpOk && visibility === 'hidden') {
           if (!browser.hiddenSince) browser.hiddenSince = now
           const idleMs = now - Number(browser.hiddenSince)
@@ -4732,6 +4768,12 @@ export function apply(ctx, config) {
           warnMB: Number(cfg.hostWarnFreeMB),
           severeMB: Number(cfg.hostCriticalFreeMB),
           emergencyMB: Number(cfg.hostEmergencyFreeMB),
+        },
+        browserAutoClose: {
+          enabled: cfg.autoClose === true,
+          requiresConfirm: false,
+          preservesHome: true,
+          ...effectiveBrowserAutoCloseLimits(cfg, memoryPolicySnapshot()),
         },
         pagefilePolicy: {
           missing: memorySnapshot?.pagefileMissing === true,
