@@ -41,10 +41,12 @@ test('v3.8.13: evaluateForkCommitBudget flags aggregate overage and remaining re
   assert.equal(over.remainingMB, 0)
 })
 
-test('v3.8.13: Config rejects maxForks>1 and defaults to the hard single fork', () => {
+test('v3.8.13: Config accepts legacy maxForks>1 but defaults to 1; apply clamps', () => {
   assert.equal(orchestrator.Config({}).maxForks, 1)
   assert.equal(orchestrator.Config({ maxForks: 1 }).maxForks, 1)
-  assert.throws(() => orchestrator.Config({ maxForks: 2 }), /maxForks/i)
+  // Legacy profile patches may still say 8; rejecting them makes the whole
+  // plugin invalid. Accept at the schema boundary, then clamp in apply().
+  assert.equal(orchestrator.Config({ maxForks: 8 }).maxForks, 8)
 })
 
 test('v3.8.13: production apply ignores maxForks/allowMultiFork and reports limit 1', async () => {

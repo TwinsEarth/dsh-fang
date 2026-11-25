@@ -1,3 +1,9 @@
+## 未发布（包元信息热修，2026-11-26）
+- `cordis.patch.yml` 自带的 `maxForks: 8` 改为 `1`；`Config.maxForks` 接受旧配置的 1–64，但 `apply()` 仍硬限 1、禁用 `allowMultiFork`。
+- 打包层过滤 `locale/._*`、`.DS_Store`；package-smoke 增加 locale language-id / AppleDouble 与 `maxForks: 8` 门禁。
+- 新增 `postinstall` 清理 locale 的 macOS 伴随文件；`tools/release/clean-locale-sidecars.mjs` 随包发布。
+- 已发布 `3.9.0` 仍含 `maxForks: 8` 问题；要修复安装需新版本（建议 3.9.1）。详见 `docs/AUDIT-v3.9.0-PKG.md`。
+
 ## 未发布（C1-C6，2026-11-26）
 - C1：`lastHostMetrics` 落盘间隔 15s → 5s，与 5s host tick 对齐；硬杀后 `host-state.json` 最多滞后一个 tick。
 - C2：`host-crashes.json` 崩溃循环窗口改为配置 `hostCrashWindowMinutes`（默认 10，1–1440 分钟）；safe-mode 原因、状态与 UI 文案同源。

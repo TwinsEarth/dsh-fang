@@ -67,7 +67,10 @@ const stagedPkg = {
   bin: { fangctl: './tools/fangctl.mjs' },
   dsh: stagedDsh,
   files: undefined,
-  scripts: { test: pkg.scripts?.test ?? 'node --test --test-concurrency=1 "test/*.test.mjs"' },
+  scripts: {
+    test: pkg.scripts?.test ?? 'node --test --test-concurrency=1 "test/*.test.mjs"',
+    ...(pkg.scripts?.postinstall ? { postinstall: pkg.scripts.postinstall } : {}),
+  },
 }
 fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(stagedPkg, null, 2) + '\n', 'utf8')
 
@@ -86,6 +89,10 @@ const fileEntries = entries.filter((e) => !e.endsWith('/') && e.endsWith('/') ==
 if (!entries.includes('package/package.json')) { console.error('FAIL tarball missing package/package.json'); process.exit(1) }
 if (entries.some((e) => e.startsWith('package/dist/') || e.startsWith('package/node_modules/'))) {
   console.error('FAIL tarball contains dist/ or node_modules/')
+  process.exit(1)
+}
+if (entries.some((e) => /(^|\/)\._|(^|\/)\.DS_Store$/.test(e))) {
+  console.error('FAIL tarball contains macOS AppleDouble / Finder sidecars')
   process.exit(1)
 }
 

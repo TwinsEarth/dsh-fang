@@ -58,6 +58,15 @@ try {
   const rowIds = [...patch.matchAll(/^\s*-\s*id:\s*['"]?([A-Za-z0-9_-]+)/gm)].map((m) => m[1])
   check('cordis rows = 19', rowIds.length === 19, `rows=${rowIds.length}`)
   check('no invalid ui-fang loader row', !rowIds.includes('ui-fang'))
+  check('cordis patch does not inject maxForks: 8', !/^\s*maxForks:\s*8\s*$/m.test(patch))
+
+  // DSH plugin metadata scans every *.json in <pkg>/locale and requires the
+  // basename to be a language id. AppleDouble sidecars must never ship.
+  const localeDir = path.join(pkgDir, 'locale')
+  const localeFiles = fs.existsSync(localeDir) ? fs.readdirSync(localeDir).filter((name) => name.endsWith('.json')) : []
+  const invalidLocale = localeFiles.filter((name) => !/^[a-z]{2,3}(-[a-z0-9]+)*$/i.test(name.slice(0, -5)))
+  check('locale filenames are language ids', invalidLocale.length === 0, invalidLocale.join(', '))
+  check('locale contains no AppleDouble sidecars', !localeFiles.some((name) => name.startsWith('._') || name === '.DS_Store'))
 
   const pluginsDir = path.join(pkgDir, 'src', 'plugins')
   const pluginFiles = fs.readdirSync(pluginsDir).filter((f) => f.endsWith('.mjs') && f !== 'imports.mjs')

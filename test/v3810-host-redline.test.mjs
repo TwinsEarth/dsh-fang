@@ -74,10 +74,11 @@ test('v3.8.10 measure 4: fork and browser are both wrapped by a Windows Job', ()
   assert.deepEqual(peMachine('native/win32/fang-job-host-arm64.exe'), { machine: 0xaa64, size: 54784 })
 })
 
-test('v3.8.13 measure 5: maxForks is hard-limited to 1 and multi-fork is not configurable', () => {
-  assert.match(orchestrator, /maxForks: z\.number\(\)[\s\S]{0,160}max\(HARD_MAX_FORKS\)[\s\S]{0,80}default\(HARD_MAX_FORKS\)/)
+test('v3.8.13 measure 5: maxForks is hard-limited to 1 at runtime', () => {
+  assert.match(orchestrator, /maxForks: z\.number\(\)\.min\(1\)\.max\(64\)\.default\(HARD_MAX_FORKS\)/)
+  assert.match(orchestrator, /兼容旧配置的容量字段/)
   assert.match(orchestrator, /const effectiveMaxForks = \(\) => \{?[\s\S]{0,80}HARD_MAX_FORKS/)
-  assert.match(orchestrator, /maxForks>1 一律拒绝/)
+  assert.match(orchestrator, /maxForks>1 只记录 requested/)
   assert.match(forker, /maxForks: 1/)
   assert.match(forker, /allowMultiFork: false/)
 })

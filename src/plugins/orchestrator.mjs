@@ -306,10 +306,12 @@ export const Config = z.object({
     .description('官方源 manifest 基础 URL（https；留空 = 无官方源，升级显式 official-source-unavailable）'),
   officialSourceToken: z.string().default('')
     .description('官方源 Bearer token（可选；不会写进日志/状态）'),
-  maxForks: z.number().min(1).max(HARD_MAX_FORKS).default(HARD_MAX_FORKS)
-    .description('同时存活的任务/分身上限；v3.8.13 硬固定为 1（second create 返回 quota-exceeded）'),
+  // Accept legacy maxForks>1 at the schema boundary so an old profile patch does
+  // not make the whole plugin invalid; apply() still clamps production to 1.
+  maxForks: z.number().min(1).max(64).default(HARD_MAX_FORKS)
+    .description('兼容旧配置的容量字段；生产路径仍硬限为 1（maxForks>1 只记录 requested，不放开并行）'),
   allowMultiFork: z.boolean().default(false)
-    .description('v3.8.13 起失效：仅保留兼容字段；maxForks>1 一律拒绝，不再提供二次确认旁路'),
+    .description('v3.8.13 起失效：仅保留兼容字段；即使旧配置 maxForks>1，apply() 也强制回落 1，不提供并行旁路'),
   memoryGuard: z.boolean().default(true)
     .description('创建/打开/还原分身前检查 CommitFree、Host JS heap 与 session 文件体量'),
   memoryMinFreeMB: z.number().min(0).max(1048576).default(3000)

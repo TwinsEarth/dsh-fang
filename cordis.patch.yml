@@ -16,7 +16,7 @@
         cliPath: ''
         profileTemplate: ''
         startTimeoutMs: 60000
-        maxForks: 8
+        maxForks: 1
         supervise: false
         maxRestarts: 3
         backoffBaseMs: 1000
@@ -138,7 +138,7 @@
       name: '@local/dsh-fang'
       config:
         role: mother
-        maxForks: 8
+        maxForks: 1
         autoReapIdleMinutes: 0
         routes:
           enabled: true

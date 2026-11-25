@@ -83,6 +83,7 @@
     "vault/cordis.patch.yml",
     "tools/migrate-fang-home.mjs",
     "tools/repair-core-ui-profile.mjs",
+    "tools/release/clean-locale-sidecars.mjs",
     "tools/release/host-boot-smoke.mjs"
   ],
   "dsh": {
@@ -123,7 +124,8 @@
     "test:lsp-live": "node tools/e2e.mjs --lsp",
     "test:lsp-bundle": "node tools/release/lsp-bundle-install.mjs",
     "verify:lsp-evidence": "node tools/release/lsp-evidence.mjs",
-    "check:lsp-mother": "node tools/release/lsp-mother-check.mjs"
+    "check:lsp-mother": "node tools/release/lsp-mother-check.mjs",
+    "postinstall": "node tools/release/clean-locale-sidecars.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {
