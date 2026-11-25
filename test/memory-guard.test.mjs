@@ -45,11 +45,16 @@ test('CIM CreationDate parses ISO, WMI /Date(ms)/ and numeric epoch', () => {
 })
 
 
-test('readProcessIdentity degrades cleanly on non-Windows', async () => {
+test('readProcessIdentity matches platform support (Windows row, non-Windows null)', async () => {
   const identity = await readProcessIdentity(process.pid)
   assert.equal(identity.ok, true)
-  assert.equal(identity.supported, false)
-  assert.equal(identity.row, null)
+  if (process.platform === 'win32') {
+    assert.equal(identity.supported, true)
+    assert.ok(identity.row, 'Windows should return an identity row')
+  } else {
+    assert.equal(identity.supported, false)
+    assert.equal(identity.row, null)
+  }
 })
 
 test('lite process table query omits identity-only fields', () => {

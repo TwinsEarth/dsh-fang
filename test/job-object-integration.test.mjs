@@ -21,6 +21,14 @@ const alive = (pid) => {
   try { process.kill(value, 0); return true } catch { return false }
 }
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const waitFor = async (fn, timeoutMs = 10000) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (fn()) return true
+    await wait(100)
+  }
+  return false
+}
 
 test('real forker+helper: killing the helper (host freeze) kills fork child and grandchild', {
   skip: process.platform !== 'win32' || !resolveJobHostPath({ packageRoot: PACKAGE_ROOT }),
@@ -56,7 +64,10 @@ setInterval(() => {}, 1000)
       env: { GRANDCHILD_FILE: marker }, timeoutMs: 20000,
     })
     assert.equal(spawn.ok, true, JSON.stringify(spawn))
-    await wait(300)
+    // The helper writes job-object.json asynchronously after the child prints its
+    // URL. A cold GitHub Windows runner can take well over 300 ms to get there.
+    const ready = await waitFor(() => service.status('f-job-kill').jobObject?.ready === true, 10000)
+    assert.equal(ready, true, 'job helper did not publish readiness within 10s')
     const row = JSON.parse(fs.readFileSync(marker, 'utf8'))
     const status = service.status('f-job-kill')
     assert.equal(status.jobObject?.ready, true)
