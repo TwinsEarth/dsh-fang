@@ -41,6 +41,7 @@ import { readLatestMigrationReport } from '../lib/migration-report.mjs'
 import { DEFAULT_LEGACY_WORKSPACE_ROOTS, mapWorkspacePathForFork, migrateForkWorkspace, prepareImportedSession } from '../lib/workspace-mapping.mjs'
 import { appendJsonlRotated } from '../lib/log-rotation.mjs'
 import { closeManagedBrowser, findBrowserPath, flushManagedBrowser, freePort, isPidAlive, launchManagedBrowser, lowerProcessPriority, sampleManagedBrowser, setManagedBrowserLifecycle } from '../lib/browser-guard.mjs'
+import { resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
 import { normalizeFetchDescriptor } from '../lib/node-compat.mjs'
 import { cleanupApprovalDrill, runApprovalDrill } from '../lib/approval-drill.mjs'
 import { negotiateProtocol } from '../lib/adapter-protocol.mjs'
@@ -66,6 +67,7 @@ import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCom
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { openDecisionEventStream } from '../lib/decision-events.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
+import { verifyPeerOwner } from '../lib/peer-owner.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 // P0: the former "accelerated Web sidecar" (a second mother Web) was retired — the
 // accelerator serves fork Web UIs only. See /fang/api/fork-core.
@@ -92,6 +94,11 @@ import {
   METHODS as CONTRACT_METHODS, CONTRACT_VERSION,
 } from '../contract/index.js'
 import zlib from 'node:zlib'
+
+// Package root is used only to resolve the bundled Windows Job helper.
+const FANG_ROOT = (() => {
+  try { return fileURLToPath(new URL('../../', import.meta.url)).replace(/[/\\]$/, '') } catch { return '' }
+})()
 
 // Legacy workspace mapping must cover the full known set of shared roots,
 // even when forbiddenDataRoots only names the DS-level paths. Otherwise a fork
@@ -282,8 +289,10 @@ export const Config = z.object({
     .description('官方源 manifest 基础 URL（https；留空 = 无官方源，升级显式 official-source-unavailable）'),
   officialSourceToken: z.string().default('')
     .description('官方源 Bearer token（可选；不会写进日志/状态）'),
-  maxForks: z.number().min(1).max(64).default(8)
-    .description('同时存活的任务/分身上限；运行并发由 singleActiveFork 硬限制为 1'),
+  maxForks: z.number().min(1).max(64).default(1)
+    .description('同时存活的任务/分身上限；默认 1'),
+  allowMultiFork: z.boolean().default(false)
+    .description('显式二次确认后才允许 maxForks>1；false 时强制 1'),
   memoryGuard: z.boolean().default(true)
     .description('创建/打开/还原分身前检查 Windows CommitFree 余量'),
   memoryMinFreeMB: z.number().min(0).max(1048576).default(6144)
@@ -340,6 +349,12 @@ export const Config = z.object({
     .description('固定兜底：单个托管浏览器 PID 树 Commit 上限（MB）；自适应开启时按宿主内存计算'),
   browserHeapLimitMB: z.number().min(128).max(1048576).default(1536)
     .description('固定兜底：托管浏览器 JS heap 上限（MB）；自适应开启时按宿主内存计算'),
+  browserJobObject: z.boolean().default(true)
+    .description('Windows 下用 Job Object 托管浏览器进程树，宿主被杀/冻结时内核回收'),
+  browserJobProcessMemoryMB: z.number().min(256).max(1048576).default(2048)
+    .description('浏览器 Job 单进程 Commit 上限（MB）'),
+  browserJobTotalMemoryMB: z.number().min(256).max(1048576).default(2048)
+    .description('浏览器 Job 总 Commit 上限（MB）'),
   gracefulBrowserCloseMs: z.number().min(0).max(30000).default(3000)
     .description('CDP Browser.close 后等待优雅退出的时间；超时才 taskkill'),
   idleCloseOnlyWhenIdle: z.boolean().default(true)
@@ -353,7 +368,11 @@ export const Config = z.object({
   forkFlushPath: z.string().default('')
     .description('关闭浏览器前调用的 fork 会话落盘路径；留空=按 routes.prefix 推导 /<prefix>/adapter/flush-session；调用前仍会实测该路径'),
   forkCommitShareLimit: z.number().min(0.05).max(1).default(0.4)
-    .description('fork+browser PID 树 commit 总和占系统 CommitLimit 的上限'),
+    .description('fork+browser 聚合 Commit 占系统上限的比例；超过即紧急处置'),
+  forkCommitWarnShare: z.number().min(0.05).max(1).default(0.3)
+    .description('聚合 Commit 警告阈值'),
+  forkCommitSevereShare: z.number().min(0.05).max(1).default(0.35)
+    .description('聚合 Commit 严重阈值'),
   browserDomNodeLimit: z.number().min(1000).max(10000000).default(200000)
     .description('托管浏览器 DOM 节点上限，超过即关闭'),
   autoCloseIdleMinutes: z.number().min(0).max(1440).default(10)
@@ -594,6 +613,11 @@ export function apply(ctx, config) {
     } catch { /* guard must never prevent fork boot; failures are audited by caller */ }
   }
   const cfg = { ...Config({}), ...(config ?? {}) }
+  // multi-fork is an explicit opt-in; maxForks alone must never bypass the
+  // single-fork red line (host memory is the shared failure domain).
+  const effectiveMaxForks = () => (cfg.allowMultiFork === true
+    ? Math.max(1, Math.floor(Number(cfg.maxForks) || 1))
+    : 1)
   const forkHealthPath = String(cfg.forkHealthPath || '').trim() || forkHealthPathForPrefix(cfg.routes?.prefix)
   const forkPrefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
   const forkFlushDefaultPath = `${forkPrefix}/adapter/flush-session`
@@ -726,32 +750,49 @@ export function apply(ctx, config) {
   const unclean = Boolean(previousHost && previousHost.clean !== true && Number(previousHost.pid) !== process.pid)
   let safeMode = Boolean(previousSafeMode?.safeMode)
   let safeModeReason = String(previousSafeMode?.reason ?? '')
+  const hostStartedAt = new Date().toISOString()
+  let lastHostMetrics = null
+  let lastProcessCount = 0
+  let hostCleanExit = false
   const now = nowMs()
   const crashDoc = readJsonFile(hostCrashFile)
   const priorCrashes = Array.isArray(crashDoc?.crashes) ? crashDoc.crashes : []
   const crashHistory = priorCrashes.slice()
-  if (unclean) crashHistory.push({ at: now, previousPid: previousHost?.pid ?? null, reason: 'unclean-shutdown' })
+  const previousMetrics = previousHost?.lastMetrics && typeof previousHost.lastMetrics === 'object'
+    ? previousHost.lastMetrics
+    : null
+  if (unclean) {
+    crashHistory.push({
+      at: now,
+      previousPid: previousHost?.pid ?? null,
+      reason: 'unclean-shutdown',
+      metrics: previousMetrics,
+      processCount: Number(previousMetrics?.processCount) || null,
+    })
+  }
   const crashPrune = pruneHostCrashHistory(crashHistory, {
     now,
     maxEntries: cfg.hostCrashMaxEntries,
     retentionDays: cfg.hostCrashRetentionDays,
   })
-  if (unclean || crashPrune.changed) {
+  // The JSON counter keeps only the 10-minute crash-loop window. Full history
+  // (with metrics) goes to host-crashes.jsonl so a crash loop cannot grow it.
+  const recent = crashPrune.crashes.filter((item) => now - Number(item.at) <= 10 * 60_000)
+  if (unclean || crashDoc) {
     const pruned = crashPrune.changed
       ? { at: now, expired: crashPrune.expired, dropped: crashPrune.dropped }
       : (crashDoc?.pruned ?? null)
     try {
       fs.writeFileSync(hostCrashFile, JSON.stringify({
-        crashes: crashPrune.crashes,
+        crashes: recent,
         cap: crashPrune.maxEntries,
         retentionDays: crashPrune.retentionDays,
+        windowMinutes: 10,
         pruned,
       }, null, 2))
     } catch { /* best effort */ }
   }
   // Red line: one crash is context; two crashes within 10 minutes means a loop.
-  // The 10-minute loop window is applied to the capped history, not to the whole file.
-  const recent = crashPrune.crashes.filter((item) => now - Number(item.at) <= 10 * 60_000)
   if (unclean && cfg.safeModeAfterCrash === true && !safeMode && recent.length >= 2) {
     safeMode = true
     safeModeReason = 'crash-loop-10m'
@@ -782,10 +823,11 @@ export function apply(ctx, config) {
     try { fs.writeFileSync(safeModeFile, JSON.stringify({ safeMode, reason: safeModeReason, at: new Date().toISOString() }, null, 2)) } catch { /* best effort */ }
   }
   persistSafeMode()
-  try { fs.writeFileSync(hostStateFile, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), clean: false }, null, 2)) } catch { /* best effort */ }
+  try { fs.writeFileSync(hostStateFile, JSON.stringify({ pid: process.pid, startedAt: hostStartedAt, clean: false, lastMetrics: lastHostMetrics }, null, 2)) } catch { /* best effort */ }
   try {
     ctx.effect(() => () => {
-      try { fs.writeFileSync(hostStateFile, JSON.stringify({ pid: process.pid, exitedAt: new Date().toISOString(), clean: true }, null, 2)) } catch { /* best effort */ }
+      hostCleanExit = true
+      try { fs.writeFileSync(hostStateFile, JSON.stringify({ pid: process.pid, startedAt: hostStartedAt, exitedAt: new Date().toISOString(), clean: true, lastMetrics: lastHostMetrics }, null, 2)) } catch { /* best effort */ }
       try {
         const prior = JSON.parse(fs.readFileSync(watchdogFile, 'utf8'))
         fs.writeFileSync(watchdogFile, JSON.stringify({ ...prior, hostPid: process.pid, clean: true, at: new Date().toISOString() }, null, 2))
@@ -802,9 +844,16 @@ export function apply(ctx, config) {
   // refreshing it; the per-fork helper then terminates the kernel job.
   const hostHeartbeatFile = path.join(layout.dataDir, `watchdog-${process.pid}.heartbeat`)
   const writeHostHeartbeat = () => {
+    if (hostCleanExit) return
     try {
       fs.writeFileSync(hostHeartbeatFile, JSON.stringify({ hostPid: process.pid, at: new Date().toISOString() }), 'utf8')
     } catch { /* best effort: helper also watches the host process */ }
+    try {
+      const snapshot = lastHostMetrics ?? { at: Date.now(), processCount: lastProcessCount || null }
+      fs.writeFileSync(hostStateFile, JSON.stringify({
+        pid: process.pid, startedAt: hostStartedAt, clean: false, lastMetrics: snapshot,
+      }, null, 2))
+    } catch { /* best effort */ }
   }
   writeHostHeartbeat()
   const hostHeartbeatTimer = setInterval(writeHostHeartbeat, 15000)
@@ -829,7 +878,7 @@ export function apply(ctx, config) {
           port: browser.port,
         })
       }
-      if (task.pid && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)) {
+      if (task.pid && task.status !== TASK_STATUS.ARCHIVED) {
         targets.push({
           pid: Number(task.pid),
           kind: 'fork',
@@ -1724,9 +1773,23 @@ export function apply(ctx, config) {
     if (!port) return { ok: false, error: 'browser-port-unavailable' }
     const profileDir = path.join(task.homeDir, 'browser-profile')
     const logDir = path.join(task.homeDir, 'browser-logs')
+    const jobEnabled = process.platform === 'win32' && cfg.browserJobObject !== false
+    const jobHelperPath = jobEnabled ? resolveJobHostPath({ packageRoot: FANG_ROOT }) : ''
     let browserHandle = null
     const launched = await launchManagedBrowser({
       exe, url, profileDir, logDir, port,
+      jobObject: jobEnabled ? {
+        enabled: true,
+        helperPath: jobHelperPath,
+        homeDir: task.homeDir,
+        forkId: `browser-${task.taskId}`,
+        hostPid: process.pid,
+        heartbeatFile: hostHeartbeatFile,
+        timeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
+        graceMs: JOB_HEARTBEAT_GRACE_MS,
+        processMemoryMB: Number(cfg.browserJobProcessMemoryMB) || 2048,
+        totalMemoryMB: Number(cfg.browserJobTotalMemoryMB) || 2048,
+      } : null,
       onExit: (info) => {
         const handle = browserHandle ?? {
           pid: info.pid ?? null, port, logFile: info.logFile ?? null,
@@ -1754,7 +1817,8 @@ export function apply(ctx, config) {
       error: launched.priority.error ?? null,
     } : null
     browserHandle = task.browser = {
-      pid: launched.pid, port: launched.port, profileDir, logFile: launched.logFile,
+      pid: launched.pid, helperPid: launched.helperPid ?? null, jobObject: launched.jobObject ?? null,
+      port: launched.port, profileDir, logFile: launched.logFile,
       crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null, priority, lifecycleState: 'active', lifecycleAt: null, lifecycleError: null, lifecycleFailedAt: null,
     }
     // A fresh browser session invalidates the previous close's unsaved warning.
@@ -1817,7 +1881,7 @@ export function apply(ctx, config) {
   }
 
   let hostPanic = false
-  const hostEmergency = async (reason, { safe = false } = {}) => {
+  const hostEmergency = async (reason, { safe = false, allTasks = false } = {}) => {
     if (hostPanic) return { ok: true, skipped: 'in-progress' }
     hostPanic = true
     try {
@@ -1830,9 +1894,9 @@ export function apply(ctx, config) {
       }
       runtimeBrowsers.clear()
       for (const task of tasks.values()) {
-        if (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING) {
-          await quarantineTask(task, `host-panic:${reason}`, { closeBrowser: false })
-        }
+        if (task.status === TASK_STATUS.ARCHIVED) continue
+        if (!allTasks && task.status !== TASK_STATUS.READY && task.status !== TASK_STATUS.RUNNING) continue
+        await quarantineTask(task, `host-panic:${reason}`, { closeBrowser: false })
       }
       if (safe) {
         safeMode = true
@@ -1840,7 +1904,12 @@ export function apply(ctx, config) {
         persistSafeMode()
       }
       const self = process.memoryUsage()
-      audit('host-emergency-guard', { reason, safe, tasks: tasks.size, selfRssMB: Math.round(self.rss / 1048576), selfPrivateMB: Math.round((self.heapUsed + self.external) / 1048576) })
+      audit('host-emergency-guard', {
+        reason, safe, allTasks, tasks: tasks.size,
+        selfRssMB: Number(lastHostMetrics?.selfRssMB) || Math.round(self.rss / 1048576),
+        selfPrivateMB: Number(lastHostMetrics?.selfPrivateMB) || Math.round((self.heapUsed + self.external) / 1048576),
+        metrics: lastHostMetrics,
+      })
       return { ok: true, reason, safe }
     } finally {
       hostPanic = false
@@ -1851,6 +1920,22 @@ export function apply(ctx, config) {
     maxBytes: Number(cfg.diagnosticLogMaxMB) * 1024 * 1024,
     retentionDays: Number(cfg.diagnosticLogRetentionDays),
   })
+
+  if (unclean) {
+    const record = crashHistory[crashHistory.length - 1] ?? { at: now, reason: 'unclean-shutdown' }
+    try {
+      appendJsonlRotated(path.join(layout.dataDir, 'host-crashes.jsonl'), {
+        event: 'host-crash', ...record,
+        commitFreeMB: record.metrics?.commitFreeMB ?? null,
+        selfRssMB: record.metrics?.selfRssMB ?? null,
+        selfPrivateMB: record.metrics?.selfPrivateMB ?? null,
+        forkCommitMB: record.metrics?.forkCommitMB ?? null,
+        browserCommitMB: record.metrics?.browserCommitMB ?? null,
+        totalCommitMB: record.metrics?.totalCommitMB ?? null,
+        processCount: record.processCount ?? record.metrics?.processCount ?? null,
+      }, diagnosticLogOptions())
+    } catch { /* diagnostics only */ }
+  }
 
   const recordForkMemory = async (task, rootPid, table) => {
     const tree = sumProcessTree(selectProcessTree(table.rows, rootPid))
@@ -2106,49 +2191,106 @@ export function apply(ctx, config) {
     const memory = rememberMemory(await readSystemMemory())
     notePagefile(memory, 'memory-watchdog')
     if (memory.ok && Number(memory.commitLimitMB) > 0) {
-      let total = 0
+      let forkCommitMB = 0
+      let browserCommitMB = 0
       for (const task of tasks.values()) {
-        if (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING) {
-          total += sumProcessTree(selectProcessTree(table.rows, Number(forker()?.status?.(task.taskId)?.pid ?? task.pid))).commitMB
+        if (task.status === TASK_STATUS.ARCHIVED || task.status === TASK_STATUS.FAILED) continue
+        if (Number(task.pid) > 0) {
+          forkCommitMB += sumProcessTree(selectProcessTree(table.rows, Number(forker()?.status?.(task.taskId)?.pid ?? task.pid))).commitMB
         }
-        if (task.browser?.pid) total += sumProcessTree(selectProcessTree(table.rows, Number(task.browser.pid))).commitMB
+        if (task.browser?.pid) browserCommitMB += sumProcessTree(selectProcessTree(table.rows, Number(task.browser.pid))).commitMB
       }
       for (const runtime of runtimeBrowsers.values()) {
-        if (runtime.browser?.pid) total += sumProcessTree(selectProcessTree(table.rows, Number(runtime.browser.pid))).commitMB
+        if (runtime.browser?.pid) browserCommitMB += sumProcessTree(selectProcessTree(table.rows, Number(runtime.browser.pid))).commitMB
       }
-      const limit = Number(memory.commitLimitMB) * Number(cfg.forkCommitShareLimit)
-      if (total > limit) {
-        audit('fork-commit-share-exceeded', { totalMB: total, limitMB: Math.round(limit), share: cfg.forkCommitShareLimit })
+      const total = forkCommitMB + browserCommitMB
+      const limitMB = Number(memory.commitLimitMB) || 0
+      const share = limitMB > 0 ? total / limitMB : 0
+      const self = process.memoryUsage()
+      const selfMetrics = {
+        at: nowMs(),
+        commitFreeMB: Number(memory.commitFreeMB) || null,
+        commitLimitMB: limitMB || null,
+        selfRssMB: Number(memory.selfRssMB) || Math.round(self.rss / 1048576),
+        selfPrivateMB: Number(memory.selfPrivateMB) || Math.round((self.heapUsed + self.external) / 1048576),
+        forkCommitMB: Math.round(forkCommitMB),
+        browserCommitMB: Math.round(browserCommitMB),
+        totalCommitMB: Math.round(total),
+        processCount: table.rows.length,
+        forkShare: Math.round(share * 1000) / 1000,
+      }
+      lastHostMetrics = selfMetrics
+      lastProcessCount = table.rows.length
+      const emergency = Number(cfg.forkCommitShareLimit)
+      const severe = Number(cfg.forkCommitSevereShare)
+      const warn = Number(cfg.forkCommitWarnShare)
+      if (share > emergency) {
+        audit('fork-commit-share-exceeded', { ...selfMetrics, limitMB: Math.round(limitMB * emergency), shareLimit: emergency })
         await hostEmergency('fork-commit-share', { safe: true })
         return
+      }
+      if (share > severe && nowMs() - lastCommitSevereAt > 60_000) {
+        lastCommitSevereAt = nowMs()
+        audit('fork-commit-share-severe', { ...selfMetrics, limitMB: Math.round(limitMB * severe), shareLimit: severe })
+      } else if (share > warn && nowMs() - lastCommitWarnAt > 60_000) {
+        lastCommitWarnAt = nowMs()
+        audit('fork-commit-share-warning', { ...selfMetrics, limitMB: Math.round(limitMB * warn), shareLimit: warn })
       }
     }
     writeWatchdog()
   }
 
   let lastHostWarnAt = 0
+  let lastHostSevereAt = 0
+  let lastCommitWarnAt = 0
+  let lastCommitSevereAt = 0
   const hostWatchdogTick = async () => {
     if (process.platform !== 'win32' || hostPanic) return
     // No fork/browser means hostEmergency has nothing to close; skip the
     // PowerShell memory query entirely (low-end machines idle cost = 0).
     const active = [...tasks.values(), ...runtimeBrowsers.values()].some((task) => task.browser?.pid
       || (Number(task.pid) > 0
-        && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)))
+        && task.status !== TASK_STATUS.ARCHIVED
+        && task.status !== TASK_STATUS.FAILED))
     if (!active) return
     const memory = rememberMemory(await readSystemMemory())
     notePagefile(memory, 'memory-watchdog')
     if (!memory.ok) return
     const free = Number(memory.commitFreeMB) || 0
+    const limitMB = Number(memory.commitLimitMB) || 0
+    const self = process.memoryUsage()
+    lastHostMetrics = {
+      ...(lastHostMetrics ?? {}),
+      at: nowMs(),
+      commitFreeMB: free,
+      commitLimitMB: limitMB || null,
+      selfRssMB: Number(memory.selfRssMB) || Math.round(self.rss / 1048576),
+      selfPrivateMB: Number(memory.selfPrivateMB) || Math.round((self.heapUsed + self.external) / 1048576),
+      processCount: lastProcessCount || lastHostMetrics?.processCount || null,
+    }
     if (free < Number(cfg.hostWarnFreeMB) && nowMs() - lastHostWarnAt > 60_000) {
       lastHostWarnAt = nowMs()
-      const self = process.memoryUsage()
-      audit('host-memory-warning', { commitFreeMB: free, warnMB: cfg.hostWarnFreeMB, selfRssMB: Math.round(self.rss / 1048576), selfPrivateMB: Math.round((self.heapUsed + self.external) / 1048576) })
+      audit('host-memory-warning', {
+        commitFreeMB: free, warnMB: cfg.hostWarnFreeMB,
+        selfRssMB: lastHostMetrics.selfRssMB, selfPrivateMB: lastHostMetrics.selfPrivateMB,
+        forkCommitMB: lastHostMetrics.forkCommitMB ?? null, browserCommitMB: lastHostMetrics.browserCommitMB ?? null,
+        totalCommitMB: lastHostMetrics.totalCommitMB ?? null, forkShare: lastHostMetrics.forkShare ?? null,
+        processCount: lastHostMetrics.processCount,
+      })
     }
-    if (free < Number(cfg.hostCriticalFreeMB)) {
-      await hostEmergency('commit-free-critical', { safe: true })
+    if (free < Number(cfg.hostCriticalFreeMB) && nowMs() - lastHostSevereAt > 60_000) {
+      lastHostSevereAt = nowMs()
+      audit('host-memory-severe', {
+        commitFreeMB: free, criticalMB: cfg.hostCriticalFreeMB,
+        selfRssMB: lastHostMetrics.selfRssMB, selfPrivateMB: lastHostMetrics.selfPrivateMB,
+        totalCommitMB: lastHostMetrics.totalCommitMB ?? null, forkShare: lastHostMetrics.forkShare ?? null,
+        processCount: lastHostMetrics.processCount,
+      })
+    }
+    if (free < Number(cfg.hostEmergencyFreeMB)) {
+      await hostEmergency('commit-free-emergency', { safe: true })
     }
   }
-
 
   /**
    * Record the spawned process's CreationDate + CommandLine hash. Orphan cleanup uses
@@ -2559,6 +2701,8 @@ export function apply(ctx, config) {
       })(),
       browser: t.browser ? {
         pid: t.browser.pid ?? null,
+        helperPid: t.browser.helperPid ?? null,
+        jobObject: t.browser.jobObject ?? null,
         port: t.browser.port ?? null,
         visibility: t.browser.last?.visibility ?? 'unknown',
         hiddenSince: t.browser.hiddenSince ?? null,
@@ -2991,8 +3135,9 @@ export function apply(ctx, config) {
         const s = taskView(t).status
         return s === TASK_STATUS.RUNNING || s === TASK_STATUS.READY
       }).length
-      if (running >= cfg.maxForks) {
-        return { ok: false, error: 'quota-exceeded', detail: `已达上限 ${cfg.maxForks}，请先归档旧任务` }
+      const maxForks = effectiveMaxForks()
+      if (running >= maxForks) {
+        return { ok: false, error: 'quota-exceeded', detail: `已达上限 ${maxForks}，请先归档旧任务` }
       }
       const f = forker()
       if (!f || typeof f.spawn !== 'function') {
@@ -3219,15 +3364,38 @@ export function apply(ctx, config) {
           audit(AUDIT.FORK_CREATED + '-session-floor-failed', { taskId, error: task.sessionFloor.error })
         }
 
-        const started = await f.spawn({
-          forkId: taskId,
-          homeDir,
-          profile,
-          // 加速档只解析加速核入口；stock 母体 CLI 绝不能传入（v3.5.2 起会误判/失败）。
-          ...(coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
-          coreMode,
-          env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(taskId) },
-        })
+        let spawnPidPoll = null
+        let started = null
+        try {
+          // The forker exposes the OS PID as soon as spawn returns, before the
+          // URL-ready promise resolves. Mirror it into the task/watchdog file
+          // synchronously so the sidecar never has to wait for a 30s tick.
+          spawnPidPoll = setInterval(() => {
+            try {
+              const live = f.status?.(taskId)
+              const livePid = Number(live?.pid)
+              if (!(livePid > 0) || Number(task.pid) === livePid) return
+              task.pid = livePid
+              if (Number(live?.port) > 0) task.port = Number(live.port)
+              syncTaskMeta(task, { pid: task.pid, port: task.port ?? null })
+              persist()
+              writeWatchdog()
+              void lowerProcessPriority(task.pid)
+            } catch { /* sidecar sync is best effort */ }
+          }, 200)
+          spawnPidPoll.unref?.()
+          started = await f.spawn({
+            forkId: taskId,
+            homeDir,
+            profile,
+            // 加速档只解析加速核入口；stock 母体 CLI 绝不能传入（v3.5.2 起会误判/失败）。
+            ...(coreMode === 'accelerated' ? {} : { cliPath: forkCliPath() }),
+            coreMode,
+            env: { DSH_FANG_ROLE: 'fork', DSH_FANG_TASK_ID: taskId, DSH_FANG_MOTHER: layout.dataDir, ...forkTempEnv(taskId) },
+          })
+        } finally {
+          if (spawnPidPoll) clearInterval(spawnPidPoll)
+        }
         if (!started || started.ok === false) {
           task.status = TASK_STATUS.FAILED
           task.lastError = started?.error ?? 'spawn-failed'
@@ -4515,9 +4683,9 @@ export function apply(ctx, config) {
         },
         mother: { profile: motherProfile, cliPath: cliPath(), template: templateDir() },
         essenceAutoRefresh: lastAutoRefresh,
-        tasks: { total: list.length, ready, running, max: cfg.maxForks, list },
+        tasks: { total: list.length, ready, running, max: effectiveMaxForks(), list },
         // v1 兼容视图：Client 徽标与旧调用方仍读 forks.*
-        forks: { total: list.length, running: ready + running, max: cfg.maxForks, list },
+        forks: { total: list.length, running: ready + running, max: effectiveMaxForks(), list },
         audit: (() => {
           const health = auditHealth()
           return {
@@ -4555,6 +4723,16 @@ export function apply(ctx, config) {
         pageFileMB: Number(memorySnapshot?.pageFileMB) || 0,
         hasPageFile: memorySnapshot?.hasPageFile === true,
         memoryPolicy: memoryPolicySnapshot(),
+        // v3.8.8: mother RSS/private + fork/browser aggregate commit snapshot.
+        hostMetrics: lastHostMetrics,
+        forkCommitPolicy: {
+          warnShare: Number(cfg.forkCommitWarnShare),
+          severeShare: Number(cfg.forkCommitSevereShare),
+          emergencyShare: Number(cfg.forkCommitShareLimit),
+          warnMB: Number(cfg.hostWarnFreeMB),
+          severeMB: Number(cfg.hostCriticalFreeMB),
+          emergencyMB: Number(cfg.hostEmergencyFreeMB),
+        },
         pagefilePolicy: {
           missing: memorySnapshot?.pagefileMissing === true,
           hasPageFile: memorySnapshot?.hasPageFile === true,
@@ -4563,7 +4741,7 @@ export function apply(ctx, config) {
             : memorySnapshot?.commitLimitNearRam === true ? 'CommitLimit≈RAM'
               : memorySnapshot?.pagefileMissing === true ? 'Win32_PageFileUsage 无分配' : null,
           singleForkOnly: memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false,
-          maxConcurrentForks: (memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) ? 1 : Math.max(1, Number(cfg.maxForks) || 1),
+          maxConcurrentForks: (memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) ? 1 : effectiveMaxForks(),
           safeMode: safeMode === true,
         },
         sessionCompact: sessionCompactSnapshot,
@@ -4632,7 +4810,7 @@ export function apply(ctx, config) {
       return { ok: memory?.ok !== false, memory: memorySnapshot, memoryPolicy: memoryPolicySnapshot() }
     },
     safeModeStatus: () => ({ ok: true, safeMode, reason: safeModeReason }),
-    panic: async () => hostEmergency('manual-panic', { safe: true }),
+    panic: async () => hostEmergency('manual-panic', { safe: true, allTasks: true }),
     resetSafeMode: async () => {
       let memory = null
       try {
@@ -6302,6 +6480,17 @@ export function apply(ctx, config) {
             bootstrap: routeOptions?.bootstrap === true,
           })
           if (!decision.ok) return json(res, decision.status, authErrorBody(decision))
+          if (routeOptions?.peerOwner === true) {
+            const verifier = typeof cfg.peerOwnerVerifier === 'function' ? cfg.peerOwnerVerifier : verifyPeerOwner
+            let peer = null
+            try { peer = await verifier(req, { hostPid: process.pid }) } catch (error) {
+              peer = { ok: false, error: `peer-owner-check-failed:${String(error?.message ?? error)}` }
+            }
+            if (peer?.ok !== true) {
+              audit('auth-token-host-owner-refused', { error: String(peer?.error ?? 'not-host-owner') })
+              return json(res, 403, { ok: false, error: String(peer?.error ?? 'not-host-owner'), code: 'not-host-owner' })
+            }
+          }
           if (req.method !== method) {
             try { res.setHeader?.('allow', method) } catch { /* fake res */ }
             return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
@@ -6375,7 +6564,7 @@ export function apply(ctx, config) {
           res.setHeader?.('vary', 'Origin')
         } catch { /* fake res */ }
         return json(res, 200, { ok: true, token: authToken })
-      }, { public: true, bootstrap: true })
+      }, { public: true, bootstrap: true, peerOwner: true })
 
       // 母体不可删除：即使有人直接打接口也返回 403，而不是“没有这个路由”。
       // 仅 POST（allow-list 只允许 GET/POST；DELETE 语义由该 403 表达）。
@@ -7113,6 +7302,13 @@ export function apply(ctx, config) {
         await readBody(req)
         const out = await service.resetSafeMode()
         return json(res, out.ok ? 200 : 409, out)
+      })
+      // Global Panic: browser -> fork -> quarantine all -> Safe Mode. UI has the
+      // button; this route is the missing HTTP entry point.
+      route('POST', `${prefix}/api/panic`, async (req, res) => {
+        await readBody(req)
+        const out = await service.panic()
+        return json(res, out?.ok === false ? 409 : 200, { ok: out?.ok !== false, mode: 'panic', ...out })
       })
       route('POST', `${prefix}/api/tasks/archive`, async (req, res) => {
         const body = await readBody(req)

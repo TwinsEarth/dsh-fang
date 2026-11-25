@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 
+import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady } from './job-object.mjs'
+
 const EDGE_CANDIDATES = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -220,7 +222,7 @@ export async function freePort(start = 19300, end = 19400) {
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
 /** Launch an isolated app window and wait for its CDP endpoint. */
-export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [], onExit = null }) {
+export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [], onExit = null, jobObject = null }) {
   if (!exe || !fs.existsSync(exe)) return { ok: false, error: 'browser-unavailable' }
   fs.mkdirSync(profileDir, { recursive: true })
   fs.mkdirSync(logDir, { recursive: true })
@@ -245,45 +247,119 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
     '--js-flags=--max-old-space-size=2048',
     ...extraArgs,
   ]
+  // Windows: the browser tree must be owned by a kernel Job, not just taskkill.
+  // The helper starts the browser suspended, assigns it to the job, then resumes.
+  const useJob = jobObject?.enabled === true
+  let jobPaths = null
+  let helperPath = ''
+  let helperArgs = []
+  if (useJob) {
+    helperPath = String(jobObject.helperPath ?? '')
+    const homeDir = String(jobObject.homeDir ?? '')
+    if (!helperPath || !fs.existsSync(helperPath) || !homeDir) {
+      return { ok: false, error: 'job-object-unavailable', detail: 'browser-job-helper-missing' }
+    }
+    jobPaths = jobObjectPaths(homeDir)
+    if (!jobPaths) return { ok: false, error: 'job-object-unavailable', detail: 'browser-job-home-missing' }
+    fs.mkdirSync(path.dirname(jobPaths.readyFile), { recursive: true })
+    // A stale ready file from the previous browser would hand us a dead PID.
+    try { fs.rmSync(jobPaths.readyFile, { force: true }) } catch { /* best effort */ }
+    helperArgs = buildJobHostArgs({
+      spec: { command: exe, args, shell: false },
+      forkId: String(jobObject.forkId ?? `browser-${port}`),
+      homeDir,
+      heartbeatFile: String(jobObject.heartbeatFile ?? ''),
+      hostPid: Number(jobObject.hostPid ?? process.pid),
+      timeoutMs: jobObject.timeoutMs,
+      graceMs: jobObject.graceMs,
+      memoryMb: jobObject.processMemoryMB,
+      totalMemoryMb: jobObject.totalMemoryMB,
+    })
+  }
   let child
   try {
-    child = spawn(exe, args, { detached: false, stdio: 'ignore', windowsHide: false })
+    child = useJob
+      ? spawn(helperPath, helperArgs, { detached: false, stdio: 'ignore', windowsHide: true })
+      : spawn(exe, args, { detached: false, stdio: 'ignore', windowsHide: false })
   } catch (error) {
     return { ok: false, error: 'browser-spawn-failed', detail: String(error?.message ?? error) }
   }
   child.on('error', () => {})
-  const pid = Number(child.pid)
+  const helperPid = Number(child.pid)
+  let browserPid = useJob ? 0 : helperPid
+  let jobReady = null
+  const exitPid = () => Number(browserPid) || helperPid
   if (typeof onExit === 'function') {
     child.once('exit', (code, signal) => {
       try {
         onExit({
           ...classifyBrowserExit(code, signal),
-          pid,
+          pid: exitPid(),
+          helperPid: useJob ? helperPid : null,
           at: Date.now(),
           logFile,
           crashDir,
           profileDir,
+          jobObject: useJob ? jobObjectSummary({ enabled: true, ready: browserPid > 0, mode: 'kill-on-close' }) : null,
         })
       } catch { /* diagnostics must never crash the host */ }
     })
   }
   child.unref?.()
+  if (useJob) {
+    const deadline = Date.now() + 10000
+    let lastJob = null
+    while (Date.now() < deadline) {
+      await sleep(100)
+      const ready = readJobReady(jobPaths.readyFile)
+      lastJob = ready
+      if (ready.error) {
+        try { child.kill() } catch { /* ignore */ }
+        return { ok: false, error: 'job-object-launch-failed', detail: ready.error, helperPid }
+      }
+      if (ready.ok && ready.childPid > 0) { browserPid = ready.childPid; jobReady = ready; break }
+      if (!isPidAlive(helperPid)) break
+    }
+    if (!(browserPid > 0)) {
+      try { child.kill() } catch { /* ignore */ }
+      return { ok: false, error: 'job-object-unavailable', detail: lastJob?.error ?? 'job-ready-timeout', helperPid }
+    }
+  }
   let ready = false
   for (let i = 0; i < 40; i += 1) {
     await sleep(250)
-    if (!isPidAlive(pid)) break
+    if (!isPidAlive(exitPid())) break
     try {
       const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1000) })
       if (response.ok) { ready = true; break }
     } catch { /* not ready */ }
   }
   if (!ready) {
-    try { await closeManagedBrowser({ pid, port }) } catch { /* ignore */ }
-    return { ok: false, error: 'browser-cdp-timeout', pid }
+    try { await closeManagedBrowser({ pid: exitPid(), port }) } catch { /* ignore */ }
+    if (useJob && helperPid > 0) { try { child.kill() } catch { /* ignore */ } }
+    return { ok: false, error: 'browser-cdp-timeout', pid: exitPid(), helperPid: useJob ? helperPid : null }
   }
   let priority = null
-  try { priority = await lowerProcessPriority(pid) } catch (error) { priority = { ok: false, error: String(error?.message ?? error) } }
-  return { ok: true, pid, port, profileDir, logFile, crashDir, exe, priority }
+  try { priority = await lowerProcessPriority(exitPid()) } catch (error) { priority = { ok: false, error: String(error?.message ?? error) } }
+  return {
+    ok: true,
+    pid: exitPid(),
+    helperPid: useJob ? helperPid : null,
+    port,
+    profileDir,
+    logFile,
+    crashDir,
+    exe,
+    priority,
+    jobObject: useJob ? jobObjectSummary({
+      enabled: true,
+      ready: true,
+      mode: 'kill-on-close',
+      helperPid: jobReady?.helperPid ?? helperPid,
+      childPid: jobReady?.childPid ?? browserPid,
+      jobName: jobReady?.jobName ?? '',
+    }) : null,
+  }
 }
 
 export async function closeManagedBrowser({ pid, port, graceMs = 3000, timeoutMs = 3000 }) {

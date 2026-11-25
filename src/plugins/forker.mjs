@@ -116,7 +116,8 @@ const DEFAULTS = {
   cliPath: '',
   profileTemplate: '',
   startTimeoutMs: 60000,
-  maxForks: 8,
+  maxForks: 1,
+  allowMultiFork: false,
   maxLogLines: 400,
   dataRoot: '',
   portPool: { ...DEFAULT_PORT_POOL },
@@ -147,7 +148,8 @@ export const Config = z
       .default('')
       .description('母版 profile 目录：clone 源 / node_modules junction 源（cleanTemplate 时只用后者）'),
     startTimeoutMs: z.natural().default(60000).description('等待 web URL 的启动超时（毫秒）'),
-    maxForks: z.natural().default(8).description('允许同时存活的分身上限'),
+    maxForks: z.natural().default(1).description('允许同时存活的分身上限；默认 1'),
+    allowMultiFork: z.boolean().default(false).description('必须显式二次确认后才允许 maxForks>1；false 时强制 1'),
     maxLogLines: z.natural().default(400).description('每个分身 stdout 滚动缓冲行数'),
     dataRoot: z.string().default('').description('注册表/端口表落盘根目录（空 = 仅进程内存）'),
     portPool: z
@@ -1202,7 +1204,9 @@ function applyForkExperimentalSurface(profileDir) {
     if (previous && (previous.running || previous.child || previous.starting)) {
       return { forkId, ok: false, error: 'already-running', pid: previous.pid ?? null }
     }
-    const maxForks = Math.max(1, Math.floor(Number(cfg.maxForks) || DEFAULTS.maxForks))
+    const maxForks = cfg.allowMultiFork === true
+      ? Math.max(1, Math.floor(Number(cfg.maxForks) || DEFAULTS.maxForks))
+      : 1
     if (starting() >= maxForks) return { forkId, ok: false, error: 'max-forks', limit: maxForks }
 
     const collector = createTextTail(maxLogLines)
@@ -1503,6 +1507,9 @@ function applyForkExperimentalSurface(profileDir) {
       rec.child = child
       rec.wrapperPid = child.pid ?? null
       rec.pid = child.pid ?? null
+      // Write PID synchronously at spawn, not on the URL-ready/tick path: a
+      // host freeze between spawn and URL would otherwise orphan the child.
+      writeForkMetaOf(rec)
       if (jobObject?.enabled) {
         jobObject.helperPid = child.pid ?? null
         const refreshJobReady = () => {
@@ -1518,6 +1525,7 @@ function applyForkExperimentalSurface(profileDir) {
             // PID shown in the UI / watchdog is the real fork host, not the wrapper.
             rec.pid = ready.childPid
             if (expectedPort > 0) bindPortToPid(expectedPort, forkId, ready.childPid)
+            writeForkMetaOf(rec)
           }
           if (jobReadyTimer) { clearInterval(jobReadyTimer); jobReadyTimer = null }
           persist()
