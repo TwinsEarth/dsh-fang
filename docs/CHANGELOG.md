@@ -1,3 +1,19 @@
+## v3.9.3（2026-11-26）
+**主题：迁移报告按钮闭包作用域修复 + 3.9.2 测试期望值校准**
+
+### 迁移报告按钮
+- 修复 `renderMigrationReportBanner` / `dismissMigrationReportBanner` 位于 `createConsole` 外层，却引用内层 `openMigrationReport`、`S`、`render` 的闭包断裂；这是 3.9.2 母体日志中 `openMigrationReport is not defined` 与 `S is not defined` 的根因。
+- “查看”改为 `app.openMigrationReport()`；“关闭”改为 `dismissMigrationReportBanner(S, app, file)`，并通过 `app.render(true)` 重绘。
+- app 对象保留对外签名 `dismissMigrationReportBanner(file)`，内部转发到带 `S/app` 的实现。
+- `test/client-migration-report.test.mjs` 改为断言 app surface，不再要求直接调用局部函数；新增作用域回归，覆盖查看、关闭、关闭后隐藏。
+
+### 测试校准
+- `test/adapter.test.mjs` 的 `heartbeatMs` 期望由 `5000` 改为 `15000`，与 3.9.2 已生效的 15s 心跳一致。
+- 3.9.2 GitHub Actions 的 Node 22/24 两条红均为测试期望滞后；本版全量测试仍为 RED（1557 tests / 1479 pass / 55 fail），未全部 triage，发布走 `--skip-preflight`，不得写成门禁 GREEN。
+
+### 发布
+- 本版执行三方发布：npm `@twinsearth/fang-dsh-plugin@3.9.3`、GitHub `v3.9.3` tag/Release、项目目录发布包与报告。
+
 ## v3.9.1（2026-11-26）
 **主题：包元信息热修 + B2 / C1–C6 收口**
 

@@ -18,10 +18,12 @@ test('client renders a visible migration banner and report modal', () => {
   assert.match(client, /function renderMigrationReportBanner\(S, app\)/)
   assert.match(client, /'data-zone': 'migration-report-banner'/)
   assert.match(client, /数据迁移报告 · \$\{report\.stamp \|\| '未知时间'\}/)
-  // C6: call the local function directly; do not depend on the app object surface.
-  assert.match(client, /onClick: \(\) => openMigrationReport\(\)/)
-  assert.doesNotMatch(client, /app\.openMigrationReport\(\)/)
-  assert.match(client, /probeMemory, openPagefileHelp, openMigrationReport, openDiskHygiene/)
+  // The banner lives outside createConsole; it must go through the app surface.
+  assert.match(client, /onClick: \(\) => app\.openMigrationReport\(\)/)
+  assert.match(client, /onClick: \(\) => dismissMigrationReportBanner\(S, app, file\)/)
+  assert.match(client, /dismissMigrationReportBanner: \(file\) => dismissMigrationReportBanner\(S, app, file\)/)
+  assert.doesNotMatch(client, /onClick: \(\) => openMigrationReport\(\)/)
+  assert.match(client, /probeMemory, openPagefileHelp, openMigrationReport, dismissMigrationReportBanner: \(file\) => dismissMigrationReportBanner\(S, app, file\), openDiskHygiene/)
   assert.match(client, /function renderMigrationReportModal\(S, app\)/)
   assert.match(client, /S\.modal\.kind === 'migrationReport'/)
   assert.match(client, /target: safeText|report\.target/)

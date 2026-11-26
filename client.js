@@ -3780,7 +3780,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         reviewSafeMode, confirmSafeModeReset, confirmPanic,
         confirmMultiFork,
-        probeMemory, openPagefileHelp, openMigrationReport, dismissMigrationReportBanner, openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
+        probeMemory, openPagefileHelp, openMigrationReport, dismissMigrationReportBanner: (file) => dismissMigrationReportBanner(S, app, file), openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
         openRestartDialog, submitRestart,
         archiveTask, restoreTask, startTask, restartQuarantinedTask, repairTask, deleteArchive, promoteTask, openTask, setActiveTask, exportTask, importTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
@@ -4293,11 +4293,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       return value
     }
 
-    function dismissMigrationReportBanner(file) {
+    function dismissMigrationReportBanner(S, app, file) {
       const key = String(file || '')
       S.migrationBannerDismissed = key
       try { window?.localStorage?.setItem('fang.migrationBannerDismissed', key) } catch { /* private mode */ }
-      render(true)
+      app.render(true)
     }
 
     function renderMigrationReportBanner(S, app) {
@@ -4316,12 +4316,12 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         h('div', { class: 'notice-actions' },
           button('查看', {
             size: 'sm', variant: 'ghost', fk: 'migration-report-open',
-            onClick: () => openMigrationReport(),
+            onClick: () => app.openMigrationReport(),
           }),
           button('', {
             size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 14), ariaLabel: '关闭迁移提示',
             fk: 'migration-report-dismiss',
-            onClick: () => dismissMigrationReportBanner(file),
+            onClick: () => dismissMigrationReportBanner(S, app, file),
           })))
     }
 

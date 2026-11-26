@@ -8,6 +8,7 @@
 
 | 版本 | 主题 | 发布记录 | 审计 |
 |---|---|---|---|
+| v3.9.3 | 迁移报告“查看/关闭”按钮闭包作用域修复 + 15s 心跳测试断言校准 | [RELEASE-v3.9.3](RELEASE-v3.9.3.md) | [AUDIT-v3.9.3](AUDIT-v3.9.3.md) |
 | v3.9.1 | 包元信息热修（maxForks / locale sidecar）+ B2 单文件 session 64 MB + C1–C6 收口 | [RELEASE-v3.9.1](RELEASE-v3.9.1.md) | [AUDIT-v3.9.1](AUDIT-v3.9.1.md) |
 | v3.9.0 | 将 v3.8.14 宿主守卫提升为正式发布版本：Host JS heap + session 文件体量 + 全盘 pagefile | [RELEASE-v3.9.0](RELEASE-v3.9.0.md) | [AUDIT-v3.9.0](AUDIT-v3.9.0.md) |
 | v3.8.14 | 宿主守卫改看 Host JS heap + session 文件体量；pagefile/commit 全盘探测（基线，已提升为 v3.9.0，不单独发布） | [RELEASE-v3.8.14](RELEASE-v3.8.14.md) | [AUDIT-v3.8.14](AUDIT-v3.8.14.md) |
