@@ -1,20 +1,23 @@
-## 未发布（包元信息热修，2026-11-26）
+## v3.9.1（2026-11-26）
+**主题：包元信息热修 + B2 / C1–C6 收口**
+
+### 包元信息
 - `cordis.patch.yml` 自带的 `maxForks: 8` 改为 `1`；`Config.maxForks` 接受旧配置的 1–64，但 `apply()` 仍硬限 1、禁用 `allowMultiFork`。
 - 打包层过滤 `locale/._*`、`.DS_Store`；package-smoke 增加 locale language-id / AppleDouble 与 `maxForks: 8` 门禁。
 - 新增 `postinstall` 清理 locale 的 macOS 伴随文件；`tools/release/clean-locale-sidecars.mjs` 随包发布。
-- 已发布 `3.9.0` 仍含 `maxForks: 8` 问题；要修复安装需新版本（建议 3.9.1）。详见 `docs/AUDIT-v3.9.0-PKG.md`。
+- 本版修复 `3.9.0` 的 `maxForks: 8` 与 locale sidecar 安装错误；详见 `docs/AUDIT-v3.9.0-PKG.md`。
 
-## 未发布（C1-C6，2026-11-26）
+### C1–C6
 - C1：`lastHostMetrics` 落盘间隔 15s → 5s，与 5s host tick 对齐；硬杀后 `host-state.json` 最多滞后一个 tick。
 - C2：`host-crashes.json` 崩溃循环窗口改为配置 `hostCrashWindowMinutes`（默认 10，1–1440 分钟）；safe-mode 原因、状态与 UI 文案同源。
 - C3：`hostEmergency` 的 `allTasks` 不再跳过 `ARCHIVED`；只清 PID/token/浏览器并保留归档状态，不把归档任务降级为 `FAILED`。
 - C4：新增 UI 按钮与 `GET/POST /fang/api/forks/multi-fork` 二次确认；仍需显式 token，且只返回 `enabled:false / hardLimit:1`，不构成多开旁路。
 - C5：新增 `processPriority` 档位 `below-normal | idle`；托管浏览器与三个分身启动/恢复点统一传 `priorityClass`，Idle 只在显式配置时使用。
 - C6：迁移报告按钮改为直接调用本地 `openMigrationReport()`，不再依赖 `app.openMigrationReport` 方法；定位结论见 `docs/AUDIT-v3.9.0-C.md`。
-- 未提升版本、未构建、未发布；v3.9.0 已发布包不含以上改动。
+- 随 v3.9.1 发布；v3.9.0 已发布包不含以上改动。
 
-## 未发布（B2，2026-11-26）
-- 单文件 session 紧急线由 48 MB 调整为 64 MB；警告 16 MB、严重 32 MB 与合计 512/1024/2048 MB 门保持不变。60.91 MB 现场文件不再触发单文件 `gate`，但仍显示 critical；64 MB 起才 gate。详见 `docs/AUDIT-v3.9.0-B2.md`。
+### B2
+- 单文件 session 紧急线由 48 MB 调整为 64 MB；警告 16 MB、严重 32 MB 与合计 512/1024/2048 MB 门保持不变。60.91 MB 现场文件不再触发单文件 `gate`，但仍显示 critical；64 MB 起才 gate。详见 `docs/AUDIT-v3.9.0-B2.md`；随 v3.9.1 发布。
 
 ## v3.9.0（2026-11-26）
 **主题：将 v3.8.14 宿主守卫提升为正式发布版本（Host JS heap + session 文件体量 + 全盘 pagefile）**
