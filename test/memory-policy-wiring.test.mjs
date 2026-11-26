@@ -16,13 +16,14 @@ test('orchestrator derives thresholds from host memory instead of fixed constant
   assert.match(orchestrator, /let lastGoodMemory = null/)
   assert.match(orchestrator, /memorySnapshot\.ok === true && \(memorySnapshot\.physicalTotalMB > 0 \|\| memorySnapshot\.commitLimitMB > 0\)/)
   assert.match(orchestrator, /const limits = memoryPolicySnapshot\(\)\n    const overKill = current >= Number\(limits\.memoryKillCommitMB\)/)
-  assert.match(orchestrator, /const limits = memoryPolicySnapshot\(\)\n      const overMemory = Number\(tree\.commitMB\) >= Number\(limits\.browserMemoryLimitMB\)/)
+  assert.match(orchestrator, /const limits = memoryPolicySnapshot\(\)\n      \/\/ v3\.8\.9[\s\S]{0,300}evaluateBrowserAutoClose\(\{/)
   assert.match(orchestrator, /limitMB: limits\.memoryKillCommitMB/)
-  assert.match(orchestrator, /memoryLimitMB: limits\.browserMemoryLimitMB/)
+  assert.match(orchestrator, /memoryLimitMB: autoCloseDecision\.limits\.treeCommitMB/)
+  assert.match(orchestrator, /heapLimitMB: autoCloseDecision\.limits\.jsHeapMB/)
 })
 
 test('status and manual probe expose the effective policy', () => {
-  assert.match(orchestrator, /memory: memorySnapshot,\n        memoryPolicy: memoryPolicySnapshot\(\)/)
+  assert.match(orchestrator, /memory: memorySnapshot,\n        pageFileMB:[\s\S]{0,120}memoryPolicy: memoryPolicySnapshot\(\)/)
   assert.match(orchestrator, /return \{ ok: memory\?\.ok !== false, memory: memorySnapshot, memoryPolicy: memoryPolicySnapshot\(\) \}/)
 })
 

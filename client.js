@@ -32,7 +32,7 @@
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 window.__ModuleLoader__.load({
-  id: '@local/dsh-fang',
+  id: '@twinsearth/fang-dsh-plugin',
   factory(require) {
     // React 只用于宿主插槽返回值（slots 契约），UI 不依赖它。见文件头说明。
     const React = require('react')
@@ -76,11 +76,24 @@ window.__ModuleLoader__.load({
       mono: 'ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace',
     }
 
-    const CAPACITY_SLOTS = 7           // 物理槽位硬上限（capacity.slots）
-    const CAPACITY_LIMIT = 5           // 默认准入配额（capacity.limit，1–7）
-    const POLL_MS = 5000
+    // v3.9.4：分身默认 8 / 硬上限 62；元主默认 3 / 硬上限 6。
+    const CAPACITY_SLOTS = 62          // 分身物理槽位硬上限
+    const CAPACITY_LIMIT = 8           // 分身默认准入配额
+    const ESSENCE_CAPACITY_SLOTS = 6   // 元主物理槽位硬上限
+    const ESSENCE_CAPACITY_LIMIT = 3   // 元主默认配额
+    const POLL_MS = 15000           // v3.9.2：5s→15s，降低母体状态/内存接口的轮询压力
     const ACTIVE_SESSION_LIMIT = 7     // 元主展开后默认显示的会话条数
     const MAX_TITLE = 40
+    // v3.8.5：客户端硬上限。所有来自 API 的集合/预览进入 UI 前先裁剪，
+    // 归档/删除时 releaseTaskCache() 立即释放对应任务缓存。
+    const CACHE_LIMITS = Object.freeze({
+      taskRows: 200,
+      motherSessions: 200,
+      forkSessionTasks: 16,
+      forkSessionItems: 80,
+      previewChars: 240,
+      logChars: 65536,
+    })
 
     // 状态 → 语义色：只允许 绿（进行中）/ 蓝（非工作的暂停或归档）/ 红（已证实故障）/ 中性（未知）。
     // 橘色只用于“配置类动作”，绝不能出现在状态 chip 上。
@@ -126,6 +139,8 @@ window.__ModuleLoader__.load({
       'managed-browser-disabled': '托管浏览器已被配置关闭。已拒绝用外部浏览器打开分身；请先启用 managedBrowser。',
       'browser-cdp-timeout': '托管浏览器启动后没有暴露 CDP 端点，已拒绝打开；请检查浏览器进程与端口。',
       'browser-open-failed': '托管浏览器打开失败，已拒绝回退外部浏览器；详情见通知。',
+      'host-js-heap-pressure': '宿主 JS heap 已达到严重阈值：先关闭/重启宿主或减少大会话，再打开新任务；本轮不是 Commit 不足。',
+      'session-footprint-pressure': 'session.v4 文件体量已达到紧急阈值：先归档或压缩过大会话，再打开新任务；本轮不是重装客户端能解决的问题。',
       'fork-url-missing': '分身没有可用的 Web URL，打开已取消。',
     }
 
@@ -392,12 +407,12 @@ window.__ModuleLoader__.load({
       return { key: 'stopped', label: '已停止', tone: 'info', hint: status === 'archived' ? '存档保留，可启动或还原' : '进程未运行' }
     }
 
-    /** 容量投影：slots=7 硬上限，limit=5 默认配额；v3.0.5 用 tasks 数兜底并显式标注“估算”。 */
+    /** 容量投影：分身默认 8 / 硬上限 62；v3.0.5 用 tasks 数兜底并显式标注“估算”。 */
     function projectCapacity(statusData, tasks) {
       const items = Array.isArray(tasks) ? tasks : []
       const capacity = statusData?.capacity || null
       const limit = Number(capacity?.limit ?? statusData?.tasks?.max ?? CAPACITY_LIMIT)
-      const slots = Number(capacity?.slots ?? CAPACITY_SLOTS)
+      const slots = Number(capacity?.slots ?? statusData?.tasks?.max ?? CAPACITY_SLOTS)
       const used = Number(capacity?.used ?? items.filter((task) => String(task.status) !== 'archived').length)
       return {
         slots, limit, used,
@@ -408,6 +423,21 @@ window.__ModuleLoader__.load({
         estimated: !capacity,
         deriveEnabled: capacity?.derive?.enabled ?? used < limit,
         deriveReason: capacity?.derive?.detail || null,
+      }
+    }
+
+    /** 元主容量投影：服务端 capacity.slots=6 / defaultLimit=3；旧快照按 6/3 兜底。 */
+    function projectEssenceCapacity(essenceData, tasks) {
+      const data = essenceData || {}
+      const cap = data.capacity || null
+      const slots = Number(cap?.slots ?? cap?.hardMax ?? ESSENCE_CAPACITY_SLOTS)
+      const limit = Number(cap?.defaultLimit ?? cap?.limit ?? ESSENCE_CAPACITY_LIMIT)
+      const used = Number(cap?.used ?? ((Array.isArray(data.essences) ? data.essences : []).filter((item) => item?.archived !== true).length))
+      return {
+        slots, limit, used,
+        headroom: Math.max(0, limit - used),
+        estimated: !cap,
+        source: cap?.source || 'essence',
       }
     }
 
@@ -426,6 +456,45 @@ window.__ModuleLoader__.load({
     }
     // v3.0.8 诊断日志：面板内所有错误集中展示，供开发/调试查看。
     const diagLog = []
+    // v3.9.2：__fangUiLog 是给冒烟脚本读取的 UI 事件流，不能无上限增长。
+    // 同时限制条数与字节数：点击事件很便宜，但 diag 条目可能带 2 KB 明细。
+    const FANG_UI_LOG_MAX_ENTRIES = 500
+    const FANG_UI_LOG_MAX_BYTES = 256 * 1024
+    function fangUiLogBytes(entry) {
+      try { return JSON.stringify(entry).length + 1 } catch { return 64 }
+    }
+    function ensureFangUiLog() {
+      try {
+        if (typeof window === 'undefined') return []
+        let log = window.__fangUiLog
+        if (!Array.isArray(log)) {
+          log = []
+          window.__fangUiLog = log
+        }
+        if (Number.isFinite(Number(log.__fangUiLogBytes))) return log
+        let bytes = 0
+        for (const entry of log) bytes += fangUiLogBytes(entry)
+        try {
+          Object.defineProperty(log, '__fangUiLogBytes', { value: bytes, writable: true, configurable: true })
+        } catch { log.__fangUiLogBytes = bytes }
+        return log
+      } catch { return [] }
+    }
+    function pushFangUiLog(entry) {
+      try {
+        const log = ensureFangUiLog()
+        if (!Array.isArray(log)) return
+        log.push(entry)
+        let bytes = Number(log.__fangUiLogBytes) || 0
+        bytes += fangUiLogBytes(entry)
+        while (log.length > FANG_UI_LOG_MAX_ENTRIES || bytes > FANG_UI_LOG_MAX_BYTES) {
+          const removed = log.shift()
+          if (removed === undefined) break
+          bytes -= fangUiLogBytes(removed)
+        }
+        log.__fangUiLogBytes = Math.max(0, bytes)
+      } catch { /* UI logging must never break the panel */ }
+    }
     function diag(level, message, detail = '') {
       const entry = {
         at: Date.now(),
@@ -435,7 +504,7 @@ window.__ModuleLoader__.load({
       }
       diagLog.push(entry)
       if (diagLog.length > 3000) diagLog.shift()
-      try { window.__fangUiLog?.push?.({ kind: 'diag', level: entry.level, message: entry.message }) } catch { /* ignore */ }
+      pushFangUiLog({ kind: 'diag', level: entry.level, message: entry.message })
       try { window.dispatchEvent(new CustomEvent('fang:diag')) } catch { /* ignore */ }
     }
 
@@ -1285,7 +1354,7 @@ window.__ModuleLoader__.load({
 /* 容量 / 配额 / 只读边界 */
 .capacity{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 6px 0;font-size:11px;color:var(--f-text-3)}
 .capacity-label{font-weight:600;color:var(--f-text-2);font-variant-numeric:tabular-nums}
-.capacity-dots{display:inline-flex;gap:4px;align-items:center}
+.capacity-dots{display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:420px}
 .cap-dot{width:16px;height:6px;border-radius:999px;background:var(--f-surface-3);border:1px solid var(--f-border);display:inline-block}
 .cap-dot.is-used{background:var(--f-green);border-color:var(--f-green)}
 .cap-dot.is-locked{background:transparent;border-style:dashed;border-color:var(--f-border-strong);opacity:.7}
@@ -1675,8 +1744,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         status: { state: 'loading', data: null, error: '', diagnostic: null, at: 0 },
         tasks: { state: 'loading', items: [], error: '', diagnostic: null, at: 0 },
         safeMode: { state: 'loading', data: null, error: '', at: 0 },
+        // 迁移横幅只提示一次：用户点关闭后记住报告文件名，不再挤占面板。
+        migrationBannerDismissed: (() => {
+          try { return String(window?.localStorage?.getItem('fang.migrationBannerDismissed') || '') } catch { return '' }
+        })(),
         sessions: { state: 'loading', items: [], total: 0, degraded: [], error: '', diagnostic: null, at: 0 },
         forkSessions: new Map(),
+        activeTaskId: '',
         query: '',
         selectedSessionId: '',
         expanded: new Set(),
@@ -1706,10 +1780,14 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         busy: '',
         refreshing: false,
         notice: null,
+        pagefileBannerDismissed: false,
         derive: deriveStore.value,
         modal: null,
         editing: null,
         toast: null,
+        messageInbox: readMessageInbox(),
+        hiddenNotices: new Set(),
+        noticeTimers: new Map(),
         aliases: loadAliases(),
         mirror: { state: 'idle', data: null, error: '', busy: '', etag: '' },
         link: { state: 'idle', data: null, error: '', probe: null, target: resolveMotherOrigin(), busy: false },
@@ -1719,6 +1797,58 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         decisionAi: { state: 'idle', configured: false, provider: null, model: null, providers: [], error: '' },
         decisionOpen: { green: false, gray: false },
         lastRefreshAt: 0,
+      }
+
+      function clampCacheText(value, max = CACHE_LIMITS.previewChars) {
+        const text = value == null ? '' : String(value)
+        return text.length > max ? text.slice(0, max) + '\n…（已截断）' : text
+      }
+
+      function capTaskRows(rows, activeId = '') {
+        const list = Array.isArray(rows) ? rows.slice() : []
+        if (list.length <= CACHE_LIMITS.taskRows) return list
+        const active = list.find((row) => String(row?.taskId ?? '') === String(activeId))
+        const rest = list.filter((row) => row !== active)
+          .sort((a, b) => (Number(b?.updatedAt) || Number(b?.createdAt) || 0) - (Number(a?.updatedAt) || Number(a?.createdAt) || 0))
+        return (active ? [active, ...rest] : rest).slice(0, CACHE_LIMITS.taskRows)
+      }
+
+      function ensureActiveTask(rows) {
+        const list = Array.isArray(rows) ? rows : []
+        const current = list.find((row) => String(row?.taskId ?? '') === String(S.activeTaskId))
+        if (current) return S.activeTaskId
+        const preferred = list.find((row) => ['running', 'ready'].includes(String(row?.status ?? '')))
+          || list.find((row) => String(row?.status ?? '') !== 'archived')
+          || list[0]
+        S.activeTaskId = String(preferred?.taskId ?? '')
+        return S.activeTaskId
+      }
+
+      function capForkSessionCache() {
+        while (S.forkSessions.size > CACHE_LIMITS.forkSessionTasks) {
+          const key = [...S.forkSessions.keys()].find((item) => item !== S.activeTaskId)
+          if (!key) break
+          S.forkSessions.delete(key)
+        }
+      }
+
+      function releaseTaskCache(taskId) {
+        const id = String(taskId ?? '')
+        if (!id) return
+        S.forkSessions.delete(id)
+        S.expanded.delete('fork:' + id)
+        S.collapsedTasks.delete(id)
+        if (S.activeTaskId === id) S.activeTaskId = ''
+        capForkSessionCache()
+      }
+
+      function setActiveTask(taskId) {
+        const id = String(taskId ?? '')
+        if (!id || id === S.activeTaskId) return
+        S.activeTaskId = id
+        capForkSessionCache()
+        if (!S.forkSessions.has(id)) void loadForkSessions(id)
+        schedule()
       }
 
       const root = h('div', { class: 'fang-console', 'data-fang-console': 'v4' })
@@ -1734,6 +1864,69 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       let refreshSeq = 0
       let pollTimer = 0
       let toastTimer = 0
+      let toastArchiveTimer = 0
+      let noticeArchiveTimer = 0
+      let modalArchiveTimer = 0
+      let modalArchiveFor = null
+      const NOTICE_INBOX_DELAY_MS = 30000
+      const MESSAGE_INBOX_MAX = 100
+      const MESSAGE_INBOX_KEY = 'fang.messageInbox.v1'
+
+      function readMessageInbox() {
+        try {
+          const raw = JSON.parse(window.localStorage?.getItem(MESSAGE_INBOX_KEY) || '[]')
+          return Array.isArray(raw) ? raw.filter((row) => row && typeof row.text === 'string').slice(0, MESSAGE_INBOX_MAX) : []
+        } catch { return [] }
+      }
+      function persistMessageInbox() {
+        try { window.localStorage?.setItem(MESSAGE_INBOX_KEY, JSON.stringify(S.messageInbox.slice(0, MESSAGE_INBOX_MAX))) } catch { /* best effort */ }
+      }
+      function archiveMessage({ tone = 'warn', title = '', text = '', at = Date.now(), kind = 'toast' } = {}) {
+        const body = String(text ?? '').trim()
+        if (!body) return null
+        const row = { id: String(at) + '-' + Math.random().toString(36).slice(2, 8), at: Number(at) || Date.now(), tone: String(tone || 'warn'), title: String(title || ''), text: body, kind }
+        S.messageInbox.unshift(row)
+        if (S.messageInbox.length > MESSAGE_INBOX_MAX) S.messageInbox.length = MESSAGE_INBOX_MAX
+        persistMessageInbox()
+        return row
+      }
+      function dismissToast(toast = S.toast, { archive = true } = {}) {
+        if (!toast) return
+        if (toastArchiveTimer) { window.clearTimeout(toastArchiveTimer); toastArchiveTimer = 0 }
+        if (S.toast?.id === toast.id) S.toast = null
+        if (archive) archiveMessage({ tone: toast.tone, title: '即时提醒', text: toast.text, at: Date.now(), kind: 'toast' })
+        if (alive) render(true)
+      }
+      function armNoticeArchive(key, title, text, onDismiss) {
+        if (!key || !text) return
+        if (S.noticeTimers.has(key)) return
+        const timer = window.setTimeout(() => {
+          S.noticeTimers.delete(key)
+          if (!alive) return
+          archiveMessage({ tone: 'warn', title, text, at: Date.now(), kind: key })
+          if (typeof onDismiss === 'function') onDismiss()
+          render(true)
+        }, NOTICE_INBOX_DELAY_MS)
+        S.noticeTimers.set(key, timer)
+      }
+      function attachNoticeClose(node, key, title, text, onDismiss) {
+        if (!node) return node
+        armNoticeArchive(key, title, text, onDismiss)
+        const actions = node.querySelector?.('.notice-actions')
+        if (!actions) return node
+        actions.append(button('', {
+          size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 13),
+          ariaLabel: '关闭提醒并收入收件箱', title: '关闭；30 秒内未处理也会自动收入消息收件箱',
+          onClick: () => {
+            const timer = S.noticeTimers.get(key)
+            if (timer) { window.clearTimeout(timer); S.noticeTimers.delete(key) }
+            archiveMessage({ tone: 'warn', title, text, at: Date.now(), kind: key })
+            if (typeof onDismiss === 'function') onDismiss()
+            render(true)
+          },
+        }))
+        return node
+      }
       let deriveTicker = 0
       const forkSeq = new Map()
 
@@ -1759,14 +1952,38 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         window.setTimeout(() => { node.textContent = String(message ?? '') }, 30)
       }
       const notify = (tone, text, options = {}) => {
-        S.toast = { tone, text, id: Date.now() + Math.random() }
-        if (tone === 'bad' || tone === 'warn') diag(tone, text)
+        const opts = typeof options === 'string' ? { detail: options } : (options || {})
+        const body = opts.detail ? `${text} · ${opts.detail}` : String(text ?? '')
+        if (S.toast) {
+          // Replaced toasts must not disappear silently: put the previous one into the inbox now.
+          if (S.toastArchiveTimer) { window.clearTimeout(S.toastArchiveTimer); S.toastArchiveTimer = 0 }
+          archiveMessage({ tone: S.toast.tone, title: '即时提醒', text: S.toast.text, at: Date.now(), kind: 'toast' })
+        }
+        const toast = { tone, text: body, id: Date.now() + Math.random(), at: Date.now() }
+        S.toast = toast
+        if (tone === 'bad' || tone === 'warn') diag(tone, body)
         if (toastTimer) window.clearTimeout(toastTimer)
-        toastTimer = window.setTimeout(() => { if (alive) { S.toast = null; render() } }, options.sticky ? 8000 : 4200)
-        if (tone === 'bad') announce(text, 'assertive')
+        const duration = Math.max(1000, Number(opts.durationMs) || (opts.sticky ? 8000 : 4200))
+        toastTimer = window.setTimeout(() => { if (alive && S.toast?.id === toast.id) { S.toast = null; render() } }, duration)
+        if (toastArchiveTimer) window.clearTimeout(toastArchiveTimer)
+        toastArchiveTimer = window.setTimeout(() => {
+          if (!alive) return
+          archiveMessage({ tone: toast.tone, title: '即时提醒', text: toast.text, at: Date.now(), kind: 'toast' })
+          if (S.toast?.id === toast.id) { S.toast = null; render() }
+        }, NOTICE_INBOX_DELAY_MS)
+        if (tone === 'bad') announce(body, 'assertive')
         if (alive) render(true)
       }
-      const setNotice = (notice) => { S.notice = notice; render() }
+      const setNotice = (notice) => {
+        if (noticeArchiveTimer) { window.clearTimeout(noticeArchiveTimer); noticeArchiveTimer = 0 }
+        S.notice = notice
+        if (notice && (notice.title || notice.message)) {
+          const title = String(notice.title || '系统提醒')
+          const body = String(notice.message || '') + (notice.detail ? ` · ${notice.detail}` : '')
+          armNoticeArchive('state-notice', title, body, () => { S.notice = null; render(true) })
+        }
+        render()
+      }
       const onFangNotice = (event) => notify('warn', String(event?.detail || ''))
       window.addEventListener('fang:notice', onFangNotice)
       const onMotherPortal = () => {
@@ -1779,6 +1996,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       function render(force = false) {
         if (!alive) return
         if (S.editing && !force) return
+        armModalArchive()
         renderQueued = false
         const doc = host.ownerDocument
         const active = doc.activeElement
@@ -1841,10 +2059,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         forkSeq.set(id, seq)
         S.forkSessions.set(id, { ...(S.forkSessions.get(id) || { items: [] }), state: 'loading', busy: true })
         schedule()
-        const result = await api('/fang/api/tasks/sessions?taskId=' + encodeURIComponent(id) + '&limit=20')
+        const result = await api('/fang/api/tasks/sessions?taskId=' + encodeURIComponent(id) + '&limit=' + CACHE_LIMITS.forkSessionItems)
         if (!alive || forkSeq.get(id) !== seq) return
         if (result.status === 200 && result.body && result.body.ok !== false) {
-          const items = Array.isArray(result.body.sessions) ? result.body.sessions : []
+          const items = (Array.isArray(result.body.sessions) ? result.body.sessions : []).slice(0, CACHE_LIMITS.forkSessionItems)
           S.forkSessions.set(id, {
             state: 'ready', items, busy: false, at: Date.now(),
             total: Number(result.body.total) || items.length,
@@ -1854,6 +2072,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
           S.forkSessions.set(id, { state: 'error', items: [], busy: false, error: code, diagnostic: result.diagnostic || null })
         }
+        capForkSessionCache()
         schedule()
       }
 
@@ -1875,7 +2094,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           const [statusRes, tasksRes, sessionsRes, essenceRes, approvalsRes, supervisionRes, forkCoreRes, safeModeRes] = await Promise.all([
             api('/fang/api/status').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/tasks').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
-            api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? 1000 : S.sessionWindow}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
+            api(`/fang/api/sessions?limit=${S.sessionWindow === 'all' ? CACHE_LIMITS.motherSessions : Math.min(Number(S.sessionWindow) || 20, CACHE_LIMITS.motherSessions)}`).catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/essence/list').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/approvals').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
             api('/fang/api/forks/supervision').catch((error) => ({ status: 0, body: null, diagnostic: { message: String(error?.message ?? error) } })),
@@ -1895,8 +2114,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           if (approvalsRes.status === 200 && approvalsRes.body && approvalsRes.body.ok !== false) {
             S.approvals = {
               state: 'ready',
-              items: Array.isArray(approvalsRes.body.items) ? approvalsRes.body.items : [],
-              failed: Array.isArray(approvalsRes.body.failed) ? approvalsRes.body.failed : [],
+              items: (Array.isArray(approvalsRes.body.items) ? approvalsRes.body.items : []).slice(0, CACHE_LIMITS.taskRows),
+              failed: (Array.isArray(approvalsRes.body.failed) ? approvalsRes.body.failed : []).slice(0, CACHE_LIMITS.taskRows),
               degraded: approvalsRes.body.degraded === true,
               error: '', at: Date.now(),
             }
@@ -1924,7 +2143,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
           let taskItems = []
           if (tasksRes.status === 200 && Array.isArray(tasksRes.body?.tasks)) {
-            taskItems = tasksRes.body.tasks
+            ensureActiveTask(tasksRes.body.tasks)
+            taskItems = capTaskRows(tasksRes.body.tasks, S.activeTaskId)
             S.tasks = { state: 'ready', items: taskItems, error: '', diagnostic: null, at: Date.now() }
           } else {
             const code = tasksRes.body?.error || (tasksRes.status ? 'http-' + tasksRes.status : 'network')
@@ -1941,7 +2161,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
           if (sessionsRes.status === 200 && sessionsRes.body && sessionsRes.body.ok !== false) {
             const body = sessionsRes.body
-            const items = Array.isArray(body.sessions) ? body.sessions : []
+            const items = (Array.isArray(body.sessions) ? body.sessions : []).slice(0, CACHE_LIMITS.motherSessions)
             const degraded = Array.isArray(body.degraded) ? body.degraded : []
             const softEmpty = body.readable === false && degraded.includes('sessions-root-missing')
             const readable = body.readable !== false || softEmpty
@@ -1956,10 +2176,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
           S.lastRefreshAt = Date.now()
           if (!options.silent) schedule()
-          // 分身会话：首次出现时预热一次（拿到会话数），之后只为展开的卡片刷新；
-          // 失败按卡独立，不拖垮整列，也不做 N+1 的每 5 秒全量轮询。
-          const targets = taskItems.filter((task) => ['ready', 'running', 'failed'].includes(String(task?.status ?? ''))
-            && (S.expanded.has('fork:' + task.taskId) || !S.forkSessions.has(String(task.taskId))))
+          // v3.8.5：只预热当前 active task 的会话目录；其他任务保持摘要，
+          // 切换 active task 时才调用 loadForkSessions()。不再对所有任务做 N+1 预热。
+          const targets = taskItems.filter((task) => String(task.taskId) === String(S.activeTaskId)
+            && ['ready', 'running', 'failed'].includes(String(task?.status ?? ''))
+            && !S.forkSessions.has(String(task.taskId)))
           for (const task of targets) void loadForkSessions(task.taskId)
         } finally {
           refreshingLock = false
@@ -2009,6 +2230,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             actions: result.taskId ? [{ label: '打开分身', onClick: () => void openTask({ taskId: result.taskId }) }] : [],
           })
           await refresh()
+        } else if (result && (result.error === 'commit-critical' || result.error === 'memory-low')) {
+          notify('bad', result.error === 'commit-critical' ? 'Commit 余量低于 999 MB，已禁止派生' : 'Commit 余量不足，已禁止派生', {
+            detail: result.detail || `CommitFree ${Number(result.commitFreeMB) || '?'} MB；释放内存或关闭分身后再试。`, durationMs: 7000,
+          })
         } else if (result) {
           setNotice({
             tone: 'bad', title: '派生失败', message: result.message || failureHint(result.error),
@@ -2047,6 +2272,39 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           const node = view.querySelector(`[data-fk="${escapeSelector(fk)}"]`)
           if (node) node.focus({ preventScroll: true })
         }
+      }
+
+      // v3.9.4 需求 6：任何表单/确认弹窗都不允许长期霸占窗口。打开后 30 秒未处理，
+      // 自动关闭并把标题/摘要收入消息收件箱；自动关闭等同取消，不替用户执行任何操作。
+      function armModalArchive() {
+        const modal = S.modal
+        if (!modal) {
+          if (modalArchiveTimer) { window.clearTimeout(modalArchiveTimer); modalArchiveTimer = 0 }
+          modalArchiveFor = null
+          return
+        }
+        if (modal.kind === 'messageInbox') return
+        if (modalArchiveFor === modal) return
+        if (modalArchiveTimer) window.clearTimeout(modalArchiveTimer)
+        modalArchiveFor = modal
+        modalArchiveTimer = window.setTimeout(() => {
+          modalArchiveTimer = 0
+          if (!alive || S.modal !== modal) return
+          const titles = {
+            confirm: '确认弹窗', prompt: '输入弹窗', safeMode: 'Safe Mode', pagefile: '页面文件',
+            migrationReport: '迁移报告', essence: '元主详情', mother: '母体详情',
+          }
+          const title = String(modal.title || titles[modal.kind] || '弹窗')
+          const text = String(modal.message || modal.label || modal.detail || modal.reason || title)
+          archiveMessage({
+            tone: 'warn', title: '弹窗已自动收起', at: Date.now(), kind: 'modal',
+            text: `${title}：${text}`.slice(0, 500) + '（30 秒未处理，已自动关闭；未执行任何操作）',
+          })
+          S.modal = null
+          modalArchiveFor = null
+          unlockScroll()
+          render(true)
+        }, NOTICE_INBOX_DELAY_MS)
       }
 
       async function probeMemory() {
@@ -2091,20 +2349,45 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const layout = S.status?.data?.layout || {}
         const memory = S.status?.data?.memory || null
         const policy = S.status?.data?.memoryPolicy || {}
-        const pageFileMB = Number(memory?.pageFileMB) || 0
-        const pagefileMissing = memory?.ok === true && (memory?.hasPageFile !== true || pageFileMB <= 0)
-        const commitLow = memory?.ok === true
-          && Number(memory?.commitFreeMB) < Number(policy.hostCriticalFreeMB ?? 4096)
+        const reset = S.safeMode?.data?.reset || null
+        // The status snapshot can be minutes stale. `reset` comes from a fresh
+        // /fang/api/safe-mode probe and is authoritative for the modal.
+        const freshMemory = reset?.memoryKnown === true
+          ? {
+            ...(memory || {}),
+            ok: true,
+            commitFreeMB: Number(reset.commitFreeMB) || 0,
+            pageFileMB: Number(reset.pageFileMB) || 0,
+            pagefileMissing: reset.pagefileMissing === true,
+          }
+          : memory
+        const pageFileMB = Number(freshMemory?.pageFileMB) || 0
+        const pagefileMissing = reset?.pagefileMissing === true || (freshMemory?.ok === true && (
+          freshMemory?.pagefileMissing === true
+          || freshMemory?.pagingFilesEmpty === true
+          || freshMemory?.commitLimitNearRam === true
+          || freshMemory?.hasPageFile !== true
+          || pageFileMB <= 0
+        ))
+        const memoryUnknown = reset?.canReset === false && reset?.error === 'memory-probe-unavailable'
+        const commitLow = (reset?.canReset === false && reset?.error === 'commit-low')
+          || (reset?.canReset !== true && freshMemory?.ok === true
+            && Number(freshMemory?.commitFreeMB) < Number(policy.hostCriticalFreeMB ?? 2345))
+        const resetBlocked = reset?.canReset === false && !pagefileMissing && !memoryUnknown && !commitLow ? reset : null
         lockScroll()
         S.modal = {
           kind: 'safeMode',
           reason: String(S.safeMode?.data?.reason || ''),
+          windowMinutes: Number(S.safeMode?.data?.windowMinutes) || 10,
           legacy: layout.legacyDataDetected === true,
           isolation: layout.dataIsolationBlocked === true,
           pagefileMissing,
+          memoryUnknown,
           commitLow,
+          canForce: reset?.canForce === true || (commitLow && freshMemory?.ok === true),
+          resetBlocked,
           pageFileMB,
-          memory,
+          memory: freshMemory,
           checks: { pagefile: false, migration: false, memory: false, isolation: false },
           busy: false,
           error: '',
@@ -2113,30 +2396,51 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         render(true)
       }
 
-      async function confirmSafeModeReset() {
+      async function confirmSafeModeReset(force = false, restore = false) {
         const modal = S.modal
         if (!modal || modal.kind !== 'safeMode' || modal.busy) return
-        if (modal.pagefileMissing === true) {
-          modal.error = '页面文件缺失/被禁用；请先恢复页面文件并重启 Windows。'
+        if (modal.commitLow === true && force !== true) {
+          modal.error = 'Commit 余量低于宿主紧急阈值；请先释放内存，或使用“强制解除”。'
           render(true)
           return
         }
-        if (modal.commitLow === true) {
-          modal.error = 'Commit 余量低于宿主紧急阈值；请先释放内存再重新检测。'
+        if (modal.memoryUnknown === true) {
+          modal.error = '无法读取系统内存状态；不能仅凭勾选解除 Safe Mode。'
+          render(true)
+          return
+        }
+        if (modal.resetBlocked) {
+          modal.error = String(modal.resetBlocked.detail || modal.resetBlocked.error || '解除条件未满足')
           render(true)
           return
         }
         const checks = modal.checks || {}
-        const required = ['pagefile', 'memory']
+        const required = ['memory']
           .concat(modal.legacy ? ['migration'] : [])
           .concat(modal.isolation ? ['isolation'] : [])
-        if (!required.every((key) => checks[key] === true)) return
+        if (force !== true && !required.every((key) => checks[key] === true)) return
         modal.busy = true
         modal.error = ''
         render(true)
-        const out = await api('/fang/api/safe-mode/reset', { method: 'POST', body: '{}' })
+        const out = await api('/fang/api/safe-mode/reset', {
+          method: 'POST',
+          body: JSON.stringify({ force: force === true, restore: restore === true }),
+        })
         if (out.status === 200) {
-          notify('warn', 'Safe Mode 已解除', '不会自动恢复分身；请手动打开需要的任务，并继续观察 Commit 余量。')
+          const restored = out.body?.restored
+          const started = Array.isArray(restored?.started) ? restored.started.length : 0
+          const failed = Array.isArray(restored?.failed) ? restored.failed.length : 0
+          if (restore === true) {
+            notify(started > 0 ? 'ok' : 'warn', 'Safe Mode 已解除，恢复任务已提交',
+              restored?.queued === true
+                ? '后台正在逐个拉起已登记分身；内存守卫不足的会被拒绝，结果写入审计日志。'
+                : `已启动 ${started} 个，失败 ${failed} 个；内存守卫不足时会拒绝启动。`)
+          } else {
+            notify('warn', 'Safe Mode 已解除',
+              force === true
+                ? '已强制解除闩锁；没有自动恢复分身。新建/打开分身仍会经过 Commit/heap 守卫。'
+                : '没有自动恢复分身；可在检查清单里选择“解除并恢复”，或手动打开需要的任务。')
+          }
           closeModal()
           void refresh()
           return
@@ -2163,6 +2467,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             S.busy = ''
             const body = result.body
             if (result.status === 200 && body?.ok) {
+              releaseTaskCache(task.taskId)
               setNotice({ tone: 'ok', title: body.already ? '已在存档中' : '已归档', message: `${task.title || task.taskId} · 进程已停止，存档保留。` })
             } else {
               const code = body?.error || (result.status ? 'http-' + result.status : 'network')
@@ -2222,7 +2527,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           })
         } else {
           const code = body?.error || (result.status ? 'http-' + result.status : 'network')
-          setNotice({ tone: 'bad', title: wasQuarantined ? '重启并解除隔离失败' : '启动分身失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+          if (code === 'commit-critical' || code === 'memory-low') {
+            notify('bad', code === 'commit-critical' ? 'Commit 余量低于 999 MB，已禁止启动分身' : 'Commit 余量不足，已禁止启动分身', {
+              detail: body?.detail || `CommitFree ${Number(body?.commitFreeMB) || '?'} MB；释放内存后再试。`, durationMs: 7000,
+            })
+          } else {
+            setNotice({ tone: 'bad', title: wasQuarantined ? '重启并解除隔离失败' : '启动分身失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
+          }
         }
         await refresh()
       }
@@ -2299,7 +2610,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             const result = await api('/fang/api/tasks/archive/delete', { method: 'POST', body: JSON.stringify({ taskId: task.taskId }) })
             S.busy = ''
             const body = result.body
-            if (result.status === 200 && body?.ok) setNotice({ tone: 'ok', title: '存档已删除', message: `${task.title || task.taskId} 的存档与 home 已删除。` })
+            if (result.status === 200 && body?.ok) { releaseTaskCache(task.taskId); setNotice({ tone: 'ok', title: '存档已删除', message: `${task.title || task.taskId} 的存档与 home 已删除。` }) }
             else {
               const code = body?.error || (result.status ? 'http-' + result.status : 'network')
               setNotice({ tone: 'bad', title: '删除存档失败', message: failureHint(code), detail: body?.detail || diagnosticText(result.diagnostic) })
@@ -3120,6 +3431,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       async function openTask(task, retryDepth = 0) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
+        setActiveTask(taskId)
         // v3.7.4：打开是显式用户动作，用 POST 触发同步；GET 只读，避免副作用。
         const result = await api('/fang/api/tasks/open', { method: 'POST', body: JSON.stringify({ taskId }) })
         if (result.status === 200 && result.body?.url) {
@@ -3143,9 +3455,17 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           notify('bad', '该分身已隔离，通信已断开', '请在任务卡点「重启并解除隔离」：会分配新端口并轮换 token，旧页面失效；无需重启 DSH 母体。')
           return
         }
+        if (code === 'commit-critical') {
+          notify('bad', 'Commit 余量低于 999 MB，已禁止启动/打开分身', {
+            detail: result.body?.detail || `CommitFree ${Number(result.body?.commitFreeMB) || '?'} MB；释放内存后再试。`, durationMs: 7000,
+          })
+          return
+        }
         if (code === 'memory-low') {
           const free = Number(result.body?.commitFreeMB)
-          notify('bad', '系统提交内存不足，已拒绝打开分身', `CommitFree ${Number.isFinite(free) ? free : '?'} MB，低于阈值。请先启用页面文件或关闭其他分身/应用。`)
+          notify('bad', '系统提交内存不足，已拒绝打开分身', {
+            detail: `CommitFree ${Number.isFinite(free) ? free : '?'} MB，低于阈值。请先关闭其他分身/应用。`, durationMs: 7000,
+          })
           return
         }
         if (code === 'browser-unavailable' || code === 'managed-browser-disabled' || code === 'browser-cdp-timeout' || code === 'browser-open-failed' || code === 'fork-url-missing') {
@@ -3594,12 +3914,36 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         })
       }
 
+      async function confirmMultiFork() {
+        askConfirm({
+          tone: 'warn',
+          title: '多分身二次确认（硬限仍为 1）',
+          message: 'v3.8.13 起生产路径硬限 1 个分身。这里只记录你的显式确认并写入审计；不会开启第二个分身，第二次创建仍返回 quota-exceeded。',
+          strong: true,
+          expected: 'MULTI-FORK',
+          confirmVerb: '记录确认',
+          confirmLabel: '确认（仍限 1）',
+          onConfirm: async () => {
+            const out = await api('/fang/api/forks/multi-fork', {
+              method: 'POST',
+              body: JSON.stringify({ confirm: true, token: 'MULTI-FORK' }),
+            })
+            if (out.status === 200) {
+              notify('warn', '已记录多分身确认', '生产路径仍硬限 1；不会开启第二个分身。')
+              return
+            }
+            notify('bad', '多分身确认失败', failureHint(out.body?.error || `http-${out.status}`))
+          },
+        })
+      }
+
       const app = {
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         reviewSafeMode, confirmSafeModeReset, confirmPanic,
-        probeMemory, openPagefileHelp, openMigrationReport, openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
+        confirmMultiFork,
+        probeMemory, openPagefileHelp, openMigrationReport, dismissMigrationReportBanner: (file) => dismissMigrationReportBanner(S, app, file), openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
         openRestartDialog, submitRestart,
-        archiveTask, restoreTask, startTask, restartQuarantinedTask, repairTask, deleteArchive, promoteTask, openTask, exportTask, importTask, copyText, captureEssence,
+        archiveTask, restoreTask, startTask, restartQuarantinedTask, repairTask, deleteArchive, promoteTask, openTask, setActiveTask, exportTask, importTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
         decideApproval,
         setForkSupervision,
@@ -3613,6 +3957,32 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         beginRename, commitRename, cancelRename, selectSession, toggleSet, toggleForkGroup,
         toggleTemporary, setView: (next) => { S.view = next; schedule(true) },
         loadForkSessions, loadMirror, mirrorAction, loadLink, probeMother, notify, announce,
+        dismissToast: (toast) => dismissToast(toast, { archive: true }),
+        archiveNotice: (title, text, tone = 'warn', kind = 'notice') => archiveMessage({ tone, title, text, at: Date.now(), kind }),
+        armNotice: (key, title, text, onHide) => armNoticeArchive(key, title, text, () => {
+          S.hiddenNotices.add(key)
+          if (typeof onHide === 'function') onHide()
+          render(true)
+        }),
+        dismissBanner: (key, title, text, tone = 'warn') => {
+          const timer = S.noticeTimers.get(key)
+          if (timer) { window.clearTimeout(timer); S.noticeTimers.delete(key) }
+          archiveMessage({ tone, title, text, at: Date.now(), kind: key })
+          S.hiddenNotices.add(key)
+          render(true)
+        },
+        openMessageInbox: () => {
+          lockScroll()
+          S.modal = { kind: 'messageInbox', returnFk: document.activeElement?.getAttribute?.('data-fk') || '' }
+          render(true)
+        },
+        removeMessage: (id) => {
+          S.messageInbox = S.messageInbox.filter((row) => row.id !== id)
+          persistMessageInbox()
+          render(true)
+        },
+        clearMessageInbox: () => { S.messageInbox = []; persistMessageInbox(); render(true) },
+        persistMessageInbox,
         backupMother: () => mirrorAction('backup', async () => (await api('/fang/api/mirror/backup', {
           method: 'POST', body: JSON.stringify({ bucket: 'restore', label: '手动备份' }),
         })).body),
@@ -3821,9 +4191,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
     }
 
     function renderSlotStrip(cap) {
-      const limit = Math.max(0, Math.min(7, Number(cap?.limit ?? 5)))
+      const limit = Math.max(0, Math.min(ESSENCE_CAPACITY_SLOTS, Number(cap?.limit ?? ESSENCE_CAPACITY_LIMIT)))
       const slots = []
-      for (let index = 0; index < 7; index += 1) {
+      const total = Math.max(0, Math.min(ESSENCE_CAPACITY_SLOTS, Number(cap?.slots ?? ESSENCE_CAPACITY_SLOTS)))
+      for (let index = 0; index < total; index += 1) {
         const enabled = index < limit
         slots.push(h('span', {
           class: 'slot', role: 'listitem', 'data-slot': String(index),
@@ -3839,7 +4210,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         }, String(index + 1)))
       }
       return h('div', {
-        class: 'slot-strip', 'data-zone': 'slots', role: 'list', 'aria-label': '分身槽位',
+        class: 'slot-strip', 'data-zone': 'slots', role: 'list', 'aria-label': '元主槽位',
         style: { display: 'inline-flex', alignItems: 'center', marginLeft: '4px' },
       }, ...slots)
     }
@@ -3976,6 +4347,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               onClick: () => void app.openRestartDialog(), fk: 'restart', dataBtnId: 'M-08',
             })
             : null,
+          button(`消息 (${S.messageInbox.length})`, {
+            variant: 'quiet', size: 'sm', icon: icon('inbox', 14),
+            title: '消息收件箱：所有关闭/超时的弹窗与提醒都在这里；30 秒内自动归档',
+            onClick: () => app.openMessageInbox(), fk: 'message-inbox',
+          }),
           button('收件箱', {
             variant: 'ghost', size: 'sm', icon: icon('inbox', 14),
             title: '决策收件箱：独立抽屉；红/黄/蓝/绿/灰分组、未读计数、键盘导航与批量处理',
@@ -4088,10 +4464,17 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         h('div', { role: 'list', style: { marginTop: 4 } }, ...rows)))]
     }
 
-    function safeModeReasonText(reason) {
+    function safeModeReasonText(reason, windowMinutes = 10) {
       const value = String(reason || '').trim()
       if (!value) return '上次宿主非正常退出或触发内存熔断；自动恢复已暂停。'
-      if (value === 'crash-loop-10m') return '10 分钟内连续两次非正常退出（可能是 pagefile/Commit 不足或插件崩溃）。'
+      const crashLoop = /^crash-loop-(\d+)m$/.exec(value)
+      if (crashLoop) {
+        const minutes = Number(crashLoop[1]) || Number(windowMinutes) || 10
+        return `${minutes} 分钟内连续两次非正常退出（可能是 pagefile/Commit 不足或插件崩溃）。`
+      }
+      if (value === 'pagefile-missing-low-commit' || value.endsWith('+pagefile-missing-low-commit')) {
+        return 'Windows 没有可用页面文件，且 Commit 余量低于宿主紧急阈值；Fang 暂停自动拉起分身。修复页面文件后重启宿主。'
+      }
       if (value === 'pagefile-missing' || value.endsWith('+pagefile-missing')) {
         return 'Windows 没有可用页面文件（Win32_PageFileUsage 无分配）；Fang 在启动前已进入 Safe Mode，不会自动拉起分身或浏览器。'
       }
@@ -4103,62 +4486,125 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       return value
     }
 
+    function dismissMigrationReportBanner(S, app, file) {
+      const key = String(file || '')
+      S.migrationBannerDismissed = key
+      try { window?.localStorage?.setItem('fang.migrationBannerDismissed', key) } catch { /* private mode */ }
+      app.render(true)
+    }
+
     function renderMigrationReportBanner(S, app) {
       const report = S.status?.data?.layout?.migrationReport
       if (!report || report.found !== true) return null
+      if (S.hiddenNotices?.has?.('banner:migration')) return null
+      const file = String(report.file || '')
+      if (file && S.migrationBannerDismissed === file) return null
+      const title = `数据迁移报告 · ${report.stamp || '未知时间'}`
+      const text = `已迁移 ${Number(report.copied) || 0} 个文件，跳过 ${Number(report.skipped) || 0} 个，冲突 ${Number(report.conflictCount) || 0} 个。`
+      app.armNotice?.('banner:migration', title, text, () => { S.migrationBannerDismissed = file })
       const conflicts = Number(report.conflictCount) || 0
+      const copied = Number(report.copied) || 0
       const tone = report.reportOk === false || conflicts > 0 ? 'warn' : 'ok'
       return h('div', { class: `notice notice--${tone} fang-migration-banner`, role: 'status', 'data-zone': 'migration-report-banner' },
         h('div', { class: 'notice-main' },
-          h('div', { class: 'notice-title' }, icon(tone === 'ok' ? 'check' : 'alert', 14), `数据迁移报告 · ${report.stamp || '未知时间'}`),
-          h('div', { class: 'notice-text' },
-            `从 ${Array.isArray(report.sources) ? report.sources.length : 0} 个旧根复制 ${Number(report.copied) || 0} 个文件，跳过 ${Number(report.skipped) || 0} 个；冲突 ${conflicts} 个。目标 ${report.target || '未记录'}。`),
-          report.reportOk === false
-            ? h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } }, '报告未标记成功；请先核对冲突与目标文件，再继续使用。')
-            : conflicts > 0
-              ? h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } }, '冲突文件按“不覆盖”保留目标现有版本；源数据未被删除。')
-              : null),
+          h('div', { class: 'notice-title' }, icon(tone === 'ok' ? 'check' : 'alert', 14), title),
+          h('div', { class: 'notice-text' }, text + `${report.target ? `；目标 ${report.target}` : ''}`)),
         h('div', { class: 'notice-actions' },
-          button('查看迁移报告', {
+          button('查看', {
             size: 'sm', variant: 'ghost', fk: 'migration-report-open',
-            onClick: () => {
-              if (typeof app.openMigrationReport !== 'function') {
-                notify('bad', '迁移报告暂不可用', '客户端没有提供 openMigrationReport；这不是 Host/Commit 崩溃，请单独上报 DSH 客户端 API 问题。')
-                return
-              }
-              app.openMigrationReport()
-            },
+            onClick: () => app.openMigrationReport(),
+          }),
+          button('', {
+            size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 14), ariaLabel: '关闭迁移提示',
+            fk: 'migration-report-dismiss',
+            onClick: () => { app.archiveNotice?.(title, text, tone, 'banner:migration'); dismissMigrationReportBanner(S, app, file) },
+          })))
+    }
+
+    function renderHostPressureBanner(S, app) {
+      if (S.hiddenNotices?.has?.('banner:host-pressure')) return null
+      const pressure = S.status?.data?.hostPressure
+      const heap = pressure?.heap
+      const session = pressure?.session
+      const heapLevel = String(heap?.level ?? '')
+      const sessionLevel = String(session?.level ?? '')
+      const heapVisible = heapLevel === 'warn' || heapLevel === 'critical' || heapLevel === 'emergency'
+      const sessionVisible = sessionLevel === 'warn' || sessionLevel === 'critical' || sessionLevel === 'emergency'
+      if (!heapVisible && !sessionVisible) return null
+      const gate = String(pressure?.gate ?? '')
+      const tone = gate ? 'bad' : 'warn'
+      const lines = []
+      if (heapVisible) {
+        const pct = Number(heap?.pressure)
+        lines.push(`Host JS heap ${Number(heap?.heapUsedMB) || 0} MB / ${Number(heap?.heapLimitMB) || '?'} MB${Number.isFinite(pct) ? `（${Math.round(pct * 100)}%）` : ''}；阈值 ${Number(heap?.warnMB) || '?'} / ${Number(heap?.criticalMB) || '?'} / ${Number(heap?.emergencyMB) || '?'} MB。`)
+      }
+      if (sessionVisible) {
+        lines.push(`session 合计 ${Number(session?.totalMB) || 0} MB · 单文件最大 ${Number(session?.largestMB) || 0} MB${session?.largestFile ? ` · ${session.largestFile}` : ''}；阈值 ${Number(session?.thresholds?.warnMB) || '?'} / ${Number(session?.thresholds?.criticalMB) || '?'} / ${Number(session?.thresholds?.emergencyMB) || '?'} MB。`)
+      }
+      const title = gate ? '宿主压力已封住新任务' : '宿主压力预警'
+      const text = lines.join(' ')
+      app.armNotice?.('banner:host-pressure', title, text)
+      return h('div', { class: `notice notice--${tone} fang-host-pressure-banner`, role: 'status', 'data-zone': 'host-pressure-banner' },
+        h('div', { class: 'notice-main' },
+          h('div', { class: 'notice-title' }, icon('alert', 15), title),
+          ...lines.map((line) => h('div', { class: 'notice-text' }, line)),
+          h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } },
+            gate
+              ? '先归档/压缩大会话，或重启宿主释放 JS heap；这不是重装客户端或替换 asar 能解决的问题。'
+              : '继续观察；若升到紧急阈值，插件会拒绝新分身/新浏览器，但不会删除会话。')),
+        h('div', { class: 'notice-actions' },
+          button('重新检测', { size: 'sm', variant: 'ghost', fk: 'host-pressure-probe', onClick: () => void app.probeMemory() }),
+          button('', {
+            size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 13), ariaLabel: '关闭压力提醒',
+            onClick: () => app.dismissBanner?.('banner:host-pressure', title, text, tone),
           })))
     }
 
     function renderPagefileBanner(S, app) {
       const memory = S.status?.data?.memory
-      if (!memory || memory.ok !== true || memory.supported === false
-        || (memory.hasPageFile === true && Number(memory.pageFileMB) > 0)) return null
+      if (!memory || memory.ok !== true || memory.supported === false) return null
+      const pagefileMissing = memory.pagefileMissing === true
+        || memory.pagingFilesEmpty === true
+        || memory.commitLimitNearRam === true
+        || memory.hasPageFile !== true
+        || Number(memory.pageFileMB) <= 0
+      if (!pagefileMissing) return null
+      if (S.pagefileBannerDismissed === true || S.hiddenNotices?.has?.('banner:pagefile')) return null
+      const title = '未启用页面文件 · 仅提醒，不限制分身'
+      const body = 'Windows 没有可用的页面文件。这只是建议：不会强制单分身，也不会改写 maxForks；实际准入只按 Commit 余量判断。'
+      app.armNotice?.('banner:pagefile', title, body, () => { S.pagefileBannerDismissed = true })
       const limit = Number(memory.commitLimitMB) || 0
       const free = Number(memory.commitFreeMB) || 0
-      return h('div', { class: 'notice notice--bad fang-pagefile-banner', role: 'alert', 'data-zone': 'pagefile-banner' },
+      return h('div', { class: 'notice notice--warn fang-pagefile-banner', role: 'status', 'data-zone': 'pagefile-banner' },
         h('div', { class: 'notice-main' },
-          h('div', { class: 'notice-title' }, icon('alert', 15), '页面文件缺失 · 宿主随时可能 OOM'),
+          h('div', { class: 'notice-title' }, icon('alert', 15), title),
           h('div', { class: 'notice-text' },
-            `Windows 没有可用的页面文件/Commit 扩展空间（上限 ${limit} MB，当前余量 ${free} MB）。瓮城会拒绝新分身；大 session、浏览器缓存和并发任务会直接推高 Commit。`),
+            `Windows 没有可用的页面文件（上限 ${limit} MB，当前 Commit 余量 ${free} MB）。${body}`),
           h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } },
-            '修复不需要重装系统：恢复系统托管的页面文件，或至少留 8–16 GB，然后重启宿主。')),
+            '可在系统属性中恢复“系统管理的大小”，但设置与否由你决定，插件没有权力强制。')),
         h('div', { class: 'notice-actions' },
-          button('查看修复说明', { size: 'sm', variant: 'danger', fk: 'pagefile-help', onClick: () => app.openPagefileHelp() }),
-          button('重新检测', { size: 'sm', variant: 'ghost', fk: 'pagefile-probe', onClick: () => void app.probeMemory() })))
+          button('查看修复说明', { size: 'sm', variant: 'ghost', fk: 'pagefile-help', onClick: () => app.openPagefileHelp() }),
+          button('重新检测', { size: 'sm', variant: 'ghost', fk: 'pagefile-probe', onClick: () => void app.probeMemory() }),
+          button('', {
+            size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 14), ariaLabel: '关闭页面文件提醒',
+            fk: 'pagefile-dismiss', onClick: () => app.dismissBanner?.('banner:pagefile', title, body, 'warn'),
+          })))
     }
 
     function renderSafeModeBanner(S, app) {
       if (S.safeMode?.data?.safeMode !== true) return null
+      if (S.hiddenNotices?.has?.('banner:safe-mode')) return null
       const layout = S.status?.data?.layout || {}
       const needsMigration = layout.legacyDataDetected === true || layout.dataIsolationBlocked === true
+      const title = 'Safe Mode · 自动恢复已禁止'
+      const text = `原因：${safeModeReasonText(S.safeMode.data.reason, S.safeMode.data.windowMinutes)}；Commit 余量 ≥2345 MB 时自动解除，也可强制解除。`
+      app.armNotice?.('banner:safe-mode', title, text)
       return h('div', { class: 'notice notice--warn fang-safe-banner', role: 'alert', 'data-zone': 'safe-mode-banner' },
         h('div', { class: 'notice-main' },
-          h('div', { class: 'notice-title' }, icon('alert', 15), 'Safe Mode · 自动恢复已禁止'),
-          h('div', { class: 'notice-text' }, `原因：${safeModeReasonText(S.safeMode.data.reason)}`),
+          h('div', { class: 'notice-title' }, icon('alert', 15), title),
+          h('div', { class: 'notice-text' }, `原因：${safeModeReasonText(S.safeMode.data.reason, S.safeMode.data.windowMinutes)}`),
           h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } },
-            '恢复前检查：① Windows 页面文件 / Commit 余量 ② 旧数据迁移与数据根 ③ 已关闭占用内存的程序。点击“恢复前检查清单”逐项确认。')),
+            'Commit 余量 ≥2345 MB 时自动解除 Safe Mode，无需手动操作；也可随时强制解除。恢复前检查：① 可用内存 ② 旧数据迁移与数据根。')),
         h('div', { class: 'notice-actions' },
           button('恢复前检查清单', { size: 'sm', variant: 'primary', fk: 'safe-mode-review', onClick: () => app.reviewSafeMode() }),
           needsMigration
@@ -4167,10 +4613,15 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               title: '先完全退出宿主，再在项目目录运行该命令；工具只复制不删除。',
               onClick: () => void app.copyText('node tools/migrate-fang-home.mjs --apply', '迁移命令'),
             })
-            : null))
+            : null,
+          button('', {
+            size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 14), ariaLabel: '关闭 Safe Mode 提醒',
+            onClick: () => app.dismissBanner?.('banner:safe-mode', title, text, 'warn'),
+          })))
     }
 
     function renderDiskHygieneBanner(S, app) {
+      if (S.hiddenNotices?.has?.('banner:disk-hygiene')) return null
       const hygiene = S.status?.data?.diskHygiene
       if (!hygiene || hygiene.ok !== true || !hygiene.summary) return null
       const cacheBytes = Number(hygiene.summary.browserCacheBytes) || 0
@@ -4178,20 +4629,28 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const search = Array.isArray(hygiene.searchIndex)
         ? hygiene.searchIndex.filter((row) => row.readable === false && row.exists !== false)
         : []
+      const title = '浏览器缓存占用偏高 · 可安全回收'
+      const text = `托管浏览器可重建缓存约 ${formatBytes(cacheBytes)}；只移动 Cache/Code Cache，不动 Cookies 和登录态。`
+      app.armNotice?.('banner:disk-hygiene', title, text)
       return h('div', { class: 'notice notice--warn fang-disk-banner', role: 'status', 'data-zone': 'disk-hygiene-banner' },
         h('div', { class: 'notice-main' },
-          h('div', { class: 'notice-title' }, icon('alert', 14), '浏览器缓存占用偏高 · 可安全回收'),
-          h('div', { class: 'notice-text' },
-            `托管浏览器可重建缓存约 ${formatBytes(cacheBytes)}；它们会和 session、Commit 抢空间。只移动 Cache/Code Cache，不动 Cookies 和登录态。`),
+          h('div', { class: 'notice-title' }, icon('alert', 14), title),
+          h('div', { class: 'notice-text' }, text),
           search.length
             ? h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } }, 'Windows 搜索索引 windows.db 当前不可读（需管理员权限），插件不会删除或重建它。')
             : null),
         h('div', { class: 'notice-actions' },
-          button('查看磁盘卫生', { size: 'sm', variant: 'ghost', fk: 'disk-hygiene-open', onClick: () => app.openDiskHygiene() })))
+          button('查看磁盘卫生', { size: 'sm', variant: 'ghost', fk: 'disk-hygiene-open', onClick: () => app.openDiskHygiene() }),
+          button('', {
+            size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 13), ariaLabel: '关闭磁盘提醒',
+            onClick: () => app.dismissBanner?.('banner:disk-hygiene', title, text, 'warn'),
+          })))
     }
 
     function renderNotices(S, app) {
       const nodes = []
+      const hostPressureBanner = renderHostPressureBanner(S, app)
+      if (hostPressureBanner) nodes.push(hostPressureBanner)
       const pagefileBanner = renderPagefileBanner(S, app)
       if (pagefileBanner) nodes.push(pagefileBanner)
       const safeBanner = renderSafeModeBanner(S, app)
@@ -4485,7 +4944,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
       return h('section', { class: 'panel', 'data-zone': 'mother', 'data-freshness': freshness, 'aria-labelledby': 'fang-mother-title' },
         head,
-        h('div', { class: 'mother-slots' }, renderSlotStrip(projectCapacity(S.status.data, S.tasks.items))),
+        h('div', { class: 'mother-slots' }, renderSlotStrip(projectEssenceCapacity(S.essenceList?.data, S.tasks.items))),
         scroll)
     }
 
@@ -4600,9 +5059,12 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
 
     function renderCapacityStrip(cap) {
       const dots = []
-      for (let index = 0; index < cap.slots; index += 1) {
-        const usable = index < cap.limit
-        const filled = index < cap.used
+      const total = Math.max(0, Math.min(CAPACITY_SLOTS, Number(cap?.slots) || 0))
+      const limit = Math.max(0, Math.min(total, Number(cap?.limit) || 0))
+      const used = Math.max(0, Math.min(total, Number(cap?.used) || 0))
+      for (let index = 0; index < total; index += 1) {
+        const usable = index < limit
+        const filled = index < used
         dots.push(h('span', {
           class: 'cap-dot' + (filled ? ' is-used' : '') + (usable ? '' : ' is-locked'),
           title: filled ? `槽位 ${index + 1}：占用` : usable ? `槽位 ${index + 1}：空闲` : `槽位 ${index + 1}：超出当前配额`,
@@ -4613,9 +5075,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         'aria-label': `配额 ${cap.used}/${cap.limit}，物理槽位 ${cap.used}/${cap.slots}${cap.estimated ? '（估算）' : ''}`,
         title: cap.estimated ? '宿主未提供 capacity：用任务数估算；契约升级后以服务端为准' : '服务端 capacity 快照',
       },
-      h('span', { class: 'capacity-label' }, `配额 ${cap.used}/${cap.limit}`),
+      h('span', { class: 'capacity-label' }, `配额 ${used}/${limit}`),
       h('span', { class: 'capacity-dots', 'aria-hidden': 'true' }, ...dots),
-      h('span', { class: 'capacity-note' }, `槽位 ${cap.used}/${cap.slots}${cap.estimated ? ' · 估算' : ''}`))
+      h('span', { class: 'capacity-note' }, `槽位 ${used}/${total}${cap.estimated ? ' · 估算' : ''}`))
     }
 
     // ── 右栏：分身区 ─────────────────────────────────────────────────────
@@ -4759,7 +5221,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const timer = setInterval(() => {
         if (!section.isConnected) { clearInterval(timer); return }
         if (!state.busy) void load()
-      }, 5000)
+      }, 15000) // v3.9.2：5s→15s
       timer.unref?.()
       return section
     }
@@ -4911,9 +5373,49 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       }, head, h('div', { class: 'cdp-metric-grid' }, cards))
     }
 
-    function renderForkCard(S, app, task, options = {}) {
+    function renderForkSummary(S, app, task, options = {}) {
+      const taskId = String(task?.taskId ?? '')
       const health = taskHealth(task)
+      const stateView = forkStateOf(task)
+      const archived = !!options.archived || String(task?.status) === 'archived'
+      return h('article', {
+        class: 'fork-card fork-card--summary',
+        'data-bar': health.tone,
+        'data-task': taskId,
+        'data-state': health.phase,
+        'data-health': health.adapter,
+        'data-summary': '1',
+        'data-active': '0',
+        'aria-label': `分身 ${task.title || taskId}，状态 ${health.label}（摘要）`,
+      },
+        h('div', { class: 'fork-head' },
+          h('div', { class: 'fork-head-main' },
+            h('div', { class: 'fork-title' }, clampText(task.title) || `分身 ${short(taskId, 8)}`),
+            h('div', { class: 'fork-chips' },
+              chip(health.tone, health.label, { state: health.phase, danger: health.tone === 'bad' && health.anomaly }),
+              archived ? chip('neutral', '已归档') : null,
+              task.browserCrash ? chip('bad', task.browserCrash.oom ? '上次崩溃于 OOM' : `上次崩溃于 exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`, { title: `上次浏览器崩溃：${task.browserCrash.oom ? 'OOM（0xE0000008）' : task.browserCrash.hex || task.browserCrash.code || 'unknown'}；${new Date(task.browserCrash.at || Date.now()).toLocaleString()}` }) : null,
+              task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）` }) : null)),
+          h('div', { class: 'fork-actions' },
+            button('查看详情', {
+              size: 'sm', variant: 'ghost', dataBtnId: 'C-11',
+              title: '切换为当前任务；只加载这一个任务的完整卡片',
+              onClick: () => app.setActiveTask(taskId),
+              fk: 'activate:' + taskId,
+            }))),
+        h('div', {
+          class: 'fork-status', 'data-state': stateView.key, 'data-tone': stateView.tone,
+          role: 'status', 'aria-label': `分身状态：${stateView.label}`,
+        },
+          h('span', { class: 'fork-status-dot', 'aria-hidden': 'true' }),
+          h('span', { class: 'fork-status-label' }, stateView.label),
+          stateView.hint ? h('span', { class: 'fork-status-hint' }, stateView.hint) : null))
+    }
+
+    function renderForkCard(S, app, task, options = {}) {
       const taskId = String(task.taskId ?? '')
+      if (taskId !== String(S.activeTaskId)) return renderForkSummary(S, app, task, options)
+      const health = taskHealth(task)
       const archived = !!options.archived || String(task.status) === 'archived'
       const expanded = S.expanded.has('fork:' + taskId)
       const sessionsState = S.forkSessions.get(taskId)
@@ -4970,7 +5472,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             archived ? null : chip(health.adapterTone, health.adapterLabel, { health: health.adapter }),
             task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
             task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）；点任务卡「重启并解除隔离」恢复（新端口/新 token）` }) : null,
-            task.memoryGuard ? chip(task.memoryGuard.unsavedForceClose ? 'bad' : 'warn', task.memoryGuard.unsavedForceClose ? '未保存强杀' : '内存保护关闭', { title: `${task.memoryGuard.unsavedForceClose ? '关闭前会话落盘未确认：未保存强杀；' : ''}关闭原因：${task.memoryGuard.reason || 'guard'}；PID ${task.memoryGuard.pid ?? '—'}；会话 home 保留，可重新打开` }) : null,
+            task.browserCrash ? chip('bad', task.browserCrash.oom ? '上次崩溃于 OOM' : `上次崩溃于 exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`, { title: `上次浏览器崩溃：${task.browserCrash.oom ? 'OOM（0xE0000008）' : `exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`}；${new Date(task.browserCrash.at || Date.now()).toLocaleString()}；PID ${task.browserCrash.pid ?? '—'}${task.browserCrash.signal ? `；signal ${task.browserCrash.signal}` : ''}` }) : null,
+            task.memoryGuard ? chip(task.memoryGuard.unsavedForceClose ? 'bad' : 'warn', task.memoryGuard.unsavedForceClose ? '未保存强杀' : '内存保护关闭', { title: `${task.memoryGuard.unsavedForceClose ? '关闭前会话落盘未确认：未保存强杀；' : ''}关闭原因：${task.memoryGuard.reason || 'guard'}${task.memoryGuard.reasonKind ? `（${task.memoryGuard.reasonKind}）` : ''}；PID ${task.memoryGuard.pid ?? '—'}；主机 Commit 余量 ${task.memoryGuard.metrics?.hostCommitFreeMB ?? '—'} MB；会话 home 保留，必须手动重新打开，不会自动重开` }) : null,
             task.sessions?.violation ? chip('warn', `会话 ${task.sessions.count}/${task.sessions.max} 超限`, { title: '分身会话超过上限；打开/修复不会再自动搬移，需手动归档或 enforce' }) : null,
             task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
@@ -4985,9 +5488,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               title: '永久删除 home 与存档，不可撤销（需输入名称）', onClick: () => void app.deleteArchive(task),
               fk: 'delete:' + taskId,
             })]
-            : [task.quarantined ? null : button('打开', {
+            : [task.quarantined ? null : button(task.memoryGuard ? '重新打开' : '打开', {
               size: 'sm', variant: 'ghost', icon: icon('external', 12), iconAfter: true, dataBtnId: 'C-01',
-              title: '在新标签页打开分身 Web UI（URL 打开时向宿主换取，不落盘）',
+              title: task.memoryGuard
+                ? `因内存保护关闭（${task.memoryGuard.reason || 'guard'}）：host 与会话已保留，点此重新打开；不会自动重开`
+                : '在新标签页打开分身 Web UI（URL 打开时向宿主换取，不落盘）',
               onClick: () => void app.openTask(task),
               fk: 'open:' + taskId,
             }),
@@ -5365,7 +5870,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         } else {
           body.append(h('pre', {
             style: { maxHeight: '46vh', overflow: 'auto', fontSize: 11, lineHeight: 1.5, whiteSpace: 'pre-wrap', margin: 0 },
-          }, detail.logs || '（暂无运行日志；先点「打开」启动该元主的隔离实例）'))
+          }, clampCacheText(detail.logs, CACHE_LIMITS.logChars) || '（暂无运行日志；先点「打开」启动该元主的隔离实例）'))
         }
       }
       const tabBar = h('div', { class: 'panel-tools', style: { borderTop: 'none' } },
@@ -5718,11 +6223,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
     function renderSafeModeModal(S, app) {
       const modal = S.modal
       const checks = modal.checks || {}
-      const required = ['pagefile', 'memory']
+      const required = ['memory']
         .concat(modal.legacy ? ['migration'] : [])
         .concat(modal.isolation ? ['isolation'] : [])
       const canConfirm = required.every((key) => checks[key] === true) && !modal.busy
-        && modal.pagefileMissing !== true && modal.commitLow !== true
+        && modal.commitLow !== true
+        && modal.memoryUnknown !== true && !modal.resetBlocked
+      const canForce = modal.canForce === true && modal.memoryUnknown !== true && !modal.busy
       const checkRow = (key, label, hint, disabled = false) => h('label', { class: 'safe-check' },
         h('input', {
           type: 'checkbox', checked: checks[key] === true, disabled: modal.busy || disabled === true,
@@ -5735,45 +6242,73 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           h('div', { class: 'glass-head' },
             h('div', { class: 'glass-head-main' },
               h('div', { class: 'glass-title', id: 'fang-safe-mode-title' }, icon('alert', 18), '解除 Safe Mode 前检查'),
-              h('div', { class: 'glass-sub' }, '只解除保护闩锁；不会自动恢复任何分身。')),
+              h('div', { class: 'glass-sub' }, '解除闩锁后默认不自动恢复分身；可选择“解除并恢复”，或强制解除后手动打开。')),
             button('', { variant: 'quiet', size: 'sm', iconOnly: true, icon: icon('close', 15), ariaLabel: '取消', onClick: () => app.closeModal() })),
           h('div', { class: 'glass-body' },
             h('div', { class: 'notice notice--warn', role: 'status' },
               h('div', { class: 'notice-main' },
                 h('div', { class: 'notice-title' }, '当前原因'),
-                h('div', { class: 'notice-text' }, safeModeReasonText(modal.reason)))),
+                h('div', { class: 'notice-text' }, safeModeReasonText(modal.reason, modal.windowMinutes)))),
             modal.pagefileMissing
-              ? h('div', { class: 'notice notice--bad', role: 'alert' },
+              ? h('div', { class: 'notice notice--warn', role: 'status' },
                 h('div', { class: 'notice-main' },
-                  h('div', { class: 'notice-title' }, '页面文件缺失/被禁用'),
-                  h('div', { class: 'notice-text' }, '此时不能解除 Safe Mode：请先在系统属性中启用页面文件并重启 Windows，再回来重新检测。')))
+                  h('div', { class: 'notice-title' }, '页面文件缺失（仅提示）'),
+                  h('div', { class: 'notice-text' }, '建议在系统属性中设置页面文件；v3.8.13 起不再因此禁止解除 Safe Mode。实际能否启动仍看可用内存与 Commit 余量。')))
               : null,
             modal.commitLow
               ? h('div', { class: 'notice notice--bad', role: 'alert' },
                 h('div', { class: 'notice-main' },
                   h('div', { class: 'notice-title' }, 'Commit 余量低于宿主紧急阈值'),
-                  h('div', { class: 'notice-text' }, `当前 Commit 余量 ${Number(modal.memory?.commitFreeMB) || 0} MB，低于解除阈值 ${Number(S.status?.data?.memoryPolicy?.hostCriticalFreeMB ?? 4096)} MB；请先释放内存。`)))
+                  h('div', { class: 'notice-text' }, `当前 Commit 余量 ${Number(modal.memory?.commitFreeMB) || 0} MB，低于解除阈值 ${Number(S.status?.data?.memoryPolicy?.hostCriticalFreeMB ?? 2345)} MB；达到 2345 MB 会自动解除，也可强制解除（不会自动恢复分身，<999 MB 时新建仍被拒绝）。`)))
+              : null,
+            modal.memoryUnknown
+              ? h('div', { class: 'notice notice--bad', role: 'alert' },
+                h('div', { class: 'notice-main' },
+                  h('div', { class: 'notice-title' }, '无法读取系统内存状态'),
+                  h('div', { class: 'notice-text' }, '页面文件与 Commit 状态未知，不能仅凭勾选解除 Safe Mode；请先点“重新检测”。')))
+              : null,
+            modal.resetBlocked
+              ? h('div', { class: 'notice notice--bad', role: 'alert' },
+                h('div', { class: 'notice-main' },
+                  h('div', { class: 'notice-title' }, '解除条件未满足'),
+                  h('div', { class: 'notice-text' }, String(modal.resetBlocked.detail || modal.resetBlocked.error || '请先修复系统条件。'))))
               : null,
             h('div', { class: 'safe-checklist' },
-              checkRow('pagefile', modal.pagefileMissing ? '页面文件缺失/被禁用，不能解除' : '页面文件 / Commit 余量已恢复', modal.pagefileMissing
-                ? '当前系统没有可用页面文件；仅勾选不会通过校验，必须先启用页面文件并重启。'
-                : '任务管理器性能页的“提交”可用量应高于启动阈值；若 pagefile 被禁用，先在系统属性里恢复“系统管理的大小”。', modal.pagefileMissing === true),
+              checkRow('pagefile', modal.memoryUnknown ? '无法读取内存/页面文件状态，不能解除' : modal.pagefileMissing ? '已了解页面文件缺失（仅提示，不必强制设置）' : '页面文件 / Commit 余量已恢复', modal.memoryUnknown
+                ? '内存探测不可用；仅勾选不会通过校验，请先重新检测。'
+                : modal.pagefileMissing
+                  ? '页面文件缺失只作提示，不再阻止解除；建议之后在系统属性里恢复“系统管理的大小”。'
+                  : '任务管理器性能页的“提交”可用量应高于启动阈值；若 pagefile 被禁用，建议在系统属性里恢复“系统管理的大小”。', modal.memoryUnknown === true),
               modal.legacy
                 ? checkRow('migration', '旧数据已迁移到规范数据根', '完全退出宿主后运行 node tools/migrate-fang-home.mjs --apply；工具只复制不删除。')
                 : null,
               modal.isolation
                 ? checkRow('isolation', '已修正数据根或完成迁移', 'Fang 数据根不能落在宿主/工程目录（如 E:\\DSH\\DS）；修正 fangHome 后重启宿主。')
                 : null,
-              checkRow('memory', '已释放内存并确认没有运行中的分身', '关闭占用内存的浏览器/应用；解除后不会自动拉起分身，请逐个手动打开。')),
+              checkRow('memory', '已释放内存并确认没有运行中的分身', '关闭占用内存的浏览器/应用；Commit ≥2345 MB 会自动解除，也可直接强制解除；<999 MB 时派生/启动会被拒绝。')),
             modal.error ? h('div', { class: 'notice notice--bad', role: 'alert' },
               h('div', { class: 'notice-main' }, h('div', { class: 'notice-title' }, '解除失败'), h('div', { class: 'notice-text' }, modal.error))) : null),
           h('div', { class: 'glass-foot' },
             button('取消', { size: 'sm', variant: 'ghost', fk: 'safe-mode-cancel', onClick: () => app.closeModal() }),
             button(modal.busy ? '解除中…' : '确认已检查，解除 Safe Mode', {
               size: 'sm', variant: 'danger', fk: 'safe-mode-confirm', disabled: !canConfirm,
-              title: modal.pagefileMissing ? '页面文件缺失/被禁用，不能解除' : modal.commitLow ? 'Commit 余量低于宿主紧急阈值，不能解除' : canConfirm ? '仅解除禁止自动恢复的闩锁' : '请先勾选全部恢复前检查项',
-              onClick: () => void app.confirmSafeModeReset(),
-            }))))
+              title: modal.commitLow ? 'Commit 余量低于宿主紧急阈值，不能走普通解除' : modal.memoryUnknown ? '内存状态未知，请先重新检测' : canConfirm ? '仅解除禁止自动恢复的闩锁' : '请先勾选全部恢复前检查项',
+              onClick: () => void app.confirmSafeModeReset(false, false),
+            }),
+            modal.commitLow
+              ? button(modal.busy ? '解除中…' : '强制解除（风险确认）', {
+                size: 'sm', variant: 'danger', fk: 'safe-mode-force', disabled: !canForce,
+                title: canForce ? '绕过 Commit 阈值解除闩锁；不会自动恢复分身，新建分身仍会被内存守卫拒绝' : '内存状态未知，无法强制解除',
+                onClick: () => void app.confirmSafeModeReset(true, false),
+              })
+              : null,
+            modal.commitLow
+              ? null
+              : button(modal.busy ? '解除中…' : '解除并恢复分身', {
+                size: 'sm', variant: 'primary', fk: 'safe-mode-restore', disabled: !canConfirm,
+                title: canConfirm ? '解除闩锁后尝试重新拉起已登记但未运行的分身；内存不足会逐个拒绝' : '请先勾选全部恢复前检查项',
+                onClick: () => void app.confirmSafeModeReset(false, true),
+              }))))
     }
 
     function renderBranchModal(S, app) {
@@ -5850,12 +6385,48 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             button(modal.confirmLabel || '确定', { size: 'sm', variant: 'primary', onClick: submit }))))
     }
 
-    function renderToast(S) {
+    function renderToast(S, app) {
       const toast = S.toast
       if (!toast) return null
       return h('div', { class: 'toast toast--' + (toast.tone === 'ok' ? 'ok' : toast.tone === 'bad' ? 'bad' : 'warn'), role: 'status', 'aria-live': 'polite' },
         toast.tone === 'ok' ? icon('check', 14) : icon('alert', 14),
-        h('span', null, toast.text))
+        h('span', null, toast.text),
+        button('', {
+          size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 12), ariaLabel: '关闭提醒',
+          title: '关闭并收入消息收件箱',
+          onClick: () => app.dismissToast(toast),
+        }))
+    }
+
+    function renderMessageInboxModal(S, app) {
+      const rows = Array.isArray(S.messageInbox) ? S.messageInbox : []
+      const list = rows.length === 0
+        ? h('div', { class: 'empty', style: { padding: '24px 12px' } },
+          h('div', { class: 'empty-title' }, '收件箱是空的'),
+          h('div', { class: 'empty-text' }, '关闭的提醒会自动归档到这里。'))
+        : h('div', { class: 'fang-message-inbox-list', style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+          ...rows.map((row) => {
+            const tone = row.tone === 'ok' ? 'ok' : row.tone === 'bad' ? 'bad' : 'warn'
+            return h('div', { class: 'notice notice--' + tone, style: { margin: 0 } },
+              h('div', { class: 'notice-main' },
+                h('div', { class: 'notice-title' }, row.title || '提醒'),
+                h('div', { class: 'notice-text', style: { whiteSpace: 'pre-wrap' } }, row.text),
+                h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } }, new Date(Number(row.at) || Date.now()).toLocaleString())),
+              h('div', { class: 'notice-actions' },
+                button('', { size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 12), ariaLabel: '删除这条消息', onClick: () => app.removeMessage(row.id) })))
+          }))
+      const footer = rows.length
+        ? h('div', { style: { display: 'flex', justifyContent: 'flex-end', marginTop: '12px' } },
+          button('清空收件箱', { size: 'sm', variant: 'ghost', onClick: () => app.clearMessageInbox() }))
+        : null
+      return h('div', { class: 'overlay', 'data-overlay': '1', onClick: (event) => { if (event.target === event.currentTarget) app.closeModal() } },
+        h('div', { class: 'glass', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'fang-message-inbox-title', 'data-message-inbox': '1' },
+          h('div', { class: 'glass-head' },
+            h('div', { class: 'glass-head-main' },
+              h('div', { class: 'glass-title', id: 'fang-message-inbox-title' }, icon('inbox', 16), `消息收件箱（${rows.length}）`),
+              h('div', { class: 'glass-sub' }, '所有弹窗、提醒和消息都会在 30 秒内自动收入这里，不会长期霸占界面。')),
+            button('', { variant: 'quiet', size: 'sm', iconOnly: true, icon: icon('close', 15), ariaLabel: '关闭', onClick: () => app.closeModal() })),
+          h('div', { class: 'glass-body' }, list, footer)))
     }
 
     // ── 分身 Web UI / 未知宿主 的说明页 ───────────────────────────────────
@@ -5910,7 +6481,12 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             toggle('autostartForks', '自动启动分身（watchdog 下次启动生效）', eff.autostartForks === true),
             toggle('supervise', '崩溃自动重启（立即生效）', eff.supervise === true),
             h('span', { style: { color: 'var(--f-text-3)' } },
-              `持久化：${persisted.exists ? '已保存' : '默认值'}${data.forker?.enabled === true ? ' · forker 看护中' : ''}`))))
+              `持久化：${persisted.exists ? '已保存' : '默认值'}${data.forker?.enabled === true ? ' · forker 看护中' : ''}`),
+            button('多开二次确认（仍限 1）', {
+              size: 'sm', variant: 'ghost', fk: 'multi-fork-confirm',
+              title: '记录一次显式确认并审计；生产路径仍硬限 1，不会开启第二个分身',
+              onClick: () => void app.confirmMultiFork(),
+            }))))
     }
 
     function renderApp(S, app) {
@@ -6066,12 +6642,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         else if (S.modal.kind === 'restart') frag.append(renderRestartModal(S, app))
         else if (S.modal.kind === 'safeMode') frag.append(renderSafeModeModal(S, app))
         else if (S.modal.kind === 'pagefile') frag.append(renderPagefileModal(S, app))
+        else if (S.modal.kind === 'messageInbox') frag.append(renderMessageInboxModal(S, app))
         else if (S.modal.kind === 'migrationReport') frag.append(renderMigrationReportModal(S, app))
         else if (S.modal.kind === 'diskHygiene') frag.append(renderDiskHygieneModal(S, app))
         else if (S.modal.kind === 'confirm') frag.append(renderConfirmModal(S, app))
         else if (S.modal.kind === 'prompt') frag.append(renderPromptModal(S, app))
       }
-      const toast = renderToast(S)
+      const toast = renderToast(S, app)
       if (toast) frag.append(toast)
       return frag
     }
@@ -6393,7 +6970,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       gray: { priority: '—', risk: 'info' },
     })
     const DECISION_RISK_LABEL = Object.freeze({ high: '高', medium: '中', low: '低', info: '信息' })
-    const INBOX_POLL_MS = 5000
+    const INBOX_POLL_MS = 15000       // v3.9.2：SSE 正常时只做低频兜底，5s→15s
     const inboxText = (value, max = 420) => {
       const text = String(value ?? '').trim()
       return text.length > max ? text.slice(0, max - 1) + '…' : text
@@ -7541,21 +8118,21 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       // v3.0.7 UI 分析日志：记录面板挂载与所有按钮/链接点击，供自动冒烟/诊断读取
       try {
         const doc = host?.ownerDocument ?? document
-        window.__fangUiLog = window.__fangUiLog || []
-        if (window.__fangUiLog.__bound !== true) {
+        const uiLog = ensureFangUiLog()
+        if (uiLog.__bound !== true) {
           doc.addEventListener('click', (ev) => {
             const el = ev.target && ev.target.closest ? ev.target.closest('button, [data-btn-id], a[href]') : null
             if (!el) return
-            window.__fangUiLog.push({
+            pushFangUiLog({
               at: Date.now(),
               btnId: el.getAttribute?.('data-btn-id') || null,
               text: String(el.textContent || '').trim().slice(0, 80),
               href: el.getAttribute?.('href') || null,
             })
           }, true)
-          window.__fangUiLog.__bound = true
+          uiLog.__bound = true
         }
-        window.__fangUiLog.push({ at: Date.now(), kind: 'panel-mount' })
+        pushFangUiLog({ at: Date.now(), kind: 'panel-mount' })
       } catch { /* 宿主无 window 时忽略 */ }
       const app = createConsole(host)
       const unmountDiagnostics = mountDiagnostics(app, host)

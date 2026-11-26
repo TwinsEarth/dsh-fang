@@ -19,7 +19,8 @@ test('browser watchdog skips CDP when the sample window has not elapsed', () => 
   assert.match(orchestrator, /cdpSampled: cdpDue && cdpOk/)
 })
 
-test('host memory query is skipped when there is no fork or browser', () => {
-  assert.match(orchestrator, /const active = \[\.\.\.tasks\.values\(\), \.\.\.runtimeBrowsers\.values\(\)\]\.some/)
-  assert.match(orchestrator, /if \(!active\) return/)
+test('host memory is sampled every tick even when no fork or browser exists', () => {
+  assert.doesNotMatch(orchestrator, /const active = \[\.\.\.tasks\.values\(\), \.\.\.runtimeBrowsers\.values\(\)\]\.some/)
+  assert.match(orchestrator, /A DSH host can OOM without any child/)
+  assert.match(orchestrator, /const memory = rememberMemory\(await readSystemMemory\(\)\)/)
 })

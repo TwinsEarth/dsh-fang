@@ -402,10 +402,18 @@ client half 不加载，侧栏与主面板整体不出现（见 `docs/CHANGELOG.
 - `test/forker.test.mjs`：29/29（含 stop 后 `fang-meta` pid/port/url 清空）；
 - 待真机：TOFUTURE 上线后按 open-fork 链路复测。
 
+**v3.8.11 补强**：
+- `taskView()` 每次读任务同时对账 task 与 `fang-meta`：task 留死 pid/port，或 meta 仍写 running，都会清成 failed/null；
+- `reconcileOpenState()` 把 meta 端口也纳入占用探测，18000 被元主运行态占用时标 `stale-port-conflict`；
+- `route` / `routeMethods` 的 catch 返回 `route`、`method`、`requestId`，并审计 `http-handler-threw` + stack；UI 的 `detail` 不再只有通用 code；
+- `pauseOtherForks()` await `f.stop()`，关浏览器与停进程分别兜底，`fork-auto-paused` 记录 `browserCloseOk/stopOk/metaSynced`。
+- 真机 TOFUTURE 现状：`tasks.json` 该 task 仍留 `pid=20800, port=18000`，而 `fang-meta.json` 已是 `stopped/null`；v3.8.11 的 taskView 对账会在下次列表/打开时清掉这两个残留。
+
 **防线**：
 1. 打开分身前先做状态归位；被别的进程占用的端口不得复用；
 2. 任何 open/restore 的异常都必须带 `step` 和 `detail`，不允许只剩 `handler-threw`；
-3. task 状态变化必须同步 `fang-meta`，旧 pid/port 不能留给 UI。
+3. task 状态变化必须同步 `fang-meta`，旧 pid/port 不能留给 UI；
+4. 500 必须能在审计链按 `requestId` 找到 route 与 stack。
 
 ---
 

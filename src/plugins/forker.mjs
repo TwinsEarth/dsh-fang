@@ -61,7 +61,7 @@ import {
   writeJsonAtomic,
   z,
 } from '../kernel/index.mjs'
-import { computeBackoff, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
+import { computeBackoff, evaluateCrashLoop, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
@@ -70,7 +70,7 @@ import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } 
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady, resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
 
-/** Repository root of this plugin (used as the @local/dsh-fang junction source). */
+/** Repository root of this plugin (used as the @twinsearth/fang-dsh-plugin junction source). */
 const FANG_ROOT = (() => {
   try {
     return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -117,16 +117,19 @@ const DEFAULTS = {
   profileTemplate: '',
   startTimeoutMs: 60000,
   maxForks: 8,
+  allowMultiFork: true,
   maxLogLines: 400,
   dataRoot: '',
   portPool: { ...DEFAULT_PORT_POOL },
   allocatePorts: true,
   cleanTemplate: true,
-  bundleName: '@local/dsh-fang',
+  bundleName: '@twinsearth/fang-dsh-plugin',
   forkProfileTag: 'web-base',
   jobObject: true,
   jobHeartbeatTimeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
   jobHeartbeatGraceMs: JOB_HEARTBEAT_GRACE_MS,
+  jobProcessMemoryMB: 2048,
+  jobTotalMemoryMB: 4096,
 }
 
 /** Files cloned from a (clean or mother) template profile: package.json + cordis*.yml only. */
@@ -145,7 +148,8 @@ export const Config = z
       .default('')
       .description('母版 profile 目录：clone 源 / node_modules junction 源（cleanTemplate 时只用后者）'),
     startTimeoutMs: z.natural().default(60000).description('等待 web URL 的启动超时（毫秒）'),
-    maxForks: z.natural().default(8).description('允许同时存活的分身上限'),
+    maxForks: z.natural().max(62).default(8).description('允许同时存活的分身上限；默认 8，硬上限 62，仍受 Commit 余量守卫限制'),
+    allowMultiFork: z.boolean().default(true).description('是否允许 maxForks>1；默认 true，仍受 Commit 余量守卫限制'),
     maxLogLines: z.natural().default(400).description('每个分身 stdout 滚动缓冲行数'),
     dataRoot: z.string().default('').description('注册表/端口表落盘根目录（空 = 仅进程内存）'),
     portPool: z
@@ -163,7 +167,7 @@ export const Config = z
       .boolean()
       .default(true)
       .description('true：用内置干净模板（不继承母体脏 profile）；false：沿用 profileTemplate'),
-    bundleName: z.string().default('@local/dsh-fang').description('干净模板 profile.bundles 的第三个 bundle'),
+    bundleName: z.string().default('@twinsearth/fang-dsh-plugin').description('干净模板 profile.bundles 的第三个 bundle'),
     coreMode: z.union([z.const('stock'), z.const('accelerated')]).default('stock').description('new fork uses stock or accelerated DSH core'),
     acceleratedCliPath: z.string().default('').description('accelerated DSH CLI path'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),
@@ -173,6 +177,10 @@ export const Config = z
       .description('Job helper 判定宿主心跳失效的阈值（毫秒）；宿主冻结时据此 TerminateJobObject'),
     jobHeartbeatGraceMs: z.natural().default(JOB_HEARTBEAT_GRACE_MS)
       .description('Job helper 对心跳缺失/过期额外宽限（毫秒）'),
+    jobProcessMemoryMB: z.natural().min(0).max(16384).default(2048)
+      .description('Windows Job Object 单进程提交内存上限（MB，0=不限制）；由 helper 设 JOB_OBJECT_LIMIT_PROCESS_MEMORY'),
+    jobTotalMemoryMB: z.natural().min(0).max(32768).default(4096)
+      .description('Windows Job Object 整个 Job 提交内存上限（MB，0=不限制）；由 helper 设 JOB_OBJECT_LIMIT_JOB_MEMORY'),
     // v3.1.12：新机器/新用户的干净分身默认不带第三方插件；这里按“安装不激活 /
     // 安装并激活”两组清单给每个新分身装默认插件（开关可关；失败不阻塞分身启动）。
     forkSeed: z
@@ -193,6 +201,10 @@ export const Config = z
       .description('backoff cap in milliseconds'),
     backoffJitter: z.number().min(0).max(0.9).default(SUPERVISION_DEFAULTS.jitter)
       .description('backoff jitter ratio'),
+    crashWindowMs: z.natural().min(60_000).max(60 * 60 * 1000).default(SUPERVISION_DEFAULTS.crashWindowMs)
+      .description('崩溃退避窗口（毫秒）；同一 fork 在窗口内达到阈值即停止自动重开'),
+    crashThreshold: z.natural().min(1).max(10).default(SUPERVISION_DEFAULTS.crashThreshold)
+      .description('窗口内崩溃次数阈值；默认 10 分钟 2 次'),
     healthPath: z.string().default(SUPERVISION_DEFAULTS.healthPath)
       .description('HTTP liveness path (any response counts)')
   })
@@ -630,6 +642,9 @@ export function apply(ctx, config) {
     exitedAt: rec.exitedAt ?? null,
     exit: rec.exit ?? null,
     lastError: rec.lastError ?? null,
+    crashCount: rec.crashCount ?? 0,
+    crashTimes: Array.isArray(rec.crashTimes) ? rec.crashTimes.slice(-10) : [],
+    quarantined: rec.quarantined ?? null,
     jobObject: jobObjectSummary(rec.jobObject),
   })
 
@@ -1071,6 +1086,7 @@ export function apply(ctx, config) {
       status: FORK_STATUS.PROVISIONING,
       exit: null,
       lastError: null,
+      quarantined: null,
     })
     records.set(forkId, rec)
     persist()
@@ -1092,6 +1108,8 @@ export function apply(ctx, config) {
       forkId: rec.forkId, status: rec.status, pid: rec.pid ?? null, port: rec.port ?? null,
       url: rec.url ?? null, profile: rec.profile ?? null,
       crashCount: rec.crashCount ?? 0, restartCount: rec.restartCount ?? 0,
+      crashTimes: Array.isArray(rec.crashTimes) ? rec.crashTimes.slice(-10) : [],
+      quarantined: rec.quarantined ?? null,
       lastError: rec.lastError ?? null, startedAt: rec.startedAt ?? null,
       exitedAt: rec.exitedAt ?? null, restartScheduledAt: rec.restartScheduledAt ?? null,
       jobObject: jobObjectSummary(rec.jobObject),
@@ -1186,7 +1204,9 @@ function applyForkExperimentalSurface(profileDir) {
     if (previous && (previous.running || previous.child || previous.starting)) {
       return { forkId, ok: false, error: 'already-running', pid: previous.pid ?? null }
     }
-    const maxForks = Math.max(1, Math.floor(Number(cfg.maxForks) || DEFAULTS.maxForks))
+    const maxForks = cfg.allowMultiFork === true
+      ? Math.max(1, Math.min(62, Math.floor(Number(cfg.maxForks) || DEFAULTS.maxForks)))
+      : 1
     if (starting() >= maxForks) return { forkId, ok: false, error: 'max-forks', limit: maxForks }
 
     const collector = createTextTail(maxLogLines)
@@ -1224,6 +1244,11 @@ function applyForkExperimentalSurface(profileDir) {
       log: collector,
       catalogCompat: spawnCatalogCompat,
     })
+    if (opts.resetCrashLoop === true) {
+      rec.crashTimes = []
+      rec.crashCount = 0
+      rec.quarantined = null
+    }
     records.set(forkId, rec)
     // v3.0.9 生产盘：每次打开/重启都从来源模板重放配置（原身 merged 或 clean template），
     // 分身自己的改动不保存；sessions/storages/buffer 与 node_modules junction 保持不动。
@@ -1437,6 +1462,7 @@ function applyForkExperimentalSurface(profileDir) {
           launchArgs = buildJobHostArgs({
             spec, forkId, homeDir, heartbeatFile, hostPid: process.pid,
             timeoutMs: cfg.jobHeartbeatTimeoutMs, graceMs: cfg.jobHeartbeatGraceMs,
+            memoryMb: cfg.jobProcessMemoryMB, totalMemoryMb: cfg.jobTotalMemoryMB,
           })
           launchShell = false
         } else {
@@ -1481,6 +1507,9 @@ function applyForkExperimentalSurface(profileDir) {
       rec.child = child
       rec.wrapperPid = child.pid ?? null
       rec.pid = child.pid ?? null
+      // Write PID synchronously at spawn, not on the URL-ready/tick path: a
+      // host freeze between spawn and URL would otherwise orphan the child.
+      writeForkMetaOf(rec)
       if (jobObject?.enabled) {
         jobObject.helperPid = child.pid ?? null
         const refreshJobReady = () => {
@@ -1496,6 +1525,7 @@ function applyForkExperimentalSurface(profileDir) {
             // PID shown in the UI / watchdog is the real fork host, not the wrapper.
             rec.pid = ready.childPid
             if (expectedPort > 0) bindPortToPid(expectedPort, forkId, ready.childPid)
+            writeForkMetaOf(rec)
           }
           if (jobReadyTimer) { clearInterval(jobReadyTimer); jobReadyTimer = null }
           persist()
@@ -1610,14 +1640,43 @@ function applyForkExperimentalSurface(profileDir) {
         }
         // A dead child never keeps a deterministic port: release it on every exit path.
         releaseReserved()
-        if (!rec.intentionalStop) rec.crashCount = (rec.crashCount ?? 0) + 1
+        let crashGate = null
+        if (!rec.intentionalStop) {
+          const at = nowMs()
+          const nextTimes = [...(Array.isArray(rec.crashTimes) ? rec.crashTimes : []), at]
+          crashGate = evaluateCrashLoop(nextTimes, at, {
+            windowMs: cfg.crashWindowMs,
+            threshold: cfg.crashThreshold,
+          })
+          rec.crashTimes = crashGate.times
+          rec.crashCount = (rec.crashCount ?? 0) + 1
+          if (crashGate.tripped) {
+            rec.quarantined = {
+              reason: 'crash-loop',
+              at,
+              count: crashGate.count,
+              threshold: crashGate.threshold,
+              windowMs: crashGate.windowMs,
+              firstAt: crashGate.firstAt,
+              lastAt: crashGate.lastAt,
+            }
+            rec.status = FORK_STATUS.CRASHED
+            rec.lastError = 'crash-loop-quarantined'
+            audit(AUDIT.FORK_CRASHED, {
+              forkId, crashLoop: true, count: crashGate.count,
+              threshold: crashGate.threshold, windowMs: crashGate.windowMs,
+            })
+            emit(EVENTS.crashed, { forkId, code: exitInfo.code, kind: exitInfo.kind, crashLoop: true, quarantined: rec.quarantined })
+            emit(EVENTS.restartFailed, { forkId, error: 'crash-loop-quarantined', terminal: true, quarantined: rec.quarantined })
+          }
+        }
         // A reap may already have deleted the record + home; never resurrect it from the exit handler.
         if (records.get(forkId) === rec) {
           // Dead child: never leave a stale running pid/port/url in fang-meta.
           writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null })
           persist()
         }
-        if (!rec.intentionalStop && runtimeSupervise && !disposed) {
+        if (!rec.intentionalStop && crashGate?.tripped !== true && runtimeSupervise && !disposed) {
           const plan = planRestart(exitInfo, rec, {
             maxRestarts: cfg.maxRestarts, baseMs: cfg.backoffBaseMs,
             maxMs: cfg.backoffMaxMs, jitter: cfg.backoffJitter,

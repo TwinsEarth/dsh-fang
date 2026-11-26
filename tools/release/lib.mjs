@@ -81,12 +81,19 @@ export function globMatch(rel, pattern) {
   return new RegExp(re + '$').test(rel.replace(/\\/g, '/'))
 }
 
+export function isPackageJunkPath(rel) {
+  const normalized = String(rel ?? '').replace(/\\/g, '/')
+  return normalized.split('/').some((part) => part === '.DS_Store' || part.startsWith('._'))
+}
+
 export function selectFilesFromManifest(pkg) {
   const out = new Set()
   for (const pattern of pkg.files ?? []) {
     for (const abs of walk(ROOT)) {
       const rel = path.relative(ROOT, abs).replace(/\\/g, '/')
       if (rel.startsWith('node_modules/') || rel.startsWith('dist/') || rel.startsWith('.git/')) continue
+      // macOS AppleDouble / Finder sidecars must never enter npm package metadata.
+      if (isPackageJunkPath(rel)) continue
       if (globMatch(rel, pattern)) out.add(rel)
     }
   }

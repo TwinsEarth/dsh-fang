@@ -11,6 +11,7 @@ import { matchesProcessIdentity } from './process-identity.mjs'
 const file = String(process.argv[2] ?? '')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 let hostChecked = false
+let stopReason = ''
 
 function alive(pid) {
   const value = Number(pid)
@@ -18,8 +19,31 @@ function alive(pid) {
   try { process.kill(value, 0); return true } catch { return false }
 }
 
+/**
+ * A live PID can still be a hung host. The host writes host-state.json every
+ * 15 s; if its mtime is older than hostStuckMs (default 60 s), the event loop
+ * is no longer making progress and the sidecar must drain children.
+ */
+function heartbeatState(data) {
+  const heartbeatFile = String(data?.heartbeatFile ?? '')
+  const limitMs = Math.max(15000, Number(data?.hostStuckMs) || 60000)
+  if (!heartbeatFile) return { available: false, stale: false, ageMs: null, limitMs }
+  try {
+    const stat = fs.statSync(heartbeatFile)
+    const ageMs = Math.max(0, Date.now() - Number(stat.mtimeMs))
+    return { available: true, stale: ageMs > limitMs, ageMs, limitMs, at: stat.mtime.toISOString() }
+  } catch {
+    // Before the first heartbeat the file may not exist. Do not kill on a
+    // missing path; host exit/PID identity still cover that window.
+    return { available: false, stale: false, ageMs: null, limitMs }
+  }
+}
+
 async function hostIsDead(data, hostPid) {
-  if (data.stop === true || data.clean === true || !alive(hostPid)) return true
+  if (data.stop === true || data.clean === true) { stopReason = 'host-clean-stop'; return true }
+  if (!alive(hostPid)) { stopReason = 'host-exit'; return true }
+  const heartbeat = heartbeatState(data)
+  if (heartbeat.stale) { stopReason = 'host-heartbeat-stale'; return { dead: true, heartbeat } }
   // A live PID is not enough: after a host crash its PID can be recycled.
   // hostStartedAt is written by the host at boot; mismatch means a different process.
   if (hostChecked || data.hostStartedAt === undefined || data.hostStartedAt === null) return false
@@ -27,7 +51,10 @@ async function hostIsDead(data, hostPid) {
   const identity = await readProcessIdentity(hostPid).catch(() => null)
   if (identity?.ok && identity.row && Number.isFinite(Number(identity.row.createdAt))) {
     const expected = Number(data.hostStartedAt)
-    if (Number.isFinite(expected) && Math.abs(Number(identity.row.createdAt) - expected) > 120_000) return true
+    if (Number.isFinite(expected) && Math.abs(Number(identity.row.createdAt) - expected) > 120_000) {
+      stopReason = 'host-pid-reused'
+      return true
+    }
   }
   return false
 }
@@ -71,13 +98,16 @@ async function main() {
     if (!data) { await sleep(2000); continue }
     const hostPid = Number(data.hostPid)
     const targets = Array.isArray(data.targets) ? data.targets : []
-    if (await hostIsDead(data, hostPid)) {
+    const dead = await hostIsDead(data, hostPid)
+    if (dead === true || dead?.dead === true) {
+      const reason = stopReason || 'host-dead'
+      const heartbeat = dead?.heartbeat ?? heartbeatState(data)
       const skipped = []
       for (const target of targets) {
         const result = await killTree(target)
         if (!result.ok) skipped.push({ pid: target.pid, kind: target.kind ?? '', taskId: target.taskId ?? '', error: result.error, detail: result.detail ?? null })
       }
-      try { fs.writeFileSync(file, JSON.stringify({ ...data, stoppedAt: new Date().toISOString(), stop: true, skipped }, null, 2)) } catch { /* ignore */ }
+      try { fs.writeFileSync(file, JSON.stringify({ ...data, stoppedAt: new Date().toISOString(), stop: true, stopReason: reason, heartbeat, skipped }, null, 2)) } catch { /* ignore */ }
       process.exit(0)
     }
     await sleep(2000)

@@ -135,3 +135,123 @@ test('open-fork: stale pid + port owned by another process returns a step error,
     fs.rmSync(dataRoot, { recursive: true, force: true })
   }
 })
+
+test('failed task with no port but stale fang-meta is repaired on listTasks', async () => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-stale-meta-'))
+  const forker = makeFakeForker(0)
+  const webServer = makeWebServerStub()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      memoryGuard: false,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const created = await svc.createTask({ title: 'stale-meta-only' })
+    assert.equal(created.ok, true)
+    // Reported shape: task row is failed with pid/port null, while fang-meta still
+    // claims it owns a now-foreign port.
+    forker.clear()
+    const metaFile = path.join(created.homeDir, 'fang-meta.json')
+    fs.writeFileSync(metaFile, JSON.stringify({
+      version: 1, status: 'running', pid: 19444, port: 18000,
+      url: 'http://127.0.0.1:18000/?token=old', profile: 'old-profile',
+    }, null, 2), 'utf8')
+    const task = svc.listTasks().find((row) => row.taskId === created.taskId)
+    assert.ok(task)
+    assert.equal(task.status, 'failed')
+    assert.equal(task.pid, null)
+    assert.equal(task.port, null)
+    assert.equal(task.url, null)
+    const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'))
+    assert.equal(meta.status, 'failed')
+    assert.equal(meta.pid, null)
+    assert.equal(meta.port, null)
+    assert.equal(meta.url, null)
+  } finally {
+    try { ctx.dispose() } catch { /* ignore */ }
+    fs.rmSync(dataRoot, { recursive: true, force: true })
+  }
+})
+
+test('handler-threw response carries route, method, requestId and audit record', async () => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-handler-threw-'))
+  const webServer = makeWebServerStub()
+  const ctx = makeCtx({ services: { webServer } })
+  const events = []
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      memoryGuard: false,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    ctx.on('fang/audit', (event) => events.push(event))
+    const svc = ctx.get(SERVICE.orchestrator)
+    svc.archiveTask = async () => { throw new Error('archive-route-boom') }
+    const route = webServer.find('POST', '/fang/api/tasks/archive')
+    assert.ok(route?.handler)
+    const res = makeRes()
+    await route.handler(makeReq({}, 'POST'), res)
+    const body = res.json()
+    assert.equal(res.statusCode, 500)
+    assert.equal(body.error, 'handler-threw')
+    assert.equal(body.route, '/fang/api/tasks/archive')
+    assert.equal(body.method, 'POST')
+    assert.match(String(body.requestId), /^req_/)
+    assert.equal(body.detail, 'archive-route-boom')
+    const audit = events.find((event) => event.kind === 'http-handler-threw')
+    assert.ok(audit, 'handler failure must be audited')
+    assert.equal(audit.data.route ?? audit.data.path, '/fang/api/tasks/archive')
+    assert.equal(audit.data.method, 'POST')
+    assert.equal(audit.data.requestId, body.requestId)
+    assert.match(String(audit.data.stack), /archive-route-boom/)
+  } finally {
+    try { ctx.dispose() } catch { /* ignore */ }
+    fs.rmSync(dataRoot, { recursive: true, force: true })
+  }
+})
+
+test('stale task pid/port is cleared even when fang-meta already says stopped', async () => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-stale-task-'))
+  const forker = makeFakeForker(0)
+  const webServer = makeWebServerStub()
+  const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
+  try {
+    orchestrator.apply(ctx, {
+      dataRoot,
+      forksRoot: path.join(dataRoot, 'forks'),
+      memoryGuard: false,
+      routes: { enabled: true, prefix: '/fang' },
+      authToken: TEST_AUTH_TOKEN,
+    })
+    const svc = ctx.get(SERVICE.orchestrator)
+    const created = await svc.createTask({ title: 'stale-task-only' })
+    assert.equal(created.ok, true)
+    forker.clear()
+    const metaFile = path.join(created.homeDir, 'fang-meta.json')
+    fs.writeFileSync(metaFile, JSON.stringify({
+      version: 1, status: 'stopped', pid: null, port: null, url: null,
+      profile: 'fang-stale-task-only',
+    }, null, 2), 'utf8')
+    const task = svc.listTasks().find((row) => row.taskId === created.taskId)
+    assert.ok(task)
+    assert.equal(task.pid, null)
+    assert.equal(task.port, null)
+    assert.equal(task.url, null)
+    assert.equal(task.health.adapter, 'pending')
+    const raw = JSON.parse(fs.readFileSync(path.join(dataRoot, 'tasks.json'), 'utf8'))
+    const stored = (raw.forks ?? []).find((row) => row.taskId === created.taskId)
+    assert.ok(stored)
+    assert.equal(stored.pid, null, 'tasks.json must not keep the dead pid')
+    assert.equal(stored.port, null, 'tasks.json must not keep the stale port')
+    assert.equal(stored.url, null, 'tasks.json must not keep the stale url')
+  } finally {
+    try { ctx.dispose() } catch { /* ignore */ }
+    fs.rmSync(dataRoot, { recursive: true, force: true })
+  }
+})

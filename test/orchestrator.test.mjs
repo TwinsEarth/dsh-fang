@@ -20,7 +20,7 @@ import { readForkSupervisionSettings } from '../src/lib/fork-supervision-setting
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
 test('orchestrator: 关闭浏览器默认走 DSH sessions.flush 的 adapter 桥，而不是空 unsupported', () => {
-  assert.equal(orchestrator.Config({}).forkFlushPath, '/fang/adapter/flush-session')
+  assert.equal(orchestrator.Config({}).forkFlushPath, '')
   assert.equal(orchestrator.Config({}).diagnosticLogMaxMB, 16)
   assert.equal(orchestrator.Config({}).diagnosticLogRetentionDays, 7)
 })
@@ -192,6 +192,12 @@ async function boot({ forker = makeFakeForker(), extraServices = {}, config = {}
     adapterPollMs: 40,
     routes: { enabled: false },
     authToken: TEST_AUTH_TOKEN,
+    // Legacy suite exercises multi-task flows. Production defaults (maxForks=1,
+    // allowMultiFork=false) are asserted in v388-redlines.test.mjs. The hook is
+    // honored only while NODE_TEST_CONTEXT is present.
+    __testOnlyAllowMultiFork: true,
+    allowMultiFork: true,
+    maxForks: 8,
     ...config,
   })
   const svc = ctx.get(SERVICE.orchestrator)
@@ -839,6 +845,9 @@ test('orchestrator: createTask({essenceId}) 用原身 merged 作模板，归档�
       forksRoot: path.join(dataRoot, 'forks'),
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const mirror = ctx.get(SERVICE.mirror)
     const svc = ctx.get(SERVICE.orchestrator)
@@ -1029,6 +1038,9 @@ test('orchestrator: 删除原身不删会话；分身保留且不能再派生；
       forksRoot: path.join(dataRoot, 'forks'),
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const mirror = ctx.get(SERVICE.mirror)
     const svc = ctx.get(SERVICE.orchestrator)
@@ -1162,6 +1174,9 @@ test('orchestrator: 官方实验性插件同步进官方派生与模板分身（
       profileTemplate: motherProfile,
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const mirror = ctx.get(SERVICE.mirror)
     const svc = ctx.get(SERVICE.orchestrator)
@@ -1439,7 +1454,8 @@ test('orchestrator: resolveCliPath derives the CLI from the current install root
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-cli-'))
   try {
     const cliName = process.platform === 'win32' ? 'dsh.cmd' : 'dsh'
-    const cli = path.join(root, 'resources', 'runtime', 'cli', 'bin', cliName)
+    const resourcesDir = process.platform === 'darwin' ? 'Resources' : 'resources'
+    const cli = path.join(root, resourcesDir, 'runtime', 'cli', 'bin', cliName)
     fs.mkdirSync(path.dirname(cli), { recursive: true })
     fs.writeFileSync(cli, '@echo off\n', 'utf8')
     assert.equal(
@@ -2503,6 +2519,9 @@ test('orchestrator: autostartForks respawns stopped tasks, skips archived/runnin
       adapterPollMs: 40,
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const svc = ctx.get(SERVICE.orchestrator)
     const a = await svc.createTask({ title: 'autostart-a' })

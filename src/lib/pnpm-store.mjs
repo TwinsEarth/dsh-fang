@@ -119,6 +119,73 @@ export function upsertNpmrc(profileDir, { storeDir, packageImportMethod = 'copy'
   return written
 }
 
+function defaultStoreForProfile(profileDir) {
+  const root = path.parse(path.resolve(String(profileDir ?? '.'))).root || ''
+  return root ? path.join(root, '.pnpm-store', 'v11') : ''
+}
+
+/**
+ * v3.9.4：Ensure `node_modules/.modules.yaml` exists. A runtime profile copied without
+ * this manifest is treated by pnpm as “installed by a different package manager”; pnpm
+ * then moves every package to `node_modules/.ignored` and the profile bundle
+ * (`@twinsearth/dsh-2xray`, …) cannot be resolved at boot.
+ *
+ * The manifest is copied from a valid source profile when available (keeping hoisted
+ * locations/layout), then its `storeDir`/`virtualStoreDir` are aligned with this profile.
+ * On a cross-drive profile the store is moved to the profile drive's pnpm store, which is
+ * exactly where pnpm 11 would otherwise choose.
+ * @param {string} modulesDir `node_modules` directory.
+ * @param {{sourceModulesDir?:string, profileDir?:string, virtualStoreDir?:string, packageManager?:string}} options
+ * @returns {{changed:boolean, created:boolean, file:string, storeDir:string, virtualStoreDir:string, error?:string}}
+ */
+export function ensureModulesManifest(modulesDir, { sourceModulesDir = '', profileDir = '', virtualStoreDir = '', packageManager = 'pnpm@11.0.0' } = {}) {
+  const modules = String(modulesDir ?? '')
+  if (!modules) return { changed: false, created: false, file: '', storeDir: '', virtualStoreDir: '', error: 'modules-dir-missing' }
+  const file = path.join(modules, MODULES_MANIFEST_FILE)
+  const virtual = String(virtualStoreDir || path.join(modules, '.pnpm'))
+  const sourceDir = String(sourceModulesDir ?? '')
+  const sourceFile = sourceDir ? path.join(sourceDir, MODULES_MANIFEST_FILE) : ''
+  const sourceManifest = sourceFile ? readJson(sourceFile, null) : null
+  let raw = readJson(file, null)
+  const created = !raw
+  if (!raw) {
+    if (sourceManifest && typeof sourceManifest === 'object') {
+      raw = JSON.parse(JSON.stringify(sourceManifest))
+    } else {
+      raw = {
+        hoistedDependencies: {},
+        hoistPattern: ['*'],
+        hoistedLocations: {},
+        included: {},
+        injectedDeps: {},
+        layoutVersion: 5,
+        nodeLinker: 'hoisted',
+        packageManager,
+        pendingBuilds: [],
+        publicHoistPattern: [],
+        skipped: [],
+        storeDir: defaultStoreForProfile(profileDir),
+        virtualStoreDir: virtual,
+        virtualStoreDirMaxLength: 120,
+      }
+    }
+    fs.mkdirSync(modules, { recursive: true })
+  }
+  // Keep the original store only when it is on the same drive as this profile; pnpm
+  // cannot use a C: store for a D: project and will silently pick D:\.pnpm-store\v11.
+  const profileRoot = path.parse(path.resolve(String(profileDir || modules))).root
+  const sourceRoot = raw.storeDir ? path.parse(path.resolve(String(raw.storeDir))).root : ''
+  if (!raw.storeDir || (profileRoot && sourceRoot && profileRoot.toLowerCase() !== sourceRoot.toLowerCase())) {
+    raw.storeDir = defaultStoreForProfile(profileDir) || raw.storeDir
+  }
+  raw.virtualStoreDir = virtual
+  if (typeof raw.packageManager !== 'string' || !raw.packageManager) raw.packageManager = packageManager
+  const before = created ? '' : readText(file)
+  const after = `${JSON.stringify(raw, null, 2)}\n`
+  if (before !== after) writeText(file, after)
+  return { changed: before !== after, created, file, storeDir: raw.storeDir, virtualStoreDir: virtual }
+}
+
 /**
  * Align a modules manifest with the store and virtual store pnpm will compute for this
  * project. pnpm's `checkCompatibility` refuses a modules directory whose recorded store
@@ -151,19 +218,31 @@ export function patchModulesManifest(modulesDir, { storeDir, virtualStoreDir } =
  * `.npmrc`, and aligns `node_modules/.modules.yaml` with the store and this project's
  * virtual store. The store location is taken from the module tree's own manifest, so the
  * chosen store always matches what the installed packages were linked from.
- * @param {{profileDir:string, modulesDir:string, sourceModulesDir?:string, nodeLinker?:string}} options
- * @returns {{ok:boolean, storeDir?:string, virtualStoreDir?:string, nodeLinker?:string, settings?:string[], npmrc?:string[], manifest?:object, error?:string}}
+ * @param {{profileDir:string, modulesDir:string, sourceModulesDir?:string, manifestSourceDir?:string, nodeLinker?:string}} options
+ * @returns {{ok:boolean, storeDir?:string, virtualStoreDir?:string, nodeLinker?:string, settings?:string[], npmrc?:string[], manifest?:object, manifestCreated?:boolean, error?:string}}
  */
-export function ensureEssenceRuntimePnpmConfig({ profileDir, modulesDir, sourceModulesDir = '', nodeLinker = 'hoisted' } = {}) {
+export function ensureEssenceRuntimePnpmConfig({ profileDir, modulesDir, sourceModulesDir = '', manifestSourceDir = '', nodeLinker = 'hoisted' } = {}) {
   const profile = String(profileDir ?? '')
   const modules = String(modulesDir ?? '')
   if (!profile || !modules) return { ok: false, error: 'profile-or-modules-missing' }
+  // v3.9.4：manifest 只补在已存在的复制产物上。node_modules 都不存在时说明复制/模板
+  // 本身失败，不能凭空造一个 manifest 把故障伪装成正常。
+  if (!fs.existsSync(modules)) return { ok: false, error: 'modules-manifest-missing' }
   const source = String(sourceModulesDir ?? '') || modules
+  const manifestSource = String(manifestSourceDir ?? '') || source
+  const hadManifest = readModulesManifest(modules) !== null
+  if (!hadManifest) {
+    // v3.9.4：copied profiles often lack .modules.yaml. Create it before reading, otherwise
+    // pnpm moves every package into .ignored and the profile bundle cannot resolve.
+    ensureModulesManifest(modules, { sourceModulesDir: manifestSource, profileDir: profile })
+  }
   const manifest = readModulesManifest(source) ?? readModulesManifest(modules)
   if (!manifest) return { ok: false, error: 'modules-manifest-missing' }
   const storeDir = manifest.storeDir
   if (!storeDir) return { ok: false, error: 'store-dir-unknown' }
   const virtualStoreDir = path.join(modules, '.pnpm')
+  // v3.9.4：manifest may have been created from the mother's C: store on a D: profile.
+  // Align storeDir with this profile before pnpm's compatibility check; patch below does it.
   const settings = upsertPnpmWorkspaceSettings(path.join(profile, PNPM_WORKSPACE_FILE), {
     nodeLinker,
     storeDir,
@@ -178,12 +257,13 @@ export function ensureEssenceRuntimePnpmConfig({ profileDir, modulesDir, sourceM
   const patched = patchModulesManifest(modules, { storeDir, virtualStoreDir })
   return {
     ok: patched.error === undefined,
-    storeDir,
+    storeDir: patched.storeDir ?? storeDir,
     virtualStoreDir,
     nodeLinker,
     settings,
     npmrc,
     manifest: patched,
+    manifestCreated: hadManifest === false,
     ...(patched.error === undefined ? {} : { error: patched.error }),
   }
 }

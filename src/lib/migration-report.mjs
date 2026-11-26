@@ -29,9 +29,13 @@ function summarize(report, file, dir, stat) {
         dataDir: safeText(source?.dataDir, 600),
       }))
     : []
+  const copied = number(report?.copied)
+  const targetFiles = number(report?.files?.targetFiles)
+  const applied = report?.apply === true && copied > 0
   return {
     ok: true,
-    found: true,
+    found: applied,
+    applied,
     dir,
     file,
     path: path.join(dir, file),
@@ -42,7 +46,7 @@ function summarize(report, file, dir, stat) {
     target: safeText(report?.target, 600),
     profile: safeText(report?.profile, 120),
     dshHome: safeText(report?.dshHome, 600),
-    copied: number(report?.copied),
+    copied,
     skipped: number(report?.skipped),
     conflictCount: conflicts.length,
     conflicts: conflicts.slice(0, MIGRATION_REPORT_MAX_CONFLICTS),
@@ -50,7 +54,7 @@ function summarize(report, file, dir, stat) {
     files: {
       tasksPath: safeText(report?.files?.tasks?.path, 600),
       tasksCount: number(report?.files?.tasks?.count),
-      targetFiles: number(report?.files?.targetFiles),
+      targetFiles,
       pointer: safeText(report?.files?.pointer, 600),
     },
     truncatedConflicts: Math.max(0, conflicts.length - MIGRATION_REPORT_MAX_CONFLICTS),
@@ -90,10 +94,14 @@ export function readLatestMigrationReport(fangHome, { maxBytes = MIGRATION_REPOR
     try {
       const report = JSON.parse(fs.readFileSync(candidate.file, 'utf8'))
       if (!report || typeof report !== 'object') continue
-      return summarize(report, candidate.name, dir, candidate.stat)
+      const summary = summarize(report, candidate.name, dir, candidate.stat)
+      // Dry-run (`apply:false`) and empty (`copied:0`) reports are not migrations;
+      // do not raise the panel banner or hide a real older migration behind them.
+      if (summary.found !== true) continue
+      return summary
     } catch {
       // Try the next newer-valid report; a partial write must not blank the panel.
     }
   }
-  return { ok: true, found: false, dir, error: reports.length ? 'reports-invalid' : 'no-reports' }
+  return { ok: true, found: false, dir, error: reports.length ? 'no-applied-report' : 'no-reports' }
 }

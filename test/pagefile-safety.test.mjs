@@ -22,11 +22,11 @@ const healthy = {
   commitFreeMB: 12000,
 }
 
-test('Safe Mode reset refuses a missing/disabled pagefile even when Commit is high', () => {
+test('v3.8.13: Safe Mode reset treats a missing pagefile as advisory, not a hard block', () => {
   const out = evaluateSafeModeReset({ ...healthy, hasPageFile: false, pageFileMB: 0 }, { hostCriticalFreeMB: 4096 })
-  assert.equal(out.ok, false)
-  assert.equal(out.error, 'pagefile-missing')
-  assert.equal(out.pageFileMB, 0)
+  assert.equal(out.ok, true)
+  assert.equal(out.pagefileMissing, true)
+  assert.equal(out.advisory, 'pagefile-missing')
 })
 
 test('Safe Mode reset refuses Commit below hostCriticalFreeMB', () => {
@@ -42,16 +42,16 @@ test('Safe Mode reset allows only a real pagefile plus Commit at/above critical 
   assert.equal(evaluateSafeModeReset({ ...healthy, commitFreeMB: 4095 }, { hostCriticalFreeMB: 4096 }).ok, false)
 })
 
-test('boot precheck forces Safe Mode whenever Win32_PageFileUsage is empty', () => {
-  assert.equal(pagefileRequiresSafeMode({ ok: true, supported: true, hasPageFile: false, pageFileMB: 0 }), true)
-  assert.equal(pagefileRequiresSafeMode({ ok: true, supported: true, hasPageFile: true, pageFileMB: 0 }), true)
+test('v3.8.13: boot precheck never forces Safe Mode for an empty Win32_PageFileUsage', () => {
+  assert.equal(pagefileRequiresSafeMode({ ok: true, supported: true, hasPageFile: false, pageFileMB: 0 }), false)
+  assert.equal(pagefileRequiresSafeMode({ ok: true, supported: true, hasPageFile: true, pageFileMB: 0 }), false)
   assert.equal(pagefileRequiresSafeMode(healthy), false)
   assert.equal(pagefileRequiresSafeMode({ ok: false, error: 'memory-probe-threw' }), false)
 })
 
-test('orchestrator wires boot gate before autostart and uses hostCritical threshold', () => {
+test('orchestrator wires advisory boot gate before autostart and uses hostCritical threshold', () => {
   const source = fs.readFileSync(new URL('../src/plugins/orchestrator.mjs', import.meta.url), 'utf8')
-  assert.match(source, /safe-mode-pagefile-missing/)
+  assert.match(source, /pagefile-missing-advisory/)
   assert.match(source, /async autostartForks\(input = \{\}\) \{[\s\S]{0,500}await bootPagefileGate[\s\S]{0,300}if \(safeMode\)/)
   assert.match(source, /hostCriticalFreeMB: cfg\.hostCriticalFreeMB/)
 })
@@ -70,7 +70,8 @@ test('Safe Mode blocks autostart before any fork/browser spawn', async () => {
   }
   const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
   try {
-    fs.writeFileSync(path.join(dataRoot, 'safe-mode.json'), JSON.stringify({ safeMode: true, reason: 'pagefile-missing' }, null, 2))
+    // v3.9.4：commit ≥2345 时普通内存闩锁会自动解除，只有 manual-panic 必须人工确认。
+    fs.writeFileSync(path.join(dataRoot, 'safe-mode.json'), JSON.stringify({ safeMode: true, reason: 'manual-panic' }, null, 2))
     orchestrator.apply(ctx, {
       dataRoot,
       forksRoot: path.join(dataRoot, 'forks'),
@@ -79,7 +80,8 @@ test('Safe Mode blocks autostart before any fork/browser spawn', async () => {
       authToken: TEST_AUTH_TOKEN,
     })
     const svc = ctx.get(SERVICE.orchestrator)
-    assert.equal(svc.safeModeStatus().safeMode, true)
+    const sm = await svc.safeModeStatus()
+    assert.equal(sm.safeMode, true)
     const out = await svc.autostartForks()
     assert.equal(out.ok, false)
     assert.equal(out.error, 'safe-mode')

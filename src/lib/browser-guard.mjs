@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 
+import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady } from './job-object.mjs'
+
 const EDGE_CANDIDATES = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -16,6 +18,41 @@ const CHROME_CANDIDATES = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
 ]
+
+/** 0xE0000008 is the Windows/Chromium OOM-family exit code observed in EB-21. */
+export const BROWSER_OOM_EXIT_CODE = 0xE0000008
+
+/** C5: only two safe lowering tiers; Idle is opt-in because it can starve UI. */
+export const PROCESS_PRIORITY_CLASSES = Object.freeze({
+  belowNormal: 'BelowNormal',
+  idle: 'Idle',
+})
+
+export function normalizePriorityClass(value = '') {
+  return String(value ?? '').trim().toLowerCase() === 'idle'
+    ? PROCESS_PRIORITY_CLASSES.idle
+    : PROCESS_PRIORITY_CLASSES.belowNormal
+}
+
+/** Normalize Node's signed/unsigned exit code and classify the common Chromium crashes. */
+export function classifyBrowserExit(code, signal = null) {
+  if (signal) return { code: null, unsignedCode: null, hex: null, signal: String(signal), kind: 'signal', oom: false }
+  const numeric = Number(code)
+  if (!Number.isFinite(numeric)) return { code: null, unsignedCode: null, hex: null, signal: null, kind: 'unknown', oom: false }
+  const unsigned = numeric >>> 0
+  const hex = `0x${unsigned.toString(16).toUpperCase().padStart(8, '0')}`
+  const kind = unsigned === 0 ? 'normal'
+    : unsigned === BROWSER_OOM_EXIT_CODE ? 'oom'
+      : unsigned === 0xC0000005 ? 'access-violation'
+        : unsigned === 0xC0000409 ? 'stack-buffer-overrun'
+          : unsigned === 0x80000003 ? 'breakpoint'
+            : 'abnormal'
+  return {
+    code: numeric, unsignedCode: unsigned, hex, signal: null, kind,
+    oom: unsigned === BROWSER_OOM_EXIT_CODE,
+  }
+}
+
 
 export function isLoweredPriorityClass(value) {
   const text = String(value ?? '').trim().toLowerCase()
@@ -71,9 +108,13 @@ export function summarizePriorityRows(rows = [], rootPid = 0) {
 }
 
 /** Build the PowerShell one-shot tree sampler. Exported so tests can assert recursion and safety. */
-export function buildPriorityTreeScript(rootPid) {
+export function buildPriorityTreeScript(rootPid, priorityClass = 'BelowNormal') {
   const root = Math.floor(Number(rootPid))
   if (!Number.isInteger(root) || root <= 0) throw new Error('invalid-pid')
+  const targetClass = normalizePriorityClass(priorityClass)
+  const skipClasses = targetClass === PROCESS_PRIORITY_CLASSES.idle
+    ? '@("Idle")'
+    : '@("Idle","BelowNormal")'
   return [
     `$root = ${root}`,
     '$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId',
@@ -112,9 +153,9 @@ export function buildPriorityTreeScript(rootPid) {
     '  }',
     '  $before = [string]$p.PriorityClass',
     '  $changed = $false; $skipped = $false; $setError = $null',
-    '  if ($before -in @("Idle","BelowNormal")) { $skipped = $true }',
+    `  if ($before -in ${skipClasses}) { $skipped = $true }`,
     '  else {',
-    '    try { $p.PriorityClass = "BelowNormal"; $changed = $true } catch { $setError = $_.Exception.Message }',
+    `    try { $p.PriorityClass = "${targetClass}"; $changed = $true } catch { $setError = $_.Exception.Message }`,
     '    try { $p.Refresh() } catch {}',
     '  }',
     '  $after = [string]$p.PriorityClass',
@@ -124,10 +165,11 @@ export function buildPriorityTreeScript(rootPid) {
   ].join('\n')
 }
 
-function setRootPriorityFallback(pid) {
+function setRootPriorityFallback(pid, priorityClass = 'BelowNormal') {
+  const targetClass = normalizePriorityClass(priorityClass)
   return new Promise((resolve) => {
     try {
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).PriorityClass = 'BelowNormal'`], { windowsHide: true, timeout: 5000 }, (error) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).PriorityClass = '${targetClass}'`], { windowsHide: true, timeout: 5000 }, (error) => {
         resolve(error ? { ok: false, error: String(error.message ?? error), rootOnly: true, partial: true } : { ok: true, rootOnly: true, partial: true })
       })
     } catch (error) { resolve({ ok: false, error: String(error?.message ?? error), rootOnly: true, partial: true }) }
@@ -139,11 +181,11 @@ function setRootPriorityFallback(pid) {
  * children may or may not inherit the root priority; the tree is sampled before
  * and after so callers can audit what actually changed.
  */
-export async function lowerProcessPriority(pid, { timeoutMs = 10000 } = {}) {
+export async function lowerProcessPriority(pid, { timeoutMs = 10000, priorityClass = 'BelowNormal' } = {}) {
   const value = Number(pid)
   if (process.platform !== 'win32' || !Number.isInteger(value) || value <= 0) return { ok: false, error: 'unsupported' }
   let script = ''
-  try { script = buildPriorityTreeScript(value) } catch (error) { return { ok: false, error: String(error?.message ?? error) } }
+  try { script = buildPriorityTreeScript(value, priorityClass) } catch (error) { return { ok: false, error: String(error?.message ?? error) } }
   const output = await new Promise((resolve) => {
     try {
       execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
@@ -153,12 +195,12 @@ export async function lowerProcessPriority(pid, { timeoutMs = 10000 } = {}) {
     } catch (error) { resolve({ ok: false, error: String(error?.message ?? error) }) }
   })
   if (!output.ok) {
-    const fallback = await setRootPriorityFallback(value)
+    const fallback = await setRootPriorityFallback(value, priorityClass)
     return { ...fallback, tree: false, detail: output.error }
   }
   const parsed = parsePowerShellJson(output.stdout)
   if (parsed === null) {
-    const fallback = await setRootPriorityFallback(value)
+    const fallback = await setRootPriorityFallback(value, priorityClass)
     return { ...fallback, tree: false, detail: 'priority-json-parse-failed' }
   }
   const rows = Array.isArray(parsed) ? parsed : [parsed]
@@ -197,7 +239,7 @@ export async function freePort(start = 19300, end = 19400) {
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
 /** Launch an isolated app window and wait for its CDP endpoint. */
-export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [] }) {
+export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [], onExit = null, jobObject = null, priorityClass = 'BelowNormal' }) {
   if (!exe || !fs.existsSync(exe)) return { ok: false, error: 'browser-unavailable' }
   fs.mkdirSync(profileDir, { recursive: true })
   fs.mkdirSync(logDir, { recursive: true })
@@ -222,31 +264,119 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
     '--js-flags=--max-old-space-size=2048',
     ...extraArgs,
   ]
+  // Windows: the browser tree must be owned by a kernel Job, not just taskkill.
+  // The helper starts the browser suspended, assigns it to the job, then resumes.
+  const useJob = jobObject?.enabled === true
+  let jobPaths = null
+  let helperPath = ''
+  let helperArgs = []
+  if (useJob) {
+    helperPath = String(jobObject.helperPath ?? '')
+    const homeDir = String(jobObject.homeDir ?? '')
+    if (!helperPath || !fs.existsSync(helperPath) || !homeDir) {
+      return { ok: false, error: 'job-object-unavailable', detail: 'browser-job-helper-missing' }
+    }
+    jobPaths = jobObjectPaths(homeDir)
+    if (!jobPaths) return { ok: false, error: 'job-object-unavailable', detail: 'browser-job-home-missing' }
+    fs.mkdirSync(path.dirname(jobPaths.readyFile), { recursive: true })
+    // A stale ready file from the previous browser would hand us a dead PID.
+    try { fs.rmSync(jobPaths.readyFile, { force: true }) } catch { /* best effort */ }
+    helperArgs = buildJobHostArgs({
+      spec: { command: exe, args, shell: false },
+      forkId: String(jobObject.forkId ?? `browser-${port}`),
+      homeDir,
+      heartbeatFile: String(jobObject.heartbeatFile ?? ''),
+      hostPid: Number(jobObject.hostPid ?? process.pid),
+      timeoutMs: jobObject.timeoutMs,
+      graceMs: jobObject.graceMs,
+      memoryMb: jobObject.processMemoryMB,
+      totalMemoryMb: jobObject.totalMemoryMB,
+    })
+  }
   let child
   try {
-    child = spawn(exe, args, { detached: false, stdio: 'ignore', windowsHide: false })
+    child = useJob
+      ? spawn(helperPath, helperArgs, { detached: false, stdio: 'ignore', windowsHide: true })
+      : spawn(exe, args, { detached: false, stdio: 'ignore', windowsHide: false })
   } catch (error) {
     return { ok: false, error: 'browser-spawn-failed', detail: String(error?.message ?? error) }
   }
   child.on('error', () => {})
+  const helperPid = Number(child.pid)
+  let browserPid = useJob ? 0 : helperPid
+  let jobReady = null
+  const exitPid = () => Number(browserPid) || helperPid
+  if (typeof onExit === 'function') {
+    child.once('exit', (code, signal) => {
+      try {
+        onExit({
+          ...classifyBrowserExit(code, signal),
+          pid: exitPid(),
+          helperPid: useJob ? helperPid : null,
+          at: Date.now(),
+          logFile,
+          crashDir,
+          profileDir,
+          jobObject: useJob ? jobObjectSummary({ enabled: true, ready: browserPid > 0, mode: 'kill-on-close' }) : null,
+        })
+      } catch { /* diagnostics must never crash the host */ }
+    })
+  }
   child.unref?.()
-  const pid = Number(child.pid)
+  if (useJob) {
+    const deadline = Date.now() + 10000
+    let lastJob = null
+    while (Date.now() < deadline) {
+      await sleep(100)
+      const ready = readJobReady(jobPaths.readyFile)
+      lastJob = ready
+      if (ready.error) {
+        try { child.kill() } catch { /* ignore */ }
+        return { ok: false, error: 'job-object-launch-failed', detail: ready.error, helperPid }
+      }
+      if (ready.ok && ready.childPid > 0) { browserPid = ready.childPid; jobReady = ready; break }
+      if (!isPidAlive(helperPid)) break
+    }
+    if (!(browserPid > 0)) {
+      try { child.kill() } catch { /* ignore */ }
+      return { ok: false, error: 'job-object-unavailable', detail: lastJob?.error ?? 'job-ready-timeout', helperPid }
+    }
+  }
   let ready = false
   for (let i = 0; i < 40; i += 1) {
     await sleep(250)
-    if (!isPidAlive(pid)) break
+    if (!isPidAlive(exitPid())) break
     try {
       const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1000) })
       if (response.ok) { ready = true; break }
     } catch { /* not ready */ }
   }
   if (!ready) {
-    try { await closeManagedBrowser({ pid, port }) } catch { /* ignore */ }
-    return { ok: false, error: 'browser-cdp-timeout', pid }
+    try { await closeManagedBrowser({ pid: exitPid(), port }) } catch { /* ignore */ }
+    if (useJob && helperPid > 0) { try { child.kill() } catch { /* ignore */ } }
+    return { ok: false, error: 'browser-cdp-timeout', pid: exitPid(), helperPid: useJob ? helperPid : null }
   }
   let priority = null
-  try { priority = await lowerProcessPriority(pid) } catch (error) { priority = { ok: false, error: String(error?.message ?? error) } }
-  return { ok: true, pid, port, profileDir, logFile, crashDir, exe, priority }
+  try { priority = await lowerProcessPriority(exitPid(), { priorityClass }) } catch (error) { priority = { ok: false, error: String(error?.message ?? error) } }
+  return {
+    ok: true,
+    pid: exitPid(),
+    helperPid: useJob ? helperPid : null,
+    port,
+    profileDir,
+    logFile,
+    crashDir,
+    exe,
+    priority,
+    jobObject: useJob ? jobObjectSummary({
+      enabled: true,
+      ready: true,
+      mode: 'kill-on-close',
+      helperPid: jobReady?.helperPid ?? helperPid,
+      childPid: jobReady?.childPid ?? browserPid,
+      jobName: jobReady?.jobName ?? '',
+    }) : null,
+  }
 }
 
 export async function closeManagedBrowser({ pid, port, graceMs = 3000, timeoutMs = 3000 }) {
@@ -290,6 +420,41 @@ async function cdpTargets(port) {
     return Array.isArray(list) ? list.filter((item) => item.type === 'page' && item.webSocketDebuggerUrl) : []
   } catch { return [] }
 }
+
+/** A profile must expose exactly one app page; DevTools/extension pages are not user tabs. */
+export function selectExtraPageTargets(targets = [], maxPages = 1) {
+  const keep = Math.max(1, Math.floor(Number(maxPages) || 1))
+  const pages = (Array.isArray(targets) ? targets : []).filter((target) => {
+    const type = String(target?.type ?? '')
+    const url = String(target?.url ?? '')
+    return type === 'page' && !/^(devtools|chrome-extension|edge-extension):/i.test(url)
+  })
+  // `--app=` can still leave an about:blank tab; keep the real http(s) app page
+  // first so the singleton rule never closes the page the user is looking at.
+  const ordered = [
+    ...pages.filter((target) => /^https?:/i.test(String(target?.url ?? ''))),
+    ...pages.filter((target) => !/^https?:/i.test(String(target?.url ?? ''))),
+  ]
+  return ordered.length > keep ? ordered.slice(keep) : []
+}
+
+/** Close extra app windows/tabs in one fork profile; never touches the first app page. */
+export async function enforceSinglePageTarget(port, { maxPages = 1 } = {}) {
+  const targets = await cdpTargets(port)
+  const extras = selectExtraPageTargets(targets, maxPages)
+  if (extras.length === 0) return { ok: true, count: targets.length, closed: [] }
+  const closed = []
+  for (const target of extras) {
+    const id = String(target.id ?? '')
+    if (!id) continue
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/close/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(1000) })
+      if (response.ok) closed.push({ id, url: String(target.url ?? '').slice(0, 300) })
+    } catch { /* the watchdog retries on the next tick */ }
+  }
+  return { ok: closed.length === extras.length, count: targets.length, closed, extras: extras.length }
+}
+
 
 function cdpEvaluate(wsUrl, expression, timeoutMs = 2500) {
   return cdpCommand(wsUrl, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: false }, timeoutMs).then((result) => result?.result?.value ?? null)
@@ -349,6 +514,22 @@ export async function flushManagedBrowser(port) {
     return true;
   })()`, 1200)
   return { ok: true }
+}
+
+/**
+ * Experimental hidden-tab pause. Chromium supports Page.setWebLifecycleState
+ * with 'frozen'/'active'; callers must keep this off by default until a real
+ * fork page has been verified to wake up and accept input after 'active'.
+ */
+export async function setManagedBrowserLifecycle(port, state) {
+  const normalized = state === 'frozen' ? 'frozen' : 'active'
+  const targets = await cdpTargets(port)
+  if (!targets.length) return { ok: false, state: normalized, error: 'no-page' }
+  const target = targets.find((item) => item.url?.startsWith('http://127.0.0.1:')) ?? targets[0]
+  await cdpCommand(target.webSocketDebuggerUrl, 'Page.enable', {}, 1500)
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Page.setWebLifecycleState', { state: normalized }, 1500)
+  if (!result || typeof result !== 'object') return { ok: false, state: normalized, error: 'cdp-lifecycle-failed' }
+  return { ok: true, state: normalized }
 }
 
 export async function sampleManagedBrowser(port) {

@@ -270,7 +270,7 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
   assert.equal(defaults.token, '')
   assert.equal(defaults.eventCapacity, 1000)
   assert.equal(defaults.commandCacheSize, 500)
-  assert.equal(defaults.heartbeatMs, 5000)
+  assert.equal(defaults.heartbeatMs, 15000)
   assert.equal(adapterModule._internals.MAX_FILE_BYTES, 1024 * 1024)
   assert.equal(adapterModule._internals.MAX_TOTAL_BYTES, 2 * 1024 * 1024)
   assert.equal(adapterModule._internals.ADAPTER_PROTOCOL_VERSION, ADAPTER_PROTOCOL_VERSION)
