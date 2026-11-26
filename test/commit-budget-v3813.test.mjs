@@ -41,15 +41,14 @@ test('v3.8.13: evaluateForkCommitBudget flags aggregate overage and remaining re
   assert.equal(over.remainingMB, 0)
 })
 
-test('v3.8.13: Config accepts legacy maxForks>1 but defaults to 1; apply clamps', () => {
-  assert.equal(orchestrator.Config({}).maxForks, 1)
+test('v3.9.4: Config defaults maxForks to 8 and accepts up to hard limit 62', () => {
+  assert.equal(orchestrator.Config({}).maxForks, 8)
   assert.equal(orchestrator.Config({ maxForks: 1 }).maxForks, 1)
-  // Legacy profile patches may still say 8; rejecting them makes the whole
-  // plugin invalid. Accept at the schema boundary, then clamp in apply().
   assert.equal(orchestrator.Config({ maxForks: 8 }).maxForks, 8)
+  assert.equal(orchestrator.Config({ maxForks: 62 }).maxForks, 62)
 })
 
-test('v3.8.13: production apply ignores maxForks/allowMultiFork and reports limit 1', async () => {
+test('v3.9.4: production apply honors maxForks 8 instead of forced 1', async () => {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-v3813-max-'))
   const ctx = makeCtx({ services: { [SERVICE.forker]: { async spawn() { throw new Error('no-spawn') }, status() { return { running: false } }, list() { return [] } }, webServer: makeWebServerStub() } })
   try {
@@ -62,7 +61,9 @@ test('v3.8.13: production apply ignores maxForks/allowMultiFork and reports limi
       maxForks: 8,
     })
     const svc = ctx.get(SERVICE.orchestrator)
-    assert.equal(svc.status().tasks.max, 1)
+    assert.equal(svc.status().tasks.max, 8)
+    assert.equal(svc.status().capacity.slots, 8)
+    assert.equal(svc.status().capacity.hardMax, 62)
   } finally {
     try { ctx.dispose() } catch { /* ignore */ }
     fs.rmSync(dataRoot, { recursive: true, force: true })
@@ -73,7 +74,7 @@ test('v3.8.13: orchestrator wires reserve into config, pre-spawn gate, 5s tick, 
   const source = fs.readFileSync(new URL('../src/plugins/orchestrator.mjs', import.meta.url), 'utf8')
   assert.match(source, /forkCommitHostReserveMB: z\.number\(\)[\s\S]{0,120}default\(HOST_COMMIT_RESERVE_MB_DEFAULT\)/)
   assert.match(source, /source: 'create-fork', failClosed: true/)
-  assert.match(source, /source: 'host-watchdog-5s'/)
+  assert.match(source, /source: 'host-watchdog-15s'/)
   assert.match(source, /reserveMB: cfg\.forkCommitHostReserveMB/)
   assert.match(source, /forkCommitLimitMB: budget\.limitMB/)
 })
@@ -88,10 +89,10 @@ test('v3.8.13: every spawn path records a provisional PID timestamp before CIM',
 })
 
 test('v3.8.13: pagefile absence is advisory and cannot force Safe Mode', async () => {
-  const low = orchestrator.decidePagefileBootPolicy({ ok: true, hasPageFile: false, pageFileMB: 0, commitFreeMB: 1024, physicalFreeMB: 1024 })
+  const low = orchestrator.decidePagefileBootPolicy({ ok: true, hasPageFile: false, pageFileMB: 0, commitFreeMB: 500, physicalFreeMB: 500 })
   assert.equal(low.safeMode, false)
   assert.equal(low.advisory, 'pagefile-missing')
   assert.equal(low.reason, 'pagefile-missing-low-free')
   assert.equal(orchestrator.pagefileRequiresSafeMode({ ok: true, hasPageFile: false, pageFileMB: 0 }), false)
-  assert.equal(orchestrator.Config({}).memoryMinFreeMB, 3000)
+  assert.equal(orchestrator.Config({}).memoryMinFreeMB, 999)
 })

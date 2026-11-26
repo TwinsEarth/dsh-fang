@@ -70,7 +70,8 @@ test('Safe Mode blocks autostart before any fork/browser spawn', async () => {
   }
   const ctx = makeCtx({ services: { [SERVICE.forker]: forker, webServer } })
   try {
-    fs.writeFileSync(path.join(dataRoot, 'safe-mode.json'), JSON.stringify({ safeMode: true, reason: 'pagefile-missing' }, null, 2))
+    // v3.9.4：commit ≥2345 时普通内存闩锁会自动解除，只有 manual-panic 必须人工确认。
+    fs.writeFileSync(path.join(dataRoot, 'safe-mode.json'), JSON.stringify({ safeMode: true, reason: 'manual-panic' }, null, 2))
     orchestrator.apply(ctx, {
       dataRoot,
       forksRoot: path.join(dataRoot, 'forks'),
@@ -79,7 +80,8 @@ test('Safe Mode blocks autostart before any fork/browser spawn', async () => {
       authToken: TEST_AUTH_TOKEN,
     })
     const svc = ctx.get(SERVICE.orchestrator)
-    assert.equal(svc.safeModeStatus().safeMode, true)
+    const sm = await svc.safeModeStatus()
+    assert.equal(sm.safeMode, true)
     const out = await svc.autostartForks()
     assert.equal(out.ok, false)
     assert.equal(out.error, 'safe-mode')

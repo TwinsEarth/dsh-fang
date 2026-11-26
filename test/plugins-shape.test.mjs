@@ -125,7 +125,7 @@ test('compose mode mounts every plugin of the current role through one row', asy
 test('package exports + bundle patch reference every row (install preflight)', async () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.name, '@local/dsh-fang')
-  assert.equal(pkg.version, '3.9.1')
+  assert.equal(pkg.version, '3.9.4')
   assert.ok(pkg.dsh?.bundle?.patch, 'dsh.bundle.patch is required to be a bundle')
   assert.ok(fs.existsSync(path.join(ROOT, pkg.dsh.bundle.patch)), 'bundle patch file exists')
   assert.equal(pkg.dsh?.client?.platform, 'web', '浏览器 client half 必须启用（插件可脱离桌面端使用）')
@@ -140,7 +140,7 @@ test('package exports + bundle patch reference every row (install preflight)', a
   const patch = fs.readFileSync(path.join(ROOT, pkg.dsh.bundle.patch), 'utf8')
   for (const spec of PLUGINS) {
     // the orchestrator row must be the BARE package name so the client half is discovered
-    const expected = spec.file === 'orchestrator' ? '@local/dsh-fang' : `@local/dsh-fang/${spec.file}`
+    const expected = spec.file === 'orchestrator' ? '@twinsearth/fang-dsh-plugin' : `@twinsearth/fang-dsh-plugin/${spec.file}`
     assert.ok(patch.includes(expected), `patch must reference ${spec.file}`)
   }
   assert.ok(patch.includes('id: fang-adapter'), 'adapter row present')
@@ -148,3 +148,4 @@ test('package exports + bundle patch reference every row (install preflight)', a
   // 2026-11-21（v3.5.8）：会话目录要能展示「已归档」分组（灰色只读），因此 allowArchived 必须开启。
   assert.match(patch, /id: fang-session-catalog[\s\S]{0,240}allowArchived:\s*true/, 'session catalog must expose archived sessions for the UI group')
 })
+

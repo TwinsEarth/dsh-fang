@@ -24,8 +24,9 @@ const browserGuard = read('src/lib/browser-guard.mjs')
 const jobObject = read('src/lib/job-object.mjs')
 const jobHostC = read('native/win32/fang-job-host.c')
 
-test('v3.8.10 measure 1: host self Private/RSS + CommitFree every 5 s, even with no forks', () => {
-  assert.match(orchestrator, /setInterval\(\(\) => \{ void hostWatchdogTick\(\) \}, 5000\)/)
+test('v3.9.4 measure 1: host self Private/RSS + CommitFree every 15 s, even with no forks', () => {
+  assert.match(orchestrator, /setInterval\(\(\) => \{ void hostWatchdogTick\(\) \}, HOST_WATCHDOG_INTERVAL_MS\)/)
+  assert.match(orchestrator, /HOST_WATCHDOG_INTERVAL_MS = 15000/)
   assert.match(orchestrator, /const hostWatchdogTick = async \(\) => \{[\s\S]*?hostWatchdogTick/)
   const body = orchestrator.slice(orchestrator.indexOf('const hostWatchdogTick'), orchestrator.indexOf('const cleanupOrphanForks'))
   assert.equal(/const active = \[\.\.\.tasks\.values/.test(body), false, 'no active-child early return')
@@ -74,13 +75,11 @@ test('v3.8.10 measure 4: fork and browser are both wrapped by a Windows Job', ()
   assert.deepEqual(peMachine('native/win32/fang-job-host-arm64.exe'), { machine: 0xaa64, size: 54784 })
 })
 
-test('v3.8.13 measure 5: maxForks is hard-limited to 1 at runtime', () => {
-  assert.match(orchestrator, /maxForks: z\.number\(\)\.min\(1\)\.max\(64\)\.default\(HARD_MAX_FORKS\)/)
-  assert.match(orchestrator, /兼容旧配置的容量字段/)
+test('v3.9.4 measure 5: maxForks defaults to 8, hard cap 62', () => {
+  assert.match(orchestrator, /maxForks: z\.number\(\)\.min\(1\)\.max\(HARD_MAX_FORKS\)\.default\(DEFAULT_MAX_FORKS\)/)
   assert.match(orchestrator, /const effectiveMaxForks = \(\) => \{?[\s\S]{0,80}HARD_MAX_FORKS/)
-  assert.match(orchestrator, /maxForks>1 只记录 requested/)
-  assert.match(forker, /maxForks: 1/)
-  assert.match(forker, /allowMultiFork: false/)
+  assert.match(forker, /maxForks: 8/)
+  assert.match(forker, /allowMultiFork: true/)
 })
 
 test('v3.8.10 measure 6: fork/browser tree is lowered, host not lowered', () => {
@@ -91,12 +90,12 @@ test('v3.8.10 measure 6: fork/browser tree is lowered, host not lowered', () => 
   assert.equal(/lowerProcessPriority\(process\.pid\)/.test(orchestrator), false)
 })
 
-test('v3.8.10 measure 7/8: crash loop enters Safe Mode and never auto-restores', () => {
+test('v3.9.4 measure 7/8: crash loop enters Safe Mode and never auto-restores', () => {
   assert.match(orchestrator, /recent\.length >= 2/)
   assert.match(orchestrator, /safeModeReason = 'crash-loop-10m'/)
   assert.match(orchestrator, /hostAdmissionClosed = true/)
   assert.match(orchestrator, /autostart-refused/)
-  assert.match(orchestrator, /const timer = setInterval\(\(\) => \{ void hostWatchdogTick\(\) \}, 5000\)/)
+  assert.match(orchestrator, /const timer = setInterval\(\(\) => \{ void hostWatchdogTick\(\) \}, HOST_WATCHDOG_INTERVAL_MS\)/)
   // No code calls restoreTask/startTask from boot or watchdog.
   const autoRestore = orchestrator.match(/setTimeout\([^)]*restoreTask|setInterval\([^)]*restoreTask/g) ?? []
   assert.equal(autoRestore.length, 0)
@@ -112,7 +111,7 @@ test('v3.8.10 measure 9: Panic closes all browser/forks and clears live identity
 test('v3.8.13 measure 10: aggregate fork commit 40% plus a 4 GB host reserve', () => {
   assert.match(orchestrator, /forkCommitShareLimit: z\.number\(\)[\s\S]{0,100}default\(FORK_COMMIT_SHARE_DEFAULT\)/)
   assert.match(orchestrator, /forkCommitHostReserveMB: z\.number\(\)[\s\S]{0,120}default\(HOST_COMMIT_RESERVE_MB_DEFAULT\)/)
-  assert.match(orchestrator, /hostCriticalFreeMB: z\.number\(\)[\s\S]{0,100}default\(4096\)/)
+  assert.match(orchestrator, /hostCriticalFreeMB: z\.number\(\)[\s\S]{0,100}default\(SAFE_MODE_AUTO_CLEAR_COMMIT_MB\)/)
   assert.match(orchestrator, /hostEmergencyFreeMB: z\.number\(\)[\s\S]{0,100}default\(2048\)/)
   assert.match(orchestrator, /evaluateForkCommitBudget\(\{/)
   assert.match(orchestrator, /!budget\.ok \|\| share > emergency/)

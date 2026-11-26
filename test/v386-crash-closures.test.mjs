@@ -47,7 +47,7 @@ test('v3.8.6: pagefile evidence covers PagingFiles={} and CommitLimit≈RAM', ()
 test('v3.8.13: no-pagefile policy is advisory and never refuses a fork', () => {
   const memory = { ok: true, supported: true, hasPageFile: false, pageFileMB: 0 }
   assert.equal(evaluatePagefileSingleFork(memory, { activeForks: 0 }).ok, true)
-  assert.equal(evaluatePagefileSingleFork(memory, { activeForks: 0 }).limited, true)
+  assert.equal(evaluatePagefileSingleFork(memory, { activeForks: 0 }).limited, false)
   assert.equal(evaluatePagefileSingleFork(memory, { activeForks: 1 }).ok, true)
   assert.equal(evaluatePagefileSingleFork(memory, { activeForks: 1 }).advisory, 'pagefile-missing')
   assert.equal(evaluatePagefileSingleFork({ ok: true, supported: true, hasPageFile: true, pageFileMB: 1024 }, { activeForks: 1 }).ok, true)

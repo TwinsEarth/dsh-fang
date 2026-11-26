@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { Config, HARD_MAX_FORKS } from '../src/plugins/orchestrator.mjs'
+import { Config, DEFAULT_MAX_FORKS, HARD_MAX_FORKS } from '../src/plugins/orchestrator.mjs'
 import { isPackageJunkPath, selectFilesFromManifest } from '../tools/release/lib.mjs'
 import { cleanLocaleSidecars } from '../tools/release/clean-locale-sidecars.mjs'
 
@@ -13,15 +13,17 @@ const root = path.resolve(import.meta.dirname, '..')
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 const patch = fs.readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8')
 
-test('maxForks accepts legacy 8 without rejecting plugin config; runtime default stays 1', () => {
-  assert.equal(Config({}).maxForks, HARD_MAX_FORKS)
+test('v3.9.4: maxForks defaults to 8, hard limit 62', () => {
+  assert.equal(Config({}).maxForks, DEFAULT_MAX_FORKS)
   assert.equal(Config({ maxForks: 8 }).maxForks, 8)
-  assert.equal(HARD_MAX_FORKS, 1)
+  assert.equal(Config({ maxForks: 62 }).maxForks, 62)
+  assert.equal(HARD_MAX_FORKS, 62)
+  assert.equal(DEFAULT_MAX_FORKS, 8)
 })
 
-test('cordis patch no longer injects maxForks: 8 into orchestrator/forker', () => {
-  assert.equal((patch.match(/^\s*maxForks: 1\s*$/gm) || []).length, 2)
-  assert.equal((patch.match(/^\s*maxForks: 8\s*$/gm) || []).length, 0)
+test('cordis patch keeps the 8-fork default capacity', () => {
+  assert.equal((patch.match(/^\s*maxForks: 8\s*$/gm) || []).length, 2)
+  assert.equal((patch.match(/^\s*maxForks: 1\s*$/gm) || []).length, 0)
 })
 
 test('AppleDouble and Finder sidecars are identified as package junk', () => {
@@ -37,7 +39,7 @@ test('package manifest filters sidecars and ships the locale cleanup hook', () =
   assert.equal(files.includes('locale/en.json'), true)
   assert.equal(files.includes('locale/zh.json'), true)
   assert.equal(files.includes('tools/release/clean-locale-sidecars.mjs'), true)
-  assert.equal(pkg.scripts?.postinstall, 'node tools/release/clean-locale-sidecars.mjs')
+  assert.equal(pkg.scripts?.postinstall, 'node tools/release/clean-apple-double.mjs && node tools/release/clean-locale-sidecars.mjs')
 })
 
 test('source locale directory contains only valid language-id JSON files', () => {
@@ -59,3 +61,4 @@ test('postinstall cleanup removes AppleDouble locale sidecars only', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+

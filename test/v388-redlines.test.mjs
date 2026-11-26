@@ -16,16 +16,16 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'fang-v388-'))
 
-test('v3.8.8 config: maxForks defaults to 1 and multi-fork is explicit', () => {
+test('v3.8.8 config: v3.9.4 defaults to 8 slots with multi-fork explicit', () => {
   const cfg = Config({})
-  assert.equal(cfg.maxForks, 1)
-  assert.equal(cfg.allowMultiFork, false)
+  assert.equal(cfg.maxForks, 8)
+  assert.equal(cfg.allowMultiFork, true)
   assert.equal(cfg.browserJobObject, true)
   assert.equal(cfg.forkCommitWarnShare, 0.3)
   assert.equal(cfg.forkCommitSevereShare, 0.35)
   assert.equal(cfg.forkCommitShareLimit, 0.4)
   assert.equal(cfg.hostWarnFreeMB, 8192)
-  assert.equal(cfg.hostCriticalFreeMB, 4096)
+  assert.equal(cfg.hostCriticalFreeMB, 2345)
   assert.equal(cfg.hostEmergencyFreeMB, 2048)
 })
 
@@ -103,7 +103,7 @@ test('v3.8.8 sidecar sees the fork PID immediately after spawn', () => {
   assert.match(source, /writeWatchdog\(\)/)
   const forker = read('src/plugins/forker.mjs')
   assert.match(forker, /rec\.pid = child\.pid \?\? null[\s\S]{0,300}writeForkMetaOf\(rec\)/)
-  assert.match(forker, /allowMultiFork: z\.boolean\(\)\.default\(false\)/)
+  assert.match(forker, /allowMultiFork: z\.boolean\(\)\.default\(true\)/)
   assert.match(forker, /cfg\.allowMultiFork === true/)
 })
 

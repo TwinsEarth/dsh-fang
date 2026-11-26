@@ -21,11 +21,11 @@ test('Safe Mode reset is gated by an explicit checklist modal', () => {
   assert.ok(client.includes('旧数据已迁移到规范数据根'))
   assert.ok(client.includes('已释放内存并确认没有运行中的分身'))
   assert.match(client, /required\.every\(\(key\) => checks\[key\] === true\)/)
-  assert.match(client, /app\.confirmSafeModeReset\(\)/)
+  assert.match(client, /app\.confirmSafeModeReset\(/)
 })
 
 test('v3.8.13: pagefile missing is advisory on both client and server', () => {
-  assert.match(client, /const pagefileMissing = reset\?\.pagefileMissing === true \|\| \(memory\?\.ok === true && \(/)
+  assert.match(client, /const pagefileMissing = reset\?\.pagefileMissing === true \|\| \(freshMemory\?\.ok === true && \(/)
   assert.match(client, /页面文件缺失（仅提示）/)
   assert.match(client, /不再因此禁止解除 Safe Mode/)
   assert.match(client, /页面文件缺失只作提示，不再阻止解除/)
@@ -33,14 +33,14 @@ test('v3.8.13: pagefile missing is advisory on both client and server', () => {
   assert.match(orchestrator, /resetSafeMode: async/)
   assert.match(orchestrator, /evaluateSafeModeReset\(memory, \{ hostCriticalFreeMB: cfg\.hostCriticalFreeMB \}\)/)
   assert.match(orchestrator, /advisory: pagefileMissing \? 'pagefile-missing' : null/)
-  assert.match(orchestrator, /const out = await service\.resetSafeMode\(\)/)
+  assert.match(orchestrator, /const out = await service\.resetSafeMode\(body\)/)
   assert.match(orchestrator, /safe-mode-reset-postcheck/)
   assert.match(orchestrator, /stage: 'postcheck'/)
 })
 
 test('Safe Mode reset guard is server-authoritative and fail-closed on unknown memory', () => {
   assert.match(orchestrator, /reset: \{\n\s+canReset: guard\.ok === true/)
-  assert.match(orchestrator, /memoryKnown: memorySnapshot\?\.ok === true/)
+  assert.match(orchestrator, /memoryKnown: memory\?\.ok === true/)
   assert.match(orchestrator, /pagefileMissing,/)
   assert.match(client, /const reset = S\.safeMode\?\.data\?\.reset \|\| null/)
   assert.match(client, /reset\?\.canReset === false && reset\?\.error === 'memory-probe-unavailable'/)
@@ -53,8 +53,7 @@ test('header Safe Mode action opens the checklist instead of resetting directly'
   assert.doesNotMatch(client, /button\('解除 Safe Mode'[\s\S]{0,260}?safe-mode\/reset/, 'header must not bypass the checklist')
 })
 
-test('migration report call site uses the local function, not an optional app API', () => {
-  assert.match(client, /onClick: \(\) => openMigrationReport\(\)/)
-  assert.doesNotMatch(client, /app\.openMigrationReport\(\)/)
-  assert.doesNotMatch(client, /typeof app\.openMigrationReport !== 'function'/)
+test('migration report call site uses the app surface (v3.9.3 closure fix)', () => {
+  assert.match(client, /app\.openMigrationReport\(\)/)
+  assert.match(client, /dismissMigrationReportBanner\(S, app, file\)/)
 })

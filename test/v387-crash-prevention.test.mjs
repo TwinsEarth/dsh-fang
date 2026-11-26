@@ -26,11 +26,11 @@ test('v3.8.13: pagefile boot policy is advisory and never forces Safe Mode', () 
   const healthyCommit = { ok: true, pagefileMissing: true, hasPageFile: false, pageFileMB: 0, commitFreeMB: 8192, physicalFreeMB: 8192 }
   const policy = orchestrator.decidePagefileBootPolicy(healthyCommit, { hostCriticalFreeMB: 4096 })
   assert.equal(policy.safeMode, false)
-  assert.equal(policy.singleForkOnly, true)
+  assert.equal(policy.singleForkOnly, false)
   assert.equal(policy.reason, 'pagefile-missing-advisory')
   assert.equal(policy.advisory, 'pagefile-missing')
 
-  const lowFree = { ...healthyCommit, physicalFreeMB: 1024, commitFreeMB: 1024 }
+  const lowFree = { ...healthyCommit, physicalFreeMB: 500, commitFreeMB: 500 }
   const low = orchestrator.decidePagefileBootPolicy(lowFree, { hostCriticalFreeMB: 4096 })
   assert.equal(low.safeMode, false)
   assert.equal(low.reason, 'pagefile-missing-low-free')
@@ -110,13 +110,14 @@ test('v3.8.7: browser crashes log raw exit/OOM/last metrics and 10m twice quaran
   assert.match(orchestratorSource, /exit\.kind !== 'normal'/)
 })
 
-test('v3.8.7: status exposes pagefile fields and missing pagefile hard-limits one browser', () => {
+test('v3.9.4: status exposes pagefile fields without hard-limiting browsers or forks', () => {
   assert.match(orchestratorSource, /pageFileMB: Number\(memorySnapshot\?\.pageFileMB\) \|\| 0/)
   assert.match(orchestratorSource, /hasPageFile: memorySnapshot\?\.hasPageFile === true/)
-  assert.match(orchestratorSource, /const max = pagefileMissing === true \? 1 : Math\.max/)
-  assert.match(orchestratorSource, /Native pagefile policy outranks maxOpenForkBrowsers/)
-  assert.ok(clientSource.includes('未启用页面文件，已强制单分身'))
-  assert.ok(clientSource.includes('最多只保留 1 个活跃分身'))
+  assert.match(orchestratorSource, /const max = Math\.max\(1, Number\(cfg\.maxOpenForkBrowsers\) \|\| 1\)/)
+  assert.equal(orchestratorSource.includes('Native pagefile policy outranks maxOpenForkBrowsers'), false)
+  assert.ok(clientSource.includes('未启用页面文件 · 仅提醒，不限制分身'))
+  assert.equal(clientSource.includes('未启用页面文件，已强制单分身'), false)
+  assert.equal(clientSource.includes('最多只保留 1 个活跃分身'), false)
 })
 
 test('v3.8.7: task card surfaces the last browser crash and classified close reason', () => {

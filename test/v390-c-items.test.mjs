@@ -10,8 +10,8 @@ const orchestrator = read('src/plugins/orchestrator.mjs')
 const browserGuard = read('src/lib/browser-guard.mjs')
 const client = read('client.js')
 
-test('C1 host metrics persist every 5s', () => {
-  assert.match(orchestrator, /export const HOST_STATE_WRITE_INTERVAL_MS = 5000/)
+test('C1 host metrics persist every 15s', () => {
+  assert.match(orchestrator, /export const HOST_STATE_WRITE_INTERVAL_MS = 15000/)
   assert.match(orchestrator, /setInterval\(writeHostHeartbeat, HOST_STATE_WRITE_INTERVAL_MS\)/)
 })
 
@@ -40,7 +40,7 @@ test('C4 multi-fork confirmation exists in HTTP and UI but never lifts hard limi
   assert.match(orchestrator, /multiForkStatus\(\)/)
   assert.match(orchestrator, /confirmMultiFork\(input = \{\}\)/)
   assert.match(orchestrator, /\/api\/forks\/multi-fork/)
-  assert.match(orchestrator, /enabled: false,\n\s+hardLimit: HARD_MAX_FORKS/)
+  assert.match(orchestrator, /enabled: limit > 1,\n\s+hardLimit: limit/)
   assert.match(client, /async function confirmMultiFork\(\)/)
   assert.match(client, /\/fang\/api\/forks\/multi-fork/)
   assert.match(client, /expected: 'MULTI-FORK'/)
@@ -58,9 +58,8 @@ test('C5 process priority exposes an Idle tier through both launch and call site
   assert.match(browserGuard, /\$p\.PriorityClass = "\$\{targetClass\}"/)
 })
 
-test('C6 migration report call no longer depends on the app API surface', () => {
-  assert.match(client, /onClick: \(\) => openMigrationReport\(\)/)
-  assert.doesNotMatch(client, /app\.openMigrationReport\(\)/)
-  assert.doesNotMatch(client, /typeof app\.openMigrationReport !== 'function'/)
-  assert.match(client, /probeMemory, openPagefileHelp, openMigrationReport, openDiskHygiene/)
+test('C6 migration report is called through the app surface', () => {
+  assert.match(client, /onClick: \(\) => app\.openMigrationReport\(\)/)
+  assert.doesNotMatch(client, /onClick: \(\) => openMigrationReport\(\)/)
+  assert.match(client, /probeMemory, openPagefileHelp, openMigrationReport,/)
 })

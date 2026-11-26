@@ -157,7 +157,7 @@ test('module surface + pure helpers (Config defaults / buildSpawnArgs / classify
   assert.deepEqual(defaults.portPool, { start: 18000, end: 18100 })
   assert.equal(defaults.allocatePorts, true)
   assert.equal(defaults.cleanTemplate, true)
-  assert.equal(defaults.bundleName, '@local/dsh-fang')
+  assert.equal(defaults.bundleName, '@twinsearth/fang-dsh-plugin')
   assert.equal(defaults.forkProfileTag, 'web-base')
 
   assert.deepEqual(forker.resolvePortPool({ start: 18000, end: 18100 }), { start: 18000, end: 18100 })
@@ -170,7 +170,7 @@ test('module surface + pure helpers (Config defaults / buildSpawnArgs / classify
     '@twinsearth/dsh-fang-node-compat',
     '@deepseek-ai/dsh-base',
     '@deepseek-ai/dsh-web-app',
-    '@local/dsh-fang',
+    '@twinsearth/fang-dsh-plugin',
   ])
   assert.equal(forker.buildTemplatePackageJson({ forkProfileTag: 'alt-tag' }).name, 'dsh-fang-fork-alt-tag')
 
@@ -428,7 +428,7 @@ test('provision in cleanTemplate mode builds the fork profile from a forker-owne
       '@twinsearth/dsh-fang-node-compat',
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
-      '@local/dsh-fang',
+      '@twinsearth/fang-dsh-plugin',
     ])
     assert.equal(pkg.dependencies, undefined, 'mother dependencies must never leak into a clean fork profile')
     assert.equal(readFile(path.join(result.profileDir, 'cordis.yml')).trim(), '[]')
@@ -542,7 +542,7 @@ test('provision failure paths + node_modules degradation in both template modes'
     assert.equal(isLink(path.join(degraded.profileDir, 'node_modules')), false)
     assert.deepEqual(
       JSON.parse(readFile(path.join(degraded.profileDir, 'package.json'))).dsh.profile.bundles,
-      ['@twinsearth/dsh-fang-node-compat', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@local/dsh-fang'],
+      ['@twinsearth/dsh-fang-node-compat', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'],
     )
   } finally {
     clean.ctx.dispose()
@@ -1353,3 +1353,4 @@ test('v2.7.3: supervise 放弃重启时 emit fang/fork-restart-failed (terminal=
     ctx.dispose()
   }
 })
+

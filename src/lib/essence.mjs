@@ -79,13 +79,19 @@ export const DEFAULT_OFFICIAL_PATCH_ENTRIES = Object.freeze([
   Object.freeze({ id: 'official-w2m', name: '@twinsearth/w2m-dsh-plugin', disabled: false }),
 ])
 
-/** VIP 配额表：原身数 / 子原身数 / 活跃会话数。归档会话不限。 */
+/**
+ * v3.9.4 元主配额：默认 3 个，任何 tier 的硬上限都是 6 个。
+ * 子元主与顶层元主共用同一硬上限，避免层级配额把总数放大到硬上限之外。
+ * 活跃会话数仍按 tier 分级；归档会话不限。
+ */
+export const ESSENCE_QUOTA_DEFAULT = 3
+export const ESSENCE_HARD_MAX = 6
 export const VIP_QUOTAS = Object.freeze({
-  free: Object.freeze({ maxEssences: 5, maxSubEssences: 5, maxActiveSessions: 10 }),
-  vip10: Object.freeze({ maxEssences: 10, maxSubEssences: 10, maxActiveSessions: 10 }),
-  vip30: Object.freeze({ maxEssences: 30, maxSubEssences: 30, maxActiveSessions: 30 }),
-  vip50: Object.freeze({ maxEssences: 50, maxSubEssences: 50, maxActiveSessions: 50 }),
-  vip100: Object.freeze({ maxEssences: 100, maxSubEssences: 100, maxActiveSessions: 100 }),
+  free: Object.freeze({ maxEssences: ESSENCE_QUOTA_DEFAULT, maxSubEssences: ESSENCE_QUOTA_DEFAULT, maxActiveSessions: 10 }),
+  vip10: Object.freeze({ maxEssences: ESSENCE_HARD_MAX, maxSubEssences: ESSENCE_HARD_MAX, maxActiveSessions: 10 }),
+  vip30: Object.freeze({ maxEssences: ESSENCE_HARD_MAX, maxSubEssences: ESSENCE_HARD_MAX, maxActiveSessions: 30 }),
+  vip50: Object.freeze({ maxEssences: ESSENCE_HARD_MAX, maxSubEssences: ESSENCE_HARD_MAX, maxActiveSessions: 50 }),
+  vip100: Object.freeze({ maxEssences: ESSENCE_HARD_MAX, maxSubEssences: ESSENCE_HARD_MAX, maxActiveSessions: 100 }),
 })
 
 export const VIP_TIERS = Object.freeze(Object.keys(VIP_QUOTAS))

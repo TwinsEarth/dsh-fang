@@ -148,7 +148,7 @@ export const Config = z
       .default('')
       .description('母版 profile 目录：clone 源 / node_modules junction 源（cleanTemplate 时只用后者）'),
     startTimeoutMs: z.natural().default(60000).description('等待 web URL 的启动超时（毫秒）'),
-    maxForks: z.natural().default(8).description('允许同时存活的分身上限；默认 8'),
+    maxForks: z.natural().max(62).default(8).description('允许同时存活的分身上限；默认 8，硬上限 62，仍受 Commit 余量守卫限制'),
     allowMultiFork: z.boolean().default(true).description('是否允许 maxForks>1；默认 true，仍受 Commit 余量守卫限制'),
     maxLogLines: z.natural().default(400).description('每个分身 stdout 滚动缓冲行数'),
     dataRoot: z.string().default('').description('注册表/端口表落盘根目录（空 = 仅进程内存）'),
@@ -1205,7 +1205,7 @@ function applyForkExperimentalSurface(profileDir) {
       return { forkId, ok: false, error: 'already-running', pid: previous.pid ?? null }
     }
     const maxForks = cfg.allowMultiFork === true
-      ? Math.max(1, Math.floor(Number(cfg.maxForks) || DEFAULTS.maxForks))
+      ? Math.max(1, Math.min(62, Math.floor(Number(cfg.maxForks) || DEFAULTS.maxForks)))
       : 1
     if (starting() >= maxForks) return { forkId, ok: false, error: 'max-forks', limit: maxForks }
 

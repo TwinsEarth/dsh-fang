@@ -20,7 +20,7 @@ test('client renders a visible migration banner and report modal', () => {
   assert.match(client, /数据迁移报告 · \$\{report\.stamp \|\| '未知时间'\}/)
   // The banner lives outside createConsole; it must go through the app surface.
   assert.match(client, /onClick: \(\) => app\.openMigrationReport\(\)/)
-  assert.match(client, /onClick: \(\) => dismissMigrationReportBanner\(S, app, file\)/)
+  assert.match(client, /app\.archiveNotice\?\.\([^\n]+\); dismissMigrationReportBanner\(S, app, file\)/)
   assert.match(client, /dismissMigrationReportBanner: \(file\) => dismissMigrationReportBanner\(S, app, file\)/)
   assert.doesNotMatch(client, /onClick: \(\) => openMigrationReport\(\)/)
   assert.match(client, /probeMemory, openPagefileHelp, openMigrationReport, dismissMigrationReportBanner: \(file\) => dismissMigrationReportBanner\(S, app, file\), openDiskHygiene/)

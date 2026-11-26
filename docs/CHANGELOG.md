@@ -1,3 +1,38 @@
+## v3.9.4（2026-11-26）
+**主题：配额/SafeMode 口径重定 + 页面文件去强制 + 消息收件箱 + 元主 bundle 修复**
+
+### 配额
+- 元主：默认配额 3，硬上限 6；`VIP_QUOTAS` 全部 tier 的 `maxEssences/maxSubEssences` 不得超过 6，free 为 3。
+- 分身：默认容量槽位 8，硬上限 62；`DEFAULT_MAX_FORKS=8`、`HARD_MAX_FORKS=62`，schema 与 forker 配置都硬夹到 62。`status.capacity` 返回 `slots/hardMax/defaultLimit/limit/used`，客户端不再硬编码 7 槽。
+
+### SafeMode / Commit
+- `SAFE_MODE_AUTO_CLEAR_COMMIT_MB=2345`：Commit 余量 ≥2345 MB 时，`safeModeStatus` 自动清除内存类 Safe Mode 闩锁，不需要手动点按钮；手动 Panic 与 crash-loop 闩锁不自动清除。
+- 用户仍可 `resetSafeMode({force:true})` 强制解除；强制解除不会自动拉起分身。
+- `FORK_COMMIT_HARD_MIN_MB=999`：CommitFree <999 MB 时，`memoryGate` 对所有派生/启动/打开/还原路径返回 `commit-critical`，禁止派生新分身、禁止启动已有分身；客户端以 7 秒可关闭弹窗提示。
+- `hostCriticalFreeMB` 默认从 4096 调整为 2345；`memoryMinFreeMB` 默认从 3000 调整为 999。
+
+### 页面文件
+- 取消“未启用页面文件，已强制单分身”：`decidePagefileBootPolicy` 的 `singleForkOnly` 固定 false，`evaluatePagefileSingleFork` 的 `limited` 固定 false。
+- 托管浏览器不再因页面文件缺失被压到 1 个；`maxOpenForkBrowsers` 是唯一并发口径。
+- 页面文件缺失只保留可关闭的黄色提醒；文案明确“仅提醒，不限制分身”，不要求用户设置虚拟缓存。
+
+### 消息与弹窗
+- 新增消息收件箱（localStorage `fang.messageInbox.v1`，上限 100 条）；顶部“消息 (n)”入口。
+- 所有 toast/通知 30 秒后自动归档进收件箱；toast 增加关闭按钮。
+- Safe Mode、页面文件、宿主压力、磁盘卫生、迁移报告横幅增加关闭按钮与 30 秒自动归档；关闭即归档。
+- 状态提示 `setNotice` 也走 30 秒归档定时器，不再长期霸屏。
+
+### 元主第三方插件
+- 修复 `cannot resolve profile bundle "@twinsearth/dsh-2xray"`：运行态 profile 缺少 `node_modules/.modules.yaml` 时，从母体复制并按目标盘对齐 `storeDir/virtualStoreDir`，防止 pnpm 把依赖移到 `.ignored`。
+- `syncProfileModulesFromMother` 优先从 `.ignored` 还原缺失包，再回退母体复制。
+
+### 测试
+- 新增 `test/v394-adjustments.test.mjs`（6 组），targeted 回归 79/79 PASS（v394 + 配额 + SafeMode + pagefile + host-redline）。
+- 全量测试结果见 `docs/AUDIT-v3.9.4.md`；不把 RED 写成 GREEN。
+
+### 发布
+- 本版执行三方发布：npm `@twinsearth/fang-dsh-plugin@3.9.4`、GitHub `v3.9.4` tag/Release、项目目录发布包与报告。
+
 ## v3.9.3（2026-11-26）
 **主题：迁移报告按钮闭包作用域修复 + 3.9.2 测试期望值校准**
 

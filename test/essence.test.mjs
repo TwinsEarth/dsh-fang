@@ -161,22 +161,22 @@ test('essence patch: 根列表与 {insert} 两种形状都能解析，序列化�
 })
 
 // ── 配额 ──────────────────────────────────────────────────────────────────
-test('essence quota: free 原身上限 5', () => {
-  assert.equal(checkEssenceQuota('free', 4).ok, true)
-  assert.equal(checkEssenceQuota('free', 5).ok, false)
-  assert.match(checkEssenceQuota('free', 5).reason, /5\/5/)
-  assert.match(checkEssenceQuota('free', 5).reason, /free/)
+test('essence quota: free 原身上限 3（v3.9.4）', () => {
+  assert.equal(checkEssenceQuota('free', 2).ok, true)
+  assert.equal(checkEssenceQuota('free', 3).ok, false)
+  assert.match(checkEssenceQuota('free', 3).reason, /3\/3/)
+  assert.match(checkEssenceQuota('free', 3).reason, /free/)
 })
 
-test('essence quota: vip100 原身上限 100', () => {
-  assert.equal(checkEssenceQuota('vip100', 99).ok, true)
-  assert.equal(checkEssenceQuota('vip100', 100).ok, false)
+test('essence quota: vip100 原身上限 6（硬上限，v3.9.4）', () => {
+  assert.equal(checkEssenceQuota('vip100', 5).ok, true)
+  assert.equal(checkEssenceQuota('vip100', 6).ok, false)
 })
 
 test('essence quota: 子原身配额独立', () => {
-  assert.equal(checkSubEssenceQuota('free', 4).ok, true)
-  assert.equal(checkSubEssenceQuota('free', 5).ok, false)
-  assert.equal(VIP_QUOTAS.vip30.maxSubEssences, 30)
+  assert.equal(checkSubEssenceQuota('free', 2).ok, true)
+  assert.equal(checkSubEssenceQuota('free', 3).ok, false)
+  assert.equal(VIP_QUOTAS.vip30.maxSubEssences, 6)
 })
 
 test('essence quota: 活跃会话配额（归档不限）', () => {
@@ -272,9 +272,9 @@ test('essence manager: 物化永不复制凭据（镜像与原身凭据都不进
   assert.equal(fs.existsSync(path.join(mergedCredentials, 'own.json')), false, '凭据不得进入派生 profile')
 })
 
-test('essence manager: free 配额上限 5，第 6 个拒绝', () => {
+test('essence manager: free 配额上限 3，第 4 个拒绝（v3.9.4）', () => {
   const { manager } = makeFixture()
-  for (let index = 0; index < 5; index += 1) manager.create({ name: `原身${index}`, tier: 'free' })
+  for (let index = 0; index < 3; index += 1) manager.create({ name: `原身${index}`, tier: 'free' })
   assert.throws(() => manager.create({ name: '超限' }), /essence quota exceeded/)
 })
 

@@ -53,7 +53,7 @@ import { describeMotherLink, probeLink, readSharedProfileSummary } from '../lib/
 import { MirrorManager } from '../lib/mirror.mjs'
 import { buildMirrorStatusResponse } from '../lib/mirror-etag.mjs'
 import { PreferencesStore } from '../lib/preferences.mjs'
-import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, VIP_QUOTAS, parsePatchEntries } from '../lib/essence.mjs'
+import { EssenceManager, OFFICIAL_ESSENCE_ID, OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, VIP_QUOTAS, ESSENCE_HARD_MAX, ESSENCE_QUOTA_DEFAULT, parsePatchEntries } from '../lib/essence.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { enforceCoreUiEntries } from '../lib/core-ui-plugins.mjs'
 import { ensureForkEmptySession, enforceForkSessionCap, summarizeForkSessions, FORK_SESSION_MAX, FORK_SESSION_MIN } from '../lib/fork-sessions.mjs'
@@ -230,7 +230,10 @@ export function isLiveForkForApprovals(_task, status) {
  * v3.8.13: a missing pagefile is advisory, not a hard prerequisite. The real
  * gate is usable free memory: CommitFree must keep the host-critical reserve.
  */
-export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096, force = false } = {}) {
+export const SAFE_MODE_AUTO_CLEAR_COMMIT_MB = 2345
+export const FORK_COMMIT_HARD_MIN_MB = 999
+
+export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = SAFE_MODE_AUTO_CLEAR_COMMIT_MB, force = false } = {}) {
   if (!memory || memory.ok !== true) {
     return { ok: false, error: 'memory-probe-unavailable', detail: '无法读取系统内存状态，拒绝解除 Safe Mode。' }
   }
@@ -265,6 +268,15 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096, force
   }
 }
 
+/** v3.9.4：Commit 余量达到 2345 MB 时，Safe Mode 闩锁自动解除，无需用户手动操作。 */
+export function shouldAutoClearSafeMode(memory, { autoClearCommitMB = SAFE_MODE_AUTO_CLEAR_COMMIT_MB, reason = '' } = {}) {
+  if (!memory || memory.ok !== true || memory.supported === false) return false
+  const why = String(reason ?? '')
+  // 手动 Panic 与崩溃循环是“人/历史”闩锁，不因当下 Commit 恢复而自动放行。
+  if (/manual-panic/.test(why) || /^crash-loop/.test(why)) return false
+  return (Number(memory.commitFreeMB) || 0) >= Math.max(0, Number(autoClearCommitMB) || 0)
+}
+
 /** Boot-time pagefile precheck is now advisory only; never force Safe Mode. */
 export function pagefileRequiresSafeMode(memory, { allowSingleFork = false } = {}) {
   return false
@@ -275,7 +287,7 @@ export function pagefileRequiresSafeMode(memory, { allowSingleFork = false } = {
  * Safe Mode condition. It only reports whether free memory is below the advisory
  * 3000 MB floor; the actual memory guard still uses `memoryMinFreeMB`.
  */
-export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = 4096, minFreeMB = 3000 } = {}) {
+export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = SAFE_MODE_AUTO_CLEAR_COMMIT_MB, minFreeMB = FORK_COMMIT_HARD_MIN_MB } = {}) {
   const missing = isPagefileMissing(memory)
   if (!missing) return { safeMode: false, singleForkOnly: false, reason: null, advisory: null }
   const commitFree = Number(memory?.commitFreeMB)
@@ -284,18 +296,21 @@ export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = 4096, mi
   const lowFree = Number.isFinite(freeMB) && freeMB < Number(minFreeMB)
   return {
     safeMode: false,
-    singleForkOnly: true,
+    // v3.9.4：页面文件缺失只提醒，绝不因此限制分身数量。
+    singleForkOnly: false,
     reason: lowFree ? 'pagefile-missing-low-free' : 'pagefile-missing-advisory',
     advisory: 'pagefile-missing',
     lowFree,
     freeMB,
     commitFreeMB: Number.isFinite(commitFree) ? commitFree : null,
     minFreeMB: Number(minFreeMB),
-    detail: '页面文件缺失：建议在 Windows 系统属性中设置页面文件；不强制阻止分身，仅按可用内存判断。',
+    detail: '页面文件缺失：建议在 Windows 系统属性中设置页面文件；仅提醒，不限制分身数量，实际准入只按 Commit 余量判断。',
   }
 }
 
-export const HARD_MAX_FORKS = 8
+// v3.9.4：分身默认容量 8，硬上限 62。maxForks 是准入配置，实际创建仍由内存/Commit 守卫裁决。
+export const DEFAULT_MAX_FORKS = 8
+export const HARD_MAX_FORKS = 62
 // C1: host-state.json lastMetrics lag follows this timer; 15s reduces the
 // heartbeat file write + host-state rewrite rate without losing crash evidence.
 export const HOST_STATE_WRITE_INTERVAL_MS = 15000
@@ -317,18 +332,18 @@ export const Config = z.object({
   // v3.9.2: restore the operator-facing 8-fork capacity. Memory/commit gates
   // still refuse new forks when the host is under pressure; this only removes
   // the unconditional single-fork clamp that made the quota useless.
-  maxForks: z.number().min(1).max(64).default(HARD_MAX_FORKS)
-    .description('允许同时存活的分身上限；默认 8，最大 64；实际创建仍受 Commit 余量守卫'),
+  maxForks: z.number().min(1).max(HARD_MAX_FORKS).default(DEFAULT_MAX_FORKS)
+    .description('允许同时存活的分身上限；默认 8，硬上限 62；实际创建仍受 Commit 余量守卫'),
   allowMultiFork: z.boolean().default(true)
     .description('是否允许 maxForks>1；默认 true；内存不足时由 memoryGuard 拒绝，而不是把配额改成 1'),
   memoryGuard: z.boolean().default(true)
     .description('创建/打开/还原分身前检查 CommitFree、Host JS heap 与 session 文件体量'),
-  memoryMinFreeMB: z.number().min(0).max(1048576).default(3000)
-    .description('创建/打开/还原分身前检查 Windows CommitFree 余量；v3.8.13 默认 3000 MB，不再因页面文件缺失而拒绝'),
+  memoryMinFreeMB: z.number().min(0).max(1048576).default(FORK_COMMIT_HARD_MIN_MB)
+    .description('创建/打开/还原分身前检查 Windows CommitFree 余量；v3.9.4 默认 999 MB，低于该值禁止派生和启动'),
   hostWarnFreeMB: z.number().min(0).max(1048576).default(8192)
     .description('宿主内存警告阈值（MB，仅提示）'),
-  hostCriticalFreeMB: z.number().min(0).max(1048576).default(4096)
-    .description('宿主紧急阈值（MB）：先杀托管浏览器，再停所有分身'),
+  hostCriticalFreeMB: z.number().min(0).max(1048576).default(SAFE_MODE_AUTO_CLEAR_COMMIT_MB)
+    .description('宿主 Commit 紧急阈值（MB）：v3.9.4 默认 2345；达到该值 Safe Mode 自动解除'),
   hostEmergencyFreeMB: z.number().min(0).max(1048576).default(2048)
     .description('宿主最低保留（MB）；低于此值进入 Safe Mode 并隔离'),
   hostJsHeapWarnMB: z.number().min(32).max(1048576).default(1024)
@@ -692,7 +707,7 @@ export function apply(ctx, config) {
   // `memoryGate`/`main-city` are the actual safety gates.
   const testOnlyMultiFork = Boolean(process.env.NODE_TEST_CONTEXT) && config?.__testOnlyAllowMultiFork === true
   const effectiveMaxForks = () => {
-    return Math.max(1, Math.min(64, Math.floor(Number(cfg.maxForks) || HARD_MAX_FORKS)))
+    return Math.max(1, Math.min(HARD_MAX_FORKS, Math.floor(Number(cfg.maxForks) || DEFAULT_MAX_FORKS)))
   }
   const forkHealthPath = String(cfg.forkHealthPath || '').trim() || forkHealthPathForPrefix(cfg.routes?.prefix)
   const forkPrefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
@@ -1310,6 +1325,8 @@ export function apply(ctx, config) {
     ...resolveMemoryThresholds(cfg, memorySnapshot?.ok === true ? memorySnapshot : lastGoodMemory),
     hostCriticalFreeMB: Number(cfg.hostCriticalFreeMB),
     memoryMinFreeMB: Number(cfg.memoryMinFreeMB),
+    safeModeAutoClearCommitMB: SAFE_MODE_AUTO_CLEAR_COMMIT_MB,
+    forkCommitHardMinMB: FORK_COMMIT_HARD_MIN_MB,
   })
   // Boot probe: the banner must be visible before the first gate/host tick even
   // when every fork is idle. A failed probe leaves memorySnapshot=null and the
@@ -1344,19 +1361,15 @@ export function apply(ctx, config) {
           lowFree: bootPolicy.lowFree === true,
         })
       }
-      if (bootPolicy.singleForkOnly === true) {
-        // Missing pagefile is advisory: never force Safe Mode for it alone.
-        // Clear only a pagefile-only latch; other Safe Mode reasons still hold.
-        if (safeMode && safeModeReason) {
-          const remaining = safeModeReason.split('+').filter((part) => part && !part.startsWith('pagefile-'))
-          safeMode = remaining.length > 0
-          safeModeReason = remaining.join('+')
-          persistSafeMode()
-        }
-        audit('pagefile-single-fork-boot', { action: 'boot', pageFileMB: Number(memory.pageFileMB) || 0, commitFreeMB: bootPolicy.commitFreeMB, lowFree: bootPolicy.lowFree === true })
-        return { ok: true, safeMode: false, singleForkOnly: true, reason: bootPolicy.reason, pageFileMB: Number(memory.pageFileMB) || 0, advisory: bootPolicy.advisory }
+      // v3.9.4：页面文件缺失不再改变准入。只保留一次提示性审计，绝不写
+      // single-fork 限制，也不因它回写 Safe Mode 状态。
+      if (bootPolicy.advisory === 'pagefile-missing') {
+        audit('pagefile-missing-advisory-only', {
+          action: 'boot', pageFileMB: Number(memory.pageFileMB) || 0, commitFreeMB: bootPolicy.commitFreeMB,
+          lowFree: bootPolicy.lowFree === true, enforcedSingleFork: false,
+        })
       }
-      return { ok: true, safeMode: false, pageFileMB: Number(memory.pageFileMB) || 0 }
+      return { ok: true, safeMode: false, pageFileMB: Number(memory.pageFileMB) || 0, advisory: bootPolicy.advisory }
     })()
   }
   const memoryGate = async (action) => {
@@ -1377,15 +1390,24 @@ export function apply(ctx, config) {
         return task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING
       }
     }).length
-    const pagefileLimit = evaluatePagefileSingleFork(memory, { activeForks })
-    if (pagefileLimit.ok !== true) {
-      audit('fork-pagefile-single-fork-refused', { action, activeForks, pageFileMB: Number(memory.pageFileMB) || 0 })
-      return pagefileLimit
-    }
-    if (pagefileLimit.limited === true) audit('fork-pagefile-single-fork', { action, activeForks, pageFileMB: Number(memory.pageFileMB) || 0 })
+    const pagefileNotice = evaluatePagefileSingleFork(memory, { activeForks })
+    // v3.9.4：页面文件缺失只是建议，不能作为拒绝派生/启动的依据。
+    if (pagefileNotice.limited === true) audit('fork-pagefile-advisory', { action, activeForks, pageFileMB: Number(memory.pageFileMB) || 0 })
     const decision = evaluateMemoryGuard(memory, { minFreeMB: cfg.memoryMinFreeMB })
-    if (decision.ok !== true) audit('fork-memory-low', { action, commitFreeMB: decision.commitFreeMB, minFreeMB: decision.minFreeMB })
-    return { ...decision, pagefileLimited: pagefileLimit.limited === true, activeForks }
+    if (decision.ok !== true) {
+      const commitFreeMB = Number(decision.commitFreeMB) || 0
+      const critical = commitFreeMB < FORK_COMMIT_HARD_MIN_MB
+      audit(critical ? 'fork-commit-critical' : 'fork-memory-low', { action, commitFreeMB, minFreeMB: decision.minFreeMB, hardMinMB: FORK_COMMIT_HARD_MIN_MB })
+      return {
+        ...decision,
+        error: critical ? 'commit-critical' : 'memory-low',
+        hardMinMB: FORK_COMMIT_HARD_MIN_MB,
+        detail: critical
+          ? `Commit 余量 ${commitFreeMB} MB 低于 ${FORK_COMMIT_HARD_MIN_MB} MB 硬底线：已禁止派生新分身和启动已有分身。`
+          : decision.detail || `Commit 余量 ${commitFreeMB} MB 低于准入阈值 ${decision.minFreeMB} MB。`,
+      }
+    }
+    return { ...decision, pagefileLimited: false, pagefileAdvisory: pagefileNotice.advisory ?? null, activeForks }
   }
 
   let sessionCompactBusy = false
@@ -1930,10 +1952,8 @@ export function apply(ctx, config) {
       }
     }
     const liveBrowsers = [...tasks.values(), ...runtimeBrowsers.values()].filter((item) => item.browser?.pid && isPidAlive(item.browser.pid))
-    // Native pagefile policy outranks maxOpenForkBrowsers: with no pagefile there
-    // may be exactly one active fork browser, regardless of config.
-    const pagefileMissing = memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false
-    const max = pagefileMissing === true ? 1 : Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
+    // v3.9.4：页面文件不再是并发限制条件；maxOpenForkBrowsers 是唯一配置口径。
+    const max = Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
     let liveCount = liveBrowsers.length
     for (const other of liveBrowsers) {
       if (other.taskId === task.taskId) continue
@@ -5189,6 +5209,14 @@ export function apply(ctx, config) {
         tasks: { total: list.length, ready, running, max: effectiveMaxForks(), list },
         // v1 兼容视图：Client 徽标与旧调用方仍读 forks.*
         forks: { total: list.length, running: ready + running, max: effectiveMaxForks(), list },
+        // v3.9.4：分身容量（默认 8 / 硬上限 62）；UI 读取这里而不是自己硬编码 7。
+        capacity: {
+          slots: effectiveMaxForks(),
+          hardMax: HARD_MAX_FORKS,
+          defaultLimit: DEFAULT_MAX_FORKS,
+          limit: effectiveMaxForks(),
+          used: list.filter((row) => row.status !== 'archived').length,
+        },
         audit: (() => {
           const health = auditHealth()
           return {
@@ -5269,8 +5297,9 @@ export function apply(ctx, config) {
           evidence: memorySnapshot?.pagingFilesEmpty === true ? 'PagingFiles={}'
             : memorySnapshot?.commitLimitNearRam === true ? 'CommitLimit≈RAM'
               : memorySnapshot?.pagefileMissing === true ? 'Win32_PageFileUsage 无分配' : null,
-          singleForkOnly: memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false,
-          maxConcurrentForks: (memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) ? 1 : effectiveMaxForks(),
+          singleForkOnly: false,
+          maxConcurrentForks: effectiveMaxForks(),
+          advisoryOnly: (memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) === true,
           safeMode: safeMode === true,
           admissionClosed: hostAdmissionClosed === true,
         },
@@ -5347,18 +5376,20 @@ export function apply(ctx, config) {
         memory = rememberMemory(await readSystemMemory())
       } catch { /* keep the last known sample */ }
       const guard = evaluateSafeModeReset(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
-      // A commit-free emergency is transient. Once Commit free is back above the
-      // critical reserve, clear that specific latch automatically; keep any
-      // crash-loop/other Safe Mode reason untouched.
-      if (safeMode && safeModeReason === 'host-emergency:commit-free-emergency' && guard.ok === true) {
+      // v3.9.4：Commit 余量 ≥2345 MB 时，Safe Mode 自动解除，不依赖用户点按钮；
+      // 用户仍可通过 resetSafeMode({force:true}) 强制解除。清理后不自动拉起分身，
+      // 新建/打开仍要经过 memoryGate（<999 MB 时直接拒绝）。
+      if (safeMode && shouldAutoClearSafeMode(memory, { autoClearCommitMB: SAFE_MODE_AUTO_CLEAR_COMMIT_MB, reason: safeModeReason })) {
+        const clearedReason = safeModeReason
         safeMode = false
         safeModeReason = ''
         hostAdmissionClosed = false
         persistSafeMode()
         audit('host-safe-mode-auto-clear', {
-          reason: 'commit-free-recovered',
-          commitFreeMB: guard.commitFreeMB,
-          minFreeMB: guard.minFreeMB,
+          reason: 'commit-recovered',
+          clearedReason,
+          commitFreeMB: Number(memory?.commitFreeMB) || 0,
+          autoClearCommitMB: SAFE_MODE_AUTO_CLEAR_COMMIT_MB,
         })
       }
       const pagefileMissing = memory ? isPagefileMissing(memory) : false
@@ -6123,6 +6154,17 @@ export function apply(ctx, config) {
     for (const name of names) {
       if (typeof name !== 'string' || !name || name.startsWith('@local/')) continue
       const target = path.join(String(profileDir), 'node_modules', ...name.split('/'))
+      // v3.9.4：pnpm 曾把“不同包管理器安装”的依赖移动到 .ignored；若顶栏缺失，
+      // 先把 .ignored 里的副本还原，否则 profile bundle（如 dsh-2xray）无法解析。
+      const ignored = path.join(String(profileDir), 'node_modules', '.ignored', ...name.split('/'))
+      if (!exists(target) && exists(ignored)) {
+        try {
+          ensureDir(path.dirname(target))
+          copyTree(ignored, target)
+          copied.push(name + ':ignored')
+          continue
+        } catch { /* fall through to mother copy */ }
+      }
       const source = path.join(motherModules, ...name.split('/'))
       if (!exists(source)) { if (!exists(target)) missing.push(name); continue }
       // 同名包已存在时不能只看“有没有”：旧 official/fork 可能停留在旧 fang/子包版本，
@@ -6347,7 +6389,7 @@ export function apply(ctx, config) {
         essences,
         mirrorFingerprint,
         staleCount: essences.filter(item => item.stale === true).length,
-        capacity: { slots: 7, defaultLimit: 5, used: essences.filter(item => item.archived !== true).length },
+        capacity: { slots: ESSENCE_HARD_MAX, hardMax: ESSENCE_HARD_MAX, defaultLimit: ESSENCE_QUOTA_DEFAULT, used: essences.filter(item => item.archived !== true).length },
       }
     },
     createEssence: (input = {}) => essenceManager.create({
@@ -6671,6 +6713,10 @@ export function apply(ctx, config) {
           profileDir: runtimeProfileDir,
           modulesDir: runtimeModules,
           sourceModulesDir: essenceModules,
+          // v3.9.4：运行态 profile 若没有 .modules.yaml，从母体复制一份并对齐 store，
+          // 否则 pnpm 把包移到 .ignored，@twinsearth/dsh-2xray 等 profile bundle
+          // 在启动时无法解析（cannot resolve profile bundle）。
+          manifestSourceDir: path.join(templateDir(), 'node_modules'),
           nodeLinker: readNodeLinker(templateDir()),
         })
       } catch (error) {
