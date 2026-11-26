@@ -201,4 +201,6 @@ test('v3.8.14 source wiring: host heap/session scan, gate, and all-drive probe',
   assert.match(client, /'data-zone': 'host-pressure-banner'/)
   assert.match(client, /host-js-heap-pressure/)
   assert.match(client, /session-footprint-pressure/)
+  assert.match(client, /合计阈值/)
+  assert.match(client, /单文件阈值/)
 })

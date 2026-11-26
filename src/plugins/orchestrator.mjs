@@ -268,12 +268,23 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = SAFE_MODE_A
   }
 }
 
+/** v3.9.5：崩溃样本是否携带真实资源压力；只有这种崩溃循环才允许全局封门。 */
+export function hasHostCrashPressure(metrics = {}, { criticalFreeMB = 2345 } = {}) {
+  const commitFree = Number(metrics?.commitFreeMB)
+  const critical = Math.max(0, Number(criticalFreeMB) || 0)
+  return (Number.isFinite(commitFree) && commitFree > 0 && commitFree < critical)
+    || metrics?.heapLevel === 'critical' || metrics?.heapLevel === 'emergency'
+    || metrics?.sessionPressure === 'emergency'
+}
+
 /** v3.9.4：Commit 余量达到 2345 MB 时，Safe Mode 闩锁自动解除，无需用户手动操作。 */
 export function shouldAutoClearSafeMode(memory, { autoClearCommitMB = SAFE_MODE_AUTO_CLEAR_COMMIT_MB, reason = '' } = {}) {
   if (!memory || memory.ok !== true || memory.supported === false) return false
   const why = String(reason ?? '')
-  // 手动 Panic 与崩溃循环是“人/历史”闩锁，不因当下 Commit 恢复而自动放行。
-  if (/manual-panic/.test(why) || /^crash-loop/.test(why)) return false
+  // 手动 Panic 是用户明确的“停住”指令，不因当前 Commit 恢复而自动放行。
+  // 崩溃循环（crash-loop-*）不是：它通常由一次 OOM 或异常重启留下，
+  // Commit 已恢复到 2345 MB 以上说明宿主风险已解除，必须自动恢复可用性。
+  if (/manual-panic/.test(why)) return false
   return (Number(memory.commitFreeMB) || 0) >= Math.max(0, Number(autoClearCommitMB) || 0)
 }
 
@@ -950,7 +961,11 @@ export function apply(ctx, config) {
     } catch { /* best effort */ }
   }
   // Red line: one crash is context; two crashes within the configured window means a loop.
-  if (unclean && cfg.safeModeAfterCrash === true && !safeMode && recent.length >= 2) {
+  // v3.9.5：只有崩溃样本携带真实资源压力（低 Commit / heap 临界 / session 紧急）才全局封门。
+  // 普通关闭/重启在 Windows 上常被记为 unclean-shutdown；若 Commit 仍有 25 GB，
+  // 仅凭“两次 unclean”封住所有分身会直接把瓮城锁死，违背守卫的初衷。
+  const recentHasResourcePressure = recent.some((item) => hasHostCrashPressure(item?.metrics, { criticalFreeMB: cfg.hostCriticalFreeMB }))
+  if (unclean && cfg.safeModeAfterCrash === true && !safeMode && recent.length >= 2 && recentHasResourcePressure) {
     safeMode = true
     safeModeReason = 'crash-loop-10m'
     if (hostCrashWindowMinutes !== 10) safeModeReason = `crash-loop-${hostCrashWindowMinutes}m`
@@ -1412,6 +1427,14 @@ export function apply(ctx, config) {
 
   let sessionCompactBusy = false
   let sessionCompactSnapshot = null
+  // 准入前先给 Safe Mode 一次“按当前 Commit 自动解除”的机会。safeModeStatus
+  // 在 apply 后段才定义，但这里的方法只会在 apply 返回后被调用，闭包可安全引用。
+  const ensureHostAdmission = async () => {
+    if (!hostAdmissionClosed && !safeMode) return { ok: true }
+    try { await safeModeStatus() } catch { /* keep latched on probe failure */ }
+    if (!hostAdmissionClosed && !safeMode) return { ok: true }
+    return { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
+  }
   const compactArchivedTaskSessions = (task) => {
     if (cfg.sessionCompactEnabled !== true) return { ok: true, skipped: 'disabled' }
     if (!task || task.status !== TASK_STATUS.ARCHIVED || !task.homeDir || sessionCompactBusy) {
@@ -1920,7 +1943,8 @@ export function apply(ctx, config) {
   }
 
   const launchTaskBrowser = async (task, url) => {
-    if (hostAdmissionClosed) return { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
+    const admission = await ensureHostAdmission()
+    if (admission.ok !== true) return admission
     const pressure = currentPressureGate()
     if (pressure.ok !== true) {
       audit('host-pressure-admission-refused', { action: 'open-browser', taskId: task?.taskId ?? null, error: pressure.error, detail: pressure.detail })
@@ -3600,7 +3624,8 @@ export function apply(ctx, config) {
     /** v2 主入口：派生一个任务（= 一个分身）。 */
     async createTask(input = {}) {
       await bootPagefileGate
-      if (hostAdmissionClosed) return { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
+      const admission = await ensureHostAdmission()
+      if (admission.ok !== true) return admission
       if (safeMode) return { ok: false, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       if (isolationBlocked) return { ok: false, error: 'data-root-forbidden', detail: isolationChecks }
       const title = String(input.title ?? input.taskTitle ?? '').trim() || `任务 ${tasks.size + 1}`
@@ -4633,7 +4658,8 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      if (hostAdmissionClosed) return { ok: false, taskId: id, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
+      const admission = await ensureHostAdmission()
+      if (admission.ok !== true) return { ...admission, taskId: id }
       if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       const wasQuarantined = Boolean(task.quarantined)
       const f = forker()
@@ -4862,7 +4888,8 @@ export function apply(ctx, config) {
       const id = String(taskId ?? '')
       const task = tasks.get(id)
       if (!task) return { ok: false, error: 'unknown-task' }
-      if (hostAdmissionClosed) return { ok: false, taskId: id, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' }
+      const admission = await ensureHostAdmission()
+      if (admission.ok !== true) return { ...admission, taskId: id }
       if (safeMode) return { ok: false, taskId: id, error: 'safe-mode', detail: safeModeReason || 'host-safe-mode' }
       // Forker 的 10 分钟 2 次崩溃闩锁是进程层事实；把它投影到任务层，
       // 否则用户点“打开”会绕过隔离直接 restore 出一个新进程。
@@ -5384,6 +5411,17 @@ export function apply(ctx, config) {
         safeMode = false
         safeModeReason = ''
         hostAdmissionClosed = false
+        // crash-loop 计数是历史闩锁；自动解除后必须把窗口内计数清零，
+        // 否则下一次正常重启会拿旧记录再次封门，形成“永远 Safe Mode”。
+        if (/^crash-loop/.test(clearedReason)) {
+          try {
+            const crashDoc = readJson(hostCrashFile, null) || {}
+            fs.writeFileSync(hostCrashFile, JSON.stringify({
+              crashes: [], cap: cfg.hostCrashMaxEntries, retentionDays: cfg.hostCrashRetentionDays,
+              windowMinutes: hostCrashWindowMinutes, clearedAt: new Date().toISOString(), clearedReason,
+            }, null, 2))
+          } catch { /* best effort: JSONL 仍保留完整审计 */ }
+        }
         persistSafeMode()
         audit('host-safe-mode-auto-clear', {
           reason: 'commit-recovered',
@@ -5391,6 +5429,12 @@ export function apply(ctx, config) {
           commitFreeMB: Number(memory?.commitFreeMB) || 0,
           autoClearCommitMB: SAFE_MODE_AUTO_CLEAR_COMMIT_MB,
         })
+      }
+      // 非 SafeMode 的旧 admission 闩锁（例如某次 hostEmergency 的 safe:false）
+      // 在内存已恢复时也应自动重开；任务级 quarantine 仍会独立拦截。
+      if (!safeMode && hostAdmissionClosed && guard.ok === true) {
+        hostAdmissionClosed = false
+        audit('host-admission-auto-reopen', { commitFreeMB: Number(memory?.commitFreeMB) || 0 })
       }
       const pagefileMissing = memory ? isPagefileMissing(memory) : false
       return {
@@ -7916,7 +7960,8 @@ export function apply(ctx, config) {
         const taskId = String(query.get('taskId') ?? '').trim()
         if (!taskId) return json(res, 400, { ok: false, error: 'taskId-required' })
         if (!tasks.has(taskId)) return json(res, 404, { ok: false, error: 'unknown-task', taskId })
-        if (hostAdmissionClosed) return json(res, 423, { ok: false, error: 'host-admission-closed', detail: safeModeReason || 'host-emergency' })
+        const admission = await ensureHostAdmission()
+        if (admission.ok !== true) return json(res, 423, admission)
         if (safeMode) return json(res, 423, { ok: false, error: 'safe-mode', detail: safeModeReason })
         const guardTask = tasks.get(taskId)
         if (guardTask?.quarantined) return json(res, 423, { ok: false, error: 'fork-quarantined', detail: guardTask.quarantined.reason ?? 'guard' })

@@ -10,7 +10,7 @@ import test from 'node:test'
 import {
   Config, DEFAULT_MAX_FORKS, HARD_MAX_FORKS, SAFE_MODE_AUTO_CLEAR_COMMIT_MB,
   FORK_COMMIT_HARD_MIN_MB, evaluateSafeModeReset, shouldAutoClearSafeMode,
-  decidePagefileBootPolicy,
+  hasHostCrashPressure, decidePagefileBootPolicy,
 } from '../src/plugins/orchestrator.mjs'
 import { ESSENCE_HARD_MAX, ESSENCE_QUOTA_DEFAULT, VIP_QUOTAS } from '../src/lib/essence.mjs'
 import { evaluatePagefileSingleFork } from '../src/lib/memory-guard.mjs'
@@ -51,7 +51,21 @@ test('v3.9.4: SafeMode thresholds are 2345 auto-clear and 999 hard fork floor', 
   assert.equal(shouldAutoClearSafeMode({ ...healthy, commitFreeMB: 2344 }), false)
   assert.equal(shouldAutoClearSafeMode({ ...healthy, reason: 'host-emergency:commit-free-emergency' }, { reason: 'host-emergency:commit-free-emergency' }), true)
   assert.equal(shouldAutoClearSafeMode(healthy, { reason: 'host-emergency:manual-panic' }), false)
-  assert.equal(shouldAutoClearSafeMode(healthy, { reason: 'crash-loop-10m' }), false)
+  // v3.9.5: crash-loop 也是可恢复闩锁；Commit 恢复后必须自动解除，否则瓮城永久锁死。
+  assert.equal(shouldAutoClearSafeMode(healthy, { reason: 'crash-loop-10m' }), true)
+  // v3.9.5: 真实故障样本 commitFree=25785、heap ok、sessionPressure=critical（单文件 61 MB），
+  // 不能仅凭两次 unclean-shutdown 封门；只有 commit/heap/session 紧急证据才允许 crash-loop 闩锁。
+  assert.equal(hasHostCrashPressure({ commitFreeMB: 25785, heapLevel: 'ok', sessionPressure: 'critical' }), false)
+  assert.equal(hasHostCrashPressure({ commitFreeMB: 1200 }), true)
+  assert.equal(hasHostCrashPressure({ heapLevel: 'critical' }), true)
+  assert.equal(hasHostCrashPressure({ sessionPressure: 'emergency' }), true)
+  assert.match(orchestratorSource, /recentHasResourcePressure/)
+  assert.match(orchestratorSource, /if \(\/\^crash-loop\/\.test\(clearedReason\)\)/)
+  assert.match(orchestratorSource, /crashes: \[\], cap: cfg\.hostCrashMaxEntries/)
+  assert.match(orchestratorSource, /host-admission-auto-reopen/)
+  assert.match(orchestratorSource, /const ensureHostAdmission = async/)
+  assert.match(orchestratorSource, /const admission = await ensureHostAdmission\(\)/)
+  assert.match(orchestratorSource, /await safeModeStatus\(\)/)
   // At/above 2345 the reset is allowed without force.
   assert.equal(evaluateSafeModeReset(healthy).ok, true)
   // Below 2345 manual reset requires force; user may force even below 999.
