@@ -92,7 +92,7 @@ const DEFAULTS = Object.freeze({
   token: '',
   eventCapacity: 1000,
   commandCacheSize: 500,
-  heartbeatMs: 5000,
+  heartbeatMs: 15000,
 })
 
 export const Config = z.object({
@@ -114,8 +114,8 @@ export const Config = z.object({
     .description('SSE 事件环形缓冲容量（母体断线后可续传的事件数）'),
   commandCacheSize: z.number().min(1).max(10000).default(500)
     .description('命令幂等缓存容量（LRU，按 commandId）'),
-  heartbeatMs: z.number().min(1000).max(60000).default(5000)
-    .description('SSE 心跳 + 待审批 diff 周期（毫秒）'),
+  heartbeatMs: z.number().min(1000).max(60000).default(15000)
+    .description('SSE 心跳 + 待审批 diff 周期（毫秒）；v3.9.2 默认由 5s 降为 15s'),
   allowLegacyNoToken: z.boolean().default(false)
     .description('v3.0.5：fork 角色无 DSH_ADAPTER_TOKEN 时是否允许 v2 兼容（默认 fail-closed）'),
 })

@@ -5,18 +5,19 @@
 # order: auditor/forker/buffer feed the middle tier, orchestrator comes last.
 - insert:
     - id: fang-auditor
-      name: '@local/dsh-fang/auditor'
+      name: '@twinsearth/fang-dsh-plugin/auditor'
       config:
         dataRoot: ''
         bootSelfCheck: true
 
     - id: fang-forker
-      name: '@local/dsh-fang/forker'
+      name: '@twinsearth/fang-dsh-plugin/forker'
       config:
         cliPath: ''
         profileTemplate: ''
         startTimeoutMs: 60000
-        maxForks: 1
+        maxForks: 8
+        allowMultiFork: true
         supervise: false
         maxRestarts: 3
         backoffBaseMs: 1000
@@ -25,19 +26,19 @@
         healthPath: /
 
     - id: fang-buffer-keeper
-      name: '@local/dsh-fang/buffer-keeper'
+      name: '@twinsearth/fang-dsh-plugin/buffer-keeper'
       config:
         root: ''
         settleMs: 750
         pollMs: 250
 
     - id: fang-scorer
-      name: '@local/dsh-fang/scorer'
+      name: '@twinsearth/fang-dsh-plugin/scorer'
       config:
         allowlist: []
 
     - id: fang-umbrella
-      name: '@local/dsh-fang/umbrella'
+      name: '@twinsearth/fang-dsh-plugin/umbrella'
       config:
         bufferRoot: ''
         productionRoot: ''
@@ -52,19 +53,19 @@
         auditDecisions: true
 
     - id: fang-healer
-      name: '@local/dsh-fang/healer'
+      name: '@twinsearth/fang-dsh-plugin/healer'
       config:
         blockingOnUnknown: true
         reservedIds: []
 
     - id: fang-router
-      name: '@local/dsh-fang/router'
+      name: '@twinsearth/fang-dsh-plugin/router'
       config:
         containerAvailable: false
         trustedPlugins: []
 
     - id: fang-approver
-      name: '@local/dsh-fang/approver'
+      name: '@twinsearth/fang-dsh-plugin/approver'
       config:
         defaultTtlMs: 300000
         remindAt: 0.5
@@ -73,14 +74,14 @@
         backupRoot: ''
 
     - id: fang-hot-reloader
-      name: '@local/dsh-fang/hot-reloader'
+      name: '@twinsearth/fang-dsh-plugin/hot-reloader'
       config:
         healthWindowMs: 300
         healthMaxNewHandles: 2
         requireApprovalForSwap: true
 
     - id: fang-restart-guard
-      name: '@local/dsh-fang/restart-guard'
+      name: '@twinsearth/fang-dsh-plugin/restart-guard'
       config:
         mode: enforce
         authMode: manual
@@ -90,7 +91,7 @@
         autoPromoteAfterHours: 24
 
     - id: fang-adapter
-      name: '@local/dsh-fang/adapter'
+      name: '@twinsearth/fang-dsh-plugin/adapter'
       config:
         prefix: /fang
         taskId: ''
@@ -98,35 +99,35 @@
         commandTimeoutMs: 10000
 
     - id: fang-session-catalog
-      name: '@local/dsh-fang/session-catalog'
+      name: '@twinsearth/fang-dsh-plugin/session-catalog'
       config:
         limit: 50
         allowArchived: true
         previewMaxChars: 2000
 
     - id: fang-session-bridge
-      name: '@local/dsh-fang/session-bridge'
+      name: '@twinsearth/fang-dsh-plugin/session-bridge'
       config:
         dshHome: ""
         prefix: /fang
         timeoutMs: 15000
 
     - id: fang-session-sync
-      name: '@local/dsh-fang/session-sync'
+      name: '@twinsearth/fang-dsh-plugin/session-sync'
       config:
         sessionsRoot: ""
         bundleRoot: ""
         maxBundleBytes: 536870912
 
     - id: fang-session-router
-      name: '@local/dsh-fang/session-router'
+      name: '@twinsearth/fang-dsh-plugin/session-router'
       config:
         sameMachine: true
         bridgeEnabled: true
         needsRealtime: false
 
     - id: fang-decision-center
-      name: '@local/dsh-fang/decision-center'
+      name: '@twinsearth/fang-dsh-plugin/decision-center'
       config:
         maxTickets: 500
         maxPendingRed: 30
@@ -135,10 +136,12 @@
         registerTool: true
 
     - id: fang-orchestrator
-      name: '@local/dsh-fang'
+      name: '@twinsearth/fang-dsh-plugin'
       config:
         role: mother
-        maxForks: 1
+        maxForks: 8
+        allowMultiFork: true
+        singleActiveFork: false
         autoReapIdleMinutes: 0
         routes:
           enabled: true

@@ -154,9 +154,9 @@ export function atomicReplaceDir(sourceDir, targetDir) {
 }
 
 
-const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@local/dsh-fang'])
-// build.mjs rewrites @local/dsh-fang to the published package name.
-const CURRENT_FANG_BUNDLE = '@local/dsh-fang'
+const FORK_BUNDLE_NAMES = Object.freeze(['@twinsearth/fang-dsh-plugin', '@twinsearth/dsh-fang', '@twinsearth/fang-dsh-plugin'])
+// build.mjs rewrites @twinsearth/fang-dsh-plugin to the published package name.
+const CURRENT_FANG_BUNDLE = '@twinsearth/fang-dsh-plugin'
 
 function profileBundles(profileDir) {
   try {
@@ -185,14 +185,14 @@ export function profileUsesCurrentFangBundle(profileDir) {
     // Only a positively-declared legacy bundle is stale. Templates that don't
     // declare fang at all (unit-test fixtures, custom hosts) are left to the
     // existing forkBundlePath probe.
-    return !(declared.has('@twinsearth/dsh-fang') || declared.has('@local/dsh-fang-legacy'))
+    return !(declared.has('@twinsearth/dsh-fang') || declared.has('@twinsearth/fang-dsh-plugin-legacy'))
   }
   // v3.3.8: same package name but an older exact version is stale too. This is
   // the normal upgrade case (3.3.7 essence after installing 3.3.8).
   const dependencies = pkg?.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}
   const declaredVersion = String(
     dependencies['@twinsearth/fang-dsh-plugin'] ||
-    dependencies['@local/dsh-fang'] ||
+    dependencies['@twinsearth/fang-dsh-plugin'] ||
     dependencies['@twinsearth/dsh-fang'] ||
     '',
   ).replace(/^[~^]/, '')
@@ -230,7 +230,7 @@ export function isLiveForkForApprovals(_task, status) {
  * v3.8.13: a missing pagefile is advisory, not a hard prerequisite. The real
  * gate is usable free memory: CommitFree must keep the host-critical reserve.
  */
-export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}) {
+export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096, force = false } = {}) {
   if (!memory || memory.ok !== true) {
     return { ok: false, error: 'memory-probe-unavailable', detail: '无法读取系统内存状态，拒绝解除 Safe Mode。' }
   }
@@ -241,7 +241,7 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}
   const commitFreeMB = Number(memory.commitFreeMB) || 0
   const minFreeMB = Math.max(0, Number(hostCriticalFreeMB) || 0)
   const pagefileMissing = isPagefileMissing(memory)
-  if (commitFreeMB < minFreeMB) {
+  if (commitFreeMB < minFreeMB && force !== true) {
     return {
       ok: false,
       error: 'commit-low',
@@ -249,11 +249,13 @@ export function evaluateSafeModeReset(memory, { hostCriticalFreeMB = 4096 } = {}
       commitFreeMB,
       minFreeMB,
       pagefileMissing,
-      detail: `Commit 余量 ${commitFreeMB} MB 低于宿主紧急阈值 ${minFreeMB} MB；请先释放内存。`,
+      canForce: true,
+      detail: `Commit 余量 ${commitFreeMB} MB 低于宿主紧急阈值 ${minFreeMB} MB；可先释放内存，或由操作员强制解除闩锁（新建分身仍会被内存守卫拒绝）。`,
     }
   }
   return {
     ok: true,
+    forced: force === true && commitFreeMB < minFreeMB,
     pageFileMB,
     commitFreeMB,
     minFreeMB,
@@ -293,9 +295,15 @@ export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = 4096, mi
   }
 }
 
-export const HARD_MAX_FORKS = 1
-// C1: host-state.json lastMetrics lag follows this timer; 5s matches the host tick.
-export const HOST_STATE_WRITE_INTERVAL_MS = 5000
+export const HARD_MAX_FORKS = 8
+// C1: host-state.json lastMetrics lag follows this timer; 15s reduces the
+// heartbeat file write + host-state rewrite rate without losing crash evidence.
+export const HOST_STATE_WRITE_INTERVAL_MS = 15000
+// v3.9.2: the host memory/heap/session watchdog used to run every 5s. That
+// meant a PowerShell/CIM probe, a session-directory stat pass and a heap sample
+// every five seconds even when no fork existed. 15s keeps the same signals and
+// lets readSystemMemory() cache one sample per tick.
+export const HOST_WATCHDOG_INTERVAL_MS = 15000
 // C4: explicit confirm token; confirmation is audited but never lifts the hard limit.
 export const MULTI_FORK_CONFIRM_TOKEN = 'MULTI-FORK'
 
@@ -306,12 +314,13 @@ export const Config = z.object({
     .description('官方源 manifest 基础 URL（https；留空 = 无官方源，升级显式 official-source-unavailable）'),
   officialSourceToken: z.string().default('')
     .description('官方源 Bearer token（可选；不会写进日志/状态）'),
-  // Accept legacy maxForks>1 at the schema boundary so an old profile patch does
-  // not make the whole plugin invalid; apply() still clamps production to 1.
+  // v3.9.2: restore the operator-facing 8-fork capacity. Memory/commit gates
+  // still refuse new forks when the host is under pressure; this only removes
+  // the unconditional single-fork clamp that made the quota useless.
   maxForks: z.number().min(1).max(64).default(HARD_MAX_FORKS)
-    .description('兼容旧配置的容量字段；生产路径仍硬限为 1（maxForks>1 只记录 requested，不放开并行）'),
-  allowMultiFork: z.boolean().default(false)
-    .description('v3.8.13 起失效：仅保留兼容字段；即使旧配置 maxForks>1，apply() 也强制回落 1，不提供并行旁路'),
+    .description('允许同时存活的分身上限；默认 8，最大 64；实际创建仍受 Commit 余量守卫'),
+  allowMultiFork: z.boolean().default(true)
+    .description('是否允许 maxForks>1；默认 true；内存不足时由 memoryGuard 拒绝，而不是把配额改成 1'),
   memoryGuard: z.boolean().default(true)
     .description('创建/打开/还原分身前检查 CommitFree、Host JS heap 与 session 文件体量'),
   memoryMinFreeMB: z.number().min(0).max(1048576).default(3000)
@@ -327,13 +336,13 @@ export const Config = z.object({
   hostJsHeapCriticalMB: z.number().min(33).max(1048576).default(1536)
     .description('Host JS heap 严重阈值（MB）；超过后拒绝新分身/新浏览器，避免继续加载大 session'),
   hostJsHeapEmergencyMB: z.number().min(34).max(1048576).default(2048)
-    .description('Host JS heap 紧急阈值（MB）；连续 N 个 5s 采样超过后按宿主紧急处置'),
+    .description('Host JS heap 紧急阈值（MB）；连续 N 个 host tick 超过后按宿主紧急处置'),
   hostJsHeapEmergencyStreak: z.number().min(1).max(30).default(3)
-    .description('Host JS heap 连续超过紧急阈值的采样次数；默认 3 次（约 15s）'),
+    .description('Host JS heap 连续超过紧急阈值的采样次数；默认 3 次（15s tick 下约 45s）'),
   sessionFootprintEnabled: z.boolean().default(true)
     .description('是否周期盘点 Host/分身 sessions 下的 session.v4.jsonl.zstd 体量（只读 stat）'),
   sessionFootprintIntervalMs: z.number().min(5000).max(86400000).default(60000)
-    .description('session 体量盘点间隔（毫秒）；默认 60s，避免每次 5s tick 都扫目录'),
+    .description('session 体量盘点间隔（毫秒）；默认 60s，避免每次 host tick 都扫目录'),
   sessionFootprintWarnMB: z.number().min(0).max(1048576).default(512)
     .description('全部 session 文件合计警告阈值（MB）'),
   sessionFootprintCriticalMB: z.number().min(0).max(1048576).default(1024)
@@ -382,8 +391,10 @@ export const Config = z.object({
     .description('browser-samples/memory-samples 单个活动日志上限（MB），超过即轮转'),
   diagnosticLogRetentionDays: z.number().min(1).max(365).default(7)
     .description('轮转后的诊断日志保留天数，过期归档自动清理'),
-  singleActiveFork: z.boolean().default(true)
-    .description('启动新分身时暂停其他运行中的分身，避免同时打开多个 Electron renderer'),
+  // v3.9.2: multi-fork is a first-class quota again. Keeping this true silently
+  // paused every sibling fork on start/open, which made `maxForks` irrelevant.
+  singleActiveFork: z.boolean().default(false)
+    .description('false（默认）：允许多个分身并存；true 时启动新分身会暂停其他运行中的分身'),
   managedBrowser: z.boolean().default(true)
     .description('由 Fang 启动独立 Chromium 窗口并纳入 PID/CDP 监控'),
   autoClose: z.boolean().default(true)
@@ -677,14 +688,11 @@ export function apply(ctx, config) {
   // as a compatibility field but can no longer open a second fork. Legacy tests
   // that exercise multi-task bookkeeping may opt in through an env-gated hook;
   // production processes never see NODE_TEST_CONTEXT.
+  // v3.9.2: no unconditional production clamp. `maxForks` is an operator quota;
+  // `memoryGate`/`main-city` are the actual safety gates.
   const testOnlyMultiFork = Boolean(process.env.NODE_TEST_CONTEXT) && config?.__testOnlyAllowMultiFork === true
-  if (!testOnlyMultiFork && (Number(cfg.maxForks) > HARD_MAX_FORKS || cfg.allowMultiFork === true)) {
-    cfg.maxForks = HARD_MAX_FORKS
-    cfg.allowMultiFork = false
-  }
   const effectiveMaxForks = () => {
-    if (!testOnlyMultiFork) return HARD_MAX_FORKS
-    return Math.max(1, Math.min(64, Math.floor(Number(cfg.maxForks) || 1)))
+    return Math.max(1, Math.min(64, Math.floor(Number(cfg.maxForks) || HARD_MAX_FORKS)))
   }
   const forkHealthPath = String(cfg.forkHealthPath || '').trim() || forkHealthPathForPrefix(cfg.routes?.prefix)
   const forkPrefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
@@ -993,8 +1001,8 @@ export function apply(ctx, config) {
     } catch { /* best effort */ }
   }
   writeHostHeartbeat()
-  // C1: 5s (not 15s) so a hard kill leaves host-state.json lastMetrics within one
-  // hostWatchdogTick of the crash, not up to three ticks stale.
+  // C1: 15s keeps host-state.json close enough to a hard kill while cutting
+  // the file-write rate to one third of the old 5s heartbeat.
   const hostHeartbeatTimer = setInterval(writeHostHeartbeat, HOST_STATE_WRITE_INTERVAL_MS)
   hostHeartbeatTimer.unref?.()
   try {
@@ -2379,7 +2387,7 @@ export function apply(ctx, config) {
 
   /**
    * v3.8.13 P0: aggregate commit for fork + managed browser PID trees.
-   * `rows` is the shared process table snapshot used by the 5s host gate and
+   * `rows` is the shared process table snapshot used by the 15s host gate and
    * the pre-spawn gate, so accounting cannot diverge between them.
    */
   const currentForkCommitMB = (rows) => {
@@ -2612,7 +2620,7 @@ export function apply(ctx, config) {
       sessionPressure: lastSessionFootprintDecision?.level ?? null,
       pressureGate: hostHeapPressureGate ? 'host-js-heap' : (sessionFootprintGate ? 'session-footprint' : null),
     }
-    // Red line: the mother samples self RSS/Private + CommitFree every 5 s even
+    // Red line: the mother samples self RSS/Private + CommitFree every 15 s even
     // when no fork/browser exists. A DSH host can OOM without any child.
     const memory = rememberMemory(await readSystemMemory())
     notePagefile(memory, 'memory-watchdog')
@@ -2632,12 +2640,12 @@ export function apply(ctx, config) {
       selfPrivateMB: Number(memory.selfPrivateMB) || Math.round((selfNow.heapUsed + selfNow.external) / 1048576),
       processCount: lastProcessCount || lastHostMetrics?.processCount || null,
     }
-    // v3.8.13: the 5 s host tick also enforces the aggregate fork budget, so a
+    // v3.8.13: the 15 s host tick also enforces the aggregate fork budget, so a
     // runaway child cannot wait for the slower memory watchdog sample.
     const activeForBudget = [...tasks.values(), ...runtimeBrowsers.values()].some((task) => task.browser?.pid
       || (Number(task.pid) > 0 && (task.status === TASK_STATUS.READY || task.status === TASK_STATUS.RUNNING)))
     if (activeForBudget) {
-      const commitGate = await enforceForkCommitBudget({ source: 'host-watchdog-5s', memory })
+      const commitGate = await enforceForkCommitBudget({ source: 'host-watchdog-15s', memory })
       if (commitGate.ok !== true) return
     }
     if (free < Number(cfg.hostWarnFreeMB) && nowMs() - lastHostWarnAt > 60_000) {
@@ -2856,7 +2864,7 @@ export function apply(ctx, config) {
   // The booted profile's own directory is authoritative (launcher sets DSH_PROFILE_DIR);
   // resolving "$DSH_HOME/profiles/<tag>" from argv can point at a template that never existed.
   // 分身模板必须来自一个**真的装了本 bundle** 的 profile；否则分身的 node_modules junction
-  // 指到一个没有 @local/dsh-fang 的 profile，fork 里所有 /fang 路由都会 404（实测事故）。
+  // 指到一个没有 @twinsearth/fang-dsh-plugin 的 profile，fork 里所有 /fang 路由都会 404（实测事故）。
   const templateDir = () => {
     const candidates = [cfg.profileTemplate, process.env.DSH_PROFILE_DIR, resolveProfileDir(motherProfile), resolveProfileDir(layout.profileTag)]
     const usable = candidates.filter((dir) => typeof dir === "string" && dir.trim()
@@ -3676,7 +3684,7 @@ export function apply(ctx, config) {
           // 加速档 + 原身派生：同步原身插件面（第三方包复制 + @deepseek-ai/* 别名桩包）。
           ...(coreMode === 'accelerated' && sourceEssence ? { sourceProfileDir: profileTemplate } : {}),
           // node_modules：优先元主自己的模块树；默认元宝/新建原身可能尚未物化 node_modules，
-          // 此时回退母体模块树，保证分身仍能解析 @local/dsh-fang（否则是僵尸分身）。
+          // 此时回退母体模块树，保证分身仍能解析 @twinsearth/fang-dsh-plugin（否则是僵尸分身）。
           ...(sourceEssence ? {
             cleanTemplate: false,
             nodeModulesSource: (() => {
@@ -3702,7 +3710,7 @@ export function apply(ctx, config) {
 
         // 防御：分身的 profile 必须能解析本 bundle；否则派生出来的是一个"没有 /fang 路由"的
         // 僵尸分身（adapter 握手会得到 http-404）。发现即回收并如实报错。
-        // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @local/dsh-fang 继续兼容。
+        // npm 安装名是 @twinsearth/fang-dsh-plugin；旧包名 @twinsearth/dsh-fang 与开发 link @twinsearth/fang-dsh-plugin 继续兼容。
         const forkProfileDir = path.join(homeDir, 'profiles', profile)
         if (process.env.DSH_FANG_E2E_DEBUG === '1') { try { copyTree(forkProfileDir, path.join(layout.dataDir, 'debug-fork-profile')) } catch { /* debug best effort */ } }
         const forkBundle = forkBundlePath(forkProfileDir)
@@ -4049,38 +4057,40 @@ export function apply(ctx, config) {
       }
     },
 
-    /** C4: compatibility field status; confirmation never lifts the hard limit. */
+    /** C4: operator quota status; safe gates are Commit/heap, not a hidden 1-fork clamp. */
     multiForkStatus() {
+      const limit = effectiveMaxForks()
       return {
         ok: true,
         requested: requestedMultiFork,
-        enabled: false,
-        hardLimit: HARD_MAX_FORKS,
+        enabled: limit > 1,
+        hardLimit: limit,
         confirmRequired: true,
         confirmToken: MULTI_FORK_CONFIRM_TOKEN,
-        detail: 'v3.8.13 起生产路径硬限 1；二次确认只用于审计，不会开启第二个分身。',
+        detail: `当前配额 ${limit}；创建新分身仍受 Commit/heap 守卫限制，内存不足会明确拒绝。`,
       }
     },
 
-    /** C4: UI/HTTP confirm endpoint; requires an explicit token, still returns enabled:false. */
+    /** C4: UI/HTTP confirm endpoint; records the operator's quota confirmation. */
     confirmMultiFork(input = {}) {
       if (input?.confirm !== true || String(input?.token ?? '') !== MULTI_FORK_CONFIRM_TOKEN) {
         return {
           ok: false,
           error: 'confirmation-required',
           requested: requestedMultiFork,
-          hardLimit: HARD_MAX_FORKS,
+          hardLimit: effectiveMaxForks(),
           confirmToken: MULTI_FORK_CONFIRM_TOKEN,
         }
       }
-      try { audit('multi-fork-confirmed', { requested: requestedMultiFork, hardLimit: HARD_MAX_FORKS }) } catch { /* audit optional */ }
+      const limit = effectiveMaxForks()
+      try { audit('multi-fork-confirmed', { requested: requestedMultiFork, hardLimit: limit }) } catch { /* audit optional */ }
       return {
         ok: true,
         confirmed: true,
         requested: requestedMultiFork,
-        enabled: false,
-        hardLimit: HARD_MAX_FORKS,
-        detail: '二次确认已记录；生产路径仍硬限 1，第二次 create 返回 quota-exceeded。',
+        enabled: limit > 1,
+        hardLimit: limit,
+        detail: `已确认 ${limit} 个分身配额；实际创建仍由 Commit/heap 守卫逐次检查。`,
       }
     },
 
@@ -5329,27 +5339,50 @@ export function apply(ctx, config) {
       notePagefile(memory, 'manual-probe')
       return { ok: memory?.ok !== false, memory: memorySnapshot, memoryPolicy: memoryPolicySnapshot() }
     },
-    safeModeStatus: () => {
-      const guard = evaluateSafeModeReset(memorySnapshot, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
-      const pagefileMissing = memorySnapshot ? isPagefileMissing(memorySnapshot) : false
+    safeModeStatus: async () => {
+      // A latched Safe Mode must reflect the *current* host, not the boot-time
+      // snapshot: otherwise closing browsers cannot unlock the UI.
+      let memory = memorySnapshot
+      try {
+        memory = rememberMemory(await readSystemMemory())
+      } catch { /* keep the last known sample */ }
+      const guard = evaluateSafeModeReset(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
+      // A commit-free emergency is transient. Once Commit free is back above the
+      // critical reserve, clear that specific latch automatically; keep any
+      // crash-loop/other Safe Mode reason untouched.
+      if (safeMode && safeModeReason === 'host-emergency:commit-free-emergency' && guard.ok === true) {
+        safeMode = false
+        safeModeReason = ''
+        hostAdmissionClosed = false
+        persistSafeMode()
+        audit('host-safe-mode-auto-clear', {
+          reason: 'commit-free-recovered',
+          commitFreeMB: guard.commitFreeMB,
+          minFreeMB: guard.minFreeMB,
+        })
+      }
+      const pagefileMissing = memory ? isPagefileMissing(memory) : false
       return {
         ok: true, safeMode, admissionClosed: hostAdmissionClosed, reason: safeModeReason,
         windowMinutes: hostCrashWindowMinutes,
         reset: {
           canReset: guard.ok === true,
+          canForce: guard.ok !== true && guard.error === 'commit-low' && memory?.ok === true,
           error: guard.ok === true ? null : guard.error,
           detail: guard.ok === true ? null : guard.detail,
-          memoryKnown: memorySnapshot?.ok === true,
+          memoryKnown: memory?.ok === true,
           pagefileMissing,
-          pageFileMB: Number(memorySnapshot?.pageFileMB) || 0,
-          commitFreeMB: Number(memorySnapshot?.commitFreeMB) || 0,
+          pageFileMB: Number(memory?.pageFileMB) || 0,
+          commitFreeMB: Number(memory?.commitFreeMB) || 0,
           minFreeMB: Number(guard.minFreeMB ?? cfg.hostCriticalFreeMB) || 0,
-          checkedAt: memorySnapshot?.checkedAt ?? null,
+          checkedAt: memory?.checkedAt ?? null,
         },
       }
     },
     panic: async () => hostEmergency('manual-panic', { safe: true, allTasks: true }),
-    resetSafeMode: async () => {
+    resetSafeMode: async (input = {}) => {
+      const force = input?.force === true
+      const restore = input?.restore === true
       let memory = null
       try {
         memory = rememberMemory(await readSystemMemory({ force: true }))
@@ -5359,7 +5392,7 @@ export function apply(ctx, config) {
         audit('safe-mode-reset-refused', { reason: 'memory-probe-threw', detail })
         return { ok: false, error: 'memory-probe-threw', detail }
       }
-      const decision = evaluateSafeModeReset(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
+      const decision = evaluateSafeModeReset(memory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB, force })
       if (decision.ok !== true) {
         audit('safe-mode-reset-refused', {
           reason: decision.error,
@@ -5385,7 +5418,7 @@ export function apply(ctx, config) {
         audit('safe-mode-reset-refused', { reason: 'postcheck-probe-threw', detail })
         return { ok: false, error: 'memory-probe-threw', detail, stage: 'postcheck', memory: memorySnapshot }
       }
-      const confirmDecision = evaluateSafeModeReset(confirmMemory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB })
+      const confirmDecision = evaluateSafeModeReset(confirmMemory, { hostCriticalFreeMB: cfg.hostCriticalFreeMB, force })
       if (confirmDecision.ok !== true) {
         audit('safe-mode-reset-refused', {
           reason: confirmDecision.error,
@@ -5411,8 +5444,29 @@ export function apply(ctx, config) {
         commitFreeMB: confirmDecision.commitFreeMB,
         minFreeMB: confirmDecision.minFreeMB,
         postcheck: 'pagefile-present',
+        forced: force,
+        restore,
       })
-      return { ok: true, safeMode: false }
+      let restored = null
+      if (restore) {
+        // Do not hold the reset HTTP response for up to N × 60 s spawn waits.
+        // The restore runs in the background and reports into the audit log.
+        restored = { queued: true }
+        Promise.resolve()
+          .then(() => service.autostartForks({}))
+          .then((result) => {
+            audit('host-safe-mode-restore', {
+              ok: result?.ok === true,
+              started: Array.isArray(result?.started) ? result.started.length : 0,
+              failed: Array.isArray(result?.failed) ? result.failed.length : 0,
+              error: result?.error ?? null,
+            })
+          })
+          .catch((error) => {
+            audit('host-safe-mode-restore', { ok: false, error: 'restore-threw', detail: String(error?.message ?? error) })
+          })
+      }
+      return { ok: true, safeMode: false, forced: decision.forced === true || confirmDecision.forced === true, restored }
     },
     /** v3.3.8：手动/启动后检测默认元主是否落后，旧则自动 capture 并 setDefault。 */
     refreshDefaultEssence: () => refreshStaleDefaultEssenceIfNeeded(),
@@ -5463,7 +5517,7 @@ export function apply(ctx, config) {
   }
   // v3.8.0: host self-preservation. This must run even when no fork is running.
   if (process.platform === 'win32') {
-    const timer = setInterval(() => { void hostWatchdogTick() }, 5000)
+    const timer = setInterval(() => { void hostWatchdogTick() }, HOST_WATCHDOG_INTERVAL_MS)
     timer.unref?.()
     try { ctx.effect(() => () => clearInterval(timer)) } catch { /* fake ctx */ }
   }
@@ -6029,7 +6083,7 @@ export function apply(ctx, config) {
       const forkBundlesBefore = Array.isArray(forkPkg?.dsh?.profile?.bundles) ? forkPkg.dsh.profile.bundles : []
       const forkFangBundle = FORK_BUNDLE_NAMES.find((candidate) => exists(path.join(String(profileDir), 'node_modules', ...candidate.split('/'))))
         || forkBundlesBefore.find((candidate) => /(^|\/)dsh-fang$/.test(String(candidate)))
-        || '@local/dsh-fang'
+        || '@twinsearth/fang-dsh-plugin'
       const bundles = sourceBundles
         .filter((name) => name !== NODE_COMPAT_BUNDLE)
         .map((name) => /(^|\/)(dsh-fang|fang-dsh-plugin)$/.test(String(name)) ? forkFangBundle : name)
@@ -7863,7 +7917,7 @@ export function apply(ctx, config) {
           return json(res, 503, { ...out, ok: false, error: 'browser-open-failed', browserError: detail, managed: false })
         }
       })
-      route('GET', `${prefix}/api/safe-mode`, async (req, res) => json(res, 200, service.safeModeStatus()))
+      route('GET', `${prefix}/api/safe-mode`, async (req, res) => json(res, 200, await service.safeModeStatus()))
       route('POST', `${prefix}/api/memory/probe`, async (req, res) => {
         await readBody(req)
         return json(res, 200, await service.probeMemory())
@@ -7884,8 +7938,8 @@ export function apply(ctx, config) {
         return json(res, out.ok ? 200 : 409, out)
       })
       route('POST', `${prefix}/api/safe-mode/reset`, async (req, res) => {
-        await readBody(req)
-        const out = await service.resetSafeMode()
+        const body = await readBody(req)
+        const out = await service.resetSafeMode(body)
         return json(res, out.ok ? 200 : 409, out)
       })
       // Global Panic: browser -> fork -> quarantine all -> Safe Mode. UI has the
@@ -8544,11 +8598,25 @@ const $ = (id) => document.getElementById(id);
 // v3.0.5/B1：面板同源读取安装 token，所有 /api 请求必须携带 header（否则 401 unauthorized）
 const AUTH = (document.querySelector('meta[name="fang-auth"]')?.content || '');
 // UI 分析日志：所有按钮/链接点击都记录（可被自动冒烟读取）
+// v3.9.2：这个页面同样给日志加上限，避免长期打开时点击事件无限堆积。
 window.__fangUiLog = [];
+window.__fangUiLog.__fangUiLogBytes = 0;
+function pushUiLog(entry) {
+  const log = window.__fangUiLog;
+  log.push(entry);
+  let bytes = Number(log.__fangUiLogBytes) || 0;
+  try { bytes += JSON.stringify(entry).length + 1; } catch { bytes += 64; }
+  while (log.length > 500 || bytes > 262144) {
+    const removed = log.shift();
+    if (removed === undefined) break;
+    try { bytes -= JSON.stringify(removed).length + 1; } catch { bytes -= 64; }
+  }
+  log.__fangUiLogBytes = Math.max(0, bytes);
+}
 document.addEventListener('click', (ev) => {
   const el = ev.target && ev.target.closest ? ev.target.closest('button, a[href]') : null;
   if (!el) return;
-  window.__fangUiLog.push({
+  pushUiLog({
     at: Date.now(),
     text: String(el.textContent || '').trim().slice(0, 80),
     act: el.getAttribute('data-act') || null,
@@ -8610,7 +8678,7 @@ $('rows').addEventListener('click', async (ev) => {
   refresh();
 });
 refresh();
-setInterval(refresh, 5000);
+setInterval(refresh, 15000);
 </script>
 </body></html>`
 }

@@ -4,7 +4,7 @@
 // A DSH session is a multi-frame zstd log. The expensive part for the Host is
 // not the compressed bytes alone; it is the fact that opening one large log
 // expands it into the V8 heap. This scanner only stats the exact session log
-// filename (no decode, no read), so it can run from the 5 s host tick behind a
+// filename (no decode, no read), so it can run from the 15 s host tick behind a
 // longer cache without becoming a second memory problem.
 import path from 'node:path'
 import { listSessionLogs } from './session-compaction.mjs'

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-fang",
-  "version": "3.9.1",
+  "version": "3.9.2",
   "private": true,
   "type": "module",
   "description": "瓮城：DSH 的第一台虚拟机！插件开发狂魔、多任务并发狂与安全焦虑症患者的隔离沙箱：热更新坏了秒回滚，多开不崩各跑各的，危险代码进审核与独立沙箱。1 编排器 + 12 子插件。",
@@ -84,7 +84,8 @@
     "tools/migrate-fang-home.mjs",
     "tools/repair-core-ui-profile.mjs",
     "tools/release/clean-locale-sidecars.mjs",
-    "tools/release/host-boot-smoke.mjs"
+    "tools/release/host-boot-smoke.mjs",
+    "tools/release/clean-apple-double.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -125,7 +126,7 @@
     "test:lsp-bundle": "node tools/release/lsp-bundle-install.mjs",
     "verify:lsp-evidence": "node tools/release/lsp-evidence.mjs",
     "check:lsp-mother": "node tools/release/lsp-mother-check.mjs",
-    "postinstall": "node tools/release/clean-locale-sidecars.mjs"
+    "postinstall": "node tools/release/clean-apple-double.mjs && node tools/release/clean-locale-sidecars.mjs"
   },
   "license": "AGPL-3.0-or-later",
   "engines": {

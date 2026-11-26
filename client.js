@@ -32,7 +32,7 @@
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 window.__ModuleLoader__.load({
-  id: '@local/dsh-fang',
+  id: '@twinsearth/fang-dsh-plugin',
   factory(require) {
     // React 只用于宿主插槽返回值（slots 契约），UI 不依赖它。见文件头说明。
     const React = require('react')
@@ -76,9 +76,9 @@ window.__ModuleLoader__.load({
       mono: 'ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace',
     }
 
-    const CAPACITY_SLOTS = 7           // 物理槽位硬上限（capacity.slots）
-    const CAPACITY_LIMIT = 5           // 默认准入配额（capacity.limit，1–7）
-    const POLL_MS = 5000
+    const CAPACITY_SLOTS = 8           // 物理槽位上限（v3.9.2 恢复 8 分身配额）
+    const CAPACITY_LIMIT = 8           // 默认准入配额（capacity.limit，1–8）
+    const POLL_MS = 15000           // v3.9.2：5s→15s，降低母体状态/内存接口的轮询压力
     const ACTIVE_SESSION_LIMIT = 7     // 元主展开后默认显示的会话条数
     const MAX_TITLE = 40
     // v3.8.5：客户端硬上限。所有来自 API 的集合/预览进入 UI 前先裁剪，
@@ -438,6 +438,45 @@ window.__ModuleLoader__.load({
     }
     // v3.0.8 诊断日志：面板内所有错误集中展示，供开发/调试查看。
     const diagLog = []
+    // v3.9.2：__fangUiLog 是给冒烟脚本读取的 UI 事件流，不能无上限增长。
+    // 同时限制条数与字节数：点击事件很便宜，但 diag 条目可能带 2 KB 明细。
+    const FANG_UI_LOG_MAX_ENTRIES = 500
+    const FANG_UI_LOG_MAX_BYTES = 256 * 1024
+    function fangUiLogBytes(entry) {
+      try { return JSON.stringify(entry).length + 1 } catch { return 64 }
+    }
+    function ensureFangUiLog() {
+      try {
+        if (typeof window === 'undefined') return []
+        let log = window.__fangUiLog
+        if (!Array.isArray(log)) {
+          log = []
+          window.__fangUiLog = log
+        }
+        if (Number.isFinite(Number(log.__fangUiLogBytes))) return log
+        let bytes = 0
+        for (const entry of log) bytes += fangUiLogBytes(entry)
+        try {
+          Object.defineProperty(log, '__fangUiLogBytes', { value: bytes, writable: true, configurable: true })
+        } catch { log.__fangUiLogBytes = bytes }
+        return log
+      } catch { return [] }
+    }
+    function pushFangUiLog(entry) {
+      try {
+        const log = ensureFangUiLog()
+        if (!Array.isArray(log)) return
+        log.push(entry)
+        let bytes = Number(log.__fangUiLogBytes) || 0
+        bytes += fangUiLogBytes(entry)
+        while (log.length > FANG_UI_LOG_MAX_ENTRIES || bytes > FANG_UI_LOG_MAX_BYTES) {
+          const removed = log.shift()
+          if (removed === undefined) break
+          bytes -= fangUiLogBytes(removed)
+        }
+        log.__fangUiLogBytes = Math.max(0, bytes)
+      } catch { /* UI logging must never break the panel */ }
+    }
     function diag(level, message, detail = '') {
       const entry = {
         at: Date.now(),
@@ -447,7 +486,7 @@ window.__ModuleLoader__.load({
       }
       diagLog.push(entry)
       if (diagLog.length > 3000) diagLog.shift()
-      try { window.__fangUiLog?.push?.({ kind: 'diag', level: entry.level, message: entry.message }) } catch { /* ignore */ }
+      pushFangUiLog({ kind: 'diag', level: entry.level, message: entry.message })
       try { window.dispatchEvent(new CustomEvent('fang:diag')) } catch { /* ignore */ }
     }
 
@@ -1687,6 +1726,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         status: { state: 'loading', data: null, error: '', diagnostic: null, at: 0 },
         tasks: { state: 'loading', items: [], error: '', diagnostic: null, at: 0 },
         safeMode: { state: 'loading', data: null, error: '', at: 0 },
+        // 迁移横幅只提示一次：用户点关闭后记住报告文件名，不再挤占面板。
+        migrationBannerDismissed: (() => {
+          try { return String(window?.localStorage?.getItem('fang.migrationBannerDismissed') || '') } catch { return '' }
+        })(),
         sessions: { state: 'loading', items: [], total: 0, degraded: [], error: '', diagnostic: null, at: 0 },
         forkSessions: new Map(),
         activeTaskId: '',
@@ -2159,18 +2202,30 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const layout = S.status?.data?.layout || {}
         const memory = S.status?.data?.memory || null
         const policy = S.status?.data?.memoryPolicy || {}
-        const pageFileMB = Number(memory?.pageFileMB) || 0
         const reset = S.safeMode?.data?.reset || null
-        const pagefileMissing = reset?.pagefileMissing === true || (memory?.ok === true && (
-          memory?.pagefileMissing === true
-          || memory?.pagingFilesEmpty === true
-          || memory?.commitLimitNearRam === true
-          || memory?.hasPageFile !== true
+        // The status snapshot can be minutes stale. `reset` comes from a fresh
+        // /fang/api/safe-mode probe and is authoritative for the modal.
+        const freshMemory = reset?.memoryKnown === true
+          ? {
+            ...(memory || {}),
+            ok: true,
+            commitFreeMB: Number(reset.commitFreeMB) || 0,
+            pageFileMB: Number(reset.pageFileMB) || 0,
+            pagefileMissing: reset.pagefileMissing === true,
+          }
+          : memory
+        const pageFileMB = Number(freshMemory?.pageFileMB) || 0
+        const pagefileMissing = reset?.pagefileMissing === true || (freshMemory?.ok === true && (
+          freshMemory?.pagefileMissing === true
+          || freshMemory?.pagingFilesEmpty === true
+          || freshMemory?.commitLimitNearRam === true
+          || freshMemory?.hasPageFile !== true
           || pageFileMB <= 0
         ))
         const memoryUnknown = reset?.canReset === false && reset?.error === 'memory-probe-unavailable'
         const commitLow = (reset?.canReset === false && reset?.error === 'commit-low')
-          || (memory?.ok === true && Number(memory?.commitFreeMB) < Number(policy.hostCriticalFreeMB ?? 4096))
+          || (reset?.canReset !== true && freshMemory?.ok === true
+            && Number(freshMemory?.commitFreeMB) < Number(policy.hostCriticalFreeMB ?? 4096))
         const resetBlocked = reset?.canReset === false && !pagefileMissing && !memoryUnknown && !commitLow ? reset : null
         lockScroll()
         S.modal = {
@@ -2182,9 +2237,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           pagefileMissing,
           memoryUnknown,
           commitLow,
+          canForce: reset?.canForce === true || (commitLow && freshMemory?.ok === true),
           resetBlocked,
           pageFileMB,
-          memory,
+          memory: freshMemory,
           checks: { pagefile: false, migration: false, memory: false, isolation: false },
           busy: false,
           error: '',
@@ -2193,11 +2249,11 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         render(true)
       }
 
-      async function confirmSafeModeReset() {
+      async function confirmSafeModeReset(force = false, restore = false) {
         const modal = S.modal
         if (!modal || modal.kind !== 'safeMode' || modal.busy) return
-        if (modal.commitLow === true) {
-          modal.error = 'Commit 余量低于宿主紧急阈值；请先释放内存再重新检测。'
+        if (modal.commitLow === true && force !== true) {
+          modal.error = 'Commit 余量低于宿主紧急阈值；请先释放内存，或使用“强制解除”。'
           render(true)
           return
         }
@@ -2215,13 +2271,29 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         const required = ['pagefile', 'memory']
           .concat(modal.legacy ? ['migration'] : [])
           .concat(modal.isolation ? ['isolation'] : [])
-        if (!required.every((key) => checks[key] === true)) return
+        if (force !== true && !required.every((key) => checks[key] === true)) return
         modal.busy = true
         modal.error = ''
         render(true)
-        const out = await api('/fang/api/safe-mode/reset', { method: 'POST', body: '{}' })
+        const out = await api('/fang/api/safe-mode/reset', {
+          method: 'POST',
+          body: JSON.stringify({ force: force === true, restore: restore === true }),
+        })
         if (out.status === 200) {
-          notify('warn', 'Safe Mode 已解除', '不会自动恢复分身；请手动打开需要的任务，并继续观察 Commit 余量。')
+          const restored = out.body?.restored
+          const started = Array.isArray(restored?.started) ? restored.started.length : 0
+          const failed = Array.isArray(restored?.failed) ? restored.failed.length : 0
+          if (restore === true) {
+            notify(started > 0 ? 'ok' : 'warn', 'Safe Mode 已解除，恢复任务已提交',
+              restored?.queued === true
+                ? '后台正在逐个拉起已登记分身；内存守卫不足的会被拒绝，结果写入审计日志。'
+                : `已启动 ${started} 个，失败 ${failed} 个；内存守卫不足时会拒绝启动。`)
+          } else {
+            notify('warn', 'Safe Mode 已解除',
+              force === true
+                ? '已强制解除闩锁；没有自动恢复分身。新建/打开分身仍会经过 Commit/heap 守卫。'
+                : '没有自动恢复分身；可在检查清单里选择“解除并恢复”，或手动打开需要的任务。')
+          }
           closeModal()
           void refresh()
           return
@@ -3708,7 +3780,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         state: S, view, render, schedule, refresh, deriveTask, openMother, closeModal,
         reviewSafeMode, confirmSafeModeReset, confirmPanic,
         confirmMultiFork,
-        probeMemory, openPagefileHelp, openMigrationReport, openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
+        probeMemory, openPagefileHelp, openMigrationReport, dismissMigrationReportBanner, openDiskHygiene, refreshDiskHygiene, cleanupBrowserCache,
         openRestartDialog, submitRestart,
         archiveTask, restoreTask, startTask, restartQuarantinedTask, repairTask, deleteArchive, promoteTask, openTask, setActiveTask, exportTask, importTask, copyText, captureEssence,
         cloneMotherProfile, syncEssence, syncEssences, setSessionWindow, essenceRuntime,
@@ -4221,25 +4293,35 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       return value
     }
 
+    function dismissMigrationReportBanner(file) {
+      const key = String(file || '')
+      S.migrationBannerDismissed = key
+      try { window?.localStorage?.setItem('fang.migrationBannerDismissed', key) } catch { /* private mode */ }
+      render(true)
+    }
+
     function renderMigrationReportBanner(S, app) {
       const report = S.status?.data?.layout?.migrationReport
       if (!report || report.found !== true) return null
+      const file = String(report.file || '')
+      if (file && S.migrationBannerDismissed === file) return null
       const conflicts = Number(report.conflictCount) || 0
+      const copied = Number(report.copied) || 0
       const tone = report.reportOk === false || conflicts > 0 ? 'warn' : 'ok'
       return h('div', { class: `notice notice--${tone} fang-migration-banner`, role: 'status', 'data-zone': 'migration-report-banner' },
         h('div', { class: 'notice-main' },
           h('div', { class: 'notice-title' }, icon(tone === 'ok' ? 'check' : 'alert', 14), `数据迁移报告 · ${report.stamp || '未知时间'}`),
           h('div', { class: 'notice-text' },
-            `从 ${Array.isArray(report.sources) ? report.sources.length : 0} 个旧根复制 ${Number(report.copied) || 0} 个文件，跳过 ${Number(report.skipped) || 0} 个；冲突 ${conflicts} 个。目标 ${report.target || '未记录'}。`),
-          report.reportOk === false
-            ? h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } }, '报告未标记成功；请先核对冲突与目标文件，再继续使用。')
-            : conflicts > 0
-              ? h('div', { class: 'notice-text', style: { color: 'var(--f-text-4)' } }, '冲突文件按“不覆盖”保留目标现有版本；源数据未被删除。')
-              : null),
+            `已迁移 ${copied} 个文件，跳过 ${Number(report.skipped) || 0} 个，冲突 ${conflicts} 个${report.target ? `；目标 ${report.target}` : ''}。`)),
         h('div', { class: 'notice-actions' },
-          button('查看迁移报告', {
+          button('查看', {
             size: 'sm', variant: 'ghost', fk: 'migration-report-open',
             onClick: () => openMigrationReport(),
+          }),
+          button('', {
+            size: 'sm', variant: 'quiet', iconOnly: true, icon: icon('close', 14), ariaLabel: '关闭迁移提示',
+            fk: 'migration-report-dismiss',
+            onClick: () => dismissMigrationReportBanner(file),
           })))
     }
 
@@ -4914,7 +4996,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const timer = setInterval(() => {
         if (!section.isConnected) { clearInterval(timer); return }
         if (!state.busy) void load()
-      }, 5000)
+      }, 15000) // v3.9.2：5s→15s
       timer.unref?.()
       return section
     }
@@ -5922,6 +6004,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const canConfirm = required.every((key) => checks[key] === true) && !modal.busy
         && modal.commitLow !== true
         && modal.memoryUnknown !== true && !modal.resetBlocked
+      const canForce = modal.canForce === true && modal.memoryUnknown !== true && !modal.busy
       const checkRow = (key, label, hint, disabled = false) => h('label', { class: 'safe-check' },
         h('input', {
           type: 'checkbox', checked: checks[key] === true, disabled: modal.busy || disabled === true,
@@ -5934,7 +6017,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           h('div', { class: 'glass-head' },
             h('div', { class: 'glass-head-main' },
               h('div', { class: 'glass-title', id: 'fang-safe-mode-title' }, icon('alert', 18), '解除 Safe Mode 前检查'),
-              h('div', { class: 'glass-sub' }, '只解除保护闩锁；不会自动恢复任何分身。')),
+              h('div', { class: 'glass-sub' }, '解除闩锁后默认不自动恢复分身；可选择“解除并恢复”，或强制解除后手动打开。')),
             button('', { variant: 'quiet', size: 'sm', iconOnly: true, icon: icon('close', 15), ariaLabel: '取消', onClick: () => app.closeModal() })),
           h('div', { class: 'glass-body' },
             h('div', { class: 'notice notice--warn', role: 'status' },
@@ -5951,7 +6034,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               ? h('div', { class: 'notice notice--bad', role: 'alert' },
                 h('div', { class: 'notice-main' },
                   h('div', { class: 'notice-title' }, 'Commit 余量低于宿主紧急阈值'),
-                  h('div', { class: 'notice-text' }, `当前 Commit 余量 ${Number(modal.memory?.commitFreeMB) || 0} MB，低于解除阈值 ${Number(S.status?.data?.memoryPolicy?.hostCriticalFreeMB ?? 4096)} MB；请先释放内存。`)))
+                  h('div', { class: 'notice-text' }, `当前 Commit 余量 ${Number(modal.memory?.commitFreeMB) || 0} MB，低于解除阈值 ${Number(S.status?.data?.memoryPolicy?.hostCriticalFreeMB ?? 4096)} MB；可继续释放内存，或强制解除（不会自动恢复分身，新建仍受内存守卫限制）。`)))
               : null,
             modal.memoryUnknown
               ? h('div', { class: 'notice notice--bad', role: 'alert' },
@@ -5977,16 +6060,30 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
               modal.isolation
                 ? checkRow('isolation', '已修正数据根或完成迁移', 'Fang 数据根不能落在宿主/工程目录（如 E:\\DSH\\DS）；修正 fangHome 后重启宿主。')
                 : null,
-              checkRow('memory', '已释放内存并确认没有运行中的分身', '关闭占用内存的浏览器/应用；解除后不会自动拉起分身，请逐个手动打开。')),
+              checkRow('memory', '已释放内存并确认没有运行中的分身', '关闭占用内存的浏览器/应用；默认不自动拉起分身，也可点“解除并恢复”逐个重开。')),
             modal.error ? h('div', { class: 'notice notice--bad', role: 'alert' },
               h('div', { class: 'notice-main' }, h('div', { class: 'notice-title' }, '解除失败'), h('div', { class: 'notice-text' }, modal.error))) : null),
           h('div', { class: 'glass-foot' },
             button('取消', { size: 'sm', variant: 'ghost', fk: 'safe-mode-cancel', onClick: () => app.closeModal() }),
             button(modal.busy ? '解除中…' : '确认已检查，解除 Safe Mode', {
               size: 'sm', variant: 'danger', fk: 'safe-mode-confirm', disabled: !canConfirm,
-              title: modal.commitLow ? 'Commit 余量低于宿主紧急阈值，不能解除' : modal.memoryUnknown ? '内存状态未知，请先重新检测' : canConfirm ? '仅解除禁止自动恢复的闩锁' : '请先勾选全部恢复前检查项',
-              onClick: () => void app.confirmSafeModeReset(),
-            }))))
+              title: modal.commitLow ? 'Commit 余量低于宿主紧急阈值，不能走普通解除' : modal.memoryUnknown ? '内存状态未知，请先重新检测' : canConfirm ? '仅解除禁止自动恢复的闩锁' : '请先勾选全部恢复前检查项',
+              onClick: () => void app.confirmSafeModeReset(false, false),
+            }),
+            modal.commitLow
+              ? button(modal.busy ? '解除中…' : '强制解除（风险确认）', {
+                size: 'sm', variant: 'danger', fk: 'safe-mode-force', disabled: !canForce,
+                title: canForce ? '绕过 Commit 阈值解除闩锁；不会自动恢复分身，新建分身仍会被内存守卫拒绝' : '内存状态未知，无法强制解除',
+                onClick: () => void app.confirmSafeModeReset(true, false),
+              })
+              : null,
+            modal.commitLow
+              ? null
+              : button(modal.busy ? '解除中…' : '解除并恢复分身', {
+                size: 'sm', variant: 'primary', fk: 'safe-mode-restore', disabled: !canConfirm,
+                title: canConfirm ? '解除闩锁后尝试重新拉起已登记但未运行的分身；内存不足会逐个拒绝' : '请先勾选全部恢复前检查项',
+                onClick: () => void app.confirmSafeModeReset(false, true),
+              }))))
     }
 
     function renderBranchModal(S, app) {
@@ -6611,7 +6708,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       gray: { priority: '—', risk: 'info' },
     })
     const DECISION_RISK_LABEL = Object.freeze({ high: '高', medium: '中', low: '低', info: '信息' })
-    const INBOX_POLL_MS = 5000
+    const INBOX_POLL_MS = 15000       // v3.9.2：SSE 正常时只做低频兜底，5s→15s
     const inboxText = (value, max = 420) => {
       const text = String(value ?? '').trim()
       return text.length > max ? text.slice(0, max - 1) + '…' : text
@@ -7759,21 +7856,21 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       // v3.0.7 UI 分析日志：记录面板挂载与所有按钮/链接点击，供自动冒烟/诊断读取
       try {
         const doc = host?.ownerDocument ?? document
-        window.__fangUiLog = window.__fangUiLog || []
-        if (window.__fangUiLog.__bound !== true) {
+        const uiLog = ensureFangUiLog()
+        if (uiLog.__bound !== true) {
           doc.addEventListener('click', (ev) => {
             const el = ev.target && ev.target.closest ? ev.target.closest('button, [data-btn-id], a[href]') : null
             if (!el) return
-            window.__fangUiLog.push({
+            pushFangUiLog({
               at: Date.now(),
               btnId: el.getAttribute?.('data-btn-id') || null,
               text: String(el.textContent || '').trim().slice(0, 80),
               href: el.getAttribute?.('href') || null,
             })
           }, true)
-          window.__fangUiLog.__bound = true
+          uiLog.__bound = true
         }
-        window.__fangUiLog.push({ at: Date.now(), kind: 'panel-mount' })
+        pushFangUiLog({ at: Date.now(), kind: 'panel-mount' })
       } catch { /* 宿主无 window 时忽略 */ }
       const app = createConsole(host)
       const unmountDiagnostics = mountDiagnostics(app, host)

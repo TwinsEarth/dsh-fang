@@ -70,7 +70,7 @@ import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } 
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady, resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
 
-/** Repository root of this plugin (used as the @local/dsh-fang junction source). */
+/** Repository root of this plugin (used as the @twinsearth/fang-dsh-plugin junction source). */
 const FANG_ROOT = (() => {
   try {
     return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -116,14 +116,14 @@ const DEFAULTS = {
   cliPath: '',
   profileTemplate: '',
   startTimeoutMs: 60000,
-  maxForks: 1,
-  allowMultiFork: false,
+  maxForks: 8,
+  allowMultiFork: true,
   maxLogLines: 400,
   dataRoot: '',
   portPool: { ...DEFAULT_PORT_POOL },
   allocatePorts: true,
   cleanTemplate: true,
-  bundleName: '@local/dsh-fang',
+  bundleName: '@twinsearth/fang-dsh-plugin',
   forkProfileTag: 'web-base',
   jobObject: true,
   jobHeartbeatTimeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
@@ -148,8 +148,8 @@ export const Config = z
       .default('')
       .description('母版 profile 目录：clone 源 / node_modules junction 源（cleanTemplate 时只用后者）'),
     startTimeoutMs: z.natural().default(60000).description('等待 web URL 的启动超时（毫秒）'),
-    maxForks: z.natural().default(1).description('允许同时存活的分身上限；默认 1'),
-    allowMultiFork: z.boolean().default(false).description('必须显式二次确认后才允许 maxForks>1；false 时强制 1'),
+    maxForks: z.natural().default(8).description('允许同时存活的分身上限；默认 8'),
+    allowMultiFork: z.boolean().default(true).description('是否允许 maxForks>1；默认 true，仍受 Commit 余量守卫限制'),
     maxLogLines: z.natural().default(400).description('每个分身 stdout 滚动缓冲行数'),
     dataRoot: z.string().default('').description('注册表/端口表落盘根目录（空 = 仅进程内存）'),
     portPool: z
@@ -167,7 +167,7 @@ export const Config = z
       .boolean()
       .default(true)
       .description('true：用内置干净模板（不继承母体脏 profile）；false：沿用 profileTemplate'),
-    bundleName: z.string().default('@local/dsh-fang').description('干净模板 profile.bundles 的第三个 bundle'),
+    bundleName: z.string().default('@twinsearth/fang-dsh-plugin').description('干净模板 profile.bundles 的第三个 bundle'),
     coreMode: z.union([z.const('stock'), z.const('accelerated')]).default('stock').description('new fork uses stock or accelerated DSH core'),
     acceleratedCliPath: z.string().default('').description('accelerated DSH CLI path'),
     forkProfileTag: z.string().default('web-base').description('干净模板 profile 标签（模板目录/缺省 profile 名）'),

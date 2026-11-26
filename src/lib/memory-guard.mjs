@@ -6,8 +6,8 @@ import { promisify } from 'node:util'
 import os from 'node:os'
 
 const execFileAsync = promisify(execFile)
-// Host memory is checked on a 5s timer; a 10s cache halves PowerShell starts
-// while keeping the critical-threshold reaction within two ticks.
+// Host memory is checked on a 15s timer; a 10s cache still coalesces ad-hoc
+// probes while the watchdog tick keeps one PowerShell/CIM query per interval.
 const DEFAULT_CACHE_MS = 10000
 const DEFAULT_PROCESS_TABLE_CACHE_MS = 0
 let cache = { at: 0, value: null, pending: null }
