@@ -1,3 +1,19 @@
+## v3.9.5（2026-11-26）
+**主题：crash-loop Safe Mode 永久闩锁热修**
+
+### 根因
+- v3.9.4 的 `shouldAutoClearSafeMode()` 显式排除 `crash-loop-*`；真实宿主两次 `unclean-shutdown`（Commit 余量 25 GB、heap 正常、单会话 61 MB）即被判 `crash-loop-10m`，`hostAdmissionClosed` 永久为真，启动分身返回 `host-admission-closed`。
+
+### 修复
+- `crash-loop-*` 在 Commit ≥2345 MB 时自动解除；`manual-panic` 仍保留人工确认。
+- 新增 `hasHostCrashPressure()`：仅低 Commit、heap critical/emergency、session emergency 才允许 crash-loop 封门。
+- 自动解除后清空 `host-crashes.json` 窗口计数（JSONL 审计保留），避免下次正常重启复发。
+- 新增 `ensureHostAdmission()`：create/restore/sync/open-browser/open-url 准入前先尝试恢复。
+- 宿主压力横幅补全单文件阈值 16/32/64 MB。
+
+### 测试
+- 定向回归 119/119 PASS；详见 `docs/AUDIT-v3.9.5.md`。
+
 ## v3.9.4（2026-11-26）
 **主题：配额/SafeMode 口径重定 + 页面文件去强制 + 消息收件箱 + 元主 bundle 修复**
 

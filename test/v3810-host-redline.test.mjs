@@ -45,9 +45,10 @@ test('v3.8.10 measure 2: emergency closes admission before browsers, forks, then
   const fork = body.indexOf('quarantineTask(task, `host-panic:${reason}`')
   assert.ok(admission > 0 && browser > admission && fork > browser)
   assert.match(body, /safeMode = true[\s\S]*safeModeReason = `host-emergency:\$\{reason\}`/)
-  assert.match(orchestrator, /async createTask[\s\S]{0,260}hostAdmissionClosed/)
-  assert.match(orchestrator, /async syncTaskOnOpen[\s\S]{0,260}hostAdmissionClosed/)
-  assert.match(orchestrator, /const launchTaskBrowser = async[\s\S]{0,120}hostAdmissionClosed/)
+  assert.match(orchestrator, /const ensureHostAdmission = async[\s\S]{0,300}hostAdmissionClosed/)
+  assert.match(orchestrator, /async createTask[\s\S]{0,300}ensureHostAdmission/)
+  assert.match(orchestrator, /async syncTaskOnOpen[\s\S]{0,300}ensureHostAdmission/)
+  assert.match(orchestrator, /const launchTaskBrowser = async[\s\S]{0,160}ensureHostAdmission/)
 })
 
 test('v3.8.10 measure 3: independent sidecar detects host exit and heartbeat stall', () => {

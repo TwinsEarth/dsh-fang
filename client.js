@@ -4539,7 +4539,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
         lines.push(`Host JS heap ${Number(heap?.heapUsedMB) || 0} MB / ${Number(heap?.heapLimitMB) || '?'} MB${Number.isFinite(pct) ? `（${Math.round(pct * 100)}%）` : ''}；阈值 ${Number(heap?.warnMB) || '?'} / ${Number(heap?.criticalMB) || '?'} / ${Number(heap?.emergencyMB) || '?'} MB。`)
       }
       if (sessionVisible) {
-        lines.push(`session 合计 ${Number(session?.totalMB) || 0} MB · 单文件最大 ${Number(session?.largestMB) || 0} MB${session?.largestFile ? ` · ${session.largestFile}` : ''}；阈值 ${Number(session?.thresholds?.warnMB) || '?'} / ${Number(session?.thresholds?.criticalMB) || '?'} / ${Number(session?.thresholds?.emergencyMB) || '?'} MB。`)
+        lines.push(`session 合计 ${Number(session?.totalMB) || 0} MB · 单文件最大 ${Number(session?.largestMB) || 0} MB${session?.largestFile ? ` · ${session.largestFile}` : ''}；合计阈值 ${Number(session?.thresholds?.warnMB) || '?'} / ${Number(session?.thresholds?.criticalMB) || '?'} / ${Number(session?.thresholds?.emergencyMB) || '?'} MB，单文件阈值 ${Number(session?.thresholds?.fileWarnMB) || '?'} / ${Number(session?.thresholds?.fileCriticalMB) || '?'} / ${Number(session?.thresholds?.fileEmergencyMB) || '?'} MB。`)
       }
       const title = gate ? '宿主压力已封住新任务' : '宿主压力预警'
       const text = lines.join(' ')

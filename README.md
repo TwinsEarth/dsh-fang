@@ -7,7 +7,7 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
-> 当前发布线：**v3.9.4**（2026-11-26，元主配额 3/6、分身槽位 8/62、Commit 2345 自动解除 SafeMode、<999 硬禁止派生与启动、取消页面文件强制单分身、全部提醒可关闭且 30 秒收入消息收件箱、修复元主 `@twinsearth/dsh-2xray` profile bundle 无法解析）。v3.9.3 的迁移报告闭包修复、15s 心跳与 UI 日志上限保持不变。v3.8.2 改变了数据根，升级前先读
+> 当前发布线：**v3.9.5**（2026-11-26，crash-loop Safe Mode 永久闩锁热修：Commit ≥2345 MB 自动解除、只有资源型崩溃才封门、准入前自动恢复；v3.9.4 的元主配额 3/6、分身槽位 8/62、<999 硬禁止、页面文件 advisory、消息收件箱、元主 bundle 修复保持不变）。v3.9.3 的迁移报告闭包修复、15s 心跳与 UI 日志上限保持不变。v3.8.2 改变了数据根，升级前先读
 > [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
 
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。
@@ -168,7 +168,7 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 | 你要做什么 | 先读 |
 |---|---|
 | 安装、升级、v3.8.2 数据根迁移 | [docs/INSTALL.md](docs/INSTALL.md) · [v3.8.2 变更](docs/CHANGELOG.md) |
-| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.9.4.md](docs/RELEASE-v3.9.4.md) · [docs/RELEASE-v3.9.3.md](docs/RELEASE-v3.9.3.md) · [docs/RELEASE-v3.9.2.md](docs/RELEASE-v3.9.2.md) · [docs/RELEASE-v3.9.0.md](docs/RELEASE-v3.9.0.md) · [docs/RELEASE-v3.8.14.md](docs/RELEASE-v3.8.14.md) · [docs/RELEASE-v3.8.13.md](docs/RELEASE-v3.8.13.md) · [docs/RELEASE-v3.8.12.md](docs/RELEASE-v3.8.12.md) · [docs/RELEASE-v3.8.11.md](docs/RELEASE-v3.8.11.md) · [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
+| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.9.5.md](docs/RELEASE-v3.9.5.md) · [docs/RELEASE-v3.9.4.md](docs/RELEASE-v3.9.4.md) · [docs/RELEASE-v3.9.3.md](docs/RELEASE-v3.9.3.md) · [docs/RELEASE-v3.9.2.md](docs/RELEASE-v3.9.2.md) · [docs/RELEASE-v3.9.0.md](docs/RELEASE-v3.9.0.md) · [docs/RELEASE-v3.8.14.md](docs/RELEASE-v3.8.14.md) · [docs/RELEASE-v3.8.13.md](docs/RELEASE-v3.8.13.md) · [docs/RELEASE-v3.8.12.md](docs/RELEASE-v3.8.12.md) · [docs/RELEASE-v3.8.11.md](docs/RELEASE-v3.8.11.md) · [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
 | P0 加固实现与真机证据 | [docs/P0-HARDENING.md](docs/P0-HARDENING.md) |
 | 真实宿主回归 smoke（v3.8.0/3.8.1） | [docs/HOST-SMOKE.md](docs/HOST-SMOKE.md) |
 | 防崩溃、Safe Mode、升级红线 | [docs/CRASH-SAFETY.md](docs/CRASH-SAFETY.md) |
