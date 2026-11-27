@@ -22,10 +22,17 @@
 - v3.9.6 的多帧 zstd 崩溃修复与打开前二次确认。
 - Host JS heap 1024/1536/2048 MB 阈值未改。
 
+## 资产
+
+- npm：`@twinsearth/fang-dsh-plugin@3.9.8`（https://www.npmjs.com/package/@twinsearth/fang-dsh-plugin/v/3.9.8）
+- GitHub Release：`v3.9.8`（https://github.com/TwinsEarth/fang-dsh-plugin/releases/tag/v3.9.8）
+- 交付目录：`E:\DBH\Fang-v3.9.8\`
+- tarball：`dsh-fang-3.9.8.tgz`，935,321 bytes，SHA-256 `8fe2c0ae3590a40c6c434d4cb57eafac0b9a102a3c22d0a819401b6b15a74fcc`
+
 ## 验收
 
 - `test/adapter.test.mjs` 43/43 PASS，新增 `/fang/api/health` 公开探针断言。
 - 真机 fork 模板：3.9.7 `/fang/api/health` 404、`/api/health` 401；3.9.8 构建产物 `/fang/api/health` 200，`role:"fork"`、`adapter.ok:true`。
 - 真实宿主一键修复 `task_mwqenfnxpobe` 成功：`fork-created → fork-started（pid 3088，port 18000）→ adapter-handshake 3.9.8 → task-restored → task-repaired`；任务状态 `ready`。
 - 打开分身成功：托管浏览器 pid 9220、port 19300；`browser-health.jsonl` 记录 `ok:true`、`http.status:200`、`path:/fang/api/health`。
-- 本地 profile 已部署 3.9.8；npm/GitHub/tag/Release 尚未发布。
+- 本地 profile 已部署 3.9.8；npm/GitHub/tag/Release 发布状态以本节资产链接为准。
