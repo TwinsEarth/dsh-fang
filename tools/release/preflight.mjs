@@ -61,6 +61,10 @@ const files = listTestFiles()
 const started = Date.now()
 const suite = nodeRun(['--test', '--test-concurrency=1', ...files.map((f) => path.join('test', f))], { timeoutMs: 900000 })
 const out = `${suite.stdout}\n${suite.stderr}`
+// Keep the full TAP stream next to the report; a red gate must be diagnosable
+// without rerunning the entire suite.
+fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })
+fs.writeFileSync(path.join(ROOT, 'dist', 'preflight-tests.log'), out, 'utf8')
 // Node's default TAP reporter uses "# pass N" on Node 22; newer builds may use
 // "ℹ pass N". Accept both so a green suite is not reported as pass=-1.
 const pass = Number((out.match(/(?:ℹ|#) pass (\d+)/) ?? [])[1] ?? -1)
