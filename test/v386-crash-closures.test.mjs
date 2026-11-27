@@ -69,6 +69,27 @@ test('v3.8.6: session health scans event count and enforces the event budget', a
   }
 })
 
+test('multi-frame session health never feeds concatenated zstd frames to a stream decoder', async () => {
+  const frames = buildEmptySessionFrames({ sessionId: 's1', createdAt: 1, cwd: '/tmp/ws' })
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-multiframe-health-'))
+  const file = path.join(root, 'sessions', 'ws', 's1', 'session.v4.jsonl.zstd')
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    // Real DSH logs are concatenated frames, not one frame for the whole log.
+    fs.writeFileSync(file, Buffer.concat([
+      encodeSessionLog(frames.slice(0, 1)),
+      encodeSessionLog(frames.slice(1)),
+    ]))
+    const count = await countSessionEvents(file, { maxEvents: 100 })
+    assert.equal(count.ok, true)
+    assert.equal(count.error, null)
+    assert.equal(count.events, frames.length)
+    assert.equal(count.truncated, false)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('v3.8.6: health gate fails on adapter, oversized session, or unavailable endpoint', async () => {
   const home = makeSessionHome()
   try {

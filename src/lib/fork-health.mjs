@@ -24,51 +24,115 @@ function boundedNumber(value, fallback, min, max) {
   return Math.min(max, Math.max(min, n))
 }
 
+// DSH session logs are concatenated zstd frames. `createZstdDecompress` stops
+// at the first frame and then emits `ZSTD_error_prefix_unknown` for the next
+// frame's magic; if the stream ends first, that error is an unhandled 'error'
+// event and takes the mother host down. Count frames structurally and decode
+// each frame independently instead — never attach a zstd stream decoder to a
+// multi-frame session log.
+const ZSTD_MAGIC = 0xFD2FB528
+const MAX_COUNT_COMPRESSED_BYTES = 64 * 1024 * 1024
+
+/** Locate complete zstd frame boundaries without decoding payloads. */
+function scanZstdFrameRanges(buffer) {
+  const frames = []
+  let offset = 0
+  while (offset < buffer.length) {
+    const start = offset
+    if (buffer.length - offset < 4) return { frames, tornStart: start }
+    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) {
+      return { frames, error: `invalid frame magic at byte ${offset}` }
+    }
+    offset += 4
+    if (offset === buffer.length) return { frames, tornStart: start }
+    const descriptor = buffer.readUInt8(offset)
+    offset += 1
+    if ((descriptor & 0x18) !== 0) {
+      return { frames, error: `reserved frame-header bit at byte ${offset - 1}` }
+    }
+    const contentSizeFlag = descriptor >>> 6
+    const singleSegment = (descriptor & 0x20) !== 0
+    const checksum = (descriptor & 0x04) !== 0
+    const dictionaryFlag = descriptor & 0x03
+    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag
+    const contentSizeBytes = contentSizeFlag === 0
+      ? (singleSegment ? 1 : 0)
+      : 1 << contentSizeFlag
+    const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes
+    if (buffer.length - offset < remainingHeaderBytes) return { frames, tornStart: start }
+    offset += remainingHeaderBytes
+    for (;;) {
+      if (buffer.length - offset < 3) return { frames, tornStart: start }
+      const blockHeader = buffer.readUIntLE(offset, 3)
+      offset += 3
+      const lastBlock = (blockHeader & 1) !== 0
+      const blockType = (blockHeader >>> 1) & 0x03
+      const blockSize = blockHeader >>> 3
+      if (blockType === 0x03) {
+        return { frames, error: `reserved block type at byte ${offset - 3}` }
+      }
+      const payloadBytes = blockType === 0x01 ? 1 : blockSize
+      if (buffer.length - offset < payloadBytes) return { frames, tornStart: start }
+      offset += payloadBytes
+      if (lastBlock) break
+    }
+    if (checksum) {
+      if (buffer.length - offset < 4) return { frames, tornStart: start }
+      offset += 4
+    }
+    frames.push({ start, end: offset })
+    if (frames.length > 1_000_000) return { frames, error: 'frame-limit' }
+  }
+  return { frames }
+}
+
 /**
- * Count newline-delimited session frames without loading the whole log.
- * The stream is destroyed as soon as the event budget is exceeded, so a 500 MB
- * session cannot become a 500 MB allocation in the mother process.
+ * Count newline-delimited events in a multi-frame session log. Reads at most
+ * 64 MiB of compressed bytes; the health gate already rejects larger logs.
  */
 export async function countSessionEvents(file, options = {}) {
   const maxEvents = Math.floor(boundedNumber(options.maxEvents, FORK_HEALTH_DEFAULTS.maxEvents, 1, 10_000_000))
   const maxUncompressedBytes = Math.floor(boundedNumber(options.maxUncompressedBytes, FORK_HEALTH_DEFAULTS.maxUncompressedBytes, 1024, 2 * 1024 * 1024 * 1024))
-  let stream = null
+  const empty = { ok: false, error: null, events: null, bytes: 0, truncated: false, maxEvents, maxUncompressedBytes }
+  let buffer
   try {
-    if (typeof zlib.createZstdDecompress !== 'function') {
-      return { ok: false, error: 'zstd-stream-unavailable', events: null, bytes: 0, truncated: false }
+    const stat = fs.statSync(file)
+    if (stat.size > MAX_COUNT_COMPRESSED_BYTES) {
+      return { ...empty, error: 'compressed-limit', truncated: true }
     }
-    stream = fs.createReadStream(file).pipe(zlib.createZstdDecompress())
-  } catch (error) {
-    return { ok: false, error: String(error?.message ?? error), events: null, bytes: 0, truncated: false }
+    buffer = fs.readFileSync(file)
+  } catch (e) {
+    return { ...empty, error: String(e?.message ?? e) }
   }
+  if (typeof zlib.zstdDecompressSync !== 'function') {
+    return { ...empty, error: 'zstd-unavailable' }
+  }
+  const scan = scanZstdFrameRanges(buffer)
+  if (scan.error) return { ...empty, error: scan.error, truncated: true }
   let bytes = 0
   let lines = 0
   let lastByte = 0
   let truncated = false
   let error = null
-  try {
-    for await (const chunk of stream) {
-      bytes += chunk.length
-      if (bytes > maxUncompressedBytes) {
-        truncated = true
-        try { stream.destroy() } catch { /* ignore */ }
-        break
-      }
-      for (let i = 0; i < chunk.length; i += 1) {
-        if (chunk[i] === 0x0a) {
-          lines += 1
-          if (lines > maxEvents) {
-            truncated = true
-            try { stream.destroy() } catch { /* ignore */ }
-            break
-          }
-        }
-      }
-      if (truncated) break
-      if (chunk.length > 0) lastByte = chunk[chunk.length - 1]
+  for (const frame of scan.frames) {
+    let decoded
+    try {
+      decoded = zlib.zstdDecompressSync(buffer.subarray(frame.start, frame.end))
+    } catch (e) {
+      error = String(e?.message ?? e)
+      break
     }
-  } catch (e) {
-    error = String(e?.message ?? e)
+    const chunk = Buffer.isBuffer(decoded) ? decoded : Buffer.from(decoded)
+    if (chunk.length > 0) lastByte = chunk[chunk.length - 1]
+    for (let i = 0; i < chunk.length; i += 1) {
+      if (chunk[i] === 0x0a) {
+        lines += 1
+        if (lines > maxEvents) { truncated = true; break }
+      }
+    }
+    bytes += chunk.length
+    if (truncated) break
+    if (bytes > maxUncompressedBytes) { truncated = true; break }
   }
   if (bytes > 0 && lastByte !== 0x0a && !truncated) lines += 1
   return {
