@@ -37,7 +37,7 @@
 
 ## 验证
 
-`npm run build` 全绿：preflight `pass=1582 fail=0 skip=13`，e2e `125/125`，package smoke / crash-safety / allow-list / main-city 全 PASS。产物 `dist/dsh-fang-3.9.10.tgz`（sha256 `2ed8c93f...19127d`）。详见 `AUDIT-v3.9.10.md`。
+`npm run build` 全绿：preflight `pass=1582 fail=0 skip=13`，e2e `125/125`，package smoke / crash-safety / allow-list / main-city 全 PASS。产物 `dist/dsh-fang-3.9.10.tgz`，SHA-256 见同目录 `.sha256` 与交付目录 `SHA256SUMS-3.9.10.txt`。详见 `AUDIT-v3.9.10.md`。
 
 ## 资产
 
