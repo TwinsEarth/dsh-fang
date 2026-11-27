@@ -1,0 +1,295 @@
+{
+  "generatedAt": "2026-11-27T09:49:49.321Z",
+  "root": "E:\\DBH\\fang-git-392",
+  "totals": {
+    "files": 71,
+    "empty": 461,
+    "bare": 2
+  },
+  "files": {
+    "src/contract/server.js": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/contract/transports.js": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/kernel/core.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/kernel/fsx.mjs": {
+      "empty": 9,
+      "bare": 0
+    },
+    "src/kernel/paths.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/kernel/rounds.mjs": {
+      "empty": 5,
+      "bare": 0
+    },
+    "src/kernel/vendor/schemastery.mjs": {
+      "empty": 2,
+      "bare": 2
+    },
+    "src/lib/accelerated-fork.mjs": {
+      "empty": 9,
+      "bare": 0
+    },
+    "src/lib/accelerated-install.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/adapter-client.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/adapter-protocol.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/ai-secret-store.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/lib/approval-drill.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/lib/boot-guard.mjs": {
+      "empty": 3,
+      "bare": 0
+    },
+    "src/lib/branch.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/broker-adapter.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/browser-guard.mjs": {
+      "empty": 14,
+      "bare": 0
+    },
+    "src/lib/command-cache.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/composer-journal.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/container/index.mjs": {
+      "empty": 6,
+      "bare": 0
+    },
+    "src/lib/decision-events.mjs": {
+      "empty": 6,
+      "bare": 0
+    },
+    "src/lib/decision-outbox.mjs": {
+      "empty": 3,
+      "bare": 0
+    },
+    "src/lib/essence.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/lib/fork-client.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/lib/fork-config-lock.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/fork-export.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/fork-health.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/fork-seed.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/fork-sessions.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/fork-supervisor.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/fs-guard.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/global-redline.mjs": {
+      "empty": 3,
+      "bare": 0
+    },
+    "src/lib/http-auth.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/idle-audit.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/install-snapshot.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/interaction-poke.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/log-rotation.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/lsp-provider.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/main-gate.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/memory-guard.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/migration-report.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/mirror.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/lib/pro-delegation.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/lib/remote.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/restart-contract.mjs": {
+      "empty": 5,
+      "bare": 0
+    },
+    "src/lib/rule-registry.mjs": {
+      "empty": 8,
+      "bare": 0
+    },
+    "src/lib/runtime-capture.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/lib/session-compaction.mjs": {
+      "empty": 10,
+      "bare": 0
+    },
+    "src/lib/session-format.mjs": {
+      "empty": 6,
+      "bare": 0
+    },
+    "src/lib/status-store.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/task-handle.mjs": {
+      "empty": 7,
+      "bare": 0
+    },
+    "src/lib/umbrella.mjs": {
+      "empty": 3,
+      "bare": 0
+    },
+    "src/lib/watch-guard.mjs": {
+      "empty": 5,
+      "bare": 0
+    },
+    "src/lib/watchdog-sidecar.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/lib/workspace-mapping.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/plugins/adapter.mjs": {
+      "empty": 25,
+      "bare": 0
+    },
+    "src/plugins/approver.mjs": {
+      "empty": 7,
+      "bare": 0
+    },
+    "src/plugins/auditor.mjs": {
+      "empty": 5,
+      "bare": 0
+    },
+    "src/plugins/buffer-keeper.mjs": {
+      "empty": 4,
+      "bare": 0
+    },
+    "src/plugins/decision-center.mjs": {
+      "empty": 38,
+      "bare": 0
+    },
+    "src/plugins/forker.mjs": {
+      "empty": 18,
+      "bare": 0
+    },
+    "src/plugins/healer.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/plugins/hot-reloader.mjs": {
+      "empty": 3,
+      "bare": 0
+    },
+    "src/plugins/orchestrator.mjs": {
+      "empty": 145,
+      "bare": 0
+    },
+    "src/plugins/restart-guard.mjs": {
+      "empty": 10,
+      "bare": 0
+    },
+    "src/plugins/router.mjs": {
+      "empty": 2,
+      "bare": 0
+    },
+    "src/plugins/scorer.mjs": {
+      "empty": 3,
+      "bare": 0
+    },
+    "src/plugins/session-bridge.mjs": {
+      "empty": 3,
+      "bare": 0
+    },
+    "src/plugins/session-catalog.mjs": {
+      "empty": 6,
+      "bare": 0
+    },
+    "src/plugins/session-sync.mjs": {
+      "empty": 1,
+      "bare": 0
+    },
+    "src/plugins/umbrella.mjs": {
+      "empty": 6,
+      "bare": 0
+    }
+  }
+}

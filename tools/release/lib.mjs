@@ -32,6 +32,9 @@ export function run(command, args, opts = {}) {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: opts.timeoutMs ?? 600000,
+    // Full-suite TAP output can exceed spawnSync's 1 MiB default and would be
+    // truncated/killed with status -1. Release gates need the complete stream.
+    maxBuffer: opts.maxBuffer ?? 64 * 1024 * 1024,
     env: { ...process.env, ...(opts.env ?? {}) },
   })
   return { status: res.status ?? -1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
@@ -81,12 +84,19 @@ export function globMatch(rel, pattern) {
   return new RegExp(re + '$').test(rel.replace(/\\/g, '/'))
 }
 
+export function isPackageJunkPath(rel) {
+  const normalized = String(rel ?? '').replace(/\\/g, '/')
+  return normalized.split('/').some((part) => part === '.DS_Store' || part.startsWith('._'))
+}
+
 export function selectFilesFromManifest(pkg) {
   const out = new Set()
   for (const pattern of pkg.files ?? []) {
     for (const abs of walk(ROOT)) {
       const rel = path.relative(ROOT, abs).replace(/\\/g, '/')
       if (rel.startsWith('node_modules/') || rel.startsWith('dist/') || rel.startsWith('.git/')) continue
+      // macOS AppleDouble / Finder sidecars must never enter npm package metadata.
+      if (isPackageJunkPath(rel)) continue
       if (globMatch(rel, pattern)) out.add(rel)
     }
   }

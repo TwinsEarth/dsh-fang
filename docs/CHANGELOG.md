@@ -1,3 +1,378 @@
+## v3.9.9（2026-11-27）
+**主题：安全收口版：权限第二道门、内存/身份回收、发布工具链与 P3 结构门**
+
+### 权限
+- `permissions.mjs` 新增 `host` 环境；`auto` 按运行时角色映射（母体 `host`、fork/consumer `derived`），显式 `mirror/essence/derived` 才收紧。
+- orchestrator 在 `roleGate` 后、路由 handler 前对写请求执行 `enforcePermission`；adapter 在 `command()` 执行前判定 `fork-session`/`archive`。
+- 拒绝统一 403 `permission-denied`，带 `action`/`envType`；未知环境/动作 fail-closed。
+
+### 内存/身份
+- `memoryKill` 身份不匹配保留 `task.orphan`，新增 `POST /fang/api/tasks/reprobe` 与 `reclaimOrphan()`；根 PID 复用不误杀。
+- 托管浏览器 close 必须带身份指纹，缺失 `identity-required`；启动先写 provisional tokens。
+- `accelerated-web` 的 start/status/stop 全部先验身份，不匹配不 taskkill、不报 running。
+
+### 发布工具链
+- `publish-npm.mjs` 200/201/202 统一先 `SUBMITTED`，registry 读回同版本后才 `PUBLISHED`；超时 `UNCONFIRMED` 退出码 3。
+- `verify-release --at-head` 断言 tag==HEAD 且 AUDIT/RELEASE/架构图与 HEAD 一致；`release-order` 自动检查，先提交 docs 再打 tag。
+
+### P3
+- 新增 `p3-structural-smoke.test.mjs`：compose 嵌套 Config + 17 插件表、包根 re-export、watchdog-sidecar 真实拉起。
+- 新增 `empty-catch` 基线门：461 处（459 注释-only + 2 裸）按文件冻结，不批量替换，新增即失败。
+- 14 个未引用模块裁定：10 保留 / 4 删除候选（`fork-export`、`fs-guard`、`reflow`、`interaction-poke`）；本版不删除。
+
+### 测试
+- 全量 `test-399-final9.log`：1599 tests / 1576 pass / 0 fail / 13 skipped / 10 todo。
+- P3 定向 6/6；compose/watchdog 相关 26/26；13 个模块测试 79/79。
+- 真机未回归：未部署新版，`task_mwqenfnxpobe` 同类一键修复待安装后复测。
+
+## v3.9.8（2026-11-27）
+**主题：打开分身热修：fork 公开健康探针 + 一键修复 bundle 复检**
+
+### 根因
+- `GET /fang/api/health` 只由 `orchestrator` 注册，而 `orchestrator` 的 `roleGate` 只在 mother 激活；分身进程实际加载的是 adapter。`probeForkHealth()` 先请求 `/fang/api/health` 得 404，再回退到 DSH 核心受保护的 `/api/health` 得 401，最终报 `fork-health-endpoint-unavailable`，即使 session 与 adapter 均正常。
+- `restoreTask()` 与 `autostartForks()` 在 `syncForkCoreMode()`/`provision()` 之前检查 `forkBundlePath()`。一键修复 `resetForkConfig` 后 profile 的 `node_modules/@twinsearth` 缺失，守卫直接返回 `fork-bundle-unavailable`，provision 永远没有机会重建镜像。
+
+### 修复
+- adapter 在 fork 角色注册公开 `GET <prefix>/api/health`（默认 `/fang/api/health`），返回 `ok/role/version/pid/taskId/sessionId/uptimeMs/adapter`；仍执行 loopback Host / Origin / Sec-Fetch-Site 校验，但公开只读不要求 Bearer。
+- restore 将 bundle 检查移到 `syncForkCoreMode(task,{force:true})` 之后；autostart 在 bundle 缺失时强制 provision，随后复查 bundle。`fork-bundle-unavailable` 不再阻断一键修复的 node_modules 重建。
+- v3.9.7 的宿主压力阈值 200/300/500 MB、3000/3600/3900 MB 不变。
+
+### 测试
+- `test/adapter.test.mjs` 43/43 PASS，新增 fork `/fang/api/health` 公开探针形状与 token 不泄露断言。
+- 真机 fork 模板复现：3.9.7 下 `/fang/adapter/identity` 200、`/fang/api/health` 404、`/api/health` 401；3.9.8 构建后 `/fang/api/health` 200。
+
+## v3.9.7（2026-11-27）
+**主题：宿主压力阈值对齐版：宿主压力横幅与准入改用 200/300/500 MB + 3000/3600/3900 MB**
+
+### 根因
+- v3.9.6 只修改了 `fork-health.mjs` 的分身打开门禁；`host-pressure.mjs` 的宿主 session 体量守卫仍保留旧的 512/1024/2048 MB 合计线与 16/32/64 MB 单文件线。重启宿主后，365.5 MB 合计 / 60.9 MB 单文件的真实会话仍显示“宿主压力预警”，与 v3.9.6 已确认的新阈值不一致。
+
+### 修复
+- `SESSION_FOOTPRINT_DEFAULTS` 改为合计 `3000/3600/3900 MB`、单文件 `200/300/500 MB`。
+- `orchestrator` 六个 `sessionFootprint*` / `sessionFile*` schema 默认值同步改为新阈值；配置覆盖仍可用。
+- session 体量等级改为严格 `>`：恰好 200/300/500 MB、3000/3600/3900 MB 仍属较低一档；超过 500 MB 单文件或 3900 MB 合计才进入 emergency。
+- Host JS heap 的 1024/1536/2048 MB 阈值保持不变，本版只对齐 session 体量阈值。
+
+### 测试
+- 定向 `test/v3814-host-guard.test.mjs` 6/6 PASS；覆盖 365.5 MB / 60.9 MB 不再预警、200/300/500 MB 与 3000/3600/3900 MB 精确边界、单文件 gate 与合计 totalGate 分离。
+- `test/v386-crash-closures.test.mjs` + `test/v387-crash-prevention.test.mjs` 19/19 PASS，v3.9.6 的分身健康与多帧 zstd 修复未回归。
+
+## v3.9.6（2026-11-27）
+**主题：会话健康阈值版：多帧 zstd 崩溃修复 + 200/300/500 MB 单文件与 3000/3600/3900 MB 合计阈值**
+
+### 根因
+- 双击“打开分身”触发宿主 `ZSTD_error_prefix_unknown` / `Unknown frame descriptor`：`countSessionEvents()` 把 DSH 的多帧 `session.v4.jsonl.zstd` 直接接到 `zlib.createZstdDecompress()`。Node 的流式 zstd 只消费第一帧，第二帧 magic 落在 `node:zlib:193` 并成为未捕获错误，母体 host 退出。
+- 旧健康门禁把 20 MB 单文件直接判 `session-too-large`；真实 21.8–63.9 MB 会话被误伤。
+
+### 修复
+- `fork-health` 改为按 zstd 帧边界逐帧 `zstdDecompressSync` 统计，不再给多帧日志挂流式解码器；保留压缩读取上限，避免把大会话整读进内存。
+- 单文件策略：`>200 MB` 警告、`>300 MB` 二次确认、`>500 MB` 硬上限；分身内合计：`>3000 MB` 警告、`>3600 MB` 二次确认、`>3900 MB` 硬上限。
+- 警告/确认档跳过事件计数（`scanSkipped:true`），避免健康检查本身制造内存压力；硬上限仍拒绝打开。
+- `POST /fang/api/tasks/open` 支持 `confirmLargeSession:true`；需确认时返回 409 `fork-session-confirmation-required` 和 `sessionPolicy`，客户端展示确认弹窗；确认后放行，硬上限即使确认也拒绝。
+- `browser-health.jsonl` 记录 `scanSkipped` / `policy`；拒绝与待确认写入审计。
+
+### 测试
+- 定向回归 19/19 PASS（含多帧 zstd、200/300/500 MB、3000/3600/3900 MB、跳过事件计数）。
+- 全量 1566 tests / 1513 pass / 30 fail；30 条均为既有 orchestrator 临时夹具缺 bundle 的 `fork-bundle-unavailable`，无新增失败；详见 `docs/AUDIT-v3.9.6.md`。
+
+## v3.9.5（2026-11-26）
+**主题：crash-loop Safe Mode 永久闩锁热修**
+
+### 根因
+- v3.9.4 的 `shouldAutoClearSafeMode()` 显式排除 `crash-loop-*`；真实宿主两次 `unclean-shutdown`（Commit 余量 25 GB、heap 正常、单会话 61 MB）即被判 `crash-loop-10m`，`hostAdmissionClosed` 永久为真，启动分身返回 `host-admission-closed`。
+
+### 修复
+- `crash-loop-*` 在 Commit ≥2345 MB 时自动解除；`manual-panic` 仍保留人工确认。
+- 新增 `hasHostCrashPressure()`：仅低 Commit、heap critical/emergency、session emergency 才允许 crash-loop 封门。
+- 自动解除后清空 `host-crashes.json` 窗口计数（JSONL 审计保留），避免下次正常重启复发。
+- 新增 `ensureHostAdmission()`：create/restore/sync/open-browser/open-url 准入前先尝试恢复。
+- 宿主压力横幅补全单文件阈值 16/32/64 MB。
+
+### 测试
+- 定向回归 119/119 PASS；详见 `docs/AUDIT-v3.9.5.md`。
+
+## v3.9.4（2026-11-26）
+**主题：配额/SafeMode 口径重定 + 页面文件去强制 + 消息收件箱 + 元主 bundle 修复**
+
+### 配额
+- 元主：默认配额 3，硬上限 6；`VIP_QUOTAS` 全部 tier 的 `maxEssences/maxSubEssences` 不得超过 6，free 为 3。
+- 分身：默认容量槽位 8，硬上限 62；`DEFAULT_MAX_FORKS=8`、`HARD_MAX_FORKS=62`，schema 与 forker 配置都硬夹到 62。`status.capacity` 返回 `slots/hardMax/defaultLimit/limit/used`，客户端不再硬编码 7 槽。
+
+### SafeMode / Commit
+- `SAFE_MODE_AUTO_CLEAR_COMMIT_MB=2345`：Commit 余量 ≥2345 MB 时，`safeModeStatus` 自动清除内存类 Safe Mode 闩锁，不需要手动点按钮；手动 Panic 与 crash-loop 闩锁不自动清除。
+- 用户仍可 `resetSafeMode({force:true})` 强制解除；强制解除不会自动拉起分身。
+- `FORK_COMMIT_HARD_MIN_MB=999`：CommitFree <999 MB 时，`memoryGate` 对所有派生/启动/打开/还原路径返回 `commit-critical`，禁止派生新分身、禁止启动已有分身；客户端以 7 秒可关闭弹窗提示。
+- `hostCriticalFreeMB` 默认从 4096 调整为 2345；`memoryMinFreeMB` 默认从 3000 调整为 999。
+
+### 页面文件
+- 取消“未启用页面文件，已强制单分身”：`decidePagefileBootPolicy` 的 `singleForkOnly` 固定 false，`evaluatePagefileSingleFork` 的 `limited` 固定 false。
+- 托管浏览器不再因页面文件缺失被压到 1 个；`maxOpenForkBrowsers` 是唯一并发口径。
+- 页面文件缺失只保留可关闭的黄色提醒；文案明确“仅提醒，不限制分身”，不要求用户设置虚拟缓存。
+
+### 消息与弹窗
+- 新增消息收件箱（localStorage `fang.messageInbox.v1`，上限 100 条）；顶部“消息 (n)”入口。
+- 所有 toast/通知 30 秒后自动归档进收件箱；toast 增加关闭按钮。
+- Safe Mode、页面文件、宿主压力、磁盘卫生、迁移报告横幅增加关闭按钮与 30 秒自动归档；关闭即归档。
+- 状态提示 `setNotice` 也走 30 秒归档定时器，不再长期霸屏。
+
+### 元主第三方插件
+- 修复 `cannot resolve profile bundle "@twinsearth/dsh-2xray"`：运行态 profile 缺少 `node_modules/.modules.yaml` 时，从母体复制并按目标盘对齐 `storeDir/virtualStoreDir`，防止 pnpm 把依赖移到 `.ignored`。
+- `syncProfileModulesFromMother` 优先从 `.ignored` 还原缺失包，再回退母体复制。
+
+### 测试
+- 新增 `test/v394-adjustments.test.mjs`（6 组），targeted 回归 79/79 PASS（v394 + 配额 + SafeMode + pagefile + host-redline）。
+- 全量测试结果见 `docs/AUDIT-v3.9.4.md`；不把 RED 写成 GREEN。
+
+### 发布
+- 本版执行三方发布：npm `@twinsearth/fang-dsh-plugin@3.9.4`、GitHub `v3.9.4` tag/Release、项目目录发布包与报告。
+
+## v3.9.3（2026-11-26）
+**主题：迁移报告按钮闭包作用域修复 + 3.9.2 测试期望值校准**
+
+### 迁移报告按钮
+- 修复 `renderMigrationReportBanner` / `dismissMigrationReportBanner` 位于 `createConsole` 外层，却引用内层 `openMigrationReport`、`S`、`render` 的闭包断裂；这是 3.9.2 母体日志中 `openMigrationReport is not defined` 与 `S is not defined` 的根因。
+- “查看”改为 `app.openMigrationReport()`；“关闭”改为 `dismissMigrationReportBanner(S, app, file)`，并通过 `app.render(true)` 重绘。
+- app 对象保留对外签名 `dismissMigrationReportBanner(file)`，内部转发到带 `S/app` 的实现。
+- `test/client-migration-report.test.mjs` 改为断言 app surface，不再要求直接调用局部函数；新增作用域回归，覆盖查看、关闭、关闭后隐藏。
+
+### 测试校准
+- `test/adapter.test.mjs` 的 `heartbeatMs` 期望由 `5000` 改为 `15000`，与 3.9.2 已生效的 15s 心跳一致。
+- 3.9.2 GitHub Actions 的 Node 22/24 两条红均为测试期望滞后；本版全量测试仍为 RED（1557 tests / 1479 pass / 55 fail），未全部 triage，发布走 `--skip-preflight`，不得写成门禁 GREEN。
+
+### 发布
+- 本版执行三方发布：npm `@twinsearth/fang-dsh-plugin@3.9.3`、GitHub `v3.9.3` tag/Release、项目目录发布包与报告。
+
+## v3.9.1（2026-11-26）
+**主题：包元信息热修 + B2 / C1–C6 收口**
+
+### 包元信息
+- `cordis.patch.yml` 自带的 `maxForks: 8` 改为 `1`；`Config.maxForks` 接受旧配置的 1–64，但 `apply()` 仍硬限 1、禁用 `allowMultiFork`。
+- 打包层过滤 `locale/._*`、`.DS_Store`；package-smoke 增加 locale language-id / AppleDouble 与 `maxForks: 8` 门禁。
+- 新增 `postinstall` 清理 locale 的 macOS 伴随文件；`tools/release/clean-locale-sidecars.mjs` 随包发布。
+- 本版修复 `3.9.0` 的 `maxForks: 8` 与 locale sidecar 安装错误；详见 `docs/AUDIT-v3.9.0-PKG.md`。
+
+### C1–C6
+- C1：`lastHostMetrics` 落盘间隔 15s → 5s，与 5s host tick 对齐；硬杀后 `host-state.json` 最多滞后一个 tick。
+- C2：`host-crashes.json` 崩溃循环窗口改为配置 `hostCrashWindowMinutes`（默认 10，1–1440 分钟）；safe-mode 原因、状态与 UI 文案同源。
+- C3：`hostEmergency` 的 `allTasks` 不再跳过 `ARCHIVED`；只清 PID/token/浏览器并保留归档状态，不把归档任务降级为 `FAILED`。
+- C4：新增 UI 按钮与 `GET/POST /fang/api/forks/multi-fork` 二次确认；仍需显式 token，且只返回 `enabled:false / hardLimit:1`，不构成多开旁路。
+- C5：新增 `processPriority` 档位 `below-normal | idle`；托管浏览器与三个分身启动/恢复点统一传 `priorityClass`，Idle 只在显式配置时使用。
+- C6：迁移报告按钮改为直接调用本地 `openMigrationReport()`，不再依赖 `app.openMigrationReport` 方法；定位结论见 `docs/AUDIT-v3.9.0-C.md`。
+- 随 v3.9.1 发布；v3.9.0 已发布包不含以上改动。
+
+### B2
+- 单文件 session 紧急线由 48 MB 调整为 64 MB；警告 16 MB、严重 32 MB 与合计 512/1024/2048 MB 门保持不变。60.91 MB 现场文件不再触发单文件 `gate`，但仍显示 critical；64 MB 起才 gate。详见 `docs/AUDIT-v3.9.0-B2.md`；随 v3.9.1 发布。
+
+## v3.9.0（2026-11-26）
+**主题：将 v3.8.14 宿主守卫提升为正式发布版本（Host JS heap + session 文件体量 + 全盘 pagefile）**
+
+### 发布
+
+- 以 `98a8b83`（v3.8.14）为源码基线，仅提升版本号与发布材料；不并入未选择的 B/C/D/E 审计项。
+- 正式发布三方：GitHub `v3.9.0` tag / Release、npm `@twinsearth/fang-dsh-plugin@3.9.0`、项目目录发布报告与校验和。
+- 代码能力与 v3.8.14 相同：Host heap 1024/1536/2048 MB 三级阈值并按 V8 `heap_size_limit` 65%/80%/90% 收紧；session 单文件 16/32/48 MB、合计 512/1024/2048 MB；pagefile/commit 覆盖所有活动/配置分页文件与所有卷。
+- `openMigrationReport` 仍未修，发布文案不得写成已修；真实 Windows DSH 宿主 E2E 未跑，preflight 为 `skipped:true / green:false`，不得写成门禁 GREEN。
+
+### 测试与构建
+
+- 全量回归与构建结果见 `docs/AUDIT-v3.9.0.md`；v3.8.14 的 6 项宿主守卫测试继续纳入全量。
+- 发布工具：`tools/release/build.mjs` 改为显式文件清单打包，移除 tarball 目录条目；否则 npm registry 以 HTTP 415 `invalid path: package/` 拒收。
+- v3.8.14 真机证据仍有效：TOFUTURE 页面文件在 D:、`CommitLimitOSMB=44821`、Host session 206 个合计 222.56 MB、最大单文件 60.91 MB，见 `docs/evidence/memory-probe-all-drives-2026-11-26.md`。
+
+## v3.8.14（2026-11-26）
+**主题：宿主守卫改看 Host JS heap + session 文件体量；pagefile/commit 全盘探测**
+
+### 修复
+
+- **Host JS heap 独立采样**：5s host tick 读取 `process.memoryUsage().heapUsed` 与 `v8.getHeapStatistics().heap_size_limit`；默认 1024 MB 警告、1536 MB 严重、2048 MB 紧急，且按 V8 上限 65%/80%/90% 收紧。达到严重阈值即拒绝新分身/新浏览器；连续 3 次采样达到紧急阈值才按宿主紧急处置。即使 PowerShell/CIM 内存探针失败，heap 仍继续采样。
+- **session 文件体量**：新增只读扫描 `src/lib/session-footprint.mjs`，对 Host `$DSH_HOME/sessions` 与每个任务 home 的 `sessions/`、`quarantine-sessions/` 统计 `session.v4.jsonl.zstd`；默认合计 512/1024/2048 MB、单文件 16/32/48 MB 三级阈值，60s 缓存，不读、不解压会话内容。单文件达到 48 MB 时拒绝新分身/新浏览器；客户端新增宿主压力横幅，显示 top 文件与总/单文件阈值。
+- **pagefile/commit 全盘**：`readSystemMemory()` 现在同时读 `Win32_PageFileUsage`（每个活动分页文件）、`Win32_PageFileSetting`（每个配置分页文件）、`Win32_LogicalDisk`（所有固定/可移动卷）与 `PagingFiles` 注册表；输出 `pageFileDrives`、`pageFileOffSystemDrive`、`pageFileDetails`、`pageFileUsageMB`、`volumes`。Commit 上限取 `max(OS TotalVirtualMemorySize, 物理内存 + 所有活动分页文件)`，不再可能只按 C 盘分页文件估算。
+- **`openMigrationReport` 不动**：作为独立客户端 API 问题保留原防御，不并入本次宿主 OOM 修复，也不通过重装客户端/改 asar 解释或掩盖。
+
+### 测试
+
+- 新增 `test/v3814-host-guard.test.mjs` 6/6：阈值钳制、heap 分级、session 总/单文件分级、临时 home 扫描、C+D 双分页文件映射、源码接线。
+- 全量回归见 `docs/AUDIT-v3.8.14.md`；真机 pagefile 全盘证据见 `docs/evidence/memory-probe-all-drives-2026-11-26.md`。真实 DSH 宿主内的 heap/session 实时读数仍需安装本版后跑一次（本轮只验证纯逻辑与 Windows PowerShell 探针）。
+
+## v3.8.13（2026-11-25）
+**主题：三条宿主红线收口 + 页面文件语义纠正**
+
+### 修复
+
+- **maxForks 硬拒 >1**：`Config` 上限收为 1，`apply()` 对直接配置也强制回落；`allowMultiFork` 不再提供旁路；第二次 create 返回 `quota-exceeded`。
+- **fork 总 Commit 4 GB 宿主余量**：新增 `src/lib/commit-budget.mjs`，有效上限取 `min(40% CommitLimit, CommitLimit-4096MB)`；spawn 前 fail-closed，5s 宿主 tick 与 15s 看门狗共同执行。
+- **sidecar spawn 当刻 PID**：create/restore/autostart 三处 spawn 成功即写 `pidStartedAt` + `spawn-provisional`；CIM 成功再覆盖，失败不再清空。
+- **页面文件改为 advisory**：不再因无 pagefile 强制 Safe Mode 或拒绝第一个分身；启动/解除按 Commit 余量与探测可用性判断，`memoryMinFreeMB` 默认 3000；客户端提示改为黄色建议，不阻止确认。
+- **autostart 补 `writeWatchdog()`**：避免只 persist 不刷新 watchdog。
+
+### 测试
+
+- 新增 `test/commit-budget-v3813.test.mjs` 7/7；`orchestrator` 74/74；v3.8.8 redline 10/10；v3.8.5 定向 12/12；pagefile/client-safe-mode 全通过。
+- 全量结果见 `docs/AUDIT-v3.8.13.md`；Windows DSH 宿主 E2E 与 native helper 的 browser/fork 完整编排链路仍未闭环；helper 本身的 kill-on-close + Job/进程内存上限已于 2026-11-26 Windows 11 真机三例 PASS，browser Job Object 也已用 headless Edge 真机验证 root + 13 子进程全部随 helper 退出，证据见 `docs/evidence/job-object-e2e-2026-11-26.md` 与 `docs/evidence/browser-job-e2e-2026-11-26.md`。
+
+## v3.8.12（2026-11-25）
+**主题：页面文件缺失时 Safe Mode 解除硬门**
+
+### 修复
+
+- **服务端权威解除门**：`safeModeStatus()` 返回 `reset`（`canReset`、`memoryKnown`、`pagefileMissing`、`commitFreeMB`、`detail`、`checkedAt`），UI 不再自行猜测。
+- **客户端 fail-closed**：页面文件缺失、Commit 低于 `hostCriticalFreeMB`、内存探测不可用或其他 blocker 时，复选框 disabled、确认按钮 disabled，本地直接拒绝。
+- **解除前二次探测**：`resetSafeMode()` 在释放闩锁前再 `force` 探测一次；第二次仍缺页面文件或 Commit 不足，返回 409，审计 `stage:'postcheck'`。
+- **`openMigrationReport` 分离**：该调用来自 DSH 0.2.2-rc.5 客户端/设置插件组合，不是 Fang 定义；已有 `typeof` 防御，不作为本次 OOM 根因。
+
+### 测试
+
+- Safe Mode / 页面文件定向 12/12 通过；全量 1572 / 1549 pass / 0 fail。
+
+## v3.8.11（2026-11-25）
+**主题：状态对账与 handler-threw 可观测性**
+
+### 修复
+
+- **500 不再吞原因**：`route` / `routeMethods` 的 catch 统一走 `handlerFailure()`，响应增加 `route`、`method`、`requestId`，审计增加 `detail` 与 `stack`（3000 字符截断）。
+- **fang-meta 自动修复**：`taskView` 读取任务前检查 `fang-meta.json`；无 live 进程但 meta 仍写 running/pid/port 时，按任务注册表清空并审计 `fork-meta-reconciled`。
+- **打开/恢复对账纳入 meta**：`reconcileOpenState` 同时读 meta；meta 旧端口参与占用探测，被元主运行态占用时标记 `stale-port-conflict`，不复用。
+- **暂停等待真实停止**：`pauseOtherForks` await `f.stop(id)`，浏览器关闭与进程停止分别兜底审计；清 token、同步 meta，`fork-auto-paused` 记录 `browserCloseOk/stopOk/metaSynced`。
+- **meta 写失败可见**：`syncTaskMeta` 写失败写 `fork-meta-write-failed` 审计。
+
+### 测试
+
+- 新增 meta-only、task-only 残留与 handler-threw 路由/审计测试；全量 1571 / 1548 pass / 0 fail。
+
+## v3.8.10（2026-11-25）
+**主题：严禁把宿主搞崩——十条宿主红线与独立兜底**
+
+### 安全 / 可靠性
+
+- **母体 5s 常驻采样**：`hostWatchdogTick` 不再因“没有活跃 fork/browser”提前返回，每 5s 读自身 RSS/Private 与系统 CommitFree；8 GB 警告、4 GB 严重、2 GB 紧急。
+- **紧急准入闸门**：`hostAdmissionClosed` 在 `hostEmergency` 第一步置位，再逐任务关浏览器、停 fork、隔离；`fork-commit-share`、`commit-free-emergency`、`manual-panic` 全部 `allTasks:true`；create/restore/open 立即 423。status 与 panic 保持可达。
+- **独立看门狗判卡死**：`watchdog-sidecar.mjs` 新增 `heartbeatState()`，`host-state.json` 超过 `watchdogHostStuckMs=60000` 未更新即 `host-heartbeat-stale`；与 `host-exit`、`host-pid-reused`、`host-clean-stop` 分因记录后清理。
+- **正式 flush 去猜测**：删除 `/api/session/flush`、`/api/session/save`、`/api/sessions/flush` 三个虚构端点；只保留 configured、health-capability、adapter-route，并把 `source` 写入 attempted/last/flushView。
+- **Windows Job helper 重编**：x64 82,944 bytes、arm64 54,784 bytes；x64 真机以 64/128 MB 限额启动成功，强杀 helper 后 Job 内子进程被内核回收。
+
+### 测试
+
+- 全量 1568 / 1545 pass / 0 fail / 13 skipped / 10 todo。
+- 新增 `v3810-host-redline` 12 项、`watchdog-sidecar-stuck` 3 项；相关回归 63 项。
+
+### 已知边界
+
+- arm64 helper 只做了 PE/导入表静态核对，未在 ARM64 Windows 真机执行。
+
+## v3.8.9（2026-11-25）
+**主题：不惜关闭——托管浏览器强制关闭八条措施与 2 GB / 1.5 GB / 200k / 4 GB 硬阈值**
+
+### 安全 / 可靠性
+
+- **新增 `autoClose`**：默认 `true`，命中内存或空闲条件直接关浏览器，不再二次确认；关闭只清进程，home、会话、存档保留。`autoClose=false` 可关内存/空闲自动关闭；宿主 <2 GB 的紧急处置仍生效。
+- **硬阈值**：`browserMemoryLimitMB=2048`、`browserHeapLimitMB=1536` 改为硬上限；自适应阈值只能更严，不能把 32 GB 机器放宽到 4 GB。DOM 上限 200000，宿主 CommitFree <4096 MB 触发。
+- **新增纯策略**：`src/lib/browser-auto-close.mjs` 的 `effectiveBrowserAutoCloseLimits()` / `evaluateBrowserAutoClose()`。浏览器自身超限返回 `scope:'task'`（关浏览器→停 fork→清端口/Token）；宿主低余量返回 `scope:'browser'`（只关浏览器，保留 fork/home）。CDP 采样失败不参与 heap/DOM 误判。
+- **接线**：`browserWatchdogTick()` 记录 `hostCommitFreeMB`、调用策略、写审计 `fork-browser-auto-close`（trigger/commit/heap/nodes/host free/四条硬阈值）；`/fang/api/status` 暴露 `browserAutoClose`。空闲关闭也受 `autoClose` 总开关控制。
+- **UI**：`task.memoryGuard` 时按钮显示“重新打开”，chip 显示“内存保护关闭”，并注明必须手动重开、不会自动重开；宿主 Commit 余量进入 title。
+
+### 测试
+
+- 新增 `test/v389-browser-auto-close.test.mjs` 11 项：硬阈值不被自适应放宽、2 GB/1.5 GB/200k 边界、宿主 4095 vs 4096、autoClose=false、idle 需 `turnRunning=false`、Browser.close→taskkill 顺序与 3 s 宽限、flush→close→fork stop→port/token、memoryGuard 持久化、不删 home + 手动重开、启动/5 分钟孤儿扫描、默认配置。
+
+### 边界 / 未闭环
+
+- 浏览器 watchdog 与 taskkill 仍仅 Windows；Windows 真机未跑阈值触发。
+- `native/win32/fang-job-host*.exe` 未重编，Job 内存上限不生效。
+- 宿主余量来自最近一次 host watchdog 采样，最多滞后一个周期。
+
+## v3.8.8（2026-11-25）
+**主题：三条红线：browser/fork Windows Job Object、聚合 commit 30/35/40 分级、Panic 路由与崩溃循环证据**
+
+### 安全 / 可靠性
+
+- **browser 接 Job Object**：`launchManagedBrowser()` 在 Windows 且 `browserJobObject=true` 时先启动 `fang-job-host.exe`；helper 建 Job + `KILL_ON_JOB_CLOSE`，browser 以 suspended 方式入 Job 后 resume；返回真实 PID、`helperPid`、`jobObject`。helper 缺失/启动失败/ready 超时 fail-closed，不退化裸 spawn。`task.browser` / taskView 暴露 `helperPid` / `jobObject`。
+- **聚合 commit 分级**：新增 `forkCommitWarnShare=0.3`、`forkCommitSevereShare=0.35`，保留 `forkCommitShareLimit=0.4`；`memoryWatchdogTick` 分项统计 `forkCommitMB`、`browserCommitMB`、`totalCommitMB`、`forkShare`、`processCount`、`selfRssMB`、`selfPrivateMB`。30%/35% 只告警（60 秒节流），40% 才 `hostEmergency`。`hostWatchdogTick` 改为 CommitFree <8192 warning、<4096 severe、<2048 emergency；`hostEmergencyFreeMB` 真正生效。`/fang/api/status` 返回 `hostMetrics` 与 `forkCommitPolicy`。
+- **母体真实内存**：PowerShell 探针用 `Get-Process -Id <Node PID>` 的 `WorkingSet64` / `PrivateMemorySize64` 取 RSS/Private，不再用 heap+external 近似。
+- **安装令牌 bootstrap 宿主属主准入**：`GET /fang/api/auth-token` 在回环 + 同源校验之后，新增 `src/lib/peer-owner.mjs` 把 TCP 对端映射到进程并校验其 OS 属主与 DSH 宿主一致：Windows 用 `Get-NetTCPConnection`/`netstat -ano` + `Win32_Process.GetOwner`，macOS 用 `lsof -Fpcun` 的 UID，Linux 用 `/proc/net/tcp[6]` 的 socket UID。映射不到或属主不同一律 403 `not-host-owner`，fail-closed；不再只凭回环地址发放审批/重启 token。实测 Windows（Node 宿主 + curl 对端）与 macOS（Node 宿主 + curl 对端）均通过，测试见 `test/peer-owner.test.mjs`。
+- **Panic 路由**：新增 `POST /fang/api/panic`，调用 `service.panic()`；成功 200 `{ok:true,mode:'panic'}`，失败 409。`service.panic` 使用 `allTasks:true`，隔离所有非 ARCHIVED 任务并进入 safe mode。
+- **崩溃证据与 10 分钟循环**：`host-crashes.json` 只保留 10 分钟 `recent`；完整历史追加 `host-crashes.jsonl`，字段含 `commitFreeMB/selfRssMB/selfPrivateMB/forkCommitMB/browserCommitMB/totalCommitMB/processCount`。`host-state.json` 每 15 秒 heartbeat 写 `lastMetrics`；clean 退出不被 heartbeat 回写为 unclean。
+- **maxForks 默认 1**：`allowMultiFork=false` 时 `effectiveMaxForks()` 强制 1，接入配额、status、`maxConcurrentForks`；forker DEFAULTS/Schema 同步，不能只改 `maxForks` 绕过。
+- **sidecar 启动即见 PID**：`createTask` 在 `await f.spawn()` 期间每 200ms 轮询 `f.status`；拿到 PID 立即同步 `task.pid/port`、`syncTaskMeta`、`persist`、`writeWatchdog`、`lowerProcessPriority`。forker spawn 后立即写 `fork-meta` PID；`writeWatchdog` 接受任何非 ARCHIVED 且 `pid>0` 的 fork。
+
+### 测试
+
+- 新增 `test/peer-owner.test.mjs` 6 项：netstat/lsof/proc 解析、缺失 socket/对端 fail-closed、bootstrap 403/200。
+- 新增 `test/v388-redlines.test.mjs` 10 项：Config 默认、helper 内存参数、browser helper 缺失 fail-closed、browser 接 Job helper、orchestrator 路由/阈值/崩溃日志/sidecar、`host-crashes.json` 10 分钟清理 + JSONL 指标、真实 `POST /fang/api/panic` 200、native 源码内存限制、母体 RSS/Private 来源。
+
+### 边界 / 未闭环
+
+- `native/win32/fang-job-host*.exe` 仍是旧二进制；kill-on-close 可用，但 Job 内存上限需 Windows CI/真机重编后生效。
+- browser Job Object 无 Windows 真机启动测试；只有 helper 缺失 fail-closed 与静态/纯函数测试。
+- `lastHostMetrics` 最多滞后 15 秒；硬杀时 JSONL 为最后一次 heartbeat 快照。
+- `host-crashes.json` 超过 10 分钟记录只在 JSONL。
+- V3.8.4 的 `/fang/api/decisions/ai Failed to fetch` 不能仅凭日志断定为路由缺失；需目标机确认宿主/端口可达性。
+- 未 commit/push/tag/publish；发布动作需用户明确确认。
+
+## v3.8.7（2026-11-25）
+**主题：按纠偏收口“防止分身 Web 端崩溃”的 P0/P1（健康阈值、真实 flush、pagefile 单活跃、崩溃退避、关闭原因）**
+
+### 安全 / 可靠性
+
+- **健康预检收紧**：`forkHealthMaxSessionMB` 64→**20**、`forkHealthMaxEvents` 50000→**20000**（严格按“> 20MB / > 20000 事件”拒绝）；`probeForkHealth` 记录端口响应 `latencyMs`；打开前健康结果写 `browser-health.jsonl`，含 adapter/session/http/flush 证据。
+- **无 pagefile 强制单活跃**：新增 `decidePagefileBootPolicy()`；缺失 pagefile 且 Commit 仍高于 `hostCriticalFreeMB` 时不再全停 Safe Mode，而是 `singleForkOnly=true`，启动闸门只清理 pagefile-only Safe Mode 闩锁，保留 crash-loop 等其他闩锁。`/fang/api/status` 顶层与 `pagefilePolicy` 均返回 `pageFileMB/hasPageFile`；`maxOpenForkBrowsers` 在 `hasPageFile=false` 时硬限 1；前端红色 banner 改为“未启用页面文件，已强制单分身”。
+- **正式 flush 先核实再调用**：不新造 DSH HTTP 端点。`flushForkSession()` 在 **3s 总预算**内依次实测配置路径、`/fang/api/health` 通告的 `flush.path`、推导的 `/<prefix>/adapter/flush-session`，再回退 `/api/session/flush`、`/api/session/save`、`/api/sessions/flush`；只有服务端显式 `saved:true` 才算落盘。全部 404/405/超时返回 `code:'flush-unsupported'` 并写“未保存强杀”警告，不假装保存。
+- **浏览器崩溃记录与退避**：`child.on('exit')` 记录 `rawCode/unsignedCode/hex/signal/at/kind/oom`、最后 CDP/PID 树；新增 `browser-crashes.jsonl`（`{taskId,pid,code,oom,lastMetrics,pids,...}`）；同一 task 在 10 分钟内 2 次崩溃写 `quarantined.reason='browser-crash-loop'` 并停 fork。正常 code 0 退出不算崩溃。
+- **单 app 标签强制**：CDP `/json` 只保留 1 个 `type=page`；启动后与 watchdog 周期执行；即使 `browserSingleAppWindow=false`，无 pagefile 时也强制单标签。
+- **关闭原因分类**：新增 `classifyCloseReason()`，把原始原因归一为 `user / idle / browser-oom / dom-limit / host-panic / crash-loop`；`closeReason`、`browserClosed.reasonKind`、`memoryGuard.reasonKind` 持久化；任务卡显示“上次崩溃于 OOM/exit 0x…”。
+
+### 边界 / 未闭环
+
+- 缺失 pagefile 且 Commit 余量低于 `hostCriticalFreeMB` 时仍进入 Safe Mode（避免连第一个分身都直接打爆 Commit）；这是“单活跃”之外的安全兜底，不是正常态。
+- 真实 DSH Windows 宿主的 fork `/api/health` 是否通告 `flush.path`、以及 `/fang/adapter/flush-session` 的 3s 端到端落盘，仍只有单测/纯函数覆盖；需 Windows 自托管环境重跑 preflight/e2e。
+- 官方 DSH Web client 的 session 事件全量渲染未改；4 万条 session 的 renderer 内存根因仍在。
+- `native/win32/fang-job-host*.exe` 仍是旧二进制，Job Object 内存上限需 Windows CI/真机 rebuild 后生效。
+- 未 commit/push/tag/publish；发布动作需用户明确确认。
+
+## v3.8.6（2026-11-25）
+**主题：分身 Web 端防崩溃 8 项措施落地（在 v3.8.5 基础上补代码，不重复计算已有能力）**
+
+### 安全 / 可靠性
+
+- **启动前 CommitFree 检查**：核对 `memoryMinFreeMB=6144`（6GB），不是 4GB；`hostWarnFreeMB=8192`、`hostCriticalFreeMB=4096`、`hostEmergencyFreeMB=2048` 保持不变。该项为 v3.8.5 已有能力，本轮未改阈值。
+- **无 pagefile 证据与单分身 gate**：Windows 探针增加注册表 `PagingFiles`、`AutomaticManagedPagefile`；新增 `pagingFilesEmpty`、`commitLimitNearRam`、`pagefileMissing`。`PagingFiles={}`、`CommitLimit <= 物理内存 × 1.1`、或 `Win32_PageFileUsage` 无分配任一命中即视为缺页文件。新增 `evaluatePagefileSingleFork()`：无 pagefile 时 `activeForks=0` 允许一个、`activeForks>=1` 返回 `pagefile-single-fork`；`memoryGate` 拒绝第二个并写 `fork-pagefile-single-fork-refused` 审计。
+- **分身打开前健康检查**：新增 `src/lib/fork-health.mjs`。`inspectForkSessionHealth()` 扫描 fork home 的 `sessions/**`，流式 zstd 解压统计最大会话事件数，超预算立即销毁流；`probeForkHealth()` 默认请求 `/fang/api/health`，404 回退 `/api/health`。`launchTaskBrowser()` 在真正新开浏览器前检查 `task.adapter.ok`、单会话 64MB/50000 事件预算、fork HTTP health；失败返回 `fork-health-*` 并写 `fork-open-health-refused` 审计，不打开浏览器。新增 `GET /fang/api/health`，响应含 `ok/role/version/pid/uptimeMs/session/adapter`。元主 runtime browser 与已存活浏览器的复用不走该 gate。
+- **浏览器崩溃日志**：托管浏览器保留 `--enable-logging --log-file --enable-crash-reporter --crash-dumps-dir`；`launchManagedBrowser` 新增 `onExit`，把 exit code/signal 归一化后交给 orchestrator。
+- **10 分钟 2 次崩溃闩锁**：`fork-supervisor.evaluateCrashLoop()` 默认 `crashWindowMs=600000`、`crashThreshold=2`；forker 在非预期退出时维护 `crashTimes`，窗口内达到 2 次即写 `quarantined={reason:'crash-loop',...}`、不进入自动重开，并发 `fang/fork-crashed` / `fang/fork-restart-failed`。`publicFork` 与 `fork-meta` 持久化 `crashTimes/quarantined`；用户手动 restore 会清除隔离并重置 `crashTimes`。
+- **浏览器单 app 窗口**：`selectExtraPageTargets()` / `enforceSinglePageTarget()` 通过 CDP `/json` 只保留一个 app page，关闭多余 page（忽略 devtools/extension）；启动后立即执行一次，`browserWatchdogTick` 每轮再执行，关闭数量写 `fork-browser-extra-pages-closed` 审计。
+- **关闭前 flush + 3s 强杀**：沿用已有 `gracefulBrowserCloseMs=3000`、`forkFlushPath=/fang/adapter/flush-session`；`closeTaskBrowser` 先 `flushForkSession`，再页面 flush，再 `closeManagedBrowser` 3s 强杀。本轮未改代码，只补回归核对。
+- **崩溃根因记录**：`recordBrowserExit()` 记录 `exit.code/unsignedCode/hex/signal/kind/oom/source/intentional`、最后 CDP `nodes/heapMB/documents/listeners/layoutCount/visibility`、PID 树 `pids/count/workingSetMB/commitMB`；写入 `browser-events.jsonl`，非主动关闭的退出另写 `memory-samples.jsonl`（`kind:'browser-exit'`）。`0xE0000008` 分类为 `oom`，写 `fork-browser-exit-oom` 审计；watchdog 发现 PID 已死但未收到 exit 事件时补写 `source:'watchdog-pid-dead'`。
+
+### 边界 / 未闭环
+
+- 无 pagefile 时启动预检仍沿用 v3.8.4 的 **Safe Mode 硬门禁**：Safe Mode 会阻止所有创建/打开/自动恢复，单分身 gate 在 Safe Mode 下不会实际放行第一个。因此“允许一个、禁止第二个”与当前更严格的“先全停、启用 pagefile 再开”存在语义差异，未擅自放宽。
+- `/fang/api/health` 与根 `/api/health` 的别名、单 app 窗口、崩溃闩锁、健康预检均只有纯函数/单测覆盖，尚未在真实 Windows DSH 宿主做端到端验证。
+- 官方 DSH Web client 的 session 事件全量渲染未改；4 万条 session 的 renderer 内存根因仍在。
+- `native/win32/fang-job-host*.exe` 仍是旧二进制，Job Object 内存上限需 Windows CI/真机 rebuild 后生效。
+- 未 commit/push/tag/publish；发布动作需用户明确确认。
+
+## v3.8.5（2026-11-25）
+**主题：闭环子集：CDP 15s、母体面板懒渲染、统一缓存上限、隐藏暂停实验开关、Job Object 内存上限**
+
+### 安全 / 可靠性
+
+- **CDP 精确采样**：`browserCdpSampleIntervalMs` 默认 45000→15000；沿用 `Performance.getMetrics` / `Memory.getDOMCounters` / `Runtime.getHeapUsage`，`JSHeapUsedSize`、Nodes、Documents、LayoutCount、listeners、visibility 全部进入采样结果；`browserHeapLimitMB=1536` 超限继续走 `quarantineTask`。
+- **母体面板懒渲染**：新增 `S.activeTaskId`；只有 active task 渲染完整 `renderForkCard`，其他任务渲染 `renderForkSummary`（标题/健康状态/状态胶囊）；`renderForkPanel` 不再对所有任务预热 `loadForkSessions`，切换任务才加载该任务 session/附件/日志。
+- **统一客户端缓存上限**：`CACHE_LIMITS` 统一任务 200、母体会话 200、fork session 缓存 16 个任务/每任务 80 条、日志 64KB、预览 240 字符；`archiveTask`/`deleteArchive` 成功即 `releaseTaskCache()`，释放 `forkSessions`、展开状态与 active 指针。
+- **隐藏暂停实验开关**：新增 `pauseHiddenTab=false` 默认关闭；开启后 hidden→CDP `Page.setWebLifecycleState=frozen`，visible→`active`，失败 60s 冷却重试；未完成真机“恢复可见→可输入”验证前不默认开启。
+- **Job Object 内存兜底**：helper 新增 `--job-process-memory-mb` / `--job-memory-mb`，设置 `JOB_OBJECT_LIMIT_PROCESS_MEMORY` / `JOB_OBJECT_LIMIT_JOB_MEMORY`；forker 新增 `jobProcessMemoryMB=2048`、`jobTotalMemoryMB=4096` 配置并传入 helper。
+- **回归**：新增 `test/v385-closures.test.mjs`；`client-layout-dom.test.mjs` 新增“只有 active task 完整渲染、切换后仍只有一张完整卡”的 DOM 用例。
+
+### 边界 / 未闭环
+
+- 官方 DSH Web client 的 session 事件全量渲染没有改；`session-bridge` 只有 `limit`，不能替代官方客户端分页/懒加载。4 万条 session 的 renderer 内存根因仍在。
+- 隐藏暂停只做到实验开关，未在真实 Windows Edge/Chrome + DSH fork 页面完成恢复可见验证，因此默认关闭。
+- Job Object C 源码与参数已改，但 macOS 本机没有 Windows 工具链，未重编译 `fang-job-host*.exe`；现有 exe 仍是旧二进制，需 Windows CI/真机 rebuild 后才生效。
+- `/fang/api/panic` 路由、`maxForks=8`、母体 RSS/Private 连续采样不在本版范围。
+- 真实 Windows DSH 宿主的 `/fang/adapter/flush-session` 3s 端到端落盘、`browser-health.jsonl` 真机采样未跑，需在 Windows 自托管环境补 `preflight` / `e2e`。
+- 无 pagefile 且 Commit 低于 `hostCriticalFreeMB` 时仍进入 Safe Mode；这是防止第一个分身打爆 Commit 的安全兜底，不放宽。
+- `dist/manifest.json` 的 `preflight` 仍是旧 3.8.5 红色结果（`pass=-1` / `fail=-1`）；构建走 `--skip-preflight`，不能宣称发布门禁通过。
+- 未 commit/push/tag/publish；发布动作需用户明确确认。
+
 ## v3.8.4（2026-11-25）
 **主题：页面文件硬门禁 + 启动前 Safe Mode 预检 + 迁移报告 API 防护**
 

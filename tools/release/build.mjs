@@ -7,6 +7,7 @@ import { ROOT, readJson, versionOf, run, sha256File, selectFilesFromManifest, PU
 
 const args = process.argv.slice(2)
 const skipPreflight = args.includes('--skip-preflight')
+if (skipPreflight) console.warn('preflight: SKIPPED — manifest will record skipped, not GREEN')
 const version = versionOf()
 const pkg = readJson('package.json')
 // 构建前清掉同版本旧产物与校验和，避免 preflight 校验到过期 sidecar
@@ -66,13 +67,21 @@ const stagedPkg = {
   bin: { fangctl: './tools/fangctl.mjs' },
   dsh: stagedDsh,
   files: undefined,
-  scripts: { test: pkg.scripts?.test ?? 'node --test --test-concurrency=1 "test/*.test.mjs"' },
+  scripts: {
+    test: pkg.scripts?.test ?? 'node --test --test-concurrency=1 "test/*.test.mjs"',
+    ...(pkg.scripts?.postinstall ? { postinstall: pkg.scripts.postinstall } : {}),
+  },
 }
 fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(stagedPkg, null, 2) + '\n', 'utf8')
 
 const tarball = tarballPath
 fs.rmSync(tarball, { force: true })
-const tgz = run('tar', ['-czf', tarball, '-C', stage, 'package'])
+// npm registry rejects tar directory entries with HTTP 415 "invalid path: package/".
+// Pass an explicit file list instead of the directory so the tarball contains files only.
+const tarFileList = path.join(stage, '.tar-files.txt')
+fs.writeFileSync(tarFileList, files.map((rel) => `package/${rel}`).join('\n') + '\n', 'utf8')
+const tgz = run('tar', ['-czf', tarball, '-C', stage, '-T', tarFileList])
+fs.rmSync(tarFileList, { force: true })
 if (tgz.status !== 0) { console.error('FAIL tar: ' + (tgz.stderr || tgz.stdout)); process.exit(1) }
 const listing = run('tar', ['-tzf', tarball])
 const entries = listing.stdout.split(/\r?\n/).filter(Boolean)
@@ -82,7 +91,14 @@ if (entries.some((e) => e.startsWith('package/dist/') || e.startsWith('package/n
   console.error('FAIL tarball contains dist/ or node_modules/')
   process.exit(1)
 }
+if (entries.some((e) => /(^|\/)\._|(^|\/)\.DS_Store$/.test(e))) {
+  console.error('FAIL tarball contains macOS AppleDouble / Finder sidecars')
+  process.exit(1)
+}
 
+const preflightRecord = skipPreflight
+  ? { green: false, skipped: true, reason: '--skip-preflight', at: new Date().toISOString() }
+  : (fs.existsSync(path.join(ROOT, 'dist', 'preflight.json')) ? readJson('dist/preflight.json') : null)
 const manifest = {
   name: PUBLISH_NAME,
   version,
@@ -94,7 +110,7 @@ const manifest = {
   entries: entries.length,
   files: entries.filter((e) => e !== 'package/' && !e.endsWith('/')),
   stagedPackageJson: stagedPkg,
-  preflight: fs.existsSync(path.join(ROOT, 'dist', 'preflight.json')) ? readJson('dist/preflight.json') : null,
+  preflight: preflightRecord,
 }
 fs.writeFileSync(path.join(ROOT, 'dist', 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
 // 发布物校验和：与 tarball 同目录、内容 `<sha256>  <basename>`

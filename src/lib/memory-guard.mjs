@@ -6,8 +6,8 @@ import { promisify } from 'node:util'
 import os from 'node:os'
 
 const execFileAsync = promisify(execFile)
-// Host memory is checked on a 5s timer; a 10s cache halves PowerShell starts
-// while keeping the critical-threshold reaction within two ticks.
+// Host memory is checked on a 15s timer; a 10s cache still coalesces ad-hoc
+// probes while the watchdog tick keeps one PowerShell/CIM query per interval.
 const DEFAULT_CACHE_MS = 10000
 const DEFAULT_PROCESS_TABLE_CACHE_MS = 0
 let cache = { at: 0, value: null, pending: null }
@@ -25,6 +25,133 @@ function parsePowerShellJson(text) {
   return null
 }
 
+function asArray(value) {
+  if (Array.isArray(value)) return value
+  if (value === null || value === undefined || value === '') return []
+  return [value]
+}
+
+function positiveNumber(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? number : 0
+}
+
+function roundMB(value) {
+  return Math.round(positiveNumber(value))
+}
+
+function driveOf(name) {
+  const match = /^([A-Za-z]:)/.exec(String(name ?? '').trim())
+  return match ? match[1].toUpperCase() : ''
+}
+
+/** Normalize per-drive Win32_PageFileUsage rows. */
+export function normalizePageFileDetails(value) {
+  return asArray(value)
+    .map((row) => ({
+      name: String(row?.Name ?? row?.name ?? ''),
+      allocatedMB: roundMB(row?.AllocatedBaseSize ?? row?.allocatedBaseSize),
+      currentUsageMB: roundMB(row?.CurrentUsage ?? row?.currentUsage),
+      peakUsageMB: roundMB(row?.PeakUsage ?? row?.peakUsage),
+    }))
+    .filter((row) => row.name || row.allocatedMB > 0)
+}
+
+/** Normalize per-drive Win32_PageFileSetting rows (configured, possibly inactive). */
+export function normalizePageFileSettings(value) {
+  return asArray(value)
+    .map((row) => ({
+      name: String(row?.Name ?? row?.name ?? ''),
+      initialMB: roundMB(row?.InitialSize ?? row?.initialSize),
+      maximumMB: roundMB(row?.MaximumSize ?? row?.maximumSize),
+    }))
+    .filter((row) => row.name)
+}
+
+/** Normalize all fixed/removable volumes for diagnostics; no decision uses them yet. */
+export function normalizeVolumes(value) {
+  return asArray(value)
+    .map((row) => ({
+      deviceId: String(row?.DeviceID ?? row?.deviceId ?? '').toUpperCase(),
+      sizeMB: roundMB(row?.SizeMB ?? row?.sizeMB),
+      freeMB: roundMB(row?.FreeMB ?? row?.freeMB),
+      fileSystem: String(row?.FileSystem ?? row?.fileSystem ?? ''),
+    }))
+    .filter((row) => row.deviceId)
+}
+
+/**
+ * Pure mapping from the PowerShell JSON shape. Kept exported so a synthetic
+ * C: + D: pagefile result can be tested without Windows.
+ */
+export function mapMemoryProbe(data, { now = Date.now(), systemDrive = process.env.SystemDrive || 'C:' } = {}) {
+  if (!data || typeof data !== 'object') return { ok: false, supported: true, source: 'powershell', error: 'memory-parse-failed' }
+  const physicalTotalMB = roundMB(data.PhysicalTotalMB)
+  const physicalFreeMB = roundMB(data.PhysicalFreeMB)
+  const pageFileDetails = normalizePageFileDetails(data.PageFileDetails)
+  const pageFileSettings = normalizePageFileSettings(data.PageFileSettings)
+  const volumes = normalizeVolumes(data.Volumes)
+  const pageFileMB = pageFileDetails.reduce((sum, row) => sum + row.allocatedMB, 0)
+    || roundMB(data.PageFileMB)
+  const pageFileUsageMB = pageFileDetails.reduce((sum, row) => sum + row.currentUsageMB, 0)
+    || roundMB(data.PageFileUsageMB)
+  const pageFilePeakMB = pageFileDetails.reduce((sum, row) => sum + row.peakUsageMB, 0)
+    || roundMB(data.PageFilePeakMB)
+  const osLimitMB = roundMB(data.CommitLimitOSMB ?? data.CommitLimitMB)
+  const derivedLimitMB = physicalTotalMB > 0 ? physicalTotalMB + pageFileMB : 0
+  // The OS value is system-wide, but older probes only surfaced the system drive
+  // through their pagefile detail. Taking the larger of the OS value and
+  // RAM + every pagefile makes an under-reported C-only limit visible instead of
+  // silently gating on it. Equal values keep the OS value as the source of truth.
+  const commitLimitMB = Math.max(osLimitMB, derivedLimitMB)
+  const commitLimitSource = derivedLimitMB > osLimitMB + 1024
+    ? 'physical-plus-all-pagefiles'
+    : (osLimitMB > 0 ? 'os-total' : 'derived')
+  const pagingFiles = String(data.PagingFiles ?? '')
+  const drives = [...new Set([
+    ...pageFileDetails.map((row) => driveOf(row.name)).filter(Boolean),
+    ...pageFileSettings.map((row) => driveOf(row.name)).filter(Boolean),
+  ])].sort()
+  const normalizedSystemDrive = driveOf(systemDrive) || 'C:'
+  const value = {
+    ok: true,
+    supported: true,
+    source: 'powershell',
+    commitLimitMB,
+    commitLimitOSMB: osLimitMB || null,
+    commitLimitDerivedMB: derivedLimitMB || null,
+    commitLimitSource,
+    commitLimitMismatchMB: derivedLimitMB && osLimitMB ? derivedLimitMB - osLimitMB : null,
+    commitFreeMB: roundMB(data.CommitFreeMB),
+    physicalTotalMB,
+    physicalFreeMB,
+    pageFileMB,
+    pageFileUsageMB,
+    pageFilePeakMB,
+    pageFileCount: pageFileDetails.length,
+    pageFileDetails,
+    pageFileSettings,
+    pageFileDrives: drives,
+    pageFileDriveCount: drives.length,
+    pageFileOnSystemDrive: drives.includes(normalizedSystemDrive),
+    pageFileOffSystemDrive: drives.some((drive) => drive !== normalizedSystemDrive),
+    systemDrive: normalizedSystemDrive,
+    volumes,
+    selfRssMB: roundMB(data.SelfRssMB),
+    selfPrivateMB: roundMB(data.SelfPrivateMB),
+    hasPageFile: pageFileMB > 0,
+    pagingFiles,
+    pagingFilesEmpty: pagingFiles.trim() === '',
+    automaticManagedPagefile: data.AutomaticManagedPagefile === true,
+    commitLimitNearRam: isCommitLimitNearRam(commitLimitMB, physicalTotalMB),
+    at: now,
+    cached: false,
+    cacheAgeMs: 0,
+  }
+  value.pagefileMissing = isPagefileMissing(value)
+  return value
+}
+
 /** Read Windows commit limit/free. Values are MB. Non-Windows returns a disabled shape. */
 export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_MS } = {}) {
   if (process.platform !== 'win32') {
@@ -37,36 +164,49 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
   if (cache.pending) return cache.pending
   const script = [
     '$o = Get-CimInstance Win32_OperatingSystem',
+    '$cs = Get-CimInstance Win32_ComputerSystem',
+    '$mm = Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management" -ErrorAction SilentlyContinue',
+    `$hp = Get-Process -Id ${Number(process.pid)} -ErrorAction SilentlyContinue`,
+    '$pf = @(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue | ForEach-Object {',
+    '  [pscustomobject]@{ Name=[string]$_.Name; AllocatedBaseSize=[double]$_.AllocatedBaseSize; CurrentUsage=[double]$_.CurrentUsage; PeakUsage=[double]$_.PeakUsage }',
+    '})',
+    '$pfs = @(Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue | ForEach-Object {',
+    '  [pscustomobject]@{ Name=[string]$_.Name; InitialSize=[double]$_.InitialSize; MaximumSize=[double]$_.MaximumSize }',
+    '})',
+    '$vol = @(Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 2 -or $_.DriveType -eq 3 } | ForEach-Object {',
+    '  [pscustomobject]@{ DeviceID=[string]$_.DeviceID; SizeMB=[math]::Round($_.Size / 1MB); FreeMB=[math]::Round($_.FreeSpace / 1MB); FileSystem=[string]$_.FileSystem }',
+    '})',
+    '$pfMB = [math]::Round((@($pf) | Measure-Object -Property AllocatedBaseSize -Sum).Sum)',
+    '$pfUseMB = [math]::Round((@($pf) | Measure-Object -Property CurrentUsage -Sum).Sum)',
+    '$pfPeakMB = [math]::Round((@($pf) | Measure-Object -Property PeakUsage -Sum).Sum)',
+    '$ramMB = [math]::Round($o.TotalVisibleMemorySize / 1024)',
     '$p = [pscustomobject]@{',
-    '  CommitLimitMB = [math]::Round($o.TotalVirtualMemorySize / 1024)',
+    '  CommitLimitOSMB = [math]::Round($o.TotalVirtualMemorySize / 1024)',
+    '  CommitLimitDerivedMB = $ramMB + $pfMB',
     '  CommitFreeMB = [math]::Round($o.FreeVirtualMemory / 1024)',
-    '  PhysicalTotalMB = [math]::Round($o.TotalVisibleMemorySize / 1024)',
+    '  PhysicalTotalMB = $ramMB',
     '  PhysicalFreeMB = [math]::Round($o.FreePhysicalMemory / 1024)',
-    '  PageFileMB = [math]::Round((Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue | Measure-Object AllocatedBaseSize -Sum).Sum)',
+    '  PageFileMB = $pfMB',
+    '  PageFileUsageMB = $pfUseMB',
+    '  PageFilePeakMB = $pfPeakMB',
+    '  PageFileDetails = @($pf)',
+    '  PageFileSettings = @($pfs)',
+    '  Volumes = @($vol)',
+    '  PagingFiles = [string](@($mm.PagingFiles) -join ";")',
+    '  AutomaticManagedPagefile = [bool]($cs.AutomaticManagedPagefile -eq $true)',
+    '  SelfRssMB = if ($hp) { [math]::Round($hp.WorkingSet64 / 1048576) } else { 0 }',
+    '  SelfPrivateMB = if ($hp) { [math]::Round($hp.PrivateMemorySize64 / 1048576) } else { 0 }',
     '}',
-    '$p | ConvertTo-Json -Compress',
+    '$p | ConvertTo-Json -Compress -Depth 6',
   ].join('\n')
   const run = (async () => {
     try {
       const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-        timeout: 10000, windowsHide: true, maxBuffer: 65536,
+        timeout: 10000, windowsHide: true, maxBuffer: 262144,
       })
       const data = parsePowerShellJson(stdout)
       if (!data) return { ok: false, supported: true, source: 'powershell', error: 'memory-parse-failed' }
-      const value = {
-        ok: true,
-        supported: true,
-        source: 'powershell',
-        commitLimitMB: Number(data.CommitLimitMB) || 0,
-        commitFreeMB: Number(data.CommitFreeMB) || 0,
-        physicalTotalMB: Number(data.PhysicalTotalMB) || 0,
-        physicalFreeMB: Number(data.PhysicalFreeMB) || 0,
-        pageFileMB: Number(data.PageFileMB) || 0,
-        hasPageFile: Number(data.PageFileMB) > 0,
-        at: now,
-        cached: false,
-        cacheAgeMs: 0,
-      }
+      const value = mapMemoryProbe(data, { now })
       cache = { at: now, value, pending: null }
       return value
     } catch (error) {
@@ -77,6 +217,31 @@ export async function readSystemMemory({ force = false, cacheMs = DEFAULT_CACHE_
   })()
   cache.pending = run
   return run
+}
+
+/** CommitLimit ≈ physical RAM is a second, independent no-pagefile signal. */
+export function isCommitLimitNearRam(commitLimitMB, physicalTotalMB) {
+  const limit = Number(commitLimitMB) || 0
+  const total = Number(physicalTotalMB) || 0
+  if (limit <= 0 || total <= 0) return false
+  return limit <= total * 1.1
+}
+
+/** Pagefile missing by usage, registry PagingFiles={}, or CommitLimit≈RAM. */
+export function isPagefileMissing(memory) {
+  if (!memory || memory.ok !== true || memory.supported === false) return false
+  if (memory.pagingFilesEmpty === true || memory.commitLimitNearRam === true) return true
+  return memory.hasPageFile !== true || Number(memory.pageFileMB) <= 0
+}
+
+/**
+ * No-pagefile policy: advisory only. Kept exported for compatibility; it must
+ * never report `limited: true` or be used to refuse a fork (v3.9.4).
+ */
+export function evaluatePagefileSingleFork(memory, { activeForks = 0 } = {}) {
+  const active = Math.max(0, Number(activeForks) || 0)
+  if (!isPagefileMissing(memory)) return { ok: true, limited: false, activeForks: active }
+  return { ok: true, limited: false, advisory: 'pagefile-missing', activeForks: active, detail: '页面文件缺失只是提醒，建议设置；不限制分身数量，实际准入只按 Commit 余量判断。' }
 }
 
 /** Pure guard decision, kept separate for tests. */

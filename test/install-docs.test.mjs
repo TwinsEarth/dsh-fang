@@ -9,7 +9,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
 
 test('README indexes the v3.8.2 migration guide and key docs', () => {
   const readme = read('README.md')
-  assert.match(readme, /当前发布线：\*\*v3\.8\.4\*\*/)
+  assert.match(readme, /当前发布线：\*\*v3\.9\.9\*\*/)
   assert.match(readme, /## 升级到 v3\.8\.2（数据根迁移，必读）/)
   assert.match(readme, /node tools\/migrate-fang-home\.mjs --apply/)
   assert.match(readme, /docs\/INSTALL\.md/)
@@ -45,3 +45,5 @@ test('install guide is included in the npm package file allowlist', () => {
   assert.ok(pkg.files.includes('docs/HOST-SMOKE.md'))
   assert.ok(pkg.files.includes('tools/release/host-boot-smoke.mjs'))
 })
+
+

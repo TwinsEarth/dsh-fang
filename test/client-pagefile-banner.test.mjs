@@ -6,12 +6,17 @@ import fs from 'node:fs'
 const client = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 const orchestrator = fs.readFileSync(new URL('../src/plugins/orchestrator.mjs', import.meta.url), 'utf8')
 
-test('pagefile missing renders a persistent red banner independent of Safe Mode', () => {
+test('v3.9.4: pagefile missing renders a closable advisory, never a forced single-fork banner', () => {
   assert.match(client, /function renderPagefileBanner\(S, app\)/)
-  assert.match(client, /memory\.hasPageFile === true && Number\(memory\.pageFileMB\) > 0/)
+  assert.match(client, /memory\.pagefileMissing === true/)
+  assert.match(client, /memory\.pagingFilesEmpty === true/)
+  assert.match(client, /memory\.commitLimitNearRam === true/)
   assert.match(client, /'data-zone': 'pagefile-banner'/)
-  assert.ok(client.includes('页面文件缺失 · 宿主随时可能 OOM'))
-  assert.match(client, /function renderNotices\(S, app\)[\s\S]{0,80}renderPagefileBanner/)
+  assert.ok(client.includes('未启用页面文件 · 仅提醒，不限制分身'))
+  assert.equal(client.includes('已强制单分身'), false)
+  assert.match(client, /pagefile-dismiss/)
+  assert.match(client, /app\.armNotice\?\.\('banner:pagefile'/)
+  assert.match(client, /function renderNotices\(S, app\)[\s\S]{0,300}renderPagefileBanner/)
   assert.doesNotMatch(client, /function renderPagefileBanner\(S, app\)[\s\S]{0,300}safeMode/)
 })
 

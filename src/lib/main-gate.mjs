@@ -1,10 +1,16 @@
 ﻿// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (c) 2026 dsh-Fang contributors 鈥?see LICENSE-CORE.
+// Copyright (c) 2026 dsh-Fang contributors — see LICENSE-CORE.
 //
-// v3.3.0 涓诲煄闂ㄧ锛坢ain-city gate锛?// ------------------------------------------------------------
-// 鐩爣锛氫换浣曘€岃繘涓诲煄銆嶇殑鍔ㄤ綔锛堟墦鍖呫€佸彂甯冦€佸畨瑁呫€侀儴缃层€佹柊寤?profile锛夐兘蹇呴』鍏堣繃
-// 鍚屼竴濂楀彲澶嶆牳鐨勬鏌ワ紱鎷夸笉鍒拌瘉鎹椂 fail-closed锛岃€屼笉鏄潤榛樻斁琛屻€?//
-// 璁捐绾︽潫锛?//   * 绾湰鍦般€佸彧璇讳紭鍏堬細榛樿涓嶅啓 profile銆佷笉鑱旂綉銆佷笉鏀逛骇鐗┿€?//   * 浜х墿鏍￠獙浠?sha256/manifest 涓哄噯锛沺rofile 鏍￠獙浠ャ€屼笉瓒婄晫 + 鍙В鏋?+ 涓嶈鐩栥€嶄负鍑嗐€?//   * 宕╂簝寰幆 / 瀹夊叏妯″紡 / 瀹¤閾炬柇瑁?= blocker锛氱郴缁熺骇鏁呴殰涓嶈兘闈犻噸璇曠粫杩囥€?//   * 闇€瑕佸啓鐩樼殑涓や釜渚嬪閮芥樉寮忓紑鍏筹細--repair 寤?profile 澶囦唤锛?-create 鏂板缓 profile銆?
+// v3.3.0 主城门禁（main-city gate）
+// ------------------------------------------------------------
+// 目标：任何「进主城」的动作（打包、发布、安装、部署、新建 profile）都必须先过
+// 同一套可复核的检查；拿不到证据时 fail-closed，而不是静默放行。
+//
+// 设计约束：
+//   * 纯本地、只读优先：默认不写 profile、不联网、不改产物。
+//   * 产物校验以 sha256/manifest 为准；profile 校验以「不越界 + 可解析 + 不覆盖」为准。
+//   * 崩溃循环 / 安全模式 / 审计链断裂 = blocker：系统级故障不能靠重试绕过。
+//   * 需要写盘的两个例外都显式开关：--repair 建 profile 备份，--create 新建 profile。
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -136,7 +142,7 @@ function walkFiles(dir, rel = '', out = [], limit = 5000) {
   return out
 }
 
-/** 婧愮爜鏍戯細鐗堟湰銆佹枃妗ｃ€乿endored 濂戠害銆佸叧閿槻绾挎枃浠躲€佸嵄闄╅粯璁ゅ€笺€?*/
+/** 源码树：版本、文档、vendored 契约、关键防线文件、危险默认值。 */
 export function checkSourceTree({ root = process.cwd(), version = '' } = {}) {
   const checks = []
   const base = path.resolve(root)
@@ -189,7 +195,9 @@ export function checkSourceTree({ root = process.cwd(), version = '' } = {}) {
 }
 
 /**
- * v3.3.1锛氱涓冪被鐩爣 workflows 鈥斺€?CI/鍙戝竷宸ヤ綔娴佹湰韬殑瀹¤銆? * 宸ヤ綔娴佹槸銆岃皝鑳藉彂甯冦€佽兘鍐欎粈涔堛€嶇殑鎵ц鍏ュ彛锛涘畠琚敼鍧忔椂锛屾簮鐮侀棬绂佸彲鑳藉畬鍏ㄧ粫杩囥€? */
+ * v3.3.1：第七类目标 workflows — CI/发布工作流本身的审计。
+ * 工作流是「谁能发布、能写什么」的执行入口；它被改坏时，源码门禁可能完全绕过。
+ */
 export function checkWorkflows({ root = process.cwd() } = {}) {
   const checks = []
   const base = path.resolve(String(root))
@@ -304,7 +312,7 @@ function checkProfile({ homeDir, profile, profileDir }) {
   if (!fs.existsSync(patchFile)) warn(checks, 'profile: patch file', 'cordis.patch.yml missing', 'profile may still boot; create an empty [] patch')
   else {
     const text = readTextSafe(patchFile)
-    // 绌?patch 鐨勫悎娉曞舰寮忥細绌烘枃浠躲€乣[]`锛圖SH 妯℃澘甯歌锛夈€?
+    // 空 patch 的合法形式：空文件、`[]`（DSH 模板常见）。
     const empty = text.trim() === '' || text.trim() === '[]' || text.trim() === '{}'
     if (empty) pass(checks, 'profile: patch parses', 'empty patch')
     else {
@@ -380,7 +388,7 @@ function aggregate(target, checks, extra = {}) {
   const warnings = checks.filter((item) => item.severity === 'warning' && item.ok === false)
   const infos = checks.filter((item) => item.severity === 'info' && item.ok === true)
   const score = scoreGateFindings(checks.map((item) => ({ severity: item.ok ? 'info' : item.severity })))
-  // 淇寤鸿鐢?healer 缁熶竴缁欏嚭锛堟湭鐭?blocker 涔熷洖钀藉埌 fail-closed 鎻愮ず锛夈€?
+  // 修复建议由 healer 统一给出（未知 blocker 也回落到 fail-closed 提示）。
   const healerHints = new Map(gateRepairPlan(checks.map((item) => ({ ...item }))).map((item) => [item.id, item.hint]))
   const repair = checks
     .filter((item) => item.ok === false)
@@ -399,7 +407,7 @@ function aggregate(target, checks, extra = {}) {
   }
 }
 
-/** 涓诲叆鍙ｏ細鎸?target 鑱氬悎妫€鏌ャ€傜己鍙傛暟鏃?fail-closed锛屼笉鐚溿€?*/
+/** 主入口：按 target 聚合检查。缺参数时 fail-closed，不猜。 */
 export function runMainGate(options = {}) {
   const target = String(options.target ?? 'package').trim()
   if (!GATE_TARGETS.includes(target)) {
@@ -485,7 +493,7 @@ export function runMainGate(options = {}) {
   return report
 }
 
-/** 鍦?profile 鐩綍鍐?.gate-backups/<stamp>/锛堝彧澶嶅埗閰嶇疆锛屼笉鍔?node_modules/浼氳瘽锛夈€?*/
+/** 在 profile 目录写 .gate-backups/<stamp>/（只复制配置，不碰 node_modules/会话）。 */
 export function createProfileBackup(profileDir) {
   const dir = path.resolve(String(profileDir ?? ''))
   if (!fs.existsSync(dir)) return { ok: false, error: 'profile-missing', dir }
@@ -507,7 +515,7 @@ export function createProfileBackup(profileDir) {
   }
 }
 
-/** 鎶婇棬绂佺粨璁哄啓杩涢摼寮忓璁★紱娌℃湁 dataDir 鏃惰烦杩囥€傞摼鍧忎簡鎷掔粷杩藉姞锛岄伩鍏嶆礂鐧姐€?*/
+/** 把门禁结论写进链式审计；没有 dataDir 时跳过。链坏了拒绝追加，避免洗白。 */
 export function recordGateDecision({ dataDir, target, report, actor = '' } = {}) {
   if (!dataDir) return { ok: false, skipped: true, reason: 'no-data-dir' }
   const ledger = path.join(String(dataDir), 'audit.jsonl')
@@ -534,7 +542,7 @@ export function recordGateDecision({ dataDir, target, report, actor = '' } = {})
   }
 }
 
-/** 鎶?blocker 姹囨€绘垚鍙洿鎺ユ墦鍦?CI/缁堢涓婄殑涓€琛岋紙涓嶉殣钘忓師鍥狅級銆?*/
+/** 把 blocker 汇总成可直接打印在 CI/终端上的一行（不隐藏原因）。 */
 export function formatGateFailure(report) {
   const blockers = report?.blockers ?? []
   if (!blockers.length) return 'gate GREEN'
@@ -548,7 +556,9 @@ export const DEFAULT_PROFILE_BUNDLES = Object.freeze([
 ])
 
 /**
- * 閫氳繃闂ㄧ鍚庣湡姝ｅ垱寤轰竴涓柊 profile锛堝敮涓€鍏佽鐨勫啓璺緞锛夈€? * 鍐嶆鏍￠獙鍚嶇О/璺緞/瀛樺湪鎬э紝閬垮厤璋冪敤鏂硅烦杩?gate 鐩存帴璋冪敤銆? */
+ * 通过门禁后真正创建一个新 profile（唯一允许的写路径）。
+ * 再次校验名称/路径/存在性，避免调用方跳过 gate 直接调用。
+ */
 export function createGatedProfile({ homeDir, profile, bundles = DEFAULT_PROFILE_BUNDLES, force = false, minFreeBytes = DEFAULT_MIN_FREE_BYTES } = {}) {
   const home = path.resolve(String(homeDir ?? ''))
   const name = String(profile ?? '').trim()

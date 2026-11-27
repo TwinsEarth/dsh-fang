@@ -87,6 +87,25 @@ jobs:
       - name: offline status (informational, clean runner has no profile)
         continue-on-error: true
         run: node tools/fangctl.mjs status
+      - name: build native Job helper from source (MSVC)
+        if: matrix.node == 24
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found; Windows runner lacks Visual Studio" }
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "MSVC x64 toolchain not found" }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && cl /nologo /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fe:dist\fang-job-host-ci.exe native\win32\fang-job-host.c /link shell32.lib"
+      - name: Job Object E2E (compiled from source)
+        if: matrix.node == 24
+        run: node tools/job-object-windows-e2e.mjs --helper dist/fang-job-host-ci.exe --memory
+      - name: Job Object E2E (shipped binary)
+        if: matrix.node == 24
+        run: node tools/job-object-windows-e2e.mjs --helper native/win32/fang-job-host.exe --memory
+      - name: Browser Job Object E2E (shipped binary)
+        if: matrix.node == 24
+        run: node tools/browser-job-windows-e2e.mjs --helper native/win32/fang-job-host.exe
 
   # ── 3. 许可分层（跨平台检查放 ubuntu）────────────────────────────────────
   license:

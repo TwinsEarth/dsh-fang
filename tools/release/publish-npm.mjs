@@ -3,7 +3,7 @@
 // 用法：node tools/release/publish-npm.mjs [--dry]
 import fs from 'node:fs'
 import path from 'node:path'
-import { ROOT, readJson, readSecret, httpJson, run } from './lib.mjs'
+import { ROOT, readJson, readSecret, httpJson, retryHttpJson, run } from './lib.mjs'
 
 const args = process.argv.slice(2)
 const dry = args.includes('--dry')
@@ -103,8 +103,28 @@ async function putRegistry(url, token, body) {
 const registryPath = pkg.name.startsWith('@') ? pkg.name.replace('/', '%2F') : encodeURIComponent(pkg.name)
 const res = await putRegistry(`https://registry.npmjs.org/${registryPath}`, token, payload)
 if (res.status === 200 || res.status === 201 || res.status === 202) {
-  console.log(`\nPUBLISHED ${pkg.name}@${pkg.version}`)
-  console.log(`registry: https://www.npmjs.com/package/${pkg.name}/v/${pkg.version}`)
+  // npm registry 的 202 只表示「已受理」；dist-tag/version 常需数十秒到数分钟才可见。
+  // 必须轮询到 <registry>/<pkg>/<version> 真能读回同一版本，才能打印 PUBLISHED。
+  console.log(`\nSUBMITTED ${pkg.name}@${pkg.version} (HTTP ${res.status})`)
+  const attempts = Math.max(1, Number(process.env.NPM_PUBLISH_CONFIRM_ATTEMPTS ?? 12) || 12)
+  const baseMs = Math.max(1000, Number(process.env.NPM_PUBLISH_CONFIRM_BASE_MS ?? 5000) || 5000)
+  const confirmUrl = `https://registry.npmjs.org/${registryPath}/${encodeURIComponent(pkg.version)}`
+  const confirmed = await retryHttpJson(confirmUrl, {
+    attempts,
+    baseMs,
+    capMs: 30000,
+    predicate: (r) => r.status === 200 && String(r.data?.version ?? '') === pkg.version,
+    log: (m) => console.log(`  confirm: ${m}`),
+  })
+  if (confirmed.status === 200 && String(confirmed.data?.version ?? '') === pkg.version) {
+    console.log(`\nPUBLISHED ${pkg.name}@${pkg.version} (registry confirmed after ${confirmed.attempts} probe(s))`)
+    console.log(`registry: https://www.npmjs.com/package/${pkg.name}/v/${pkg.version}`)
+  } else {
+    console.error(`\nUNCONFIRMED ${pkg.name}@${pkg.version}: registry did not expose the version within ${attempts} probe(s)`)
+    console.error(`last status=${confirmed.status} body=${JSON.stringify(confirmed.data).slice(0, 300)}`)
+    console.error('HTTP 202 means accepted/processing, not published. Re-check before retrying; the PUT may already have landed.')
+    process.exitCode = 3
+  }
 } else if ((res.status === 403 || res.status === 409) && /previously published/i.test(String(res.data?.error ?? ''))) {
   // 幂等：版本已发布（手动补发/工作流重跑）视为成功，避免发布流水线被重复发布打红。
   console.log(`\nALREADY PUBLISHED ${pkg.name}@${pkg.version}`)

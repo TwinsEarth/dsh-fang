@@ -11,7 +11,7 @@ test('quarantined task card offers an explicit restart-and-unquarantine action',
   assert.ok(client.includes('重启并解除隔离'))
   assert.ok(client.includes('旧页面/旧 token 失效'))
   assert.match(client, /task\.quarantined \? button\('重启并解除隔离'/)
-  assert.match(client, /task\.quarantined \? null : button\('打开'/)
+  assert.match(client, /task\.quarantined \? null : button\(task\.memoryGuard \? '重新打开' : '打开'/)
 })
 
 test('quarantined state is distinct and start action is not duplicated', () => {

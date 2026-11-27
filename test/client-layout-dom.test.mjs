@@ -45,7 +45,7 @@ const tasks = Array.from({ length: 24 }, (_, i) => ({
   collaborators: [], seed: null, importedSession: null, archivedAt: null, archiveRemote: null,
 }))
 
-function makeHarness() {
+function makeHarness(taskList = tasks) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/', runScripts: 'dangerously', pretendToBeVisual: true })
   const { window } = dom
   window.TextDecoder = TextDecoder
@@ -60,7 +60,7 @@ function makeHarness() {
       tasks: { ready: 24, total: 24, max: 8, list: [], capacity: { slots: 7, limit: 5, used: 5 } },
       forks: { total: 24, running: 24, max: 8, list: [] }, mother: { profile: 'desktop' } })
     if (u.includes('/fang/api/tasks/sessions')) return jsonResponse({ ok: true, sessions: [], total: 0, degraded: [] })
-    if (u.includes('/fang/api/tasks')) return jsonResponse({ ok: true, tasks })
+    if (u.includes('/fang/api/tasks')) return jsonResponse({ ok: true, tasks: taskList })
     if (u.includes('/fang/api/essence/list')) return jsonResponse({ ok: true, officialId: essences[0].id, defaultId: essences[0].id, essences, staleCount: 0 })
     if (u.includes('/fang/api/sessions')) return jsonResponse({ ok: true, sessions: [], total: 0, degraded: [] })
     if (u.includes('/fang/api/auth-token')) return jsonResponse({ token: 't' })
@@ -201,6 +201,46 @@ test('client layout: two splitters — mother/right and forks/decision vertical'
   const key = new harness.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
   rowHandle.dispatchEvent(key)
   assert.ok(Number(harness.window.localStorage.getItem('fang.panel.decision.split')) > 0.5, 'ArrowDown grows the bottom decision block')
+  harness.window.close()
+})
+
+test('client v3.8.5: only the active task gets a full card; others are summaries until switched', async () => {
+  const harness = makeHarness()
+  const { host } = mountConsole(harness)
+  const doc = harness.window.document
+  await waitFor(() => host.querySelectorAll('.fork-card').length >= tasks.length)
+  const cards = [...host.querySelectorAll('.fork-card')]
+  const full = cards.filter((card) => card.getAttribute('data-summary') !== '1')
+  const summaries = cards.filter((card) => card.getAttribute('data-summary') === '1')
+  assert.equal(full.length, 1, 'exactly one active task is fully rendered')
+  assert.equal(summaries.length, tasks.length - 1, 'all other tasks are summary cards')
+  assert.ok(full[0].querySelector('.fork-head'), 'active card keeps the full header')
+
+  const targetId = summaries[0].getAttribute('data-task')
+  summaries[0].querySelector('button').click()
+  await waitFor(() => host.querySelector(`.fork-card[data-task="${targetId}"]:not([data-summary])`))
+  const cardsAfter = [...host.querySelectorAll('.fork-card')]
+  assert.equal(cardsAfter.filter((card) => card.getAttribute('data-summary') !== '1').length, 1, 'switch keeps exactly one full card')
+  assert.equal(cardsAfter.filter((card) => card.getAttribute('data-summary') === '1').length, tasks.length - 1)
+  harness.window.close()
+})
+
+test('client v3.8.5: task list cache caps at 200 rows before render', async () => {
+  const many = Array.from({ length: 240 }, (_, i) => ({
+    ...tasks[0],
+    taskId: `bulk_${i}`,
+    forkId: `bulk_${i}`,
+    title: `批量任务 ${i + 1}`,
+    taskTitle: `批量任务 ${i + 1}`,
+    port: 19000 + i,
+    url: `http://127.0.0.1:${19000 + i}/`,
+    updatedAt: now - i,
+    createdAt: now - i,
+  }))
+  const harness = makeHarness(many)
+  const { host } = mountConsole(harness)
+  await waitFor(() => host.querySelectorAll('.fork-card').length > 0)
+  assert.equal(host.querySelectorAll('.fork-card').length, 200, 'only the capped 200 tasks are rendered')
   harness.window.close()
 })
 

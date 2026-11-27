@@ -1,0 +1,6 @@
+# macOS AppleDouble / Finder metadata must never ship in the npm tarball.
+**/._*
+**/.DS_Store
+._*
+.DS_Store
+*.tgz

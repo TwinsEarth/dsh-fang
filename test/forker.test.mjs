@@ -157,7 +157,7 @@ test('module surface + pure helpers (Config defaults / buildSpawnArgs / classify
   assert.deepEqual(defaults.portPool, { start: 18000, end: 18100 })
   assert.equal(defaults.allocatePorts, true)
   assert.equal(defaults.cleanTemplate, true)
-  assert.equal(defaults.bundleName, '@local/dsh-fang')
+  assert.equal(defaults.bundleName, '@twinsearth/fang-dsh-plugin')
   assert.equal(defaults.forkProfileTag, 'web-base')
 
   assert.deepEqual(forker.resolvePortPool({ start: 18000, end: 18100 }), { start: 18000, end: 18100 })
@@ -170,7 +170,7 @@ test('module surface + pure helpers (Config defaults / buildSpawnArgs / classify
     '@twinsearth/dsh-fang-node-compat',
     '@deepseek-ai/dsh-base',
     '@deepseek-ai/dsh-web-app',
-    '@local/dsh-fang',
+    '@twinsearth/fang-dsh-plugin',
   ])
   assert.equal(forker.buildTemplatePackageJson({ forkProfileTag: 'alt-tag' }).name, 'dsh-fang-fork-alt-tag')
 
@@ -428,7 +428,7 @@ test('provision in cleanTemplate mode builds the fork profile from a forker-owne
       '@twinsearth/dsh-fang-node-compat',
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
-      '@local/dsh-fang',
+      '@twinsearth/fang-dsh-plugin',
     ])
     assert.equal(pkg.dependencies, undefined, 'mother dependencies must never leak into a clean fork profile')
     assert.equal(readFile(path.join(result.profileDir, 'cordis.yml')).trim(), '[]')
@@ -542,7 +542,7 @@ test('provision failure paths + node_modules degradation in both template modes'
     assert.equal(isLink(path.join(degraded.profileDir, 'node_modules')), false)
     assert.deepEqual(
       JSON.parse(readFile(path.join(degraded.profileDir, 'package.json'))).dsh.profile.bundles,
-      ['@twinsearth/dsh-fang-node-compat', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@local/dsh-fang'],
+      ['@twinsearth/dsh-fang-node-compat', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@twinsearth/fang-dsh-plugin'],
     )
   } finally {
     clean.ctx.dispose()
@@ -1098,6 +1098,46 @@ test('reap stops the child, releases its port, removes the home tree and preserv
   }
 })
 
+test('stale registry PID is killed only when its command line still proves the fork', async () => {
+  const root = tmp()
+  const dataRoot = path.join(root, 'data')
+  fs.mkdirSync(dataRoot, { recursive: true })
+  const homeDir = path.join(root, 'fork-home')
+  fs.mkdirSync(homeDir, { recursive: true })
+
+  // Matching stale row: node's command line carries the profile and port fallback.
+  const matching = spawnChild(process.execPath, [FAKE_CLI, '--profile', 'web', '--port', '19999'], { stdio: 'ignore', windowsHide: true, env: { ...process.env, FAKE_DSH_MODE: 'ok' } })
+  await waitFor(() => matching.pid > 0)
+  writeJsonAtomic(path.join(dataRoot, 'forks.json'), {
+    at: new Date().toISOString(),
+    forks: [{ forkId: 'f-stale-match', homeDir, profile: 'web', port: 19999, pid: matching.pid, status: 'running' }],
+  })
+  const matched = newForkContext({ dataRoot })
+  const stopped = matched.service.stop('f-stale-match')
+  assert.equal(stopped.ok, true)
+  assert.equal(stopped.killed, true, 'matching stale PID must be killed')
+  assert.equal(await waitFor(() => !isPidAlive(matching.pid), { timeout: 10000 }), true)
+  matched.ctx.dispose()
+
+  // Foreign stale row: same PID field, unrelated command line. Must survive.
+  const foreign = spawnChild(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true })
+  await waitFor(() => foreign.pid > 0)
+  writeJsonAtomic(path.join(dataRoot, 'forks.json'), {
+    at: new Date().toISOString(),
+    forks: [{ forkId: 'f-stale-foreign', homeDir, profile: 'web', port: 19999, pid: foreign.pid, status: 'running' }],
+  })
+  const foreignCtx = newForkContext({ dataRoot })
+  try {
+    const refused = foreignCtx.service.stop('f-stale-foreign')
+    assert.equal(refused.ok, true)
+    assert.equal(refused.killed, false, 'foreign PID must not be reported as killed')
+    assert.equal(isPidAlive(foreign.pid), true, 'foreign PID must survive a stale registry row')
+  } finally {
+    try { foreign.kill('SIGKILL') } catch { /* already gone */ }
+    foreignCtx.ctx.dispose()
+  }
+})
+
 test('dataRoot persists the registry; a fresh instance sees stopped forks and can reap them', async () => {
   const root = tmp()
   const template = makeTemplate(root)
@@ -1353,3 +1393,4 @@ test('v2.7.3: supervise 放弃重启时 emit fang/fork-restart-failed (terminal=
     ctx.dispose()
   }
 })
+

@@ -70,7 +70,9 @@ export function isLoopbackAddress(address) {
 export function isAllowedOrigin(origin) {
   const raw = String(origin ?? '').trim()
   if (raw.length === 0) return true
-  if (raw === 'dsh-app://app' || raw.startsWith('dsh-app://')) return true
+  // Only the DSH shell's own origin. A prefix check (`startsWith`) accepted
+  // `dsh-app://evil` and any future shell host; the app never needs another host.
+  if (/^dsh-app:\/\/app(?:$|\/)/.test(raw)) return true
   try {
     const url = new URL(raw)
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
@@ -123,7 +125,7 @@ export function checkRequestAuth(req, options) {
     if (site && site !== 'same-origin' && site !== 'none') return { ok: false, status: 403, code: 'cross-site' }
     if (origin) {
       const raw = String(origin).trim()
-      if (!(raw === 'dsh-app://app' || raw.startsWith('dsh-app://'))) {
+      if (!/^dsh-app:\/\/app(?:$|\/)/.test(raw)) {
         let parsed = null
         try { parsed = new URL(raw) } catch { return { ok: false, status: 403, code: 'bad-origin' } }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false, status: 403, code: 'bad-origin' }

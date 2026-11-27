@@ -18,7 +18,8 @@ test('orchestrator exposes P2#4/#5 config and wires the housekeeping module', ()
   assert.match(source, /'recycle', 'watchdog'/)
 })
 
-test('crash-loop decision still uses the ten-minute window after the cap', () => {
-  assert.match(source, /now - Number\(item\.at\) <= 10 \* 60_000/)
+test('crash-loop decision uses the configured window after the cap', () => {
+  assert.match(source, /now - Number\(item\.at\) <= hostCrashWindowMs/)
+  assert.match(source, /hostCrashWindowMinutes/)
   assert.match(source, /recent\.length >= 2/)
 })

@@ -14,13 +14,13 @@ import { makeCtx, makeWebServerStub, makeReq, makeRes, TEST_AUTH_TOKEN } from '.
 import { SERVICE, FANG_VERSION, bus, resolveFangLayout } from '../src/kernel/index.mjs'
 import * as orchestrator from '../src/plugins/orchestrator.mjs'
 import { BranchStore } from '../src/lib/branch-store.mjs'
-import { EssenceManager } from '../src/lib/essence.mjs'
+import { EssenceManager, ESSENCE_HARD_MAX } from '../src/lib/essence.mjs'
 import { MirrorManager } from '../src/lib/mirror.mjs'
 import { readForkSupervisionSettings } from '../src/lib/fork-supervision-settings.mjs'
 import { encodeWorkspaceKey } from '../src/lib/session-format.mjs'
 
 test('orchestrator: 关闭浏览器默认走 DSH sessions.flush 的 adapter 桥，而不是空 unsupported', () => {
-  assert.equal(orchestrator.Config({}).forkFlushPath, '/fang/adapter/flush-session')
+  assert.equal(orchestrator.Config({}).forkFlushPath, '')
   assert.equal(orchestrator.Config({}).diagnosticLogMaxMB, 16)
   assert.equal(orchestrator.Config({}).diagnosticLogRetentionDays, 7)
 })
@@ -74,8 +74,12 @@ function makeFakeForker(overrides = {}) {
         try { fs.copyFileSync(path.join(args.profileTemplate, name), path.join(profileDir, name)) } catch { /* optional */ }
       }
       // The orchestrator now refuses forks whose profile cannot resolve this bundle,
-      // so the fake forker must materialize the marker (real forker junctions it).
-      fs.mkdirSync(path.join(args.homeDir, 'profiles', args.profile, 'node_modules', '@local', 'dsh-fang'), { recursive: true })
+      // so the fake forker must materialize the published bundle marker (real forker
+      // junctions `@twinsearth/fang-dsh-plugin`). Keep the legacy @local alias too:
+      // a few fixtures assert the development link name is not mistaken for the bundle.
+      for (const bundleName of ['@twinsearth/fang-dsh-plugin', '@local/dsh-fang']) {
+        fs.mkdirSync(path.join(args.homeDir, 'profiles', args.profile, 'node_modules', ...bundleName.split('/')), { recursive: true })
+      }
       return { ok: true, homeDir: args.homeDir, profileDir }
     },
     async spawn(args) {
@@ -192,6 +196,12 @@ async function boot({ forker = makeFakeForker(), extraServices = {}, config = {}
     adapterPollMs: 40,
     routes: { enabled: false },
     authToken: TEST_AUTH_TOKEN,
+    // Legacy suite exercises multi-task flows. Production defaults (maxForks=1,
+    // allowMultiFork=false) are asserted in v388-redlines.test.mjs. The hook is
+    // honored only while NODE_TEST_CONTEXT is present.
+    __testOnlyAllowMultiFork: true,
+    allowMultiFork: true,
+    maxForks: 8,
     ...config,
   })
   const svc = ctx.get(SERVICE.orchestrator)
@@ -270,6 +280,26 @@ test('orchestrator: status exposes a read-only restart-guard summary for the cli
     assert.deepEqual(st.restart.approvals, {
       total: 1, authorized: 1, executed: 0, stale: 0, notArmed: 0, invalid: 0,
     })
+  } finally {
+    cleanup(ctx, dataRoot)
+  }
+})
+
+test('orchestrator: permissionEnv=mirror makes mutating routes fail closed after auth', async () => {
+  const webServer = makeWebServerStub()
+  const { ctx, dataRoot } = await boot({
+    extraServices: { webServer },
+    config: { routes: { enabled: true, prefix: '/fang' }, permissionEnv: 'mirror' },
+  })
+  try {
+    const route = webServer.find('POST', '/fang/api/tasks/create')
+    assert.ok(route, 'POST /fang/api/tasks/create must be registered')
+    const res = makeRes()
+    await route.handler(makeReq({ name: 'mirror-denied' }, 'POST'), res)
+    assert.equal(res.statusCode, 403)
+    assert.equal(res.json().code, 'permission-denied')
+    assert.equal(res.json().action, 'task-enqueue')
+    assert.equal(res.json().envType, 'mirror')
   } finally {
     cleanup(ctx, dataRoot)
   }
@@ -839,6 +869,9 @@ test('orchestrator: createTask({essenceId}) 用原身 merged 作模板，归档�
       forksRoot: path.join(dataRoot, 'forks'),
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const mirror = ctx.get(SERVICE.mirror)
     const svc = ctx.get(SERVICE.orchestrator)
@@ -1029,6 +1062,9 @@ test('orchestrator: 删除原身不删会话；分身保留且不能再派生；
       forksRoot: path.join(dataRoot, 'forks'),
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const mirror = ctx.get(SERVICE.mirror)
     const svc = ctx.get(SERVICE.orchestrator)
@@ -1162,6 +1198,9 @@ test('orchestrator: 官方实验性插件同步进官方派生与模板分身（
       profileTemplate: motherProfile,
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const mirror = ctx.get(SERVICE.mirror)
     const svc = ctx.get(SERVICE.orchestrator)
@@ -1439,7 +1478,8 @@ test('orchestrator: resolveCliPath derives the CLI from the current install root
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-cli-'))
   try {
     const cliName = process.platform === 'win32' ? 'dsh.cmd' : 'dsh'
-    const cli = path.join(root, 'resources', 'runtime', 'cli', 'bin', cliName)
+    const resourcesDir = process.platform === 'darwin' ? 'Resources' : 'resources'
+    const cli = path.join(root, resourcesDir, 'runtime', 'cli', 'bin', cliName)
     fs.mkdirSync(path.dirname(cli), { recursive: true })
     fs.writeFileSync(cli, '@echo off\n', 'utf8')
     assert.equal(
@@ -1500,6 +1540,9 @@ test('orchestrator: 元主 backup / restore / import 三条路由', async () => 
     assert.equal(missing.statusCode, 400)
     assert.equal(missing.json().error, 'restore-failed')
     assert.match(String(missing.json().detail), /backup-missing/)
+    // Free the third quota slot before importing a fourth essence: free tier is 3/3.
+    mirror.archiveEssence(noBackup.id, true)
+    mirror.deleteEssence(noBackup.id)
 
     // 3) import：整包 → 新元主
     const bundle = mirror.downloadEssence(essenceId, { full: true })
@@ -1811,7 +1854,7 @@ test('orchestrator: HTTP routes cover tasks v2 + forks v1 and the panel renders 
   const essenceBody = essenceList.json()
   assert.equal(essenceBody.officialId, 'essence-official-dev')
   assert.ok(Array.isArray(essenceBody.essences))
-  assert.equal(essenceBody.capacity.slots, 7)
+  assert.equal(essenceBody.capacity.slots, ESSENCE_HARD_MAX, 'capacity.slots tracks the v3.9.4 hard max (6), not the retired 7')
   assert.equal(typeof essenceBody.defaultId, 'string')
 
   // v3.0.6：create → rename → list 契约
@@ -2503,6 +2546,9 @@ test('orchestrator: autostartForks respawns stopped tasks, skips archived/runnin
       adapterPollMs: 40,
       routes: { enabled: true, prefix: '/fang' },
       authToken: TEST_AUTH_TOKEN,
+      __testOnlyAllowMultiFork: true,
+      allowMultiFork: true,
+      maxForks: 8,
     })
     const svc = ctx.get(SERVICE.orchestrator)
     const a = await svc.createTask({ title: 'autostart-a' })

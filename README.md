@@ -7,7 +7,7 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
-> 当前发布线：**v3.8.4**（2026-11-25，页面文件硬门禁 + 启动前 Safe Mode 预检）。v3.8.2 改变了数据根，升级前先读
+> 当前发布线：**v3.9.9**（2026-11-27，安全收口版：权限第二道门接入生产、内存/身份回收 fail-closed、发布工具链 202/tag 门修复；P3 补齐 compose/watchdog smoke 与 461 空 catch 基线门。v3.9.8 的 fork 公开健康探针与 bundle 复检、v3.9.7 压力阈值、v3.9.6 多帧 zstd 修复保持不变。v3.9.5 的 crash-loop SafeMode 永久闩锁、v3.9.4 的元主配额 3/6、分身槽位 8/62、<999 硬禁止、页面文件 advisory、消息收件箱、元主 bundle 修复保持不变。v3.8.2 改变了数据根，升级前先读
 > [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
 
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。
@@ -71,7 +71,7 @@ node tools/migrate-fang-home.mjs --apply
 - 测试：**292 tests / 291 pass / 0 fail / 1 skip**（skip = `FANG_CONTAINER_LIVE=1` 手动容器探针，已单独跑 **9/9**）；
 - 实机端到端：`node tools/e2e.mjs` → **41/41 checks passed**（临时 `$DSH_HOME` + 真实 dsh 母体 + 真分身：
   派生 → Adapter 握手 → 角色矩阵 → 任务/分身会话标题 → 归档 → 审计链 → 回收）；
-- desktop profile 已挂 `@local/dsh-fang` bundle 层（通过 `link:` 指到本仓库，包版本 2.3.1）；
+- desktop profile 已挂 `@twinsearth/fang-dsh-plugin` bundle 层（通过 `link:` 指到本仓库，包版本 2.3.1）；
 - ✅ v2.1.0 的「瓮城」UI 已在运行中的宿主生效（活体实测）：`sidebar.panellist` 有 `id=fang`（order 90, active）、
   `main` 的 key `fang` 已注册、dock 的 `fang-badge` active；宿主行 `include:fang-session-catalog` 已加载。
 - 🔧 v2.3.1（3:7 分屏面板 + 分身会话 API + 会话原生标题 + 僵尸防护）代码与测试已就绪；
@@ -168,7 +168,7 @@ v1 运行中的宿主缓存旧模块，v2 生效需母体重启（红线：由�
 | 你要做什么 | 先读 |
 |---|---|
 | 安装、升级、v3.8.2 数据根迁移 | [docs/INSTALL.md](docs/INSTALL.md) · [v3.8.2 变更](docs/CHANGELOG.md) |
-| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
+| 查某次发布的结果 / 回滚锚点 | [docs/RELEASE-v3.9.8.md](docs/RELEASE-v3.9.8.md) · [docs/RELEASE-v3.9.7.md](docs/RELEASE-v3.9.7.md) · [docs/RELEASE-v3.9.6.md](docs/RELEASE-v3.9.6.md) · [docs/RELEASE-v3.9.5.md](docs/RELEASE-v3.9.5.md) · [docs/RELEASE-v3.9.4.md](docs/RELEASE-v3.9.4.md) · [docs/RELEASE-v3.9.3.md](docs/RELEASE-v3.9.3.md) · [docs/RELEASE-v3.9.2.md](docs/RELEASE-v3.9.2.md) · [docs/RELEASE-v3.9.0.md](docs/RELEASE-v3.9.0.md) · [docs/RELEASE-v3.8.14.md](docs/RELEASE-v3.8.14.md) · [docs/RELEASE-v3.8.13.md](docs/RELEASE-v3.8.13.md) · [docs/RELEASE-v3.8.12.md](docs/RELEASE-v3.8.12.md) · [docs/RELEASE-v3.8.11.md](docs/RELEASE-v3.8.11.md) · [docs/RELEASE-v3.8.10.md](docs/RELEASE-v3.8.10.md) · [docs/RELEASE-v3.8.9.md](docs/RELEASE-v3.8.9.md) · [docs/RELEASE-v3.8.8.md](docs/RELEASE-v3.8.8.md) · [docs/RELEASE-v3.8.2.md](docs/RELEASE-v3.8.2.md) · [docs/RELEASE-v3.8.5.md](docs/RELEASE-v3.8.5.md) · [docs/RELEASE-v3.8.4.md](docs/RELEASE-v3.8.4.md) · [docs/RELEASE-v3.8.3.md](docs/RELEASE-v3.8.3.md) |
 | P0 加固实现与真机证据 | [docs/P0-HARDENING.md](docs/P0-HARDENING.md) |
 | 真实宿主回归 smoke（v3.8.0/3.8.1） | [docs/HOST-SMOKE.md](docs/HOST-SMOKE.md) |
 | 防崩溃、Safe Mode、升级红线 | [docs/CRASH-SAFETY.md](docs/CRASH-SAFETY.md) |
