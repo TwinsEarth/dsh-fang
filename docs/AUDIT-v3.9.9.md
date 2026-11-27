@@ -106,7 +106,7 @@
 
 ## 七、未覆盖与风险
 
-- **真机未回归**：本版只做工作树 + 本地测试；未部署到 `C:\Users\fangw\.dsh\profiles\desktop`，`task_mwqenfnxpobe` 同类一键修复未在新版上复测。
+- **真机未回归**：本版只做工作树 + 本地测试；未部署到 `%USERPROFILE%\.dsh\profiles\desktop`，`task_mwqenfnxpobe` 同类一键修复未在新版上复测。
 - 宿主 `http://127.0.0.1:61412` 在审计期间连接拒绝；发布后需安装新版再跑真机 smoke。
 - `release-order` 在本机缺 `contract` 子仓时仍有“contract 版本不可读 / vendored 不匹配”FAIL；与本版代码无关，但完整发布顺序检查需补 contract 仓。
 - 删除候选 4 个模块仍在包内；本版不清理，避免把结构清理和发布混在一起。

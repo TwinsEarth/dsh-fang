@@ -32,6 +32,9 @@ export function run(command, args, opts = {}) {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: opts.timeoutMs ?? 600000,
+    // Full-suite TAP output can exceed spawnSync's 1 MiB default and would be
+    // truncated/killed with status -1. Release gates need the complete stream.
+    maxBuffer: opts.maxBuffer ?? 64 * 1024 * 1024,
     env: { ...process.env, ...(opts.env ?? {}) },
   })
   return { status: res.status ?? -1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }

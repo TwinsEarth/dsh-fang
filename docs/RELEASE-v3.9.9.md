@@ -55,4 +55,4 @@ v3.9.9 把 v3.9.8 之后审计出的高风险链路接进生产，并给结构�
 - 全量 `test-399-final9.log`：**1599 tests / 1576 pass / 0 fail / 13 skipped / 10 todo**。
 - P3 定向：`p3-structural-smoke` 3/3、`p3-empty-catch-gate` 3/3；compose/watchdog 相关 5 套件 26/26；13 个模块测试 79/79。
 - 构建门禁：preflight（全量 + e2e）、package smoke、crash-safety、allowlist、main-city package gate。
-- **真机未回归**：本版未部署到 `C:\Users\fangw\.dsh\profiles\desktop`，新版上的 `task_mwqenfnxpobe` 同类一键修复待安装后复测。
+- **真机未回归**：本版未部署到 `%USERPROFILE%\.dsh\profiles\desktop`，新版上的 `task_mwqenfnxpobe` 同类一键修复待安装后复测。

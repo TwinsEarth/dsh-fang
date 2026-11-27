@@ -179,6 +179,12 @@ function makeProfile(homeRoot) {
   const link = path.join(profileDir, 'node_modules', '@local', 'dsh-fang')
   fs.mkdirSync(path.dirname(link), { recursive: true })
   fs.symlinkSync(ROOT, link, 'junction')
+  // cordis.patch.yml names the published package (@twinsearth/fang-dsh-plugin);
+  // the source tree is @local/dsh-fang. Alias the same root under the published
+  // name so the e2e profile can load the source bundle without a registry install.
+  const publishedLink = path.join(profileDir, 'node_modules', '@twinsearth', 'fang-dsh-plugin')
+  fs.mkdirSync(path.dirname(publishedLink), { recursive: true })
+  fs.symlinkSync(ROOT, publishedLink, 'junction')
   // The fang bundle now carries a client-side child plugin (queue journal).
   const childLink = path.join(profileDir, 'node_modules', '@twinsearth', 'dsh-fang-queue-journal')
   fs.mkdirSync(path.dirname(childLink), { recursive: true })
