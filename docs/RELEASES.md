@@ -8,6 +8,7 @@
 
 | 版本 | 主题 | 发布记录 | 审计 |
 |---|---|---|---|
+| v3.9.8 | 打开分身热修：adapter 提供 fork 公开 `/fang/api/health`；restore/一键修复在 provision 后复查 bundle，修复 `fork-bundle-unavailable` | [RELEASE-v3.9.8](RELEASE-v3.9.8.md) | [AUDIT-v3.9.8](AUDIT-v3.9.8.md) |
 | v3.9.7 | 宿主压力阈值对齐版：宿主压力横幅与准入改用 200/300/500 MB、3000/3600/3900 MB | [RELEASE-v3.9.7](RELEASE-v3.9.7.md) | [AUDIT-v3.9.7](AUDIT-v3.9.7.md) |
 | v3.9.6 | 会话健康阈值版：多帧 zstd 崩溃修复；单文件 200/300/500 MB、合计 3000/3600/3900 MB；二次确认 | [RELEASE-v3.9.6](RELEASE-v3.9.6.md) | [AUDIT-v3.9.6](AUDIT-v3.9.6.md) |
 | v3.9.5 | crash-loop Safe Mode 永久闩锁热修；资源型崩溃才封门；准入前自动恢复 | [RELEASE-v3.9.5](RELEASE-v3.9.5.md) | [AUDIT-v3.9.5](AUDIT-v3.9.5.md) |

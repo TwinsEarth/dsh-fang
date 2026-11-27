@@ -4778,10 +4778,10 @@ export function apply(ctx, config) {
         audit('fork-workspace-migration-failed', { taskId: id, error: task.workspaceMapping.error })
       }
       const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
-      const forkBundle = forkBundlePath(forkProfileDir)
-      if (!forkBundle) {
-        return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
-      }
+      // v3.9.8：bundle 检查必须放在 syncForkCoreMode() 之后。后者会调用
+      // forker.provision()，从模板/原身重新镜像 node_modules；旧顺序在 reset
+      // 去掉 node_modules 后先检查、直接报 fork-bundle-unavailable，导致一键
+      // 修复永远卡在 spawn 之前。
       // 从原身派生的分身：还原前先把配置重置回来源原身（分身只生产，不保留配置改动）。
       // 先捕获元主 Web 的最新插件改动，避免 reset 用旧快照覆盖。所有分身（含模板）
       // 默认同步源为官方推荐。
@@ -4825,6 +4825,20 @@ export function apply(ctx, config) {
         syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: task.adapter.error })
         audit(AUDIT.TASK_RESTORED, { taskId: id, ok: false, error: coreSync.error })
         return { ok: false, taskId: id, step: 'sync-fork-core-mode', error: coreSync.error, detail: coreSync.detail ?? null }
+      }
+      // v3.9.8：provision 完成后重新确认 fork 能解析本 bundle；仍失败才拒绝启动。
+      // provision 会把模板/原身的 @twinsearth/fang-dsh-plugin 重新镜像进 profile，
+      // 因而此前的 fork-bundle-unavailable 可被一键修复恢复。
+      const forkBundle = forkBundlePath(forkProfileDir)
+      if (!forkBundle) {
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        persist()
+        syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: 'fork-bundle-unavailable' })
+        audit(AUDIT.FORK_CRASHED, { taskId: id, error: 'fork-bundle-unavailable', forkProfileDir })
+        return { ok: false, error: 'fork-bundle-unavailable', taskId: id, detail: forkProfileDir }
       }
       // 老/空白分身重新打开时补齐官方实验性插件表面；先整体对齐来源元主的完整插件面。
       // 完整来源插件面对齐：默认开启；e2e 已证 125/125（node-compat 复制关闭后）。
@@ -5134,19 +5148,27 @@ export function apply(ctx, config) {
           report.failed.push({ taskId: id, error: 'path-escape' })
           continue
         }
-        const forkBundle = forkBundlePath(path.join(task.homeDir, 'profiles', task.profile))
-        if (!forkBundle) {
-          report.failed.push({ taskId: id, error: 'fork-bundle-unavailable' })
-          continue
-        }
+        const forkProfileDir = path.join(task.homeDir, 'profiles', task.profile)
+        // v3.9.8：bundle 缺失时不要提前 continue；让 syncForkCoreMode(force) 先
+        // provision/镜像 node_modules，再复查。否则 host 重启后一键修复的产物
+        // 仍会被旧的 fork-bundle-unavailable 守卫挡住。
+        const bundleMissing = !forkBundlePath(forkProfileDir)
         task.status = TASK_STATUS.PROVISIONING
         persist()
         let started
         try {
-          const coreSync = await syncForkCoreMode(task)
+          const coreSync = await syncForkCoreMode(task, { force: bundleMissing })
           if (coreSync.ok !== true) {
             report.failed.push({ taskId: id, error: coreSync.error })
             audit(AUDIT.FORK_CRASHED, { taskId: id, error: coreSync.error, reason: 'autostart-core-switch' })
+            continue
+          }
+          const forkBundle = forkBundlePath(forkProfileDir)
+          if (!forkBundle) {
+            task.status = TASK_STATUS.FAILED
+            persist()
+            audit(AUDIT.FORK_CRASHED, { taskId: id, error: 'fork-bundle-unavailable', reason: 'autostart' })
+            report.failed.push({ taskId: id, error: 'fork-bundle-unavailable' })
             continue
           }
           started = await f.spawn({

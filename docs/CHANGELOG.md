@@ -1,3 +1,19 @@
+## v3.9.8（2026-11-27）
+**主题：打开分身热修：fork 公开健康探针 + 一键修复 bundle 复检**
+
+### 根因
+- `GET /fang/api/health` 只由 `orchestrator` 注册，而 `orchestrator` 的 `roleGate` 只在 mother 激活；分身进程实际加载的是 adapter。`probeForkHealth()` 先请求 `/fang/api/health` 得 404，再回退到 DSH 核心受保护的 `/api/health` 得 401，最终报 `fork-health-endpoint-unavailable`，即使 session 与 adapter 均正常。
+- `restoreTask()` 与 `autostartForks()` 在 `syncForkCoreMode()`/`provision()` 之前检查 `forkBundlePath()`。一键修复 `resetForkConfig` 后 profile 的 `node_modules/@twinsearth` 缺失，守卫直接返回 `fork-bundle-unavailable`，provision 永远没有机会重建镜像。
+
+### 修复
+- adapter 在 fork 角色注册公开 `GET <prefix>/api/health`（默认 `/fang/api/health`），返回 `ok/role/version/pid/taskId/sessionId/uptimeMs/adapter`；仍执行 loopback Host / Origin / Sec-Fetch-Site 校验，但公开只读不要求 Bearer。
+- restore 将 bundle 检查移到 `syncForkCoreMode(task,{force:true})` 之后；autostart 在 bundle 缺失时强制 provision，随后复查 bundle。`fork-bundle-unavailable` 不再阻断一键修复的 node_modules 重建。
+- v3.9.7 的宿主压力阈值 200/300/500 MB、3000/3600/3900 MB 不变。
+
+### 测试
+- `test/adapter.test.mjs` 43/43 PASS，新增 fork `/fang/api/health` 公开探针形状与 token 不泄露断言。
+- 真机 fork 模板复现：3.9.7 下 `/fang/adapter/identity` 200、`/fang/api/health` 404、`/api/health` 401；3.9.8 构建后 `/fang/api/health` 200。
+
 ## v3.9.7（2026-11-27）
 **主题：宿主压力阈值对齐版：宿主压力横幅与准入改用 200/300/500 MB + 3000/3600/3900 MB**
 
