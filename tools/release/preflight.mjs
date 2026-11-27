@@ -61,10 +61,12 @@ const files = listTestFiles()
 const started = Date.now()
 const suite = nodeRun(['--test', '--test-concurrency=1', ...files.map((f) => path.join('test', f))], { timeoutMs: 900000 })
 const out = `${suite.stdout}\n${suite.stderr}`
-const pass = Number((out.match(/ℹ pass (\d+)/) ?? [])[1] ?? -1)
-const fail = Number((out.match(/ℹ fail (\d+)/) ?? [])[1] ?? -1)
-const skip = Number((out.match(/ℹ skipped (\d+)/) ?? [])[1] ?? 0)
-add('tests: full suite green', suite.status === 0 && fail === 0, `pass=${pass} fail=${fail} skip=${skip} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
+// Node's default TAP reporter uses "# pass N" on Node 22; newer builds may use
+// "ℹ pass N". Accept both so a green suite is not reported as pass=-1.
+const pass = Number((out.match(/(?:ℹ|#) pass (\d+)/) ?? [])[1] ?? -1)
+const fail = Number((out.match(/(?:ℹ|#) fail (\d+)/) ?? [])[1] ?? -1)
+const skip = Number((out.match(/(?:ℹ|#) skipped (\d+)/) ?? [])[1] ?? 0)
+add('tests: full suite green', suite.status === 0 && pass >= 0 && fail === 0, `pass=${pass} fail=${fail} skip=${skip} status=${suite.status} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
 
 let e2e = null
 if (wantE2e) {
