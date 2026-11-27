@@ -64,6 +64,7 @@ import {
 import { computeBackoff, evaluateCrashLoop, planRestart, reconcileOrphans, writeForkMeta, probeHttpAlive, SUPERVISION_DEFAULTS } from '../lib/fork-supervisor.mjs'
 import { applyForkConfigLock, setProfileConfigReadonly } from '../lib/fork-config-lock.mjs'
 import { runMainGate, formatGateFailure } from '../lib/main-gate.mjs'
+import { matchesProcessIdentity } from '../lib/process-identity.mjs'
 import { DEFAULT_FORK_SEED, applyForkSeedToProfile } from '../lib/fork-seed.mjs'
 import { loadAcceleratedKnownEventTypes, normalizeCoreMode, pruneAliasStubs, sanitizeAcceleratedForkSessions, writeAcceleratedForkProfile } from '../lib/accelerated-fork.mjs'
 import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } from '../lib/essence.mjs'
@@ -121,6 +122,7 @@ const DEFAULTS = {
   maxLogLines: 400,
   dataRoot: '',
   portPool: { ...DEFAULT_PORT_POOL },
+  portProbeTimeoutMs: PORT_PROBE_TIMEOUT_MS,
   allocatePorts: true,
   cleanTemplate: true,
   bundleName: '@twinsearth/fang-dsh-plugin',
@@ -154,11 +156,13 @@ export const Config = z
     dataRoot: z.string().default('').description('注册表/端口表落盘根目录（空 = 仅进程内存）'),
     portPool: z
       .object({
-        start: z.number().default(DEFAULT_PORT_POOL.start).description('端口池起始（含）'),
-        end: z.number().default(DEFAULT_PORT_POOL.end).description('端口池结束（含）'),
+        start: z.natural().min(1).max(65535).default(DEFAULT_PORT_POOL.start).description('端口池起始（含，1–65535）'),
+        end: z.natural().min(1).max(65535).default(DEFAULT_PORT_POOL.end).description('端口池结束（含，1–65535；必须 >= start）'),
       })
       .default({})
       .description('确定性端口池 18000–18100'),
+    portProbeTimeoutMs: z.natural().min(1000).max(30000).default(PORT_PROBE_TIMEOUT_MS)
+      .description('端口空闲探测超时（毫秒，默认 5000；探测无响应按“不可用”处理，fail-closed）'),
     allocatePorts: z
       .boolean()
       .default(true)
@@ -513,12 +517,14 @@ export function apply(ctx, config) {
   if (!gate.active) return
 
   const rawConfig = { ...DEFAULTS, ...(config ?? {}) }
-  const portPool = resolvePortPool(rawConfig.portPool) ?? { ...DEFAULT_PORT_POOL }
+  const portPool = resolvePortPool(rawConfig.portPool)
+  if (!portPool) throw new Error('invalid portPool: start/end must be integers within 1..65535 and start <= end')
   const allocatePorts = rawConfig.allocatePorts !== false
   const cleanTemplate = rawConfig.cleanTemplate !== false
   const bundleName = String(rawConfig.bundleName ?? DEFAULTS.bundleName).trim() || DEFAULTS.bundleName
   const forkProfileTag = safeProfile(rawConfig.forkProfileTag)
   const cfg = { ...rawConfig, portPool, allocatePorts, cleanTemplate, bundleName, forkProfileTag }
+  const probePort = (port) => probePortFree(port, { timeoutMs: cfg.portProbeTimeoutMs })
   // 运行时 supervise 开关：patch/config 的初值 + 可在不重启宿主的情况下切换（UI/API）。
   let runtimeSupervise = cfg.supervise === true
 
@@ -793,7 +799,7 @@ export function apply(ctx, config) {
       if (portTable.has(port)) continue
       let free = false
       try {
-        free = await probePortFree(port)
+        free = await probePort(port)
       } catch {
         free = false
       }
@@ -813,10 +819,50 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * Windows-only sync identity probe for a registry record loaded from disk.
+   * A persisted `rec.pid` has no child handle and may have been recycled by
+   * Windows between sessions; taskkill by PID alone could hit an unrelated
+   * process. Fail-closed: unreadable/empty row means "do not kill".
+   */
+  const stalePidMatchesRecord = (rec) => {
+    const pid = Number(rec?.pid)
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    const script = [
+      `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" |`,
+      '  Select-Object ProcessId,CommandLine |',
+      '  ConvertTo-Json -Compress',
+    ].join('\n')
+    try {
+      const out = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+        encoding: 'utf8', timeout: 3000, windowsHide: true, maxBuffer: 1024 * 1024,
+      })
+      const text = String(out?.stdout ?? '').trim()
+      if (!text) return false
+      const raw = JSON.parse(text)
+      const row = {
+        pid: Number(raw?.ProcessId ?? raw?.pid),
+        commandLine: String(raw?.CommandLine ?? raw?.commandLine ?? ''),
+        createdAt: raw?.CreationDate ? Date.parse(raw.CreationDate) : null,
+      }
+      return matchesProcessIdentity(row, {
+        pid,
+        taskId: rec.forkId,
+        profile: rec.profile,
+        port: rec.port,
+      }).ok === true
+    } catch {
+      return false
+    }
+  }
+
   /** Windows: taskkill /PID <pid> /T /F kills the whole tree (electron children too). */
-  const killTree = (rec) => {
+  const killTree = (rec, { identityVerified = false } = {}) => {
     const pid = rec?.pid ?? rec?.child?.pid ?? null
     if (process.platform === 'win32' && pid) {
+      // A live child still has rec.child; a stale registry row loaded after a host
+      // restart does not. Only the latter needs (and gets) a sync PID fingerprint.
+      if (!rec?.child && !identityVerified && !stalePidMatchesRecord(rec)) return false
       try {
         const res = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10000 })
         if (res && res.status === 0) return true
@@ -839,6 +885,24 @@ export function apply(ctx, config) {
     const resolved = path.resolve(homeDir)
     const root = path.parse(resolved).root
     return resolved !== root && resolved.length > root.length + 1
+  }
+
+  // Windows releases the Job helper's job-object.log a few hundred ms after
+  // taskkill returns. A single removeTree therefore reported removed:true while
+  // leaving `run/job-object.log` behind (forker tests caught it). Retry briefly so
+  // reap is truthful; stop blocking after the budget and return the real state.
+  const sleepSync = (ms) => {
+    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) } catch { /* non-shared fallback */ }
+  }
+  const removeHomeTree = (homeDir, { attempts = 20, delayMs = 100 } = {}) => {
+    let removed = false
+    for (let i = 0; i < attempts; i += 1) {
+      if (!exists(homeDir)) return true
+      removed = removeTree(homeDir)
+      if (!exists(homeDir)) return true
+      if (i < attempts - 1) sleepSync(delayMs)
+    }
+    return removed && !exists(homeDir)
   }
 
   // ───────────────────────────── clean template ─────────────────────────────
@@ -1728,9 +1792,14 @@ function applyForkExperimentalSurface(profileDir) {
     // token 随进程死亡作废：绝不留给下一次 spawn 复用（restartFork 会重新生成）。
     rec.adapterToken = null
     const wasRunning = !!rec.running || !!rec.child || !!rec.starting
+    // A registry row restored after a host restart has no child handle and
+    // `running:false`, but its PID can still be alive. Kill it only when the
+    // command line still proves this fork (profile + port/forkId); otherwise
+    // a recycled PID belongs to an unrelated process and must survive.
+    const staleAlive = !rec.child && rec.pid ? stalePidMatchesRecord(rec) : false
     const pid = rec.pid ?? rec.child?.pid ?? null
-    if (wasRunning) {
-      killTree(rec)
+    if (wasRunning || staleAlive) {
+      killTree(rec, { identityVerified: staleAlive })
       rec.running = false
       rec.child = null
       rec.starting = false
@@ -1740,7 +1809,7 @@ function applyForkExperimentalSurface(profileDir) {
       rec.status = FORK_STATUS.STOPPED
     }
     if (rec.port) releaseOwnedPort(rec.port, rec.forkId)
-    return { ok: true, forkId: rec.forkId, pid, killed: wasRunning }
+    return { ok: true, forkId: rec.forkId, pid, killed: wasRunning || staleAlive }
   }
 
   /** Kill the process tree. Idempotent: an already-dead fork returns ok with killed:false. */
@@ -1767,12 +1836,33 @@ function applyForkExperimentalSurface(profileDir) {
     const id = String(forkId ?? '').trim()
     const rec = records.get(id)
     if (!rec) return { ok: false, error: 'not-found', forkId: id }
-    stop(id)
+    const stopResult = stop(id)
+    // Do not delete a home while its process still answers the PID fingerprint.
+    // stopRecord always reports ok; taskkill can fail on access-denied / a wedged
+    // Job helper. Reaping then would destroy the profile under a live process.
+    if (rec.pid && stalePidMatchesRecord(rec)) {
+      rec.lastError = 'stop-failed'
+      writeForkMetaOf(rec, { status: rec.status, pid: rec.pid, port: rec.port, url: rec.url, lastError: rec.lastError })
+      persist()
+      audit(AUDIT.FORK_REAPED, { forkId: id, homeDir: rec.homeDir ?? '', removed: false, error: 'stop-failed', stop: stopResult })
+      return { ok: false, forkId: id, homeDir: rec.homeDir ?? '', removed: false, error: 'stop-failed' }
+    }
     rec.status = FORK_STATUS.REAPED
     writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null })
     const homeDir = rec.homeDir ? path.resolve(rec.homeDir) : ''
-    let removed = false
-    if (homeDir && isSafeToRemove(homeDir)) removed = exists(homeDir) ? removeTree(homeDir) : false
+    const hadHome = Boolean(homeDir && isSafeToRemove(homeDir) && exists(homeDir))
+    const removed = hadHome ? removeHomeTree(homeDir) : false
+    if (hadHome && exists(homeDir)) {
+      // A locked file (usually the Job helper's run/job-object.log) survived the retry
+      // budget. Keep the registry record and report failure: deleting it would orphan
+      // the home forever and claim a reaping that did not happen.
+      const detail = { forkId: id, homeDir, removed: false, error: 'remove-failed' }
+      rec.lastError = 'remove-failed'
+      writeForkMetaOf(rec, { status: rec.status, pid: null, port: null, url: null, lastError: rec.lastError })
+      persist()
+      audit(AUDIT.FORK_REAPED, { ...detail, ok: false })
+      return { ok: false, ...detail }
+    }
     records.delete(id)
     persist()
     emit(EVENTS.reaped, { forkId: id })
@@ -1928,7 +2018,7 @@ function applyForkExperimentalSurface(profileDir) {
     portFree: async (port) => {
       const n = Math.floor(Number(port))
       if (!Number.isInteger(n) || n < 1 || n > 65535) return false
-      return probePortFree(n)
+      return probePort(n)
     },
     ensureTemplate,
     portPool: () => ({ ...portPool }),

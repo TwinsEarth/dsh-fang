@@ -58,6 +58,7 @@ import {
   totalResources,
 } from '../kernel/index.mjs'
 import { authErrorBody, checkRequestAuth } from '../lib/http-auth.mjs'
+import { PERMISSION_DENIED, checkPermission, permissionActionForAdapterOp, resolvePermissionEnv } from '../lib/permissions.mjs'
 import { readForkActivity } from '../lib/fork-activity.mjs'
 import {
   CommandCache,
@@ -118,6 +119,10 @@ export const Config = z.object({
     .description('SSE 心跳 + 待审批 diff 周期（毫秒）；v3.9.2 默认由 5s 降为 15s'),
   allowLegacyNoToken: z.boolean().default(false)
     .description('v3.0.5：fork 角色无 DSH_ADAPTER_TOKEN 时是否允许 v2 兼容（默认 fail-closed）'),
+  permissionEnv: z.union([
+    z.const('auto'), z.const('host'), z.const('mirror'), z.const('essence'), z.const('derived'),
+  ]).default('auto')
+    .description('第二道门权限环境；auto=按运行时角色映射（fork→derived），显式 mirror/essence 可收紧'),
 })
 
 const msgOf = (e) => String(e && e.message !== undefined ? e.message : e)
@@ -275,6 +280,7 @@ export function apply(ctx, config) {
   const commandCacheSize = clampInt(cfg.commandCacheSize, 1, 10000, DEFAULTS.commandCacheSize)
   const heartbeatMs = clampInt(cfg.heartbeatMs, 1000, 60000, DEFAULTS.heartbeatMs)
   const role = gate.role
+  const permissionEnv = resolvePermissionEnv({ envType: cfg.permissionEnv, role })
   const startedAt = nowMs()
 
   /**
@@ -1109,6 +1115,19 @@ export function apply(ctx, config) {
       emit('fang/adapter-command', { op, ok: false, code: envelope.code })
       return envelope
     }
+    const permissionAction = permissionActionForAdapterOp(op)
+    if (permissionAction) {
+      const decision = checkPermission(permissionEnv, permissionAction)
+      if (!decision.allowed) {
+        const envelope = {
+          ok: false, op, error: decision.message, code: PERMISSION_DENIED,
+          action: permissionAction, envType: permissionEnv,
+        }
+        emit('fang/adapter-command', { op, ok: false, code: envelope.code })
+        try { ctx.logger?.warn?.(`[fang] adapter permission denied: ${op} (${permissionAction}) in ${permissionEnv}`) } catch { /* ignore */ }
+        return envelope
+      }
+    }
 
     let raw
     try {
@@ -1366,12 +1385,17 @@ export function apply(ctx, config) {
 
   const registerRoutes = (webServer) => {
     // v3.1.14：浏览器无法持有 adapter Bearer token；身份探测必须是公开只读路由。
-    // 服务端仍只监听 loopback，且返回值不含 taskId/token（见 identity()）。
+    // 服务端仍只监听 loopback；v3.9.9 起公开路由也必须过 Host/Origin/Sec-Fetch-Site
+    // 同一套边界（之前 identity/client-report 完全绕过 checkRequestAuth，属于权限面缺口）。
     webServer.register({
       kind: 'exact',
       path: `${prefix}${ADAPTER_ROUTE.IDENTITY}`,
       method: 'GET',
-      handler: (req, res) => json(res, 200, identity()),
+      handler: (req, res) => {
+        const decision = checkRequestAuth(req, { token: adapterToken, publicRoute: true })
+        if (!decision.ok) return json(res, decision.status, { ...authErrorBody(decision), path: `${prefix}${ADAPTER_ROUTE.IDENTITY}` })
+        return json(res, 200, identity())
+      },
     })
     try { service.routes.push(`${prefix}${ADAPTER_ROUTE.IDENTITY}`) } catch { /* fake ws */ }
     // v3.1.17：客户端自报加载状态（只记录时间戳，不含身份/token）。
@@ -1379,7 +1403,15 @@ export function apply(ctx, config) {
       kind: 'exact',
       path: `${prefix}${ADAPTER_ROUTE.CLIENT_REPORT}`,
       method: 'POST',
-      handler: (req, res) => json(res, 200, reportClient()),
+      handler: (req, res) => {
+        const decision = checkRequestAuth(req, { token: adapterToken, publicRoute: true })
+        if (!decision.ok) return json(res, decision.status, { ...authErrorBody(decision), path: `${prefix}${ADAPTER_ROUTE.CLIENT_REPORT}` })
+        const contentType = String(req?.headers?.['content-type'] ?? '').toLowerCase()
+        if (contentType && !contentType.includes('application/json')) {
+          return json(res, 415, { ok: false, code: 'content-type-required', error: 'content-type-required', path: `${prefix}${ADAPTER_ROUTE.CLIENT_REPORT}` })
+        }
+        return json(res, 200, reportClient())
+      },
     })
     try { service.routes.push(`${prefix}${ADAPTER_ROUTE.CLIENT_REPORT}`) } catch { /* fake ws */ }
     // v3.9.8：fork 角色不加载 orchestrator（roleGate 只在 mother 激活），

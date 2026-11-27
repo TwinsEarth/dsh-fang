@@ -84,7 +84,10 @@ test('v3.8.9 idle close requires hidden page and no running turn', () => {
 
 test('v3.8.9 managed browser close is CDP Browser.close, 3 s grace, then taskkill /T /F', () => {
   const source = read('src/lib/browser-guard.mjs')
-  assert.match(source, /closeManagedBrowser\(\{ pid, port, graceMs = 3000, timeoutMs = 3000 \}\)/)
+  assert.match(source, /closeManagedBrowser\(\{ pid, port, graceMs = 3000, timeoutMs = 3000, identity = null \}\)/)
+  assert.match(source, /identity\.tokens/)
+  assert.match(source, /skipped: 'identity-required'/)
+  assert.match(source, /skipped: 'pid-identity-mismatch'/)
   const start = source.indexOf('export async function closeManagedBrowser')
   const end = source.indexOf('\nasync function cdpTargets', start)
   const body = source.slice(start, end)

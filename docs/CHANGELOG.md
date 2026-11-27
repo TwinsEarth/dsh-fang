@@ -1,3 +1,30 @@
+## v3.9.9（2026-11-27）
+**主题：安全收口版：权限第二道门、内存/身份回收、发布工具链与 P3 结构门**
+
+### 权限
+- `permissions.mjs` 新增 `host` 环境；`auto` 按运行时角色映射（母体 `host`、fork/consumer `derived`），显式 `mirror/essence/derived` 才收紧。
+- orchestrator 在 `roleGate` 后、路由 handler 前对写请求执行 `enforcePermission`；adapter 在 `command()` 执行前判定 `fork-session`/`archive`。
+- 拒绝统一 403 `permission-denied`，带 `action`/`envType`；未知环境/动作 fail-closed。
+
+### 内存/身份
+- `memoryKill` 身份不匹配保留 `task.orphan`，新增 `POST /fang/api/tasks/reprobe` 与 `reclaimOrphan()`；根 PID 复用不误杀。
+- 托管浏览器 close 必须带身份指纹，缺失 `identity-required`；启动先写 provisional tokens。
+- `accelerated-web` 的 start/status/stop 全部先验身份，不匹配不 taskkill、不报 running。
+
+### 发布工具链
+- `publish-npm.mjs` 200/201/202 统一先 `SUBMITTED`，registry 读回同版本后才 `PUBLISHED`；超时 `UNCONFIRMED` 退出码 3。
+- `verify-release --at-head` 断言 tag==HEAD 且 AUDIT/RELEASE/架构图与 HEAD 一致；`release-order` 自动检查，先提交 docs 再打 tag。
+
+### P3
+- 新增 `p3-structural-smoke.test.mjs`：compose 嵌套 Config + 17 插件表、包根 re-export、watchdog-sidecar 真实拉起。
+- 新增 `empty-catch` 基线门：461 处（459 注释-only + 2 裸）按文件冻结，不批量替换，新增即失败。
+- 14 个未引用模块裁定：10 保留 / 4 删除候选（`fork-export`、`fs-guard`、`reflow`、`interaction-poke`）；本版不删除。
+
+### 测试
+- 全量 `test-399-final9.log`：1599 tests / 1576 pass / 0 fail / 13 skipped / 10 todo。
+- P3 定向 6/6；compose/watchdog 相关 26/26；13 个模块测试 79/79。
+- 真机未回归：未部署新版，`task_mwqenfnxpobe` 同类一键修复待安装后复测。
+
 ## v3.9.8（2026-11-27）
 **主题：打开分身热修：fork 公开健康探针 + 一键修复 bundle 复检**
 

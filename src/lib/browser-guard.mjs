@@ -9,6 +9,8 @@ import net from 'node:net'
 import path from 'node:path'
 
 import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady } from './job-object.mjs'
+import { matchesProcessIdentity } from './process-identity.mjs'
+import { readProcessIdentity } from './memory-guard.mjs'
 
 const EDGE_CANDIDATES = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -352,7 +354,14 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
     } catch { /* not ready */ }
   }
   if (!ready) {
-    try { await closeManagedBrowser({ pid: exitPid(), port }) } catch { /* ignore */ }
+    // The launch path knows the exact profile/port it just spawned. Pass those
+    // argv tokens so a reused PID can never be closed without a fingerprint.
+    const launchIdentity = browserPid > 0
+      ? { pid: browserPid, port, tokens: [`--user-data-dir=${profileDir}`, `--remote-debugging-port=${port}`] }
+      : null
+    if (launchIdentity) {
+      try { await closeManagedBrowser({ pid: exitPid(), port, identity: launchIdentity }) } catch { /* ignore */ }
+    }
     if (useJob && helperPid > 0) { try { child.kill() } catch { /* ignore */ } }
     return { ok: false, error: 'browser-cdp-timeout', pid: exitPid(), helperPid: useJob ? helperPid : null }
   }
@@ -379,9 +388,30 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
   }
 }
 
-export async function closeManagedBrowser({ pid, port, graceMs = 3000, timeoutMs = 3000 }) {
+export async function closeManagedBrowser({ pid, port, graceMs = 3000, timeoutMs = 3000, identity = null }) {
   const value = Number(pid)
   if (Number.isInteger(value) && value > 0) {
+    // Fail closed: a persisted browser PID may be recycled after a host/crash.
+    // Without a capture-time fingerprint (start time, command-line hash, or the
+    // profile/port argv tokens) a bare PID must never reach CDP close or taskkill.
+    const hasIdentity = Boolean(identity && (
+      identity.startedAt
+      || identity.commandLineHash
+      || (Array.isArray(identity.tokens) && identity.tokens.length > 0)
+    ))
+    if (!hasIdentity) return { ok: false, graceful: false, skipped: 'identity-required', error: 'identity-required' }
+    const current = await readProcessIdentity(value).catch((error) => ({ ok: false, error: String(error?.message ?? error), row: null }))
+    if (!current.ok) return { ok: true, graceful: false, skipped: 'identity-unreadable', reason: current.error ?? 'not-found' }
+    const matched = matchesProcessIdentity(current.row, {
+      pid: value,
+      taskId: identity.taskId ?? '',
+      profile: identity.profile ?? '',
+      port: identity.port ?? port,
+      startedAt: identity.startedAt ?? null,
+      commandLineHash: identity.commandLineHash ?? null,
+      tokens: Array.isArray(identity.tokens) ? identity.tokens : [],
+    })
+    if (!matched.ok) return { ok: true, graceful: false, skipped: 'pid-identity-mismatch', reason: matched.reason }
     // 1) Ask the browser to close itself, giving the page a chance to flush.
     let graceful = false
     if (port) {

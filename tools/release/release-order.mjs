@@ -80,6 +80,19 @@ checkRegistryAbsent(`${PUBLISH_NAME} ${fangVersion} publish state`, fangRegistry
 const tagResult = spawnSync('git', ['-C', REPO, 'tag', '--list', `v${fangVersion}`], { encoding: 'utf8' })
 const tagged = (tagResult.stdout ?? '').trim() !== ''
 check(`tag v${fangVersion} state`, true, tagged ? 'already tagged' : 'not tagged yet')
+if (tagged) {
+  const tagCommit = (spawnSync('git', ['-C', REPO, 'rev-parse', `v${fangVersion}^{commit}`], { encoding: 'utf8' }).stdout ?? '').trim()
+  const headCommit = (spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout ?? '').trim()
+  check('tag points at HEAD (docs committed before tag)', tagCommit !== '' && tagCommit === headCommit, `${tagCommit.slice(0, 8)} vs HEAD ${headCommit.slice(0, 8)}`)
+  for (const doc of [`docs/AUDIT-v${fangVersion}.md`, `docs/RELEASE-v${fangVersion}.md`, 'docs/DSH-ARCHITECTURE-MAP.md']) {
+    const tagDoc = spawnSync('git', ['-C', REPO, 'show', `v${fangVersion}:${doc}`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+    let headDoc = null
+    try { headDoc = fs.readFileSync(path.join(REPO, doc), 'utf8') } catch { headDoc = null }
+    const tagText = String(tagDoc.stdout ?? '').replace(/\r\n/g, '\n')
+    const headText = String(headDoc ?? '').replace(/\r\n/g, '\n')
+    check(`tag contains current ${doc}`, tagDoc.status === 0 && headDoc !== null && tagText === headText, tagDoc.status === 0 ? (tagText === headText ? 'match' : 'differs from HEAD') : 'missing in tag')
+  }
+}
 
 const tgz = path.join(REPO, 'dist', `dsh-fang-${fangVersion}.tgz`)
 const sidecar = `${tgz}.sha256`

@@ -1,4 +1,6 @@
-# DSH 系统架构 × 瓮城安全边界（v3.3.0）
+# DSH 系统架构 × 瓮城安全边界（v3.9.9 审计增补；层图基线 v3.3.0）
+
+> 2026-11-27：本文件的分层图仍记录 v3.3.0 基线；第 3 节子插件清单与职责已按 v3.9.9 的 18 个模块核对。逐文件矩阵以 `docs` 外的审计产物为准。
 
 > 依据：DeepSeek Harness 0.2.2 架构文档与仓库内实际代码（`dsh --profile <name> --dump-config` 是最终事实）。
 > 本文只记录「哪些层会影响主城安全、瓮城在哪一层设闸」。逐文件行号会随 DSH 版本变化，结论以能力边界为准。
@@ -22,6 +24,7 @@
 | 层 | DSH 机制 | 失败后果 | 瓮城闸门 |
 |---|---|---|---|
 | Profile 组合 | bundles 有序 + patch 逐层覆盖 | 缺 bundle/重复/坏 patch → 起不来或半残 | `profile` gate：路径、名称、bundles 去重、patch 解析、磁盘 |
+| 运行时权限（第二道门） | `permissions.mjs` 的 host/mirror/essence/derived 能力矩阵；orchestrator 写路由 + adapter fork-session/archive 在 handler 前判定 | 直连 API 绕过 UI；显式收紧时误放行 | `permissionEnv` 默认 auto（mother→host、fork→derived）；未知环境/动作 fail-closed；403 带 action/envType |
 | 插件生命周期 | Cordis Fiber；PENDING/LOADING/ACTIVE/FAILED；effect 可回收 | 注册泄漏/依赖缺失 → 静默无能力 | boot-guard + 关键防线文件 + 插件冒烟 |
 | Host/Agent 平面 | 注册表与工具作用域隔离 | 把 host 注册表塞进 isolate → 名称解析失败 | 不在门禁里改 profile 层，只做只读校验 |
 | Agent Loop | turn/step/工具批次；错误恢复 append-only | 半途崩溃留下不一致历史 | restart safe-mode + 审计链 |

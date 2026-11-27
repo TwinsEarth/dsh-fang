@@ -315,6 +315,42 @@ test('fork public health: GET /fang/api/health 200, ok/role/taskId/adapter 不�
   ctx.dispose()
 })
 
+test('fork public routes reject non-loopback Host/Origin before handler side effects', async () => {
+  const { ctx, ws, service } = applyAsFork({ taskId: 'task_public_guard' }, {}, { env: { DSH_ADAPTER_TOKEN: '' } })
+  const identity = ws.find('GET', routePath(ADAPTER_ROUTE.IDENTITY))
+  const before = service.identity()
+  const badHost = makeReq()
+  badHost.headers.host = 'evil.example:443'
+  let res = makeRes()
+  await identity.handler(badHost, res)
+  assert.equal(res.statusCode, 403)
+  assert.equal(res.json().code, 'bad-host')
+  assert.equal(service.identity().clientLoaded, before.clientLoaded, 'rejected probe must not mutate identity state')
+
+  const badOrigin = makeReq()
+  badOrigin.headers.origin = 'https://evil.example'
+  res = makeRes()
+  await identity.handler(badOrigin, res)
+  assert.equal(res.statusCode, 403)
+  assert.equal(res.json().code, 'bad-origin')
+
+  const report = ws.find('POST', routePath(ADAPTER_ROUTE.CLIENT_REPORT))
+  const noJson = makeReq(undefined, 'POST')
+  noJson.headers['content-type'] = 'text/plain'
+  res = makeRes()
+  await report.handler(noJson, res)
+  assert.equal(res.statusCode, 415)
+  assert.equal(res.json().code, 'content-type-required')
+  assert.equal(service.identity().clientLoaded, false, 'non-JSON report must not mark client loaded')
+
+  const good = makeReq(undefined, 'POST')
+  res = makeRes()
+  await report.handler(good, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal(service.identity().clientLoaded, true)
+  ctx.dispose()
+})
+
 test('Config.prefix 生效（与母体 Remote.prefix 对齐）', () => {
   const { ctx, ws } = applyAsFork({ prefix: '/x/' })
   assert.deepEqual(ws.paths(), [
@@ -1068,6 +1104,27 @@ test('v3: SSE events 路由（回放/session-changed/cursor-invalid/cursor-expir
   assert.equal(badCursor.statusCode, 400)
   assert.equal(badCursor.json().code, 'cursor-invalid')
   ctx.dispose()
+})
+
+test('v399: permissionEnv=mirror denies fork-session/archive at the adapter command gate', async () => {
+  const { ctx, service } = applyAsFork({ permissionEnv: 'mirror' })
+  try {
+    const denied = await service.command({ op: ADAPTER_OP.FORK_SESSION, payload: {} })
+    assert.equal(denied.ok, false)
+    assert.equal(denied.code, 'permission-denied')
+    assert.equal(denied.action, 'session-create')
+    assert.equal(denied.envType, 'mirror')
+
+    const deniedArchive = await service.command({ op: ADAPTER_OP.ARCHIVE, payload: {} })
+    assert.equal(deniedArchive.ok, false)
+    assert.equal(deniedArchive.code, 'permission-denied')
+    assert.equal(deniedArchive.action, 'task-enqueue')
+
+    const ping = await service.command({ op: ADAPTER_OP.PING })
+    assert.equal(ping.ok, true, '未映射命令不受第二道门影响')
+  } finally {
+    ctx.dispose()
+  }
 })
 
 test('v3: POST commands 幂等（同 commandId 只执行一次）+ 202 异步 + 参数校验', async () => {

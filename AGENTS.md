@@ -2,12 +2,12 @@
 
 > 本文件是 **dsh-fang 仓库/工作树** 的唯一会话范围守则；任何 Agent 在本仓库或其工作树接手任务前必须先读本文件。
 > 本文件由用户 2026-11-12 指令确立，2026-11-14 从 `E:\GPT\AGENTS.md` 迁入本仓库，并补充版本发布纪律。
-> 2026-11-21 项目整体迁入 `E:\DSH\DS\Fang`（旧仓库 `E:/GPT/dsh-fang` 保留只读）；本文件仍是本仓库唯一会话范围守则。
+> 2026-11-21 项目曾整体迁入 `E:\DSH\DS\Fang`；2026-11-27 当前唯一开发副本迁至 `E:\DBH\fang-git-392`（旧根只读存档，不再写入）。
 
-## 迁移后根目录（2026-11-21，硬性）
+## 迁移后根目录（2026-11-27，硬性）
 
-1. **唯一根目录 = `E:\DSH\DS\Fang`**：所有代码、文档、脚本、构建产物、临时文件只写在这里；
-   禁止写回旧仓库 `E:/GPT/dsh-fang`，禁止写其它项目/会话目录（DSH 自身存储中本项目会话除外）。
+1. **唯一根目录 = 本文件所在目录（当前为 `E:\DBH\fang-git-392`）**：所有代码、文档、脚本、构建产物、临时文件只写在这里；
+   禁止写回旧仓库 `E:/GPT/dsh-fang` 与旧根 `E:\DSH\DS\Fang`，禁止写其它项目/会话目录（DSH 自身存储中本项目会话除外）。
 2. 本地目录（不入库、随文件夹复制带走）：`sessions/ scratch/ runtime/ archive/ .secrets/ tools/session/ contract/`。
 3. 临时文件只放 `scratch/`；会话恢复与官方 ZIP 导入见 [docs/SESSIONS.md](docs/SESSIONS.md)；
    目录职责见 [docs/PROJECT-LAYOUT.md](docs/PROJECT-LAYOUT.md)；迁移记录见

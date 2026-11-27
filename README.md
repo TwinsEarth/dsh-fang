@@ -7,7 +7,7 @@
 
 # 瓮城：DSH 的第一台虚拟机！
 
-> 当前发布线：**v3.9.8**（2026-11-27，打开分身热修版：fork 角色由 adapter 提供公开 `GET /fang/api/health`，修复 orchestrator 只在 mother 加载导致健康探针 404/401；restore/一键修复在 provision 后复查 bundle，修复 `fork-bundle-unavailable` 卡死）。v3.9.7 的宿主压力阈值 200/300/500 MB、3000/3600/3900 MB 与 v3.9.6 的多帧 zstd 崩溃修复保持不变。v3.9.5 的 crash-loop SafeMode 永久闩锁、v3.9.4 的元主配额 3/6、分身槽位 8/62、<999 硬禁止、页面文件 advisory、消息收件箱、元主 bundle 修复保持不变。v3.8.2 改变了数据根，升级前先读
+> 当前发布线：**v3.9.9**（2026-11-27，安全收口版：权限第二道门接入生产、内存/身份回收 fail-closed、发布工具链 202/tag 门修复；P3 补齐 compose/watchdog smoke 与 461 空 catch 基线门。v3.9.8 的 fork 公开健康探针与 bundle 复检、v3.9.7 压力阈值、v3.9.6 多帧 zstd 修复保持不变。v3.9.5 的 crash-loop SafeMode 永久闩锁、v3.9.4 的元主配额 3/6、分身槽位 8/62、<999 硬禁止、页面文件 advisory、消息收件箱、元主 bundle 修复保持不变。v3.8.2 改变了数据根，升级前先读
 > [v3.8.2 数据根迁移](#升级到-v382数据根迁移必读) 与 [安装/升级向导](docs/INSTALL.md)。
 
 > Dsh-瓮城，诞生于一群热爱折腾、也被折腾过无数次的极客之手。

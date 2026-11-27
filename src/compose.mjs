@@ -27,23 +27,27 @@ export const name = 'fang-compose'
 export const inject = []
 
 export const Config = z.object({
-  auditor: z.object({}).default({}).description('审计子插件配置'),
-  forker: z.object({}).default({}).description('派生器配置'),
-  bufferKeeper: z.object({}).default({}).description('缓冲管理器配置'),
-  scorer: z.object({}).default({}).description('评分配置'),
-  umbrella: z.object({}).default({}).description('保护伞（动作灯色 + 决策）配置'),
-  healer: z.object({}).default({}).description('修复子插件配置'),
-  router: z.object({}).default({}).description('路由决策配置'),
-  approver: z.object({}).default({}).description('审批子插件配置'),
-  hotReloader: z.object({}).default({}).description('热更新引擎配置'),
-  restartGuard: z.object({}).default({}).description('红线守卫配置'),
-  adapter: z.object({}).default({}).description('分身侧 Adapter 配置'),
-  orchestrator: z.object({}).default({}).description('编排器配置'),
-  sessionBridge: z.object({}).default({}).description('桥接（实时驱动 PC 会话）配置'),
-  sessionSync: z.object({}).default({}).description('同步（勾选会话搬运）配置'),
-  sessionRouter: z.object({}).default({}).description('混合路由配置'),
-  sessionCatalog: z.object({}).default({}).description('母体会话目录（只读）配置'),
-  decisionCenter: z.object({}).default({}).description('决策中心配置'),
+  // Nested schemas (not `z.object({})`): the split-row patch normally validates each
+  // sub-plugin through its own Config, but the fallback compose path used to accept
+  // every key unvalidated. Nested schemas catch `maxForks: 99` / wrong types while
+  // Schemastery still merges unknown forward-compatible keys.
+  auditor: auditor.Config.default({}).description('审计子插件配置'),
+  forker: forker.Config.default({}).description('派生器配置'),
+  bufferKeeper: bufferKeeper.Config.default({}).description('缓冲管理器配置'),
+  scorer: scorer.Config.default({}).description('评分配置'),
+  umbrella: umbrella.Config.default({}).description('保护伞（动作灯色 + 决策）配置'),
+  healer: healer.Config.default({}).description('修复子插件配置'),
+  router: router.Config.default({}).description('路由决策配置'),
+  approver: approver.Config.default({}).description('审批子插件配置'),
+  hotReloader: hotReloader.Config.default({}).description('热更新引擎配置'),
+  restartGuard: restartGuard.Config.default({}).description('红线守卫配置'),
+  adapter: adapter.Config.default({}).description('分身侧 Adapter 配置'),
+  orchestrator: orchestrator.Config.default({}).description('编排器配置'),
+  sessionBridge: sessionBridge.Config.default({}).description('桥接（实时驱动 PC 会话）配置'),
+  sessionSync: sessionSync.Config.default({}).description('同步（勾选会话搬运）配置'),
+  sessionRouter: sessionRouter.Config.default({}).description('混合路由配置'),
+  sessionCatalog: sessionCatalog.Config.default({}).description('母体会话目录（只读）配置'),
+  decisionCenter: decisionCenter.Config.default({}).description('决策中心配置'),
 }).description('dsh-Fang 单行装载模式配置')
 
 export function apply(ctx, config) {

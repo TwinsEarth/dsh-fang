@@ -95,7 +95,10 @@ test('routes and UI are wired (source guards)', () => {
   assert.match(orchestrator, /const coreMode = normalizeCoreMode\(input\.coreMode \?\? coreSettings\.mode\)/)
   assert.match(orchestrator, /accelerated-new-session/)
   // 开关不是热更新：restore/autostart 在启动前按当前开关换核（重新 provision），并只用返回的 coreMode。
-  assert.match(orchestrator, /const coreSync = await syncForkCoreMode\(task\)/)
+  // v3.9.8 起 restore 用 syncForkCoreMode(task,{force:true}) 强制重建 stock profile；
+  // autostart 仅在 bundle 缺失时 force。两者仍只在 reopen 路径出现。
+  assert.match(orchestrator, /let coreSync/, 'restore assigns coreSync in both preserveProfile branches')
+  assert.match(orchestrator, /await syncForkCoreMode\(task, \{ force: true \}\)/, 'restore forces a stock-profile reprovision')
   assert.equal((orchestrator.match(/syncForkCoreMode\(task[,)]/g) ?? []).length, 2, 'restore + autostart are the only reopen paths that switch core')
   assert.match(orchestrator, /coreMode: coreSync\.coreMode/)
   assert.equal(/normalizeCoreMode\(task\.coreMode \?\? forkCoreSettings\(\)\.mode\)/.test(orchestrator), false)

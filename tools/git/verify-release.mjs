@@ -48,6 +48,18 @@ export function collect ({ tag, base = 'main' }) {
   const tagSha = git(['rev-parse', '--verify', `${tag}^{commit}`], { allowFail: true })
   const tagObject = git(['cat-file', '-t', tag], { allowFail: true })
   const baseSha = git(['rev-parse', '--verify', baseRef], { allowFail: true })
+  const headSha = git(['rev-parse', '--verify', 'HEAD'], { allowFail: true })
+  const docPaths = [`docs/AUDIT-v${version}.md`, `docs/RELEASE-v${version}.md`, 'docs/DSH-ARCHITECTURE-MAP.md']
+  const docs = docPaths.map((docPath) => {
+    const atTag = tagSha.status === 0 ? git(['show', `${tag}:${docPath}`], { allowFail: true }) : { status: 1, out: '' }
+    const atHead = git(['show', `HEAD:${docPath}`], { allowFail: true })
+    return {
+      path: docPath,
+      inTag: atTag.status === 0,
+      inHead: atHead.status === 0,
+      matchesHead: atTag.status === 0 && atHead.status === 0 && atTag.out === atHead.out,
+    }
+  })
   const previous = tagSha.status === 0
     ? git(['describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*', `${tag}^`], { allowFail: true }).out
     : ''
@@ -65,6 +77,9 @@ export function collect ({ tag, base = 'main' }) {
     tag,
     version,
     tagSha: tagSha.status === 0 ? tagSha.out : '',
+    headSha: headSha.status === 0 ? headSha.out : '',
+    atHead: tagSha.status === 0 && headSha.status === 0 && tagSha.out === headSha.out,
+    docs,
     annotated: (() => {
       if (tagObject.out === 'tag') return true
       // actions/checkout 可能把 annotated tag 重写成同名的 lightweight 本地 ref；
@@ -85,7 +100,7 @@ export function collect ({ tag, base = 'main' }) {
   }
 }
 
-export function runChecks (facts, { requireArtifact = true } = {}) {
+export function runChecks (facts, { requireArtifact = true, requireHead = false } = {}) {
   const checks = []
   const add = (id, ok, detail = '') => checks.push({ id, ok: !!ok, detail })
   const { version, tag, tagSha, preflight } = facts
@@ -94,6 +109,12 @@ export function runChecks (facts, { requireArtifact = true } = {}) {
   add('tag: 是 annotated tag', facts.annotated, facts.annotated ? 'tag object' : 'lightweight tag（发布请用 git tag -a）')
   add('tag: 在 main 的 first-parent 上', facts.onMain, facts.onMain ? 'yes' : 'NO —— 这就是 v3.0.7 的错误，禁止在特性分支打版本标签')
   add('tag: 名称 = package 版本', facts.pkgVersion === version, `${facts.pkgVersion} vs ${version}`)
+  if (requireHead) {
+    add('tag: tag^{commit} == HEAD', facts.atHead, facts.atHead ? 'yes' : `${String(facts.tagSha).slice(0, 8)} vs HEAD ${String(facts.headSha).slice(0, 8)}（先提交最终 docs 再打 tag）`)
+    const docs = Array.isArray(facts.docs) ? facts.docs : []
+    const badDocs = docs.filter((doc) => doc.inTag !== true || doc.matchesHead !== true)
+    add('docs: tag 内文档与 HEAD 一致', docs.length > 0 && badDocs.length === 0, badDocs.length ? badDocs.map((doc) => doc.path).join(', ') : `${docs.length} docs match`)
+  }
   add('version: kernel FANG_VERSION', facts.kernelVersion === version, facts.kernelVersion || '(missing)')
   add('docs: CHANGELOG 段', facts.changelogHeading, `## v${version}`)
   add('docs: AUDIT-v<版本>.md', facts.auditExists, `docs/AUDIT-v${version}.md`)
@@ -131,14 +152,15 @@ function main () {
   const base = opt('--base', 'main')
   const jsonOnly = flag('--json')
   const noWrite = flag('--no-write')
+  const atHead = flag('--at-head')
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
-    console.error('usage: node tools/git/verify-release.mjs --tag v3.0.8 [--no-artifact] [--remote] [--private] [--json]')
+    console.error('usage: node tools/git/verify-release.mjs --tag v3.0.8 [--at-head] [--no-artifact] [--remote] [--private] [--json]')
     process.exitCode = 2
     return
   }
 
   const facts = collect({ tag, base })
-  const checks = runChecks(facts, { requireArtifact: !flag('--no-artifact') })
+  const checks = runChecks(facts, { requireArtifact: !flag('--no-artifact'), requireHead: atHead })
 
   if (flag('--remote')) {
     const r = node(['tools/release/healthz.mjs', '--remote'])

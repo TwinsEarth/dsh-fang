@@ -306,16 +306,21 @@ export function removeTree(target) {
   let st
   try { st = fs.lstatSync(target) } catch { return false }
   if (st.isSymbolicLink()) {
-    try { fs.unlinkSync(target); return true } catch { return false }
+    try { fs.unlinkSync(target); return !exists(target) } catch { return false }
   }
   if (!st.isDirectory()) {
-    try { fs.unlinkSync(target); return true } catch { return false }
+    try { fs.unlinkSync(target); return !exists(target) } catch { return false }
   }
   let names = []
   try { names = fs.readdirSync(target) } catch { names = [] }
-  for (const n of names) removeTree(path.join(target, n))
-  try { fs.rmdirSync(target) } catch { /* ignore */ }
-  return true
+  let allChildrenRemoved = true
+  for (const n of names) {
+    if (!removeTree(path.join(target, n))) allChildrenRemoved = false
+  }
+  try { fs.rmdirSync(target) } catch { /* a locked child keeps the directory alive */ }
+  // Return the truth, not the attempt: a locked file makes rmdir fail, and callers
+  // (forker.reap / archive evidence) must not report `removed:true` for a survivor.
+  return allChildrenRemoved && !exists(target)
 }
 
 export function listFiles(dir, { max = 5000 } = {}) {

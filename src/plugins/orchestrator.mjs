@@ -72,6 +72,7 @@ import { DEFAULT_EXPECTED_ROUTE_COUNT, readCompatStatus, runCompatGate, writeCom
 import { buildUpgradeStatus } from '../lib/upgrade-status.mjs'
 import { openDecisionEventStream } from '../lib/decision-events.mjs'
 import { authErrorBody, checkRequestAuth, loadAuthToken } from '../lib/http-auth.mjs'
+import { PERMISSION_DENIED, checkPermission, permissionActionForPath, resolvePermissionEnv } from '../lib/permissions.mjs'
 import { verifyPeerOwner } from '../lib/peer-owner.mjs'
 import { buildEssenceActions, buildTaskActions } from '../lib/ui-actions.mjs'
 // P0: the former "accelerated Web sidecar" (a second mother Web) was retired — the
@@ -526,6 +527,10 @@ export const Config = z.object({
     .description('派生时导入母体历史会话日志的大小上限（字节）；超过则只保留交接摘要，不复制历史'),
   allowProcessRestart: z.boolean().default(false)
     .description('是否允许编排器主动重启母体（默认禁止；重启一律交给 restart-guard）'),
+  permissionEnv: z.union([
+    z.const('auto'), z.const('host'), z.const('mirror'), z.const('essence'), z.const('derived'),
+  ]).default('auto')
+    .description('第二道门权限环境；auto=按运行时角色映射（mother→host，fork/consumer→derived），host/mirror/essence/derived 可显式覆盖'),
   autoReapIdleMinutes: z.number().min(0).max(1440).default(0)
     .description('空闲多少分钟后自动回收任务（0 = 不自终）'),
   archiveStopTimeoutMs: z.number().min(100).max(30000).default(3000)
@@ -746,6 +751,8 @@ export function apply(ctx, config) {
     }
   } catch { /* guard 失败不阻塞插件加载 */ }
   const role = gate.role
+  // 第二道门：auto 下母体=host、分身=derived，不改变既有行为；显式 mirror/essence/derived 才收紧。
+  const permissionEnv = resolvePermissionEnv({ envType: cfg.permissionEnv, role })
 
   const layout = resolveFangLayout({ dataRoot: cfg.dataRoot, forksRoot: cfg.forksRoot, fangHome: cfg.fangHome })
   // P2 #10: migration is performed while the host is stopped; read the latest
@@ -1787,6 +1794,25 @@ export function apply(ctx, config) {
     }
   }
 
+  // Never close a managed browser by bare PID. A newly launched browser gets a
+  // provisional tokens fingerprint before the async CIM capture completes; older
+  // records without one stay fail-closed instead of falling back to taskkill.
+  const browserCloseIdentity = (browser) => {
+    if (!browser) return null
+    if (browser.pidIdentity) return browser.pidIdentity
+    const tokens = browser.profileDir && Number(browser.port) > 0
+      ? [`--user-data-dir=${browser.profileDir}`, `--remote-debugging-port=${browser.port}`]
+      : []
+    if (!tokens.length) return null
+    return {
+      pid: browser.pid ?? null,
+      port: browser.port ?? null,
+      tokens,
+      capturedAt: browser.identityCapturedAt ?? null,
+      source: 'spawn-provisional',
+    }
+  }
+
   const closeTaskBrowser = async (task, reason = 'guard') => {
     if (!task?.browser?.pid) return { ok: true, skipped: 'no-browser' }
     const browser = task.browser
@@ -1820,7 +1846,7 @@ export function apply(ctx, config) {
     }
     let pageFlush = null
     try { pageFlush = await flushManagedBrowser(browser.port) } catch (error) { pageFlush = { ok: false, error: String(error?.message ?? error) } }
-    const result = await closeManagedBrowser({ pid: browser.pid, port: browser.port, graceMs: cfg.gracefulBrowserCloseMs })
+    const result = await closeManagedBrowser({ pid: browser.pid, port: browser.port, graceMs: cfg.gracefulBrowserCloseMs, identity: browserCloseIdentity(browser) })
     task.browser = null
     task.browserClosed = {
       at: nowMs(), reason, reasonKind: closeKind, pid: browser.pid, ok: result.ok, graceful: result.graceful === true,
@@ -2076,6 +2102,14 @@ export function apply(ctx, config) {
       pid: launched.pid, helperPid: launched.helperPid ?? null, jobObject: launched.jobObject ?? null,
       port: launched.port, profileDir, logFile: launched.logFile,
       crashDir: launched.crashDir, exe, startedAt: nowMs(), hiddenSince: null, last: null, priority, lifecycleState: 'active', lifecycleAt: null, lifecycleError: null, lifecycleFailedAt: null,
+      // Fail-closed close needs a fingerprint from the first possible close path.
+      pidIdentity: {
+        pid: launched.pid,
+        port: launched.port,
+        tokens: [`--user-data-dir=${profileDir}`, `--remote-debugging-port=${launched.port}`],
+        capturedAt: nowMs(),
+        source: 'spawn-provisional',
+      },
     }
     // A fresh browser session invalidates the previous close's unsaved warning.
     task.closeWarning = null
@@ -2227,16 +2261,75 @@ export function apply(ctx, config) {
     const overKill = current >= Number(limits.memoryKillCommitMB)
     const overGrowth = current - low >= Number(limits.memoryGrowCommitMB)
     if (overKill && overGrowth) {
-      try { forker()?.stop?.(task.taskId) } catch { /* best effort */ }
-      try { await killProcessTree(rootPid) } catch { /* PID may already be gone */ }
+      // PID reuse guard: the sample table can be a few hundred ms old. Never taskkill
+      // a PID that no longer carries this task's CreationDate/CommandLine fingerprint
+      // (or its profile/port fallback). The orphan sweeper already does this before
+      // taskkill; the memory watchdog used to skip it and could kill an unrelated PID.
+      const identity = {
+        pid: rootPid,
+        taskId: task.taskId,
+        profile: task.profile,
+        port: task.port,
+        startedAt: task.pidIdentity?.startedAt ?? task.pidStartedAt ?? null,
+        commandLineHash: task.pidIdentity?.commandLineHash ?? null,
+        tokens: task.profile && Number(task.port) > 0 ? [String(task.profile), '--port', String(task.port)] : [],
+      }
+      const beforeKill = await readProcessIdentity(rootPid).catch((error) => ({ ok: false, error: String(error?.message ?? error), row: null }))
+      const matchedBeforeKill = beforeKill.ok === true ? matchesProcessIdentity(beforeKill.row, identity) : { ok: false, reason: beforeKill.error ?? 'identity-unreadable' }
+      if (matchedBeforeKill.ok !== true) {
+        audit('fork-memory-kill-skipped', {
+          taskId: task.taskId, pid: rootPid, commitMB: current, limitMB: limits.memoryKillCommitMB,
+          reason: matchedBeforeKill.reason, detail: matchedBeforeKill.detail ?? null,
+        })
+        // Do not pretend the process is gone. Keep a durable orphan record so the
+        // panel can re-probe and reclaim it, and the periodic sweeper can retry
+        // without trusting a bare PID.
+        task.orphan = {
+          pid: rootPid,
+          pids: tree.pids,
+          identity,
+          reason: matchedBeforeKill.reason,
+          detail: matchedBeforeKill.detail ?? null,
+          detectedAt: nowMs(),
+          source: 'memory-watchdog',
+          status: 'unresolved',
+        }
+        task.status = TASK_STATUS.FAILED
+        task.pid = null
+        task.port = null
+        task.url = null
+        task.adapter = { ok: false, error: 'memory-watchdog-pid-reused' }
+        task.memoryKill = {
+          at: nowMs(), commitMB: current, lowMB: low, limitMB: limits.memoryKillCommitMB,
+          growMB: limits.memoryGrowCommitMB, source: limits.source, pids: tree.pids,
+          pid: rootPid, skipped: 'pid-identity-mismatch', reason: matchedBeforeKill.reason,
+          orphan: 'unresolved',
+        }
+        persist()
+        syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: task.adapter.error })
+        return { ...tree, killed: false, skipped: 'pid-identity-mismatch', orphan: 'unresolved' }
+      }
+      let stopResult = null
+      try { stopResult = forker()?.stop?.(task.taskId) ?? null } catch { /* best effort */ }
+      // Re-read immediately before the direct taskkill. If forker.stop already reaped
+      // the tree, readProcessIdentity returns not-found and we do not touch the PID.
+      const afterStop = await readProcessIdentity(rootPid).catch((error) => ({ ok: false, error: String(error?.message ?? error), row: null }))
+      if (afterStop.ok === true && matchesProcessIdentity(afterStop.row, identity).ok === true) {
+        try { await killProcessTree(rootPid) } catch { /* PID may already be gone */ }
+      }
       task.status = TASK_STATUS.FAILED
       task.pid = null
       task.port = null
       task.url = null
       task.adapter = { ok: false, error: 'memory-watchdog-killed' }
-      task.memoryKill = { at: nowMs(), commitMB: current, lowMB: low, limitMB: limits.memoryKillCommitMB, growMB: limits.memoryGrowCommitMB, source: limits.source, pids: tree.pids }
+      task.memoryKill = {
+        at: nowMs(), commitMB: current, lowMB: low, limitMB: limits.memoryKillCommitMB,
+        growMB: limits.memoryGrowCommitMB, source: limits.source, pids: tree.pids,
+        stop: stopResult && typeof stopResult === 'object' ? { ok: stopResult.ok === true, killed: stopResult.killed === true } : null,
+      }
       audit('fork-memory-killed', { taskId: task.taskId, commitMB: current, lowMB: low, limitMB: limits.memoryKillCommitMB, growMB: limits.memoryGrowCommitMB, source: limits.source, pids: tree.pids })
       persist()
+      syncTaskMeta(task, { status: TASK_STATUS.FAILED, pid: null, port: null, url: null, lastError: task.adapter.error })
       return { ...tree, killed: true }
     }
     return tree
@@ -2865,11 +2958,91 @@ export function apply(ctx, config) {
   }
 
 
+  const markOrphanGone = (task, orphan, status, extra = {}) => {
+    if (task.orphan !== orphan) return
+    task.orphan = {
+      ...orphan,
+      status,
+      resolvedAt: nowMs(),
+      ...extra,
+    }
+    if (task.memoryKill && task.memoryKill.pid === orphan.pid) {
+      task.memoryKill.orphan = status
+      task.memoryKill.reclaimedAt = status === 'reclaimed' ? nowMs() : task.memoryKill.reclaimedAt ?? null
+    }
+    persist()
+  }
+
+  /**
+   * Re-probe a durable orphan record and only kill when the current process still
+   * matches the capture-time identity. Never use task.orphan.pid as a bare PID.
+   */
+  const reclaimOrphan = async (task, { source = 'manual' } = {}) => {
+    const orphan = task?.orphan
+    if (!orphan || orphan.status !== 'unresolved') return { ok: false, error: 'no-unresolved-orphan' }
+    const pid = Number(orphan.pid)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      markOrphanGone(task, orphan, 'invalid')
+      return { ok: true, reclaimed: false, gone: true, reason: 'invalid-pid' }
+    }
+    // The forker owns the actual child handle. Try it first even when the stored
+    // root PID was recycled: it has its own fingerprint check for stale rows.
+    let stop = null
+    try { stop = forker()?.stop?.(task.taskId) ?? null } catch (error) { stop = { ok: false, error: String(error?.message ?? error) } }
+    const stopKilled = stop?.killed === true
+    const identity = { ...orphan.identity, pid }
+    const current = await readProcessIdentity(pid).catch((error) => ({ ok: false, error: String(error?.message ?? error), row: null }))
+    if (!current.ok) {
+      if (String(current.error ?? '') === 'not-found') {
+        markOrphanGone(task, orphan, 'gone', { reason: 'process-not-found', reclaimedBy: stopKilled ? `${source}:forker` : undefined })
+        audit('fork-orphan-reprobe', { taskId: task.taskId, pid, source, ok: true, gone: true, reason: 'process-not-found', forkerStopped: stopKilled })
+        return { ok: true, reclaimed: stopKilled, gone: true, pid, stop }
+      }
+      audit('fork-orphan-reprobe', { taskId: task.taskId, pid, source, ok: false, error: 'identity-unreadable', reason: current.error ?? null, forkerStopped: stopKilled })
+      return { ok: false, pid, error: 'identity-unreadable', reason: current.error ?? null, stop }
+    }
+    const matched = matchesProcessIdentity(current.row, identity)
+    if (!matched.ok) {
+      const stoppedPid = Number(stop?.pid)
+      const stopConfirmed = stopKilled && (!Number.isInteger(stoppedPid) || !isPidAlive(stoppedPid))
+      if (stopConfirmed) {
+        // The actual fork was killed through the forker's live child handle; the
+        // stored root PID now belongs to an unrelated process and must survive.
+        markOrphanGone(task, orphan, 'reclaimed', { reclaimedBy: `${source}:forker`, rootPidReused: true })
+        audit('fork-orphan-reclaimed', { taskId: task.taskId, pid, source, killedBy: 'forker', rootPidReused: true, reason: matched.reason })
+        bus.emit('fang/fork-orphan-reclaimed', { taskId: task.taskId, pid, source, killedBy: 'forker', rootPidReused: true })
+        return { ok: true, reclaimed: true, gone: false, pid, killedBy: 'forker', rootPidReused: true, stop }
+      }
+      audit('fork-orphan-reprobe', { taskId: task.taskId, pid, source, ok: false, error: 'identity-mismatch', reason: matched.reason, detail: matched.detail ?? null, forkerStopped: stopKilled })
+      return { ok: false, pid, error: 'orphan-identity-mismatch', reason: matched.reason, detail: matched.detail ?? null, stop }
+    }
+    let killedBy = stopKilled ? 'forker' : null
+    if (isPidAlive(pid)) {
+      const killed = await killProcessTree(pid).catch((error) => ({ ok: false, error: String(error?.message ?? error) }))
+      await sleep(200)
+      if (!killed.ok || isPidAlive(pid)) {
+        audit('fork-orphan-reprobe', { taskId: task.taskId, pid, source, ok: false, error: 'kill-failed', detail: killed.error ?? null })
+        return { ok: false, pid, error: 'orphan-kill-failed', detail: killed.error ?? null, stop }
+      }
+      killedBy = 'taskkill'
+    }
+    markOrphanGone(task, orphan, 'reclaimed', { reclaimedBy: `${source}:${killedBy ?? 'already-gone'}` })
+    audit('fork-orphan-reclaimed', { taskId: task.taskId, pid, source, killedBy: killedBy ?? 'already-gone', stop: stop ? { ok: stop.ok === true, killed: stop.killed === true } : null })
+    bus.emit('fang/fork-orphan-reclaimed', { taskId: task.taskId, pid, source, killedBy: killedBy ?? 'already-gone' })
+    return { ok: true, reclaimed: true, gone: false, pid, killedBy: killedBy ?? 'already-gone', stop }
+  }
+
   const cleanupOrphanForks = async () => {
     if (process.platform !== 'win32') return { ok: true, killed: [] }
     const table = await readProcessTable()
     if (!table.ok) return { ok: false, killed: [], error: table.error }
     const killed = []
+    // Durable memory-watchdog orphans have task.pid cleared; sweep them separately.
+    for (const task of tasks.values()) {
+      if (!task.orphan || task.orphan.status !== 'unresolved') continue
+      const result = await reclaimOrphan(task, { source: 'sweeper' })
+      if (result.reclaimed) killed.push(task.taskId)
+    }
     for (const task of tasks.values()) {
       if (task.status !== TASK_STATUS.ARCHIVED && task.status !== TASK_STATUS.FAILED) continue
       const rootPid = Number(task.pid)
@@ -2993,6 +3166,8 @@ export function apply(ctx, config) {
       browserClosed: f.browserClosed ?? null,
       closeWarning: f.closeWarning ?? null,
       memoryGuard: f.memoryGuard ?? null,
+      memoryKill: f.memoryKill ?? null,
+      orphan: f.orphan ?? null,
       collaborators: Array.isArray(f.collaborators) ? f.collaborators : [],
       template: f.template ?? '',
       essenceId: f.essenceId ?? null,
@@ -3172,7 +3347,10 @@ export function apply(ctx, config) {
   function taskView(t) {
     try { repairTaskMetaIfStale(t, 'task-view') } catch { /* best effort */ }
     const live = forker()?.status?.(t.taskId)
-    const running = live ? !!live.running : t.status === TASK_STATUS.RUNNING || t.status === TASK_STATUS.READY
+    const orphanPending = t.orphan?.status === 'unresolved'
+    // A forker record can still say running after the watchdog refused to kill a
+    // recycled PID. The panel must show the unresolved orphan, not a false green.
+    const running = orphanPending ? false : (live ? !!live.running : t.status === TASK_STATUS.RUNNING || t.status === TASK_STATUS.READY)
     const status = !running ? (t.status === TASK_STATUS.ARCHIVED ? TASK_STATUS.ARCHIVED : TASK_STATUS.FAILED)
       : (t.adapter?.ok ? TASK_STATUS.READY : TASK_STATUS.RUNNING)
     const phase = !running
@@ -3233,6 +3411,9 @@ export function apply(ctx, config) {
       browserCrashes: Array.isArray(t.browserCrashes) ? t.browserCrashes.slice(-5) : [],
       closeReason: t.closeReason ?? null,
       browserClosed: t.browserClosed ?? null,
+      memoryKill: t.memoryKill ?? null,
+      orphan: t.orphan ?? null,
+      canReprobeOrphan: t.orphan?.status === 'unresolved',
       flushCapability: t.flushCapability ?? null,
       adapter: { ok: !!t.adapter?.ok, version: t.adapter?.version ?? '', protocol: t.adapter?.protocol ?? 0, error: t.adapter?.error ?? '' },
       activity: (() => {
@@ -3640,7 +3821,7 @@ export function apply(ctx, config) {
       // Never flush through the stale URL: it may now point at the essence runtime.
       try {
         if (task.browser?.pid) {
-          const closed = await closeManagedBrowser({ pid: task.browser.pid, port: task.browser.port, graceMs: cfg.gracefulBrowserCloseMs })
+          const closed = await closeManagedBrowser({ pid: task.browser.pid, port: task.browser.port, graceMs: cfg.gracefulBrowserCloseMs, identity: browserCloseIdentity(task.browser) })
           task.browser = null
           audit('fork-open-stale-browser-closed', { taskId: id, reason, ok: closed?.ok === true })
         }
@@ -5461,6 +5642,16 @@ export function apply(ctx, config) {
       if (!task) return { ok: false, error: 'unknown-task' }
       return closeTaskBrowser(task, reason)
     },
+    /** Panel action for a memory-watchdog orphan: re-probe identity, then reclaim. */
+    async reprobeTaskOrphan(taskId) {
+      const task = tasks.get(String(taskId ?? ''))
+      if (!task) return { ok: false, error: 'unknown-task' }
+      if (!task.orphan || task.orphan.status !== 'unresolved') {
+        return { ok: false, error: 'no-unresolved-orphan', taskId: task.taskId, memoryKill: task.memoryKill ?? null }
+      }
+      const result = await reclaimOrphan(task, { source: 'manual' })
+      return { ...result, taskId: task.taskId, orphan: task.orphan }
+    },
     probeMemory: async () => {
       const memory = rememberMemory(await readSystemMemory({ force: true }))
       notePagefile(memory, 'manual-probe')
@@ -7265,6 +7456,20 @@ export function apply(ctx, config) {
         })
         req.on('error', () => resolve({}))
       })
+      // 第二道门只拦写动作；GET 读取（如 fork-core 状态）在 mirror 下仍可诊断。
+      const enforcePermission = (req, pathname, res) => {
+        const method = String(req.method ?? 'GET').toUpperCase()
+        if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return false
+        const action = permissionActionForPath(pathname, forkPrefix)
+        if (!action) return false
+        const decision = checkPermission(permissionEnv, action)
+        if (decision.allowed) return false
+        audit('permission-denied', { path: pathname, method, action, envType: permissionEnv })
+        json(res, 403, {
+          ok: false, code: PERMISSION_DENIED, error: decision.message, action, envType: permissionEnv,
+        })
+        return true
+      }
       const route = (method, pathname, handler, routeOptions) => webServer.register({
         kind: 'exact',
         path: pathname,
@@ -7294,6 +7499,7 @@ export function apply(ctx, config) {
             try { res.setHeader?.('allow', method) } catch { /* fake res */ }
             return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
           }
+          if (enforcePermission(req, pathname, res)) return
           try { return await handler(req, res) } catch (e) {
             return handlerFailure(res, e, method, pathname)
           }
@@ -7321,6 +7527,7 @@ export function apply(ctx, config) {
             try { res.setHeader?.('allow', allow.join(', ')) } catch { /* fake res */ }
             return json(res, 405, { ok: false, error: 'method-not-allowed', code: 'method-not-allowed' })
           }
+          if (enforcePermission(req, pathname, res)) return
           try { return await fn(req, res) } catch (e) {
             return handlerFailure(res, e, String(req.method ?? 'GET').toUpperCase(), pathname)
           }
@@ -8124,6 +8331,13 @@ export function apply(ctx, config) {
         const out = await service.archiveTask(String(body?.taskId ?? ''))
         return json(res, out.ok ? 200 : 409, out)
       })
+      // Memory-watchdog identity mismatch leaves a durable orphan; this is the
+      // panel's explicit re-probe/reclaim action. It never accepts a bare PID.
+      route('POST', `${prefix}/api/tasks/reprobe`, async (req, res) => {
+        const body = await readBody(req)
+        const out = await service.reprobeTaskOrphan(String(body?.taskId ?? ''))
+        return json(res, out.ok ? 200 : 409, out)
+      })
       route('POST', `${prefix}/api/tasks/restore`, async (req, res) => {
         const body = await readBody(req)
         let out
@@ -8812,12 +9026,14 @@ async function refresh() {
   if (!list.length) { $('rows').innerHTML = '<tr><td colspan="6" class="empty">还没有任务。输入标题并点「派生新任务」。</td></tr>'; return; }
   $('rows').innerHTML = list.map(t => '<tr>' +
     '<td>' + esc(t.title) + '<br><code>' + esc(t.taskId) + '</code></td>' +
-    '<td><span class="badge ' + esc(t.status) + '">' + esc(t.status) + '</span></td>' +
+    '<td><span class="badge ' + esc(t.status) + '">' + esc(t.status) + '</span>' +
+      (t.canReprobeOrphan ? '<br><span class="badge failed">孤儿待回收</span>' : '') + '</td>' +
     '<td><span class="badge ' + (t.adapter?.ok ? 'ready' : 'failed') + '">' + (t.adapter?.ok ? 'ready' : esc(t.adapter?.error || 'down')) + '</span></td>' +
     '<td>' + (t.port ? esc(t.port) : '—') + '</td>' +
     '<td>' + (t.pid ? esc(t.pid) : '—') + '</td>' +
     '<td>' +
       (t.url ? '<a class="badge" href="' + esc(t.url) + '" target="_blank" rel="noopener">打开</a> ' : '') +
+      (t.canReprobeOrphan ? '<button data-act="reprobe" data-id="' + esc(t.taskId) + '">重新探测/回收</button> ' : '') +
       '<button data-act="archive" data-id="' + esc(t.taskId) + '">归档</button> ' +
       '<button data-act="promote" data-id="' + esc(t.taskId) + '">提升插件…</button>' +
     '</td></tr>').join('');
@@ -8835,7 +9051,11 @@ $('rows').addEventListener('click', async (ev) => {
   const btn = ev.target.closest('button[data-act]');
   if (!btn) return;
   const id = btn.getAttribute('data-id');
-  if (btn.dataset.act === 'archive') {
+  if (btn.dataset.act === 'reprobe') {
+    if (!confirm('重新探测该任务的孤儿 PID 指纹；只有仍匹配时才回收。')) return;
+    const { body } = await api('/api/tasks/reprobe', { method: 'POST', body: JSON.stringify({ taskId: id }) });
+    msg(body?.ok ? (body.gone ? '进程已不存在，孤儿记录已标记 gone' : '已回收 PID ' + body.pid) : '回收被拒：' + (body?.error || 'unknown') + (body?.reason ? ' — ' + body.reason : ''), !body?.ok);
+  } else if (btn.dataset.act === 'archive') {
     if (!confirm('归档该任务？会先 flush 分身缓冲并落审计，再删除 $DSH_HOME。')) return;
     const { body } = await api('/api/tasks/archive', { method: 'POST', body: JSON.stringify({ taskId: id }) });
     msg(body?.ok ? '已归档 ' + id : '归档失败：' + (body?.error || 'unknown'), !body?.ok);

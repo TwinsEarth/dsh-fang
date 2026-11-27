@@ -8,6 +8,7 @@
 
 | 版本 | 主题 | 发布记录 | 审计 |
 |---|---|---|---|
+| v3.9.9 | 安全收口：权限第二道门接入生产；内存/身份回收 fail-closed；npm 202/tag 门修复；compose/watchdog smoke + 461 空 catch 基线门 | [RELEASE-v3.9.9](RELEASE-v3.9.9.md) | [AUDIT-v3.9.9](AUDIT-v3.9.9.md) |
 | v3.9.8 | 打开分身热修：adapter 提供 fork 公开 `/fang/api/health`；restore/一键修复在 provision 后复查 bundle，修复 `fork-bundle-unavailable` | [RELEASE-v3.9.8](RELEASE-v3.9.8.md) | [AUDIT-v3.9.8](AUDIT-v3.9.8.md) |
 | v3.9.7 | 宿主压力阈值对齐版：宿主压力横幅与准入改用 200/300/500 MB、3000/3600/3900 MB | [RELEASE-v3.9.7](RELEASE-v3.9.7.md) | [AUDIT-v3.9.7](AUDIT-v3.9.7.md) |
 | v3.9.6 | 会话健康阈值版：多帧 zstd 崩溃修复；单文件 200/300/500 MB、合计 3000/3600/3900 MB；二次确认 | [RELEASE-v3.9.6](RELEASE-v3.9.6.md) | [AUDIT-v3.9.6](AUDIT-v3.9.6.md) |

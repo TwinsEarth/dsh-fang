@@ -76,6 +76,7 @@ test('http-auth: loopback 判定与 Origin 白名单', () => {
   assert.equal(isAllowedOrigin(''), true)
   assert.equal(isAllowedOrigin('http://localhost:56071'), true)
   assert.equal(isAllowedOrigin('dsh-app://app'), true)
+  assert.equal(isAllowedOrigin('dsh-app://evil'), false, 'only the DSH shell host app is allowed')
   assert.equal(isAllowedOrigin('https://evil.example'), false)
 })
 
