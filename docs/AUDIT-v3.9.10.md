@@ -39,7 +39,7 @@
 - 首轮全量 preflight：`pass=1581 fail=0 skip=13`，e2e `125/125` GREEN。
 - 首轮 `npm run build` 在打包冒烟处失败：`tools/release/package-smoke.mjs` 仍要求 `maxForks: 8`。已改为校验两行 `maxForks: 5`、orchestrator `maxOpenForkBrowsers: 5`、`allowMultiFork: true`、`singleActiveFork: false`。
 - `cordis.patch.single-row.yml` 同步为 `maxForks: 5` / `maxOpenForkBrowsers: 5`，并新增 `package-metadata` 断言防止回退。
-- 最终 `npm run build`：preflight GREEN；全量测试 `pass=1582 fail=0 skip=13`（438.2s）；e2e `125/125`（49.8s）；package smoke、crash-safety、allow-list、main-city 全 PASS。
-- 最终产物：`dist/dsh-fang-3.9.10.tgz`（948804 bytes，211 entries），sha256 `2ed8c93f3472182c5580f30547de23e992b5add2876d55d35d91dd101a19127d`。
+- 最终 `npm run build`：preflight GREEN；全量测试 `pass=1582 fail=0 skip=13`；e2e `125/125`；package smoke、crash-safety、allow-list、main-city 全 PASS。
+- 最终产物：`dist/dsh-fang-3.9.10.tgz`（211 entries），sha256 见同目录 `.sha256` 与交付目录 `SHA256SUMS-3.9.10.txt`。
 - 定向测试覆盖：版本配额表、普通版夹紧、Config 默认 5、源码准入守卫、status 双容量面、package 元数据与单行回退配置。
-- 构建日志：`E:\DBH\fang-report\build-3910b.log`。
+- 构建日志：`E:\DBH\fang-report\build-3910-final*.log`。
