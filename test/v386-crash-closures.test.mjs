@@ -90,6 +90,67 @@ test('multi-frame session health never feeds concatenated zstd frames to a strea
   }
 })
 
+test('v3.9.6: session size policy uses 200/300/500 MB single and 3000/3600/3900 MB total', () => {
+  const MB = 1024 * 1024
+  const limits = {
+    maxSessionMB: 500,
+    warnSessionMB: 200,
+    confirmSessionMB: 300,
+    warnTotalMB: 3000,
+    confirmTotalMB: 3600,
+    hardTotalMB: 3900,
+    maxEvents: 100,
+  }
+  const base = { ok: true, sessions: 1, totalBytes: 1 * MB, largestBytes: 1 * MB, events: 10, truncated: false }
+  const evaluate = (session, extra = {}) => evaluateForkHealth({ session, limits, ...extra })
+
+  assert.equal(evaluate(base).ok, true)
+  assert.equal(evaluate({ ...base, largestBytes: 200 * MB }).warning, null)
+  const warning = evaluate({ ...base, largestBytes: 201 * MB })
+  assert.equal(warning.ok, true)
+  assert.equal(warning.warning.code, 'fork-health-session-size-warning')
+  assert.equal(warning.sessionPolicy.level, 'warn')
+
+  const confirm = evaluate({ ...base, largestBytes: 301 * MB })
+  assert.equal(confirm.ok, false)
+  assert.equal(confirm.error, 'fork-session-confirmation-required')
+  assert.equal(confirm.requiresConfirmation, true)
+  assert.equal(evaluate({ ...base, largestBytes: 301 * MB }, { limits: { ...limits, confirmed: true } }).ok, true)
+
+  const hard = evaluate({ ...base, largestBytes: 501 * MB }, { limits: { ...limits, confirmed: true } })
+  assert.equal(hard.ok, false)
+  assert.equal(hard.error, 'fork-health-session-hard-limit')
+
+  const totalConfirm = evaluate({ ...base, totalBytes: 3601 * MB })
+  assert.equal(totalConfirm.error, 'fork-session-confirmation-required')
+  const totalHard = evaluate({ ...base, totalBytes: 3901 * MB }, { limits: { ...limits, confirmed: true } })
+  assert.equal(totalHard.error, 'fork-health-session-hard-limit')
+})
+
+test('v3.9.6: size policy skips event counting for a large session instead of loading it', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-large-session-'))
+  const file = path.join(root, 'sessions', 'ws', 's1', 'session.v4.jsonl.zstd')
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, '')
+    fs.truncateSync(file, 201 * 1024 * 1024)
+    const health = await inspectForkSessionHealth(root, {
+      maxSessionMB: 500,
+      warnSessionMB: 200,
+      confirmSessionMB: 300,
+      warnTotalMB: 3000,
+      confirmTotalMB: 3600,
+      hardTotalMB: 3900,
+    })
+    assert.equal(health.ok, true)
+    assert.equal(health.scanSkipped, true)
+    assert.equal(health.events, null)
+    assert.equal(health.policy.level, 'warn')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('v3.8.6: health gate fails on adapter, oversized session, or unavailable endpoint', async () => {
   const home = makeSessionHome()
   try {
@@ -100,7 +161,7 @@ test('v3.8.6: health gate fails on adapter, oversized session, or unavailable en
       session: { ...session, largestBytes: 2 * 1024 * 1024 }, adapter: { ok: true }, http: { ok: true },
       limits: { maxSessionMB: 1, maxEvents: 100 },
     })
-    assert.equal(oversized.error, 'fork-health-session-too-large')
+    assert.equal(oversized.error, 'fork-health-session-hard-limit')
     const noEndpoint = evaluateForkHealth({ session, adapter: { ok: true }, http: { ok: false, error: 'health-timeout' } })
     assert.equal(noEndpoint.error, 'fork-health-endpoint-unavailable')
   } finally {

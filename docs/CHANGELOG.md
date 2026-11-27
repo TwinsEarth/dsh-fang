@@ -1,3 +1,21 @@
+## v3.9.6（2026-11-27）
+**主题：会话健康阈值版：多帧 zstd 崩溃修复 + 200/300/500 MB 单文件与 3000/3600/3900 MB 合计阈值**
+
+### 根因
+- 双击“打开分身”触发宿主 `ZSTD_error_prefix_unknown` / `Unknown frame descriptor`：`countSessionEvents()` 把 DSH 的多帧 `session.v4.jsonl.zstd` 直接接到 `zlib.createZstdDecompress()`。Node 的流式 zstd 只消费第一帧，第二帧 magic 落在 `node:zlib:193` 并成为未捕获错误，母体 host 退出。
+- 旧健康门禁把 20 MB 单文件直接判 `session-too-large`；真实 21.8–63.9 MB 会话被误伤。
+
+### 修复
+- `fork-health` 改为按 zstd 帧边界逐帧 `zstdDecompressSync` 统计，不再给多帧日志挂流式解码器；保留压缩读取上限，避免把大会话整读进内存。
+- 单文件策略：`>200 MB` 警告、`>300 MB` 二次确认、`>500 MB` 硬上限；分身内合计：`>3000 MB` 警告、`>3600 MB` 二次确认、`>3900 MB` 硬上限。
+- 警告/确认档跳过事件计数（`scanSkipped:true`），避免健康检查本身制造内存压力；硬上限仍拒绝打开。
+- `POST /fang/api/tasks/open` 支持 `confirmLargeSession:true`；需确认时返回 409 `fork-session-confirmation-required` 和 `sessionPolicy`，客户端展示确认弹窗；确认后放行，硬上限即使确认也拒绝。
+- `browser-health.jsonl` 记录 `scanSkipped` / `policy`；拒绝与待确认写入审计。
+
+### 测试
+- 定向回归 19/19 PASS（含多帧 zstd、200/300/500 MB、3000/3600/3900 MB、跳过事件计数）。
+- 全量 1566 tests / 1513 pass / 30 fail；30 条均为既有 orchestrator 临时夹具缺 bundle 的 `fork-bundle-unavailable`，无新增失败；详见 `docs/AUDIT-v3.9.6.md`。
+
 ## v3.9.5（2026-11-26）
 **主题：crash-loop Safe Mode 永久闩锁热修**
 

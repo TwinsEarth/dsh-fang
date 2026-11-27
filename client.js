@@ -3428,17 +3428,22 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       // 独立 Vault 子插件通过此桥触发导出/导入（按钮由 vault/client.js 注入）。
       try { window.__fangVaultBridge = { exportTask, importTask } } catch { /* ignore */ }
 
-      async function openTask(task, retryDepth = 0) {
+      async function openTask(task, retryDepth = 0, confirmLargeSession = false) {
         const taskId = String(task?.taskId ?? '')
         if (!taskId) { notify('warn', '该分身没有 taskId，无法打开。'); return }
         setActiveTask(taskId)
         // v3.7.4：打开是显式用户动作，用 POST 触发同步；GET 只读，避免副作用。
-        const result = await api('/fang/api/tasks/open', { method: 'POST', body: JSON.stringify({ taskId }) })
+        const result = await api('/fang/api/tasks/open', { method: 'POST', body: JSON.stringify({ taskId, confirmLargeSession: confirmLargeSession === true }) })
         if (result.status === 200 && result.body?.url) {
           const paused = Array.isArray(result.body?.paused) ? result.body.paused : []
-          if (paused.length) notify('warn', `为释放内存，已暂停其他 ${paused.length} 个运行中的分身`, '母体只保留当前任务；其他分身可用“还原”重新启动。')
+          const warning = result.body?.sessionWarning?.detail || result.body?.sessionWarning?.message || null
           if (result.body?.managed === true) {
-            notify('ok', '已在受控浏览器中打开分身', `PID ${result.body.pid ?? '?'}；内存/空闲/崩溃由瓮城看门狗接管。`)
+            const notes = []
+            if (paused.length) notes.push(`为释放内存，已暂停其他 ${paused.length} 个运行中的分身`)
+            if (warning) notes.push(`大会话警告：${warning}`)
+            notify(notes.length ? 'warn' : 'ok',
+              notes.length ? '已在受控浏览器中打开分身（有提醒）' : '已在受控浏览器中打开分身',
+              notes.length ? notes.join('；') : `PID ${result.body.pid ?? '?'}；内存/空闲/崩溃由瓮城看门狗接管。`)
             void refresh()
             return
           }
@@ -3447,6 +3452,33 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
           return
         }
         const code = result.body?.error || (result.status ? 'http-' + result.status : 'network')
+        if (code === 'fork-session-confirmation-required') {
+          const policy = result.body?.sessionPolicy || {}
+          const total = Number(policy.totalMB)
+          const single = Number(policy.largestMB)
+          const sizeText = [
+            Number.isFinite(single) ? `单文件 ${single.toFixed(1)} MB` : '',
+            Number.isFinite(total) ? `合计 ${total.toFixed(1)} MB` : '',
+          ].filter(Boolean).join(' / ')
+          setNotice({
+            tone: 'warn',
+            title: '大会话需要二次确认',
+            message: `该分身会话${sizeText ? '：' + sizeText : '已达到二次确认线'}，超过单文件 300 MB / 合计 3600 MB 时需确认。`,
+            detail: result.body?.detail || '确认后才会启动受控浏览器；不会修改会话文件。',
+            actions: [{ label: '确认打开', onClick: () => void openTask(task, retryDepth, true) }],
+          })
+          return
+        }
+        if (code === 'fork-health-session-hard-limit') {
+          const policy = result.body?.sessionPolicy || {}
+          const single = Number(policy.largestMB)
+          const total = Number(policy.totalMB)
+          notify('bad', '会话超过硬上限，已拒绝打开', [
+            Number.isFinite(single) ? `单文件 ${single.toFixed(1)} MB（上限 500 MB）` : '',
+            Number.isFinite(total) ? `合计 ${total.toFixed(1)} MB（上限 3900 MB）` : '',
+          ].filter(Boolean).join('；') || '请先归档/压缩会话。', { durationMs: 7000 })
+          return
+        }
         if (code === 'safe-mode') {
           notify('bad', '宿主处于 Safe Mode，已拒绝自动打开', result.body?.detail || '请先解除 Safe Mode 或重启宿主。')
           return
@@ -3487,7 +3519,7 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             const retry = await api(`/fang/api/tasks/open-url?taskId=${encodeURIComponent(taskId)}`)
             if (retry.status === 200 && retry.body?.url) {
               // Re-enter the same managed-browser gate; never window.open the raw URL.
-              return openTask(task, retryDepth + 1)
+              return openTask(task, retryDepth + 1, confirmLargeSession)
             }
           }
           notify('warn', '分身已启动，但 Web URL 尚未就绪；稍后点“打开”再试。')

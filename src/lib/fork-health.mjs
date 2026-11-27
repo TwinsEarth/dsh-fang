@@ -13,15 +13,49 @@ export const FORK_HEALTH_DEFAULTS = Object.freeze({
   path: '/fang/api/health',
   fallbackPaths: ['/api/health'],
   timeoutMs: 2000,
-  maxSessionMB: 20,
-  maxEvents: 20000,
-  maxUncompressedBytes: 64 * 1024 * 1024,
+  // 单文件：200 MB 警告、300 MB 二次确认、500 MB 硬上限。
+  maxSessionMB: 500,
+  warnSessionMB: 200,
+  confirmSessionMB: 300,
+  // 分身内会话合计：3000 MB 警告、3600 MB 二次确认、3900 MB 硬上限。
+  warnTotalMB: 3000,
+  confirmTotalMB: 3600,
+  hardTotalMB: 3900,
+  maxEvents: 1_000_000,
+  maxUncompressedBytes: 1024 * 1024 * 1024,
 })
 
 function boundedNumber(value, fallback, min, max) {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback
   return Math.min(max, Math.max(min, n))
+}
+
+function mbToBytes(mb) {
+  return Math.floor(Number(mb) * 1024 * 1024)
+}
+
+function bytesToMB(bytes) {
+  return Number(bytes) / (1024 * 1024)
+}
+
+/** ok < warn < confirm < hard. `>` is intentional: exactly 200/300/500 is still the lower band. */
+function sizeLevel(bytes, warnMB, confirmMB, hardMB) {
+  const value = Number(bytes) || 0
+  if (value > mbToBytes(hardMB)) return 'hard'
+  if (value > mbToBytes(confirmMB)) return 'confirm'
+  if (value > mbToBytes(warnMB)) return 'warn'
+  return 'ok'
+}
+
+const LEVEL_RANK = { ok: 0, warn: 1, confirm: 2, hard: 3 }
+
+function worstLevel(...levels) {
+  return levels.reduce((worst, level) => (LEVEL_RANK[level] > LEVEL_RANK[worst] ? level : worst), 'ok')
+}
+
+function formatMB(bytes) {
+  return `${bytesToMB(bytes).toFixed(1)} MB`
 }
 
 // DSH session logs are concatenated zstd frames. `createZstdDecompress` stops
@@ -31,7 +65,8 @@ function boundedNumber(value, fallback, min, max) {
 // each frame independently instead — never attach a zstd stream decoder to a
 // multi-frame session log.
 const ZSTD_MAGIC = 0xFD2FB528
-const MAX_COUNT_COMPRESSED_BYTES = 64 * 1024 * 1024
+// 单文件超过 200 MB 就跳过事件计数（由大小策略决定），因此这里最多读 256 MiB。
+const MAX_COUNT_COMPRESSED_BYTES = 256 * 1024 * 1024
 
 /** Locate complete zstd frame boundaries without decoding payloads. */
 function scanZstdFrameRanges(buffer) {
@@ -147,40 +182,75 @@ export async function countSessionEvents(file, options = {}) {
 }
 
 /**
- * Inspect a fork home's own session store. The largest session is the one that
- * decides whether opening a browser is safe; total bytes/count are reported too.
+ * Inspect a fork home's own session store. Size policy is:
+ * single file 200 MB warning / 300 MB confirmation / 500 MB hard;
+ * all sessions 3000 MB warning / 3600 MB confirmation / 3900 MB hard.
+ * When any size band is reached, event counting is skipped — the policy is
+ * decided by bytes, and a 500 MB compressed log must not be loaded into the
+ * mother process just to count lines.
  */
 export async function inspectForkSessionHealth(homeDir, options = {}) {
-  const maxCompressedBytes = Math.floor(boundedNumber(options.maxSessionMB, FORK_HEALTH_DEFAULTS.maxSessionMB, 1, 4096)) * 1024 * 1024
+  const hardSessionMB = boundedNumber(options.maxSessionMB ?? options.hardSessionMB, FORK_HEALTH_DEFAULTS.maxSessionMB, 1, 4096)
+  const warnSessionMB = boundedNumber(options.warnSessionMB, FORK_HEALTH_DEFAULTS.warnSessionMB, 1, 4096)
+  const confirmSessionMB = boundedNumber(options.confirmSessionMB, FORK_HEALTH_DEFAULTS.confirmSessionMB, 1, 4096)
+  const warnTotalMB = boundedNumber(options.warnTotalMB, FORK_HEALTH_DEFAULTS.warnTotalMB, 1, 4096)
+  const confirmTotalMB = boundedNumber(options.confirmTotalMB, FORK_HEALTH_DEFAULTS.confirmTotalMB, 1, 4096)
+  const hardTotalMB = boundedNumber(options.hardTotalMB, FORK_HEALTH_DEFAULTS.hardTotalMB, 1, 4096)
   const maxEvents = Math.floor(boundedNumber(options.maxEvents, FORK_HEALTH_DEFAULTS.maxEvents, 1, 10_000_000))
+  const maxCompressedBytes = mbToBytes(hardSessionMB)
+  const thresholds = {
+    hardSessionMB, warnSessionMB, confirmSessionMB,
+    warnTotalMB, confirmTotalMB, hardTotalMB,
+  }
   const sessions = scanForkSessions(homeDir)
   const totalBytes = sessions.reduce((sum, row) => sum + (Number(row.bytes) || 0), 0)
   if (sessions.length === 0) {
     return {
       ok: true, sessions: 0, totalBytes: 0, largestBytes: 0,
       largestSessionId: null, events: 0, eventScan: null, truncated: false,
+      scanSkipped: false, maxSessionBytes: maxCompressedBytes, maxEvents, thresholds,
+      policy: { level: 'ok', singleMB: 0, totalMB: 0, requiresConfirmation: false, warnings: [] },
     }
   }
   const largest = sessions.reduce((max, row) => (Number(row.bytes) > Number(max.bytes) ? row : max), sessions[0])
-  if (largest.bytes > maxCompressedBytes) {
+  const singleLevel = sizeLevel(largest.bytes, warnSessionMB, confirmSessionMB, hardSessionMB)
+  const totalLevel = sizeLevel(totalBytes, warnTotalMB, confirmTotalMB, hardTotalMB)
+  const level = worstLevel(singleLevel, totalLevel)
+  const policy = {
+    level,
+    singleMB: bytesToMB(largest.bytes),
+    totalMB: bytesToMB(totalBytes),
+    requiresConfirmation: level === 'confirm',
+    hardLimit: level === 'hard',
+    warnings: level === 'warn'
+      ? [{ code: 'fork-health-size-warning', detail: `单文件 ${formatMB(largest.bytes)}，合计 ${formatMB(totalBytes)}` }]
+      : level === 'confirm'
+        ? [{ code: 'fork-health-size-confirmation', detail: `单文件 ${formatMB(largest.bytes)}，合计 ${formatMB(totalBytes)}` }]
+        : [],
+  }
+  if (level !== 'ok') {
     return {
-      ok: false,
-      error: 'session-too-large',
+      ok: true,
+      error: null,
       sessions: sessions.length,
       totalBytes,
       largestBytes: largest.bytes,
       largestSessionId: largest.sessionId,
       events: null,
-      eventScan: null,
-      truncated: true,
+      eventScan: { ok: true, skipped: true, reason: 'session-size-policy' },
+      truncated: false,
+      scanSkipped: true,
       maxSessionBytes: maxCompressedBytes,
+      maxEvents,
+      thresholds,
+      policy,
     }
   }
   const eventScan = await countSessionEvents(largest.file, {
     maxEvents,
     maxUncompressedBytes: Math.min(
       FORK_HEALTH_DEFAULTS.maxUncompressedBytes,
-      Math.max(4 * 1024 * 1024, maxCompressedBytes * 8),
+      Math.max(64 * 1024 * 1024, maxCompressedBytes * 4),
     ),
   })
   return {
@@ -193,28 +263,76 @@ export async function inspectForkSessionHealth(homeDir, options = {}) {
     events: eventScan.events,
     eventScan,
     truncated: eventScan.truncated === true,
+    scanSkipped: false,
     maxSessionBytes: maxCompressedBytes,
     maxEvents,
+    thresholds,
+    policy,
   }
 }
 
 /** Pure gate used before opening a managed browser. */
 export function evaluateForkHealth({ session = null, adapter = null, http = null, limits = {} } = {}) {
-  const failures = []
-  const maxSessionMB = boundedNumber(limits.maxSessionMB, FORK_HEALTH_DEFAULTS.maxSessionMB, 1, 4096)
+  const hardSessionMB = boundedNumber(limits.maxSessionMB ?? limits.hardSessionMB, FORK_HEALTH_DEFAULTS.maxSessionMB, 1, 4096)
+  const warnSessionMB = boundedNumber(limits.warnSessionMB, FORK_HEALTH_DEFAULTS.warnSessionMB, 1, 4096)
+  const confirmSessionMB = boundedNumber(limits.confirmSessionMB, FORK_HEALTH_DEFAULTS.confirmSessionMB, 1, 4096)
+  const warnTotalMB = boundedNumber(limits.warnTotalMB, FORK_HEALTH_DEFAULTS.warnTotalMB, 1, 4096)
+  const confirmTotalMB = boundedNumber(limits.confirmTotalMB, FORK_HEALTH_DEFAULTS.confirmTotalMB, 1, 4096)
+  const hardTotalMB = boundedNumber(limits.hardTotalMB, FORK_HEALTH_DEFAULTS.hardTotalMB, 1, 4096)
   const maxEvents = boundedNumber(limits.maxEvents, FORK_HEALTH_DEFAULTS.maxEvents, 1, 10_000_000)
+  const confirmed = limits.confirmed === true
+  const thresholds = {
+    hardSessionMB, warnSessionMB, confirmSessionMB,
+    warnTotalMB, confirmTotalMB, hardTotalMB,
+  }
+  const failures = []
+  const warnings = []
+  let requiresConfirmation = false
+  let confirmationReason = null
+  let level = 'ok'
+  let meaningfulSession = null
+  let policyLargestBytes = 0
+  let policyTotalBytes = 0
+
+  if (session) {
+    meaningfulSession = session
+    const totalBytes = Number(session.totalBytes) || 0
+    const largestBytes = Number(session.largestBytes) || 0
+    policyLargestBytes = largestBytes
+    policyTotalBytes = totalBytes
+    if (totalBytes > 0 || largestBytes > 0) {
+      const singleLevel = sizeLevel(largestBytes, warnSessionMB, confirmSessionMB, hardSessionMB)
+      const totalLevel = sizeLevel(totalBytes, warnTotalMB, confirmTotalMB, hardTotalMB)
+      level = worstLevel(singleLevel, totalLevel)
+      const detail = `单文件 ${formatMB(largestBytes)}（${singleLevel}），合计 ${formatMB(totalBytes)}（${totalLevel}）`
+      if (level === 'hard') {
+        failures.push({
+          code: 'fork-health-session-hard-limit',
+          detail: `${detail}; 单文件上限 ${hardSessionMB} MB，合计上限 ${hardTotalMB} MB`,
+        })
+      } else if (level === 'confirm') {
+        requiresConfirmation = true
+        confirmationReason = `${detail}; 超过 ${confirmSessionMB} MB 单文件 / ${confirmTotalMB} MB 合计需二次确认`
+      } else if (level === 'warn') {
+        warnings.push({
+          code: 'fork-health-session-size-warning',
+          detail: `${detail}; 已超过 ${warnSessionMB} MB 单文件 / ${warnTotalMB} MB 合计警戒线`,
+        })
+      }
+    }
+  }
+
   if (adapter && adapter.ok !== true) {
     failures.push({ code: 'fork-adapter-unavailable', detail: String(adapter.error ?? 'adapter not ready') })
   }
   if (session) {
-    if (session.ok === false) failures.push({ code: 'fork-session-unreadable', detail: session.error ?? 'session scan failed' })
-    if (Number(session.largestBytes) > maxSessionMB * 1024 * 1024) {
-      failures.push({ code: 'fork-health-session-too-large', detail: `largest=${session.largestBytes}B > ${maxSessionMB}MB` })
+    if (session.ok === false && session.scanSkipped !== true && level !== 'hard') {
+      failures.push({ code: 'fork-session-unreadable', detail: session.error ?? 'session scan failed' })
     }
-    if (session.truncated === true) {
+    if (session.truncated === true && session.scanSkipped !== true && level === 'ok') {
       failures.push({ code: 'fork-health-events-limit', detail: `events >= ${session.events ?? maxEvents} (limit ${maxEvents})` })
     }
-    if (Number(session.events) > maxEvents) {
+    if (Number(session.events) > maxEvents && level === 'ok') {
       failures.push({ code: 'fork-health-events-limit', detail: `events=${session.events} > ${maxEvents}` })
     }
   }
@@ -225,25 +343,63 @@ export function evaluateForkHealth({ session = null, adapter = null, http = null
       failures.push({ code: 'fork-health-rejected', detail: String(http.data.error ?? http.data.reason ?? 'health reported not-ok') })
     } else {
       const remote = http.data?.session
-      if (remote && Number(remote.largestBytes) > maxSessionMB * 1024 * 1024) {
-        failures.push({ code: 'fork-health-session-too-large', detail: `remote largest=${remote.largestBytes}B` })
-      }
-      if (remote && remote.truncated === true) {
-        failures.push({ code: 'fork-health-events-limit', detail: 'remote session scan truncated' })
-      }
-      if (remote && Number(remote.events) > maxEvents) {
-        failures.push({ code: 'fork-health-events-limit', detail: `remote events=${remote.events} > ${maxEvents}` })
+      if (remote) {
+        const remoteLargest = Number(remote.largestBytes) || 0
+        const remoteTotal = Number(remote.totalBytes) || 0
+        policyLargestBytes = Math.max(policyLargestBytes, remoteLargest)
+        policyTotalBytes = Math.max(policyTotalBytes, remoteTotal)
+        let remoteLevel = 'ok'
+        if (remoteLargest > 0 || remoteTotal > 0) {
+          const remoteSingle = sizeLevel(remoteLargest, warnSessionMB, confirmSessionMB, hardSessionMB)
+          const remoteTotalLevel = sizeLevel(remoteTotal, warnTotalMB, confirmTotalMB, hardTotalMB)
+          remoteLevel = worstLevel(remoteSingle, remoteTotalLevel)
+          level = worstLevel(level, remoteLevel)
+          const detail = `远端单文件 ${formatMB(remoteLargest)}，合计 ${formatMB(remoteTotal)}`
+          if (remoteLevel === 'hard') {
+            failures.push({ code: 'fork-health-session-hard-limit', detail: `${detail}; 超过硬上限` })
+          } else if (remoteLevel === 'confirm') {
+            requiresConfirmation = true
+            confirmationReason = confirmationReason ?? `${detail}; 需要二次确认`
+          } else if (remoteLevel === 'warn') {
+            warnings.push({ code: 'fork-health-session-size-warning', detail: `${detail}; 超过警戒线` })
+          }
+        }
+        if (remote.truncated === true && remote.scanSkipped !== true && remoteLevel === 'ok') {
+          failures.push({ code: 'fork-health-events-limit', detail: 'remote session scan truncated' })
+        }
+        if (Number(remote.events) > maxEvents && remoteLevel === 'ok') {
+          failures.push({ code: 'fork-health-events-limit', detail: `remote events=${remote.events} > ${maxEvents}` })
+        }
       }
       if (http.data?.adapter && http.data.adapter.ok === false) {
         failures.push({ code: 'fork-adapter-unavailable', detail: String(http.data.adapter.error ?? 'adapter reported not-ok') })
       }
     }
   }
+
+  const blocking = failures[0] ?? null
+  const sessionPolicy = (meaningfulSession || policyLargestBytes > 0 || policyTotalBytes > 0) ? {
+    level,
+    totalMB: bytesToMB(policyTotalBytes),
+    largestMB: bytesToMB(policyLargestBytes),
+    requiresConfirmation,
+    confirmed,
+    thresholds,
+    warnings,
+    confirmationReason,
+  } : { level, totalMB: 0, largestMB: 0, requiresConfirmation: false, confirmed, thresholds, warnings, confirmationReason: null }
+  const warning = warnings[0] ?? null
+  const error = blocking?.code ?? (requiresConfirmation && !confirmed ? 'fork-session-confirmation-required' : null)
   return {
-    ok: failures.length === 0,
+    ok: failures.length === 0 && (!requiresConfirmation || confirmed),
     failures,
-    error: failures[0]?.code ?? null,
-    detail: failures[0]?.detail ?? null,
+    error,
+    detail: blocking?.detail ?? (requiresConfirmation && !confirmed ? confirmationReason : null),
+    requiresConfirmation,
+    confirmed,
+    warnings,
+    warning,
+    sessionPolicy,
     session,
     adapter,
     http: http ? { ok: http.ok === true, status: http.status ?? null, path: http.path ?? null, latencyMs: http.latencyMs ?? null, data: http.data ?? null } : null,

@@ -14,8 +14,8 @@ const clientSource = fs.readFileSync(new URL('./client.js', root), 'utf8')
 
 test('v3.8.7: health thresholds, flush budget and browser crash window defaults are explicit', () => {
   const cfg = orchestrator.Config({})
-  assert.equal(cfg.forkHealthMaxSessionMB, 20)
-  assert.equal(cfg.forkHealthMaxEvents, 20000)
+  assert.equal(cfg.forkHealthMaxSessionMB, 500)
+  assert.equal(cfg.forkHealthMaxEvents, 1_000_000)
   assert.equal(cfg.forkFlushTimeoutMs, 3000)
   assert.equal(cfg.browserCrashWindowMs, 600000)
   assert.equal(cfg.browserCrashThreshold, 2)
@@ -80,12 +80,12 @@ test('v3.8.7: remote health events and largest session are both hard limits', ()
   const base = { ok: true, session: { events: 10, largestBytes: 1024 * 1024 } }
   const ok = evaluateForkHealth({ http: { ok: true, data: base }, adapter: { ok: true }, limits: { maxSessionMB: 20, maxEvents: 20000 } })
   assert.equal(ok.ok, true)
-  const tooMany = evaluateForkHealth({ http: { ok: true, data: { ...base, session: { ...base.session, events: 20001 } } }, adapter: { ok: true }, limits: { maxSessionMB: 20, maxEvents: 20000 } })
+  const tooMany = evaluateForkHealth({ http: { ok: true, data: { ...base, session: { ...base.session, events: 1_000_001 } } }, adapter: { ok: true }, limits: { maxSessionMB: 500, maxEvents: 1_000_000 } })
   assert.equal(tooMany.ok, false)
   assert.match(tooMany.error, /events-limit/)
-  const tooBig = evaluateForkHealth({ http: { ok: true, data: { ...base, session: { ...base.session, largestBytes: 20 * 1024 * 1024 + 1 } } }, adapter: { ok: true }, limits: { maxSessionMB: 20, maxEvents: 20000 } })
+  const tooBig = evaluateForkHealth({ http: { ok: true, data: { ...base, session: { ...base.session, largestBytes: 501 * 1024 * 1024 } } }, adapter: { ok: true }, limits: { maxSessionMB: 500, maxEvents: 1_000_000 } })
   assert.equal(tooBig.ok, false)
-  assert.match(tooBig.error, /session-too-large/)
+  assert.match(tooBig.error, /hard-limit/)
 })
 
 test('v3.8.7: flush verifies the real adapter endpoint within the 3s budget and records unsupported', () => {
