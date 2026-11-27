@@ -23,7 +23,7 @@ AdapterServer 独立 listen → 双端口 waitReady → 双端口归还」在这
 | ② meta.json 写 `adapterPort` | `forks.json` / `fang-meta.json` 只有 `port`，没有 `adapterPort` |
 | ③ env 注入 `DSH_ADAPTER_PORT` | 不注入；只注入 `DSH_ADAPTER_TOKEN`（v3 Bearer） |
 | ④ AdapterServer 从 env 读端口 | 无 AdapterServer；Adapter 从未知 env 读端口，直接挂 webServer |
-| ⑤ 端口池容量翻倍 | 不需要：每分身 1 个端口，池 18000–18100（101 个），`maxForks` 默认 8 |
+| ⑤ 端口池容量翻倍 | 不需要：每分身 1 个端口，池 18000–18100（101 个），普通版 `maxForks` 默认 5，团队版预留 100 仍余 1 个 |
 | ⑥ 端口被抢窗口 / Adapter listen 失败 | 不存在第二监听者；DSH 端口被抢时 spawn 失败并归还 |
 | ⑦ 双端口健康检查 | forker 探 DSH 端口；Adapter 就绪由 Orchestrator 在同端口做 `/fang/adapter/hello` 握手 |
 | ⑧ 双端口归还路径 | 单端口归还路径见 §4（fork 失败/exit/timeout/stop/reap/死孤儿） |
@@ -41,7 +41,7 @@ Forker.spawn()
   └─ spawn(cli --profile ... --port <port> --no-open)
 ```
 
-- 端口池容量：101 个端口 × 1 个/分身 = 101 并发；`maxForks` 默认 8，上限远小于容量。
+- 端口池容量：101 个端口 × 1 个/分身 = 101 并发；普通版 `maxForks` 默认 5，团队版预留 100，仍在池容量内。
 - `allocatePorts=false` 时退回 v1 `--port 0`（OS 分配，从 banner 解析），仅兼容旧行为。
 - Adapter 不感知端口：它拿的是 webServer 已绑定的同一端口。
 

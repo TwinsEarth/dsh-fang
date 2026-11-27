@@ -40,6 +40,10 @@ import { cleanupWatchdogFiles, pruneHostCrashHistory } from '../lib/host-houseke
 import { appendBrowserMetricHistory } from '../lib/browser-metrics.mjs'
 import { enforceSinglePageTarget } from '../lib/browser-guard.mjs'
 import { evaluateForkHealth, forkHealthPathForPrefix, inspectForkSessionHealth, probeForkHealth } from '../lib/fork-health.mjs'
+import {
+  ACTIVE_FORK_EDITION, DEFAULT_MAX_FORK_WEBS, DEFAULT_MAX_FORKS, FORK_WEB_QUOTAS,
+  HARD_MAX_FORK_WEBS, HARD_MAX_FORKS, effectiveForkLimit, effectiveForkWebLimit, forkQuotaForEdition,
+} from '../lib/fork-capacity.mjs'
 import { readLatestMigrationReport } from '../lib/migration-report.mjs'
 import { DEFAULT_LEGACY_WORKSPACE_ROOTS, mapWorkspacePathForFork, migrateForkWorkspace, prepareImportedSession } from '../lib/workspace-mapping.mjs'
 import { appendJsonlRotated } from '../lib/log-rotation.mjs'
@@ -320,9 +324,10 @@ export function decidePagefileBootPolicy(memory, { hostCriticalFreeMB = SAFE_MOD
   }
 }
 
-// v3.9.4：分身默认容量 8，硬上限 62。maxForks 是准入配置，实际创建仍由内存/Commit 守卫裁决。
-export const DEFAULT_MAX_FORKS = 8
-export const HARD_MAX_FORKS = 62
+// v3.9.10：配额按发行版分层。普通版 5，专业版 20（预留），团队版 100（预留）。
+// maxForks 是任务槽位；maxOpenForkBrowsers 是同时存活的托管浏览器窗口。两者都先按
+// 当前发行版上限夹紧，再交给 Commit/内存守卫做第二道裁决。
+export { DEFAULT_MAX_FORKS, HARD_MAX_FORKS, DEFAULT_MAX_FORK_WEBS, HARD_MAX_FORK_WEBS, ACTIVE_FORK_EDITION, FORK_WEB_QUOTAS }
 // C1: host-state.json lastMetrics lag follows this timer; 15s reduces the
 // heartbeat file write + host-state rewrite rate without losing crash evidence.
 export const HOST_STATE_WRITE_INTERVAL_MS = 15000
@@ -341,11 +346,11 @@ export const Config = z.object({
     .description('官方源 manifest 基础 URL（https；留空 = 无官方源，升级显式 official-source-unavailable）'),
   officialSourceToken: z.string().default('')
     .description('官方源 Bearer token（可选；不会写进日志/状态）'),
-  // v3.9.2: restore the operator-facing 8-fork capacity. Memory/commit gates
-  // still refuse new forks when the host is under pressure; this only removes
-  // the unconditional single-fork clamp that made the quota useless.
+  // v3.9.10: ordinary edition is 5 concurrent fork slots; professional (20) and
+  // team (100) are reserved tiers in fork-capacity.mjs. Memory/commit gates still
+  // refuse earlier when the host is under pressure.
   maxForks: z.number().min(1).max(HARD_MAX_FORKS).default(DEFAULT_MAX_FORKS)
-    .description('允许同时存活的分身上限；默认 8，硬上限 62；实际创建仍受 Commit 余量守卫'),
+    .description('允许同时存活的分身上限；普通版默认 5，硬上限 100（专业版 20 / 团队版 100 为预留档位）；实际创建仍受 Commit 余量守卫'),
   allowMultiFork: z.boolean().default(true)
     .description('是否允许 maxForks>1；默认 true；内存不足时由 memoryGuard 拒绝，而不是把配额改成 1'),
   memoryGuard: z.boolean().default(true)
@@ -438,8 +443,8 @@ export const Config = z.object({
     .description('内存/空闲触发时自动关闭托管浏览器，默认 true，不再二次确认；只清进程，home 与会话文件保留'),
   browserPath: z.string().default('')
     .description('托管浏览器 exe；留空自动找 Edge/Chrome'),
-  maxOpenForkBrowsers: z.number().min(1).max(16).default(1)
-    .description('同时存活的托管浏览器窗口上限'),
+  maxOpenForkBrowsers: z.number().min(1).max(HARD_MAX_FORK_WEBS).default(DEFAULT_MAX_FORK_WEBS)
+    .description('同时存活的托管浏览器窗口上限；普通版默认 5，硬上限 100（专业版 20 / 团队版 100 为预留档位）'),
   browserMemoryLimitMB: z.number().min(256).max(1048576).default(2048)
     .description('托管浏览器 PID 树 Commit 硬上限（MB）；默认 2048，自适应阈值只能更严不能放宽'),
   browserHeapLimitMB: z.number().min(128).max(1048576).default(1536)
@@ -732,9 +737,10 @@ export function apply(ctx, config) {
   // v3.9.2: no unconditional production clamp. `maxForks` is an operator quota;
   // `memoryGate`/`main-city` are the actual safety gates.
   const testOnlyMultiFork = Boolean(process.env.NODE_TEST_CONTEXT) && config?.__testOnlyAllowMultiFork === true
-  const effectiveMaxForks = () => {
-    return Math.max(1, Math.min(HARD_MAX_FORKS, Math.floor(Number(cfg.maxForks) || DEFAULT_MAX_FORKS)))
-  }
+  // v3.9.10: task slots and managed browser windows share the edition table but
+  // remain separate axes: a fork may be alive without an open Web window.
+  const effectiveMaxForks = () => effectiveForkLimit(cfg.maxForks, ACTIVE_FORK_EDITION)
+  const effectiveMaxOpenForkBrowsers = () => effectiveForkWebLimit(cfg.maxOpenForkBrowsers, ACTIVE_FORK_EDITION)
   const forkHealthPath = String(cfg.forkHealthPath || '').trim() || forkHealthPathForPrefix(cfg.routes?.prefix)
   const forkPrefix = String(cfg.routes?.prefix ?? '/fang').replace(/\/+$/, '') || '/fang'
   const forkFlushDefaultPath = `${forkPrefix}/adapter/flush-session`
@@ -2039,8 +2045,9 @@ export function apply(ctx, config) {
       }
     }
     const liveBrowsers = [...tasks.values(), ...runtimeBrowsers.values()].filter((item) => item.browser?.pid && isPidAlive(item.browser.pid))
-    // v3.9.4：页面文件不再是并发限制条件；maxOpenForkBrowsers 是唯一配置口径。
-    const max = Math.max(1, Number(cfg.maxOpenForkBrowsers) || 1)
+    // v3.9.10：页面文件不再是并发限制条件；maxOpenForkBrowsers 按当前发行版
+    // 配额夹紧（普通版 5 / 专业版预留 20 / 团队版预留 100），内存/Commit 守卫另算。
+    const max = effectiveMaxOpenForkBrowsers()
     let liveCount = liveBrowsers.length
     for (const other of liveBrowsers) {
       if (other.taskId === task.taskId) continue
@@ -5483,13 +5490,26 @@ export function apply(ctx, config) {
         tasks: { total: list.length, ready, running, max: effectiveMaxForks(), list },
         // v1 兼容视图：Client 徽标与旧调用方仍读 forks.*
         forks: { total: list.length, running: ready + running, max: effectiveMaxForks(), list },
-        // v3.9.4：分身容量（默认 8 / 硬上限 62）；UI 读取这里而不是自己硬编码 7。
+        // v3.9.10：普通版 5 个任务槽位 / 5 个托管浏览器；专业版 20、团队版 100 为预留档位。
+        // maxForks 与 maxOpenForkBrowsers 是两个独立轴：分身可以存活但 Web 窗口已关闭。
         capacity: {
           slots: effectiveMaxForks(),
           hardMax: HARD_MAX_FORKS,
           defaultLimit: DEFAULT_MAX_FORKS,
           limit: effectiveMaxForks(),
           used: list.filter((row) => row.status !== 'archived').length,
+          edition: ACTIVE_FORK_EDITION,
+          editionLabel: forkQuotaForEdition(ACTIVE_FORK_EDITION).label,
+          browsers: (() => {
+            const live = [...tasks.values(), ...runtimeBrowsers.values()]
+              .filter((item) => item.browser?.pid && isPidAlive(item.browser.pid)).length
+            return {
+              limit: effectiveMaxOpenForkBrowsers(),
+              hardMax: HARD_MAX_FORK_WEBS,
+              defaultLimit: DEFAULT_MAX_FORK_WEBS,
+              used: live,
+            }
+          })(),
         },
         audit: (() => {
           const health = auditHealth()

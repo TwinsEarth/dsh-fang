@@ -16,7 +16,7 @@ test('memory guard refuses when Windows CommitFree is below threshold', () => {
 test('memory guard skips unsupported platform but defaults are safe', () => {
   assert.equal(evaluateMemoryGuard({ ok: true, supported: false }).ok, true)
   assert.equal(memoryGuardDefaults().minFreeMB, 4096)
-  assert.equal(memoryGuardDefaults().singleActiveFork, true)
+  assert.equal(memoryGuardDefaults().singleActiveFork, false)
 })
 
 test('process tree selection includes descendants, not siblings', () => {

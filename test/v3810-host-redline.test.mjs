@@ -76,10 +76,11 @@ test('v3.8.10 measure 4: fork and browser are both wrapped by a Windows Job', ()
   assert.deepEqual(peMachine('native/win32/fang-job-host-arm64.exe'), { machine: 0xaa64, size: 54784 })
 })
 
-test('v3.9.4 measure 5: maxForks defaults to 8, hard cap 62', () => {
+test('v3.9.10 measure 5: maxForks defaults to 5, hard cap 100', () => {
   assert.match(orchestrator, /maxForks: z\.number\(\)\.min\(1\)\.max\(HARD_MAX_FORKS\)\.default\(DEFAULT_MAX_FORKS\)/)
-  assert.match(orchestrator, /const effectiveMaxForks = \(\) => \{?[\s\S]{0,80}HARD_MAX_FORKS/)
-  assert.match(forker, /maxForks: 8/)
+  assert.match(orchestrator, /const effectiveMaxForks = \(\) => effectiveForkLimit\(cfg\.maxForks, ACTIVE_FORK_EDITION\)/)
+  assert.match(orchestrator, /const effectiveMaxOpenForkBrowsers = \(\) => effectiveForkWebLimit\(cfg\.maxOpenForkBrowsers, ACTIVE_FORK_EDITION\)/)
+  assert.match(forker, /maxForks: DEFAULT_MAX_FORKS/)
   assert.match(forker, /allowMultiFork: true/)
 })
 

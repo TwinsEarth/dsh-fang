@@ -5,6 +5,7 @@
 export const CLOSE_REASON_KINDS = Object.freeze([
   'user',
   'idle',
+  'capacity',
   'browser-oom',
   'dom-limit',
   'host-panic',
@@ -15,6 +16,7 @@ export function classifyCloseReason(reason) {
   const raw = String(reason ?? '').trim().toLowerCase()
   if (/^host-panic|host-panic/.test(raw)) return 'host-panic'
   if (/crash-loop/.test(raw)) return 'crash-loop'
+  if (/max-open-fork-browsers|capacity|quota/.test(raw)) return 'capacity'
   if (/dom|node-limit|dom-limit/.test(raw)) return 'dom-limit'
   if (/oom|heap-limit|memory-limit|memory-guard/.test(raw)) return 'browser-oom'
   if (/idle/.test(raw)) return 'idle'

@@ -76,9 +76,9 @@ window.__ModuleLoader__.load({
       mono: 'ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace',
     }
 
-    // v3.9.4：分身默认 8 / 硬上限 62；元主默认 3 / 硬上限 6。
-    const CAPACITY_SLOTS = 62          // 分身物理槽位硬上限
-    const CAPACITY_LIMIT = 8           // 分身默认准入配额
+    // v3.9.10：普通版 5 / 专业版 20（预留）/ 团队版 100（预留）；元主默认 3 / 硬上限 6。
+    const CAPACITY_SLOTS = 100         // 分身物理槽位硬上限（团队版预留）
+    const CAPACITY_LIMIT = 5           // 分身默认准入配额（普通版）
     const ESSENCE_CAPACITY_SLOTS = 6   // 元主物理槽位硬上限
     const ESSENCE_CAPACITY_LIMIT = 3   // 元主默认配额
     const POLL_MS = 15000           // v3.9.2：5s→15s，降低母体状态/内存接口的轮询压力
@@ -407,17 +407,22 @@ window.__ModuleLoader__.load({
       return { key: 'stopped', label: '已停止', tone: 'info', hint: status === 'archived' ? '存档保留，可启动或还原' : '进程未运行' }
     }
 
-    /** 容量投影：分身默认 8 / 硬上限 62；v3.0.5 用 tasks 数兜底并显式标注“估算”。 */
+    /** 容量投影：分身普通版 5 / 硬上限 100；v3.0.5 用 tasks 数兜底并显式标注“估算”。 */
     function projectCapacity(statusData, tasks) {
       const items = Array.isArray(tasks) ? tasks : []
       const capacity = statusData?.capacity || null
       const limit = Number(capacity?.limit ?? statusData?.tasks?.max ?? CAPACITY_LIMIT)
       const slots = Number(capacity?.slots ?? statusData?.tasks?.max ?? CAPACITY_SLOTS)
       const used = Number(capacity?.used ?? items.filter((task) => String(task.status) !== 'archived').length)
+      const browsers = capacity?.browsers || null
       return {
         slots, limit, used,
         headroom: Math.max(0, limit - used),
         slotFree: Math.max(0, slots - used),
+        browserLimit: Number(browsers?.limit ?? CAPACITY_LIMIT),
+        browserUsed: Number(browsers?.used ?? 0),
+        edition: capacity?.edition || 'standard',
+        editionLabel: capacity?.editionLabel || '普通版',
         source: capacity?.source || 'config',
         fresh: capacity?.fresh !== false,
         estimated: !capacity,
@@ -5094,6 +5099,8 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       const total = Math.max(0, Math.min(CAPACITY_SLOTS, Number(cap?.slots) || 0))
       const limit = Math.max(0, Math.min(total, Number(cap?.limit) || 0))
       const used = Math.max(0, Math.min(total, Number(cap?.used) || 0))
+      const browserLimit = Math.max(0, Number(cap?.browserLimit) || 0)
+      const browserUsed = Math.max(0, Number(cap?.browserUsed) || 0)
       for (let index = 0; index < total; index += 1) {
         const usable = index < limit
         const filled = index < used
@@ -5104,12 +5111,12 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
       }
       return h('div', {
         class: 'capacity', role: 'group',
-        'aria-label': `配额 ${cap.used}/${cap.limit}，物理槽位 ${cap.used}/${cap.slots}${cap.estimated ? '（估算）' : ''}`,
+        'aria-label': `配额 ${cap.used}/${cap.limit}，物理槽位 ${cap.used}/${cap.slots}，Web 窗口 ${browserUsed}/${browserLimit}${cap.estimated ? '（估算）' : ''}`,
         title: cap.estimated ? '宿主未提供 capacity：用任务数估算；契约升级后以服务端为准' : '服务端 capacity 快照',
       },
-      h('span', { class: 'capacity-label' }, `配额 ${used}/${limit}`),
+      h('span', { class: 'capacity-label' }, `${cap?.editionLabel || '普通版'} · 配额 ${used}/${limit}`),
       h('span', { class: 'capacity-dots', 'aria-hidden': 'true' }, ...dots),
-      h('span', { class: 'capacity-note' }, `槽位 ${used}/${total}${cap.estimated ? ' · 估算' : ''}`))
+      h('span', { class: 'capacity-note' }, `槽位 ${used}/${total} · Web ${browserUsed}/${browserLimit}${cap.estimated ? ' · 估算' : ''}`))
     }
 
     // ── 右栏：分身区 ─────────────────────────────────────────────────────
@@ -5505,7 +5512,13 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
             task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）；点任务卡「重启并解除隔离」恢复（新端口/新 token）` }) : null,
             task.browserCrash ? chip('bad', task.browserCrash.oom ? '上次崩溃于 OOM' : `上次崩溃于 exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`, { title: `上次浏览器崩溃：${task.browserCrash.oom ? 'OOM（0xE0000008）' : `exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`}；${new Date(task.browserCrash.at || Date.now()).toLocaleString()}；PID ${task.browserCrash.pid ?? '—'}${task.browserCrash.signal ? `；signal ${task.browserCrash.signal}` : ''}` }) : null,
-            task.memoryGuard ? chip(task.memoryGuard.unsavedForceClose ? 'bad' : 'warn', task.memoryGuard.unsavedForceClose ? '未保存强杀' : '内存保护关闭', { title: `${task.memoryGuard.unsavedForceClose ? '关闭前会话落盘未确认：未保存强杀；' : ''}关闭原因：${task.memoryGuard.reason || 'guard'}${task.memoryGuard.reasonKind ? `（${task.memoryGuard.reasonKind}）` : ''}；PID ${task.memoryGuard.pid ?? '—'}；主机 Commit 余量 ${task.memoryGuard.metrics?.hostCommitFreeMB ?? '—'} MB；会话 home 保留，必须手动重新打开，不会自动重开` }) : null,
+            task.memoryGuard ? chip(
+              task.memoryGuard.reasonKind === 'capacity' ? 'warn' : (task.memoryGuard.unsavedForceClose ? 'bad' : 'warn'),
+              task.memoryGuard.reasonKind === 'capacity'
+                ? '并发配额关闭'
+                : (task.memoryGuard.unsavedForceClose ? '未保存强杀' : '内存保护关闭'),
+              { title: `${task.memoryGuard.unsavedForceClose ? '关闭前会话落盘未确认：未保存强杀；' : ''}关闭原因：${task.memoryGuard.reason || 'guard'}${task.memoryGuard.reasonKind ? `（${task.memoryGuard.reasonKind}）` : ''}；PID ${task.memoryGuard.pid ?? '—'}；主机 Commit 余量 ${task.memoryGuard.metrics?.hostCommitFreeMB ?? '—'} MB；会话 home 保留，必须手动重新打开，不会自动重开` }
+            ) : null,
             task.sessions?.violation ? chip('warn', `会话 ${task.sessions.count}/${task.sessions.max} 超限`, { title: '分身会话超过上限；打开/修复不会再自动搬移，需手动归档或 enforce' }) : null,
             task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
@@ -5523,7 +5536,9 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             : [task.quarantined ? null : button(task.memoryGuard ? '重新打开' : '打开', {
               size: 'sm', variant: 'ghost', icon: icon('external', 12), iconAfter: true, dataBtnId: 'C-01',
               title: task.memoryGuard
-                ? `因内存保护关闭（${task.memoryGuard.reason || 'guard'}）：host 与会话已保留，点此重新打开；不会自动重开`
+                ? (task.memoryGuard.reasonKind === 'capacity'
+                  ? `因并发配额关闭（${task.memoryGuard.reason || 'guard'}）：按 LRU 顶掉了旧窗口，host 与会话已保留，点此重新打开；不会自动重开`
+                  : `因内存保护关闭（${task.memoryGuard.reason || 'guard'}）：host 与会话已保留，点此重新打开；不会自动重开`)
                 : '在新标签页打开分身 Web UI（URL 打开时向宿主换取，不落盘）',
               onClick: () => void app.openTask(task),
               fk: 'open:' + taskId,

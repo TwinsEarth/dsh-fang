@@ -77,7 +77,7 @@ forks/<forkId>/ 每个分身的 $DSH_HOME（内含自己的 profiles/、fang/、
 ```
 POST /fang/api/forks/create {taskTitle}
   → orchestrator.fork()
-      1. 配额检查（maxForks，默认 8）
+      1. 配额检查（maxForks：普通版 5 / 专业版 20 预留 / 团队版 100 预留）
       2. forker.provision()：建 homeDir；克隆 profileTemplate 的 package.json + cordis*.yml；
          node_modules = junction(母版 profile/node_modules)
       3. forker.spawn()：spawn(cliPath, ['--profile',<profile>,'--port','0','--no-open'], {env:{DSH_HOME: homeDir}})

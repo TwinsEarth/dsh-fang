@@ -410,5 +410,7 @@ export async function killProcessTree(rootPid) {
 }
 
 export function memoryGuardDefaults() {
-  return { enabled: true, minFreeMB: 4096, watchdogEnabled: true, watchIntervalMs: 30000, killCommitMB: 2048, growCommitMB: 768, singleActiveFork: true }
+  // v3.9.10: a healthy host must not be forced into single-fork mode by default.
+  // `singleActiveFork` stays an explicit emergency switch, not an implicit quota.
+  return { enabled: true, minFreeMB: 4096, watchdogEnabled: true, watchIntervalMs: 30000, killCommitMB: 2048, growCommitMB: 768, singleActiveFork: false }
 }

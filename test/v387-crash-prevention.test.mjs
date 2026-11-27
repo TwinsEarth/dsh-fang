@@ -41,10 +41,11 @@ test('v3.8.13: pagefile boot policy is advisory and never forces Safe Mode', () 
   assert.equal(orchestrator.decidePagefileBootPolicy(withPagefile).singleForkOnly, false)
 })
 
-test('v3.8.7: close reasons collapse to the six operator-visible kinds', () => {
-  assert.deepEqual(CLOSE_REASON_KINDS, ['user', 'idle', 'browser-oom', 'dom-limit', 'host-panic', 'crash-loop'])
+test('v3.9.10: close reasons include capacity and collapse to operator-visible kinds', () => {
+  assert.deepEqual(CLOSE_REASON_KINDS, ['user', 'idle', 'capacity', 'browser-oom', 'dom-limit', 'host-panic', 'crash-loop'])
   assert.equal(classifyCloseReason('user'), 'user')
   assert.equal(classifyCloseReason('idle-hidden'), 'idle')
+  assert.equal(classifyCloseReason('max-open-fork-browsers'), 'capacity')
   assert.equal(classifyCloseReason('browser-memory-limit'), 'browser-oom')
   assert.equal(classifyCloseReason('browser-heap-limit'), 'browser-oom')
   assert.equal(classifyCloseReason('browser-dom-limit'), 'dom-limit')
@@ -110,10 +111,10 @@ test('v3.8.7: browser crashes log raw exit/OOM/last metrics and 10m twice quaran
   assert.match(orchestratorSource, /exit\.kind !== 'normal'/)
 })
 
-test('v3.9.4: status exposes pagefile fields without hard-limiting browsers or forks', () => {
+test('v3.9.10: status exposes pagefile fields without hard-limiting browsers or forks', () => {
   assert.match(orchestratorSource, /pageFileMB: Number\(memorySnapshot\?\.pageFileMB\) \|\| 0/)
   assert.match(orchestratorSource, /hasPageFile: memorySnapshot\?\.hasPageFile === true/)
-  assert.match(orchestratorSource, /const max = Math\.max\(1, Number\(cfg\.maxOpenForkBrowsers\) \|\| 1\)/)
+  assert.match(orchestratorSource, /const max = effectiveMaxOpenForkBrowsers\(\)/)
   assert.equal(orchestratorSource.includes('Native pagefile policy outranks maxOpenForkBrowsers'), false)
   assert.ok(clientSource.includes('未启用页面文件 · 仅提醒，不限制分身'))
   assert.equal(clientSource.includes('未启用页面文件，已强制单分身'), false)

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// v3.9.4 closure tests: essence quota 3/6, fork slots 8/62, SafeMode 2345/999,
+// v3.9.4 closure tests: essence quota 3/6, fork slots 5/100 (v3.9.10), SafeMode 2345/999,
 // pagefile advisory-only, message inbox, and profile bundle modules manifest.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -31,14 +31,14 @@ test('v3.9.4: essence quota is 3 by default and hard-capped at 6 for every tier'
   assert.match(orchestratorSource, /capacity: \{ slots: ESSENCE_HARD_MAX, hardMax: ESSENCE_HARD_MAX, defaultLimit: ESSENCE_QUOTA_DEFAULT/)
 })
 
-test('v3.9.4: fork capacity defaults to 8 and hard-caps at 62', () => {
-  assert.equal(DEFAULT_MAX_FORKS, 8)
-  assert.equal(HARD_MAX_FORKS, 62)
-  assert.equal(Config({}).maxForks, 8)
-  assert.equal(Config({ maxForks: 62 }).maxForks, 62)
-  assert.match(orchestratorSource, /capacity: \{[\s\S]{0,180}hardMax: HARD_MAX_FORKS/)
-  assert.match(client, /const CAPACITY_SLOTS = 62/)
-  assert.match(client, /const CAPACITY_LIMIT = 8/)
+test('v3.9.10: fork capacity defaults to 5 and hard-caps at 100', () => {
+  assert.equal(DEFAULT_MAX_FORKS, 5)
+  assert.equal(HARD_MAX_FORKS, 100)
+  assert.equal(Config({}).maxForks, 5)
+  assert.equal(Config({ maxForks: 100 }).maxForks, 100)
+  assert.match(orchestratorSource, /capacity: \{[\s\S]{0,220}hardMax: HARD_MAX_FORKS/)
+  assert.match(client, /const CAPACITY_SLOTS = 100/)
+  assert.match(client, /const CAPACITY_LIMIT = 5/)
   assert.match(client, /const ESSENCE_CAPACITY_SLOTS = 6/)
   assert.match(client, /const ESSENCE_CAPACITY_LIMIT = 3/)
 })
