@@ -43,14 +43,18 @@ v3.9.6 的发布说明只覆盖 `fork-health` 的 200/300/500 MB、3000/3600/390
 
 全量：
 
-- `E:\DBH\fang-report\test-397-final.log`：待构建阶段补录
+- `E:\DBH\fang-report\test-397-final.log`：1566 tests / 1511 pass / 32 fail / 13 skipped / 10 todo
+- 32 条失败中，30 条为既有 `orchestrator.test.mjs` 临时夹具缺真实 bundle 的 `fork-bundle-unavailable`；
+- 另 2 条为 `forker.test.mjs` 的 `reap stops...` / `dataRoot persists...`：`taskkill /T /F` 后 `run\job-object.log` 句柄释放竞态，`reap` 返回 `removed:true` 但目录尚未完全消失；与本版阈值改动无关，单独重跑仍复现，未纳入本版修复范围。
+- 本版新增/修改的 host-pressure、版本、README、docs 断言全部通过。
 
 ## 五、构建与部署
 
 - 构建：`node tools/release/build.mjs --skip-preflight`
-- tarball：`dist/dsh-fang-3.9.7.tgz`
-- 构建的 `manifest.preflight` 会记录 `skipped:true / green:false`，不得表述为 preflight GREEN。
-- 本机 profile 部署后必须完全退出并重启 DSH Desktop 才会加载新代码。
+- tarball：`dist/dsh-fang-3.9.7.tgz`（934,612 bytes）
+- SHA-256：`cb092df4992bbb88222ae68028d1adcde8db87fb317c9f154f87e600957647e2`
+- 构建的 `manifest.preflight` 记录 `skipped:true / green:false / reason:"--skip-preflight"`，不得表述为 preflight GREEN。
+- 本机 profile 已部署 `@twinsearth/fang-dsh-plugin@3.9.7`，部署 digest `f4feac8b2ff577917bb4c0f2e91b4a7460e0f8d8ec8b86651cef8f7e034d78ba`；部署后必须完全退出并重启 DSH Desktop 才会加载新代码。
 
 ## 六、未覆盖
 
