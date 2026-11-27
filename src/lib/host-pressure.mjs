@@ -16,12 +16,14 @@ export const HOST_HEAP_DEFAULTS = Object.freeze({
 })
 
 export const SESSION_FOOTPRINT_DEFAULTS = Object.freeze({
-  warnMB: 512,
-  criticalMB: 1024,
-  emergencyMB: 2048,
-  fileWarnMB: 16,
-  fileCriticalMB: 32,
-  fileEmergencyMB: 64,
+  // v3.9.7: align host-pressure session thresholds with the confirmed
+  // fork-health policy (200/300/500 MB per file; 3000/3600/3900 MB total).
+  warnMB: 3000,
+  criticalMB: 3600,
+  emergencyMB: 3900,
+  fileWarnMB: 200,
+  fileCriticalMB: 300,
+  fileEmergencyMB: 500,
 })
 
 function positiveMB(value, fallback) {
@@ -111,9 +113,11 @@ export function evaluateHostHeap(metrics = {}, limits = null) {
 }
 
 function levelForMB(value, thresholds) {
-  if (value >= thresholds.emergencyMB) return 'emergency'
-  if (value >= thresholds.criticalMB) return 'critical'
-  if (value >= thresholds.warnMB) return 'warn'
+  // Exact threshold values stay in the lower band, matching fork-health's
+  // `>` semantics: 200/300/500 MB and 3000/3600/3900 MB are not crossed yet.
+  if (value > thresholds.emergencyMB) return 'emergency'
+  if (value > thresholds.criticalMB) return 'critical'
+  if (value > thresholds.warnMB) return 'warn'
   return 'ok'
 }
 
@@ -171,7 +175,7 @@ export function evaluateSessionFootprint(footprint = {}, limits = {}) {
     reasons,
     // A hard gate is driven by the largest single file, not by total bytes.
     // Many small archived sessions can make the total large without making the
-    // next Host open dangerous; one 64 MB+ log is the actual heap risk.
+    // next Host open dangerous; one 500 MB+ log is the actual heap risk.
     gate: fileLevel === 'emergency',
     totalGate: totalLevel === 'emergency',
     thresholds,

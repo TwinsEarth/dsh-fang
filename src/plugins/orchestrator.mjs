@@ -369,17 +369,17 @@ export const Config = z.object({
     .description('是否周期盘点 Host/分身 sessions 下的 session.v4.jsonl.zstd 体量（只读 stat）'),
   sessionFootprintIntervalMs: z.number().min(5000).max(86400000).default(60000)
     .description('session 体量盘点间隔（毫秒）；默认 60s，避免每次 host tick 都扫目录'),
-  sessionFootprintWarnMB: z.number().min(0).max(1048576).default(512)
+  sessionFootprintWarnMB: z.number().min(0).max(1048576).default(3000)
     .description('全部 session 文件合计警告阈值（MB）'),
-  sessionFootprintCriticalMB: z.number().min(0).max(1048576).default(1024)
+  sessionFootprintCriticalMB: z.number().min(0).max(1048576).default(3600)
     .description('全部 session 文件合计严重阈值（MB）'),
-  sessionFootprintEmergencyMB: z.number().min(0).max(1048576).default(2048)
+  sessionFootprintEmergencyMB: z.number().min(0).max(1048576).default(3900)
     .description('全部 session 文件合计紧急阈值（MB）；超过后只审计/横幅提示，单文件紧急线才拒绝新分身/新浏览器'),
-  sessionFileWarnMB: z.number().min(0).max(1048576).default(16)
+  sessionFileWarnMB: z.number().min(0).max(1048576).default(200)
     .description('单个 session.v4 文件警告阈值（MB）'),
-  sessionFileCriticalMB: z.number().min(0).max(1048576).default(32)
+  sessionFileCriticalMB: z.number().min(0).max(1048576).default(300)
     .description('单个 session.v4 文件严重阈值（MB）'),
-  sessionFileEmergencyMB: z.number().min(0).max(1048576).default(64)
+  sessionFileEmergencyMB: z.number().min(0).max(1048576).default(500)
     .description('单个 session.v4 文件紧急阈值（MB）；超过后拒绝新分身/新浏览器'),
   memoryWatchdog: z.boolean().default(true)
     .description('定时采样每个分身的 PID 树/Commit，异常增长时只杀该分身'),
