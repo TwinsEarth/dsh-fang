@@ -57,39 +57,77 @@ test('v3.8.14 host heap levels map to warn/critical/emergency', () => {
   assert.equal(evaluateHostHeap({}, limits).skipped, 'no-heap-metric')
 })
 
-test('v3.8.14 session footprint uses total and largest file independently', () => {
+test('v3.9.7 host-pressure session thresholds align with fork health', () => {
+  const MB = 1024 * 1024
   const thresholds = { ...SESSION_FOOTPRINT_DEFAULTS }
-  assert.equal(SESSION_FOOTPRINT_DEFAULTS.fileEmergencyMB, 64)
+  assert.deepEqual(thresholds, {
+    warnMB: 3000,
+    criticalMB: 3600,
+    emergencyMB: 3900,
+    fileWarnMB: 200,
+    fileCriticalMB: 300,
+    fileEmergencyMB: 500,
+  })
 
-  const total = evaluateSessionFootprint({ bytes: 5000 * 1024 * 1024, files: 3, largestBytes: 10 * 1024 * 1024 }, thresholds)
+  const at = (totalMB, largestMB) => evaluateSessionFootprint({
+    bytes: Math.round(totalMB * MB),
+    files: 3,
+    largestBytes: Math.round(largestMB * MB),
+  }, thresholds)
+
+  const total = at(4000, 10)
   assert.equal(total.level, 'emergency')
   assert.equal(total.gate, false)
   assert.equal(total.totalGate, true)
 
-  const single = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: 40 * 1024 * 1024 }, thresholds)
+  const single = at(500, 340)
   assert.equal(single.level, 'critical')
   assert.equal(single.gate, false)
 
-  // B2 boundary: the observed 60.91 MB session must not trip the single-file gate.
-  const observed6091 = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: Math.round(60.91 * 1024 * 1024) }, thresholds)
-  assert.equal(observed6091.level, 'critical')
-  assert.equal(observed6091.gate, false)
+  // The observed host banner used 365.5 MB total / 60.9 MB largest. Under the
+  // confirmed policy both values are comfortably below the warning lines.
+  const observed = at(365.5, 60.9)
+  assert.equal(observed.level, 'ok')
+  assert.equal(observed.gate, false)
 
-  // 64 MB is the new single-file emergency line; total gate remains independent.
-  const at64 = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: 64 * 1024 * 1024 }, thresholds)
-  assert.equal(at64.level, 'emergency')
-  assert.equal(at64.gate, true)
-  assert.equal(at64.totalGate, false)
+  // Exact threshold values remain in the lower band (`>` semantics).
+  const atWarnBoundary = at(3000, 200)
+  assert.equal(atWarnBoundary.level, 'ok')
+  assert.equal(atWarnBoundary.gate, false)
 
-  const fileEmergency = evaluateSessionFootprint({ bytes: 200 * 1024 * 1024, files: 3, largestBytes: 70 * 1024 * 1024 }, thresholds)
-  assert.equal(fileEmergency.level, 'emergency')
-  assert.equal(fileEmergency.gate, true)
+  const aboveWarn = at(3001, 200.1)
+  assert.equal(aboveWarn.level, 'warn')
+  assert.equal(aboveWarn.gate, false)
+  assert.ok(aboveWarn.reasons.includes('session-total-warn'))
+  assert.ok(aboveWarn.reasons.includes('session-file-warn'))
 
-  const warn = evaluateSessionFootprint({ bytes: 60 * 1024 * 1024, files: 3, largestBytes: 20 * 1024 * 1024 }, thresholds)
-  assert.equal(warn.level, 'warn')
-  assert.equal(warn.gate, false)
+  const atCriticalBoundary = at(3600, 300)
+  assert.equal(atCriticalBoundary.level, 'warn')
+  assert.equal(atCriticalBoundary.gate, false)
 
-  const ok = evaluateSessionFootprint({ bytes: 16 * 1024 * 1024, files: 3, largestBytes: 10 * 1024 * 1024 }, thresholds)
+  const aboveCritical = at(3601, 300.1)
+  assert.equal(aboveCritical.level, 'critical')
+  assert.equal(aboveCritical.gate, false)
+
+  const atEmergencyBoundary = at(3000, 500)
+  assert.equal(atEmergencyBoundary.level, 'critical')
+  assert.equal(atEmergencyBoundary.gate, false)
+
+  const aboveEmergency = at(3000, 500.1)
+  assert.equal(aboveEmergency.level, 'emergency')
+  assert.equal(aboveEmergency.gate, true)
+
+  const totalAtBoundary = at(3900, 10)
+  assert.equal(totalAtBoundary.level, 'critical')
+  assert.equal(totalAtBoundary.gate, false)
+  assert.equal(totalAtBoundary.totalGate, false)
+
+  const totalAboveBoundary = at(3901, 10)
+  assert.equal(totalAboveBoundary.level, 'emergency')
+  assert.equal(totalAboveBoundary.gate, false)
+  assert.equal(totalAboveBoundary.totalGate, true)
+
+  const ok = at(100, 20)
   assert.equal(ok.level, 'ok')
 })
 
@@ -183,7 +221,7 @@ test('v3.8.14 source wiring: host heap/session scan, gate, and all-drive probe',
   assert.match(orchestrator, /hostJsHeapEmergencyStreak: z\.number\(\)/)
   assert.match(orchestrator, /sessionFootprintEnabled: z\.boolean\(\)/)
   assert.match(orchestrator, /sessionFileCriticalMB: z\.number\(\)/)
-  assert.match(orchestrator, /sessionFileEmergencyMB: z\.number\(\)\.min\(0\)\.max\(1048576\)\.default\(64\)/)
+  assert.match(orchestrator, /sessionFileEmergencyMB: z\.number\(\)\.min\(0\)\.max\(1048576\)\.default\(500\)/)
   assert.match(orchestrator, /const sampleHostHeap = \(\) =>/)
   assert.match(orchestrator, /v8\.getHeapStatistics\(\)/)
   assert.match(orchestrator, /scanSessionFootprint\(/)

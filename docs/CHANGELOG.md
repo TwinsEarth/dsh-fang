@@ -1,3 +1,35 @@
+## v3.9.8（2026-11-27）
+**主题：打开分身热修：fork 公开健康探针 + 一键修复 bundle 复检**
+
+### 根因
+- `GET /fang/api/health` 只由 `orchestrator` 注册，而 `orchestrator` 的 `roleGate` 只在 mother 激活；分身进程实际加载的是 adapter。`probeForkHealth()` 先请求 `/fang/api/health` 得 404，再回退到 DSH 核心受保护的 `/api/health` 得 401，最终报 `fork-health-endpoint-unavailable`，即使 session 与 adapter 均正常。
+- `restoreTask()` 与 `autostartForks()` 在 `syncForkCoreMode()`/`provision()` 之前检查 `forkBundlePath()`。一键修复 `resetForkConfig` 后 profile 的 `node_modules/@twinsearth` 缺失，守卫直接返回 `fork-bundle-unavailable`，provision 永远没有机会重建镜像。
+
+### 修复
+- adapter 在 fork 角色注册公开 `GET <prefix>/api/health`（默认 `/fang/api/health`），返回 `ok/role/version/pid/taskId/sessionId/uptimeMs/adapter`；仍执行 loopback Host / Origin / Sec-Fetch-Site 校验，但公开只读不要求 Bearer。
+- restore 将 bundle 检查移到 `syncForkCoreMode(task,{force:true})` 之后；autostart 在 bundle 缺失时强制 provision，随后复查 bundle。`fork-bundle-unavailable` 不再阻断一键修复的 node_modules 重建。
+- v3.9.7 的宿主压力阈值 200/300/500 MB、3000/3600/3900 MB 不变。
+
+### 测试
+- `test/adapter.test.mjs` 43/43 PASS，新增 fork `/fang/api/health` 公开探针形状与 token 不泄露断言。
+- 真机 fork 模板复现：3.9.7 下 `/fang/adapter/identity` 200、`/fang/api/health` 404、`/api/health` 401；3.9.8 构建后 `/fang/api/health` 200。
+
+## v3.9.7（2026-11-27）
+**主题：宿主压力阈值对齐版：宿主压力横幅与准入改用 200/300/500 MB + 3000/3600/3900 MB**
+
+### 根因
+- v3.9.6 只修改了 `fork-health.mjs` 的分身打开门禁；`host-pressure.mjs` 的宿主 session 体量守卫仍保留旧的 512/1024/2048 MB 合计线与 16/32/64 MB 单文件线。重启宿主后，365.5 MB 合计 / 60.9 MB 单文件的真实会话仍显示“宿主压力预警”，与 v3.9.6 已确认的新阈值不一致。
+
+### 修复
+- `SESSION_FOOTPRINT_DEFAULTS` 改为合计 `3000/3600/3900 MB`、单文件 `200/300/500 MB`。
+- `orchestrator` 六个 `sessionFootprint*` / `sessionFile*` schema 默认值同步改为新阈值；配置覆盖仍可用。
+- session 体量等级改为严格 `>`：恰好 200/300/500 MB、3000/3600/3900 MB 仍属较低一档；超过 500 MB 单文件或 3900 MB 合计才进入 emergency。
+- Host JS heap 的 1024/1536/2048 MB 阈值保持不变，本版只对齐 session 体量阈值。
+
+### 测试
+- 定向 `test/v3814-host-guard.test.mjs` 6/6 PASS；覆盖 365.5 MB / 60.9 MB 不再预警、200/300/500 MB 与 3000/3600/3900 MB 精确边界、单文件 gate 与合计 totalGate 分离。
+- `test/v386-crash-closures.test.mjs` + `test/v387-crash-prevention.test.mjs` 19/19 PASS，v3.9.6 的分身健康与多帧 zstd 修复未回归。
+
 ## v3.9.6（2026-11-27）
 **主题：会话健康阈值版：多帧 zstd 崩溃修复 + 200/300/500 MB 单文件与 3000/3600/3900 MB 合计阈值**
 

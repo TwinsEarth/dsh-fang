@@ -1382,6 +1382,25 @@ export function apply(ctx, config) {
       handler: (req, res) => json(res, 200, reportClient()),
     })
     try { service.routes.push(`${prefix}${ADAPTER_ROUTE.CLIENT_REPORT}`) } catch { /* fake ws */ }
+    // v3.9.8：fork 角色不加载 orchestrator（roleGate 只在 mother 激活），
+    // 因此 orchestrator 的 GET /<prefix>/api/health 在分身进程里不存在。
+    // 打开分身前的 probeForkHealth() 固定请求该路径；这里由 fork 必装的 adapter
+    // 提供同路径公开存活探针，避免 /fang/api/health 404 后回退到受保护的核心
+    // /api/health 得到 401（fork-health-endpoint-unavailable）。
+    webServer.register({
+      kind: 'exact',
+      path: `${prefix}/api/health`,
+      method: 'GET',
+      handler: (req, res) => {
+        // 公开只读，但仍保留 loopback Host / Origin / Sec-Fetch-Site 校验。
+        const decision = checkRequestAuth(req, { token: adapterToken, publicRoute: true })
+        if (!decision.ok) {
+          return json(res, decision.status, { ...authErrorBody(decision), path: `${prefix}/api/health` })
+        }
+        return json(res, 200, { ...health(), role: 'fork', adapter: { ok: true } })
+      },
+    })
+    try { service.routes.push(`${prefix}/api/health`) } catch { /* fake ws */ }
     const route = (method, routePath, handler) => {
       webServer.register({
         kind: 'exact',

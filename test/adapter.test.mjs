@@ -243,6 +243,7 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
   assert.deepEqual(ws.paths(), [
     routePath(ADAPTER_ROUTE.IDENTITY),
     routePath(ADAPTER_ROUTE.CLIENT_REPORT),
+    `${PREFIX}/api/health`,
     routePath(ADAPTER_ROUTE.HELLO),
     routePath(ADAPTER_ROUTE.STATUS),
     routePath(ADAPTER_ROUTE.ACTIVITY),
@@ -255,7 +256,7 @@ test('fork 角色: 服务/路由/形状符合 CONTRACTS-V2 §5.1', () => {
     routePath(ADAPTER_ROUTE.STATE),
     routePath(ADAPTER_ROUTE.COMMANDS),
     routePath(ADAPTER_ROUTE.EVENTS),
-  ], '14 条路由 = identity + client-report + v2 五条 + activity + flush-session + v3 五条，顺序与 ADAPTER_ROUTE 常量一致')
+  ], '15 条路由 = identity + client-report + fork 健康探针 + v2 五条 + activity + flush-session + v3 五条，顺序与注册顺序一致')
   assert.deepEqual(service.routes, ws.paths(), 'service.routes 暴露已注册路径（测试用）')
   for (const route of ws.routes) assert.equal(route.kind, 'exact')
 
@@ -298,10 +299,26 @@ test('hello(): role/taskId/version/capabilities；taskId 取 environ / 配置优
   configWins.ctx.dispose()
 })
 
+test('fork public health: GET /fang/api/health 200, ok/role/taskId/adapter 不含 token', async () => {
+  const { ctx, ws } = applyAsFork({ taskId: 'task_health' }, {}, { env: { DSH_ADAPTER_TOKEN: '' } })
+  const route = ws.find('GET', '/fang/api/health')
+  assert.ok(route, 'fork 必须注册 /fang/api/health（v3.9.8）')
+  const res = makeRes()
+  await route.handler(makeReq(), res)
+  assert.equal(res.statusCode, 200)
+  const body = res.json()
+  assert.equal(body.ok, true)
+  assert.equal(body.role, 'fork')
+  assert.equal(body.taskId, 'task_health')
+  assert.deepEqual(body.adapter, { ok: true })
+  assert.equal(JSON.stringify(body).includes('token'), false, '健康响应不得泄露 token')
+  ctx.dispose()
+})
+
 test('Config.prefix 生效（与母体 Remote.prefix 对齐）', () => {
   const { ctx, ws } = applyAsFork({ prefix: '/x/' })
   assert.deepEqual(ws.paths(), [
-    '/x/adapter/identity', '/x/adapter/client-report', '/x/adapter/hello', '/x/adapter/status', '/x/adapter/activity', '/x/adapter/flush-session', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
+    '/x/adapter/identity', '/x/adapter/client-report', '/x/api/health', '/x/adapter/hello', '/x/adapter/status', '/x/adapter/activity', '/x/adapter/flush-session', '/x/adapter/approvals', '/x/adapter/audit', '/x/adapter/command',
     '/x/adapter/version', '/x/adapter/health', '/x/adapter/state', '/x/adapter/commands', '/x/adapter/events',
   ])
   ctx.dispose()
