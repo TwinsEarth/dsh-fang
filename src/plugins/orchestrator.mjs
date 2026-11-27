@@ -393,9 +393,19 @@ export const Config = z.object({
     .description('分身健康检查路径；留空=按 routes.prefix 推导 /<prefix>/api/health'),
   forkHealthTimeoutMs: z.number().min(100).max(30000).default(2000)
     .description('分身健康检查超时（毫秒）'),
-  forkHealthMaxSessionMB: z.number().min(1).max(4096).default(20)
-    .description('打开前允许的最大单会话文件（MB）；超过即拒绝打开并要求归档/压缩'),
-  forkHealthMaxEvents: z.number().min(1).max(10000000).default(20000)
+  forkHealthMaxSessionMB: z.number().min(1).max(4096).default(500)
+    .description('单文件硬上限（MB）；超过即拒绝打开'),
+  forkHealthWarnSessionMB: z.number().min(1).max(4096).default(200)
+    .description('单文件警戒线（MB）；超过显示警告但允许打开'),
+  forkHealthConfirmSessionMB: z.number().min(1).max(4096).default(300)
+    .description('单文件二次确认线（MB）；超过需用户确认'),
+  forkHealthWarnTotalMB: z.number().min(1).max(4096).default(3000)
+    .description('分身内会话合计警戒线（MB）；超过显示警告'),
+  forkHealthConfirmTotalMB: z.number().min(1).max(4096).default(3600)
+    .description('分身内会话合计二次确认线（MB）；超过需用户确认'),
+  forkHealthHardTotalMB: z.number().min(1).max(4096).default(3900)
+    .description('分身内会话合计硬上限（MB）；超过即拒绝打开'),
+  forkHealthMaxEvents: z.number().min(1).max(10000000).default(1000000)
     .description('打开前允许的最大单会话事件数；超过或扫描截断即拒绝打开并要求归档/压缩'),
   forkFlushTimeoutMs: z.number().min(100).max(30000).default(3000)
     .description('关闭浏览器前等待 fork flush 的总预算（毫秒；超时按 unsupported/未确认处理，不假装保存）'),
@@ -1863,7 +1873,7 @@ export function apply(ctx, config) {
     return { ok: true, quarantined: true, taskId: task.taskId, reason }
   }
 
-  const inspectTaskOpenHealth = async (task) => {
+  const inspectTaskOpenHealth = async (task, options = {}) => {
     if (cfg.forkHealthGate !== true) return { ok: true, skipped: 'disabled' }
     // 元主 runtime browser 不是任务，没有 task.adapter/port；它的存活由 forker
     // 的 live 状态保证，不能套用分身的 task health gate。
@@ -1875,6 +1885,11 @@ export function apply(ctx, config) {
     try {
       session = await inspectForkSessionHealth(task.homeDir, {
         maxSessionMB: cfg.forkHealthMaxSessionMB,
+        warnSessionMB: cfg.forkHealthWarnSessionMB,
+        confirmSessionMB: cfg.forkHealthConfirmSessionMB,
+        warnTotalMB: cfg.forkHealthWarnTotalMB,
+        confirmTotalMB: cfg.forkHealthConfirmTotalMB,
+        hardTotalMB: cfg.forkHealthHardTotalMB,
         maxEvents: cfg.forkHealthMaxEvents,
       })
     } catch (error) {
@@ -1898,7 +1913,16 @@ export function apply(ctx, config) {
       session,
       adapter,
       http,
-      limits: { maxSessionMB: cfg.forkHealthMaxSessionMB, maxEvents: cfg.forkHealthMaxEvents },
+      limits: {
+        maxSessionMB: cfg.forkHealthMaxSessionMB,
+        warnSessionMB: cfg.forkHealthWarnSessionMB,
+        confirmSessionMB: cfg.forkHealthConfirmSessionMB,
+        warnTotalMB: cfg.forkHealthWarnTotalMB,
+        confirmTotalMB: cfg.forkHealthConfirmTotalMB,
+        hardTotalMB: cfg.forkHealthHardTotalMB,
+        maxEvents: cfg.forkHealthMaxEvents,
+        confirmed: options.confirmLargeSession === true,
+      },
     })
     // A successful fork health response may advertise the real flush endpoint.
     // Never invent one: if it is absent, close will record flush=unsupported.
@@ -1917,6 +1941,8 @@ export function apply(ctx, config) {
         largestSessionId: session.largestSessionId ?? null,
         events: session.events,
         truncated: session.truncated === true,
+        scanSkipped: session.scanSkipped === true,
+        policy: session.policy ?? null,
       } : null,
       http: http ? {
         ok: http.ok === true,
@@ -1929,6 +1955,13 @@ export function apply(ctx, config) {
       adapter,
     }
     try { appendJsonlRotated(path.join(layout.dataDir, 'browser-health.jsonl'), healthRecord, diagnosticLogOptions()) } catch { /* diagnostics only */ }
+    if (decision.requiresConfirmation && decision.confirmed !== true) {
+      audit('fork-open-session-confirmation-required', {
+        taskId: task.taskId,
+        detail: decision.detail,
+        sessionPolicy: decision.sessionPolicy,
+      })
+    }
     if (decision.ok !== true) {
       audit('fork-open-health-refused', {
         taskId: task.taskId,
@@ -1942,7 +1975,7 @@ export function apply(ctx, config) {
     return { ...decision, healthRecord }
   }
 
-  const launchTaskBrowser = async (task, url) => {
+  const launchTaskBrowser = async (task, url, options = {}) => {
     const admission = await ensureHostAdmission()
     if (admission.ok !== true) return admission
     const pressure = currentPressureGate()
@@ -1959,13 +1992,17 @@ export function apply(ctx, config) {
       task.memoryGuard = null
       return { ok: true, managed: true, pid: task.browser.pid, port: task.browser.port, reused: true }
     }
-    const health = await inspectTaskOpenHealth(task)
+    const health = await inspectTaskOpenHealth(task, options)
     if (health.ok !== true) {
       return {
         ok: false,
         error: health.error ?? 'fork-health-refused',
         step: 'fork-health',
         detail: health.detail ?? null,
+        requiresConfirmation: health.requiresConfirmation === true,
+        sessionPolicy: health.sessionPolicy ?? null,
+        warnings: health.warnings ?? [],
+        sessionWarning: health.warning ?? null,
         health: {
           ok: false,
           failures: health.failures,
@@ -2061,7 +2098,14 @@ export function apply(ctx, config) {
       const event = !priority.ok ? 'fork-browser-priority-failed' : priority.partial ? 'fork-browser-priority-partial' : 'fork-browser-priority'
       audit(event, { taskId: task.taskId, ...priority })
     }
-    return { ok: true, managed: true, pid: launched.pid, port: launched.port }
+    return {
+      ok: true,
+      managed: true,
+      pid: launched.pid,
+      port: launched.port,
+      sessionWarning: health.warning ?? null,
+      sessionPolicy: health.sessionPolicy ?? null,
+    }
   }
 
   /** Managed browser for the essence runtime (元主 Web), which is not a task. */
@@ -5342,6 +5386,11 @@ export function apply(ctx, config) {
         try {
           session = await inspectForkSessionHealth(home, {
             maxSessionMB: cfg.forkHealthMaxSessionMB,
+            warnSessionMB: cfg.forkHealthWarnSessionMB,
+            confirmSessionMB: cfg.forkHealthConfirmSessionMB,
+            warnTotalMB: cfg.forkHealthWarnTotalMB,
+            confirmTotalMB: cfg.forkHealthConfirmTotalMB,
+            hardTotalMB: cfg.forkHealthHardTotalMB,
             maxEvents: cfg.forkHealthMaxEvents,
           })
         } catch (error) {
@@ -5379,11 +5428,11 @@ export function apply(ctx, config) {
       }
     },
 
-    openManagedBrowser: async (taskId, url) => {
+    openManagedBrowser: async (taskId, url, options = {}) => {
       const task = tasks.get(String(taskId ?? ''))
       if (!task) return { ok: false, error: 'unknown-task' }
       if (task.quarantined) return { ok: false, error: 'fork-quarantined', detail: task.quarantined.reason ?? 'guard' }
-      return launchTaskBrowser(task, String(url ?? task.url ?? ''))
+      return launchTaskBrowser(task, String(url ?? task.url ?? ''), options)
     },
     closeManagedBrowser: async (taskId, reason = 'user') => {
       const task = tasks.get(String(taskId ?? ''))
@@ -7997,9 +8046,17 @@ export function apply(ctx, config) {
         // through the managed, measurable browser. If it cannot start, fail the
         // open explicitly and keep the URL server-side for a later retry.
         try {
-          const browser = await service.openManagedBrowser(taskId, out.url)
+          const browser = await service.openManagedBrowser(taskId, out.url, {
+            confirmLargeSession: body?.confirmLargeSession === true,
+          })
           if (browser?.ok === true) return json(res, 200, { ...out, ...browser, managed: true })
           const error = browser?.error ?? 'browser-unavailable'
+          if (error === 'fork-session-confirmation-required') {
+            return json(res, 409, { ...out, ...browser, ok: false, error, requiresConfirmation: true })
+          }
+          if (error === 'fork-health-session-hard-limit') {
+            return json(res, 409, { ...out, ...browser, ok: false, error })
+          }
           audit('fork-browser-open-refused', { taskId, error })
           return json(res, 503, { ...out, ok: false, error, browserError: error, managed: false })
         } catch (error) {
