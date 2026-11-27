@@ -10,7 +10,8 @@
       config:
         orchestrator:
           role: mother
-          maxForks: 8
+          maxForks: 5
+          maxOpenForkBrowsers: 5
           motherProfile: web
         restartGuard:
           mode: observe

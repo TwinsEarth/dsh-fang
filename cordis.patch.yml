@@ -16,7 +16,7 @@
         cliPath: ''
         profileTemplate: ''
         startTimeoutMs: 60000
-        maxForks: 8
+        maxForks: 5
         allowMultiFork: true
         supervise: false
         maxRestarts: 3
@@ -139,9 +139,10 @@
       name: '@twinsearth/fang-dsh-plugin'
       config:
         role: mother
-        maxForks: 8
+        maxForks: 5
         allowMultiFork: true
         singleActiveFork: false
+        maxOpenForkBrowsers: 5
         autoReapIdleMinutes: 0
         routes:
           enabled: true

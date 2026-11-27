@@ -41,14 +41,14 @@ test('v3.8.13: evaluateForkCommitBudget flags aggregate overage and remaining re
   assert.equal(over.remainingMB, 0)
 })
 
-test('v3.9.4: Config defaults maxForks to 8 and accepts up to hard limit 62', () => {
-  assert.equal(orchestrator.Config({}).maxForks, 8)
+test('v3.9.10: Config defaults maxForks to 5 and accepts up to hard limit 100', () => {
+  assert.equal(orchestrator.Config({}).maxForks, 5)
   assert.equal(orchestrator.Config({ maxForks: 1 }).maxForks, 1)
   assert.equal(orchestrator.Config({ maxForks: 8 }).maxForks, 8)
-  assert.equal(orchestrator.Config({ maxForks: 62 }).maxForks, 62)
+  assert.equal(orchestrator.Config({ maxForks: 100 }).maxForks, 100)
 })
 
-test('v3.9.4: production apply honors maxForks 8 instead of forced 1', async () => {
+test('v3.9.10: production apply clamps maxForks 8 to the ordinary-edition quota 5', async () => {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-v3813-max-'))
   const ctx = makeCtx({ services: { [SERVICE.forker]: { async spawn() { throw new Error('no-spawn') }, status() { return { running: false } }, list() { return [] } }, webServer: makeWebServerStub() } })
   try {
@@ -61,9 +61,11 @@ test('v3.9.4: production apply honors maxForks 8 instead of forced 1', async () 
       maxForks: 8,
     })
     const svc = ctx.get(SERVICE.orchestrator)
-    assert.equal(svc.status().tasks.max, 8)
-    assert.equal(svc.status().capacity.slots, 8)
-    assert.equal(svc.status().capacity.hardMax, 62)
+    assert.equal(svc.status().tasks.max, 5)
+    assert.equal(svc.status().capacity.slots, 5)
+    assert.equal(svc.status().capacity.hardMax, 100)
+    assert.equal(svc.status().capacity.browsers.limit, 5)
+    assert.equal(svc.status().capacity.browsers.hardMax, 100)
   } finally {
     try { ctx.dispose() } catch { /* ignore */ }
     fs.rmSync(dataRoot, { recursive: true, force: true })

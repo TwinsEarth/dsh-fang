@@ -16,9 +16,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'fang-v388-'))
 
-test('v3.8.8 config: v3.9.4 defaults to 8 slots with multi-fork explicit', () => {
+test('v3.9.10 config: ordinary edition defaults to 5 slots with multi-fork explicit', () => {
   const cfg = Config({})
-  assert.equal(cfg.maxForks, 8)
+  assert.equal(cfg.maxForks, 5)
   assert.equal(cfg.allowMultiFork, true)
   assert.equal(cfg.browserJobObject, true)
   assert.equal(cfg.forkCommitWarnShare, 0.3)

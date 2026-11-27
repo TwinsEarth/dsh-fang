@@ -196,8 +196,8 @@ async function boot({ forker = makeFakeForker(), extraServices = {}, config = {}
     adapterPollMs: 40,
     routes: { enabled: false },
     authToken: TEST_AUTH_TOKEN,
-    // Legacy suite exercises multi-task flows. Production defaults (maxForks=1,
-    // allowMultiFork=false) are asserted in v388-redlines.test.mjs. The hook is
+    // Legacy suite exercises multi-task flows. The ordinary-edition quota is 5;
+    // production defaults are asserted in v388-redlines.test.mjs. The hook is
     // honored only while NODE_TEST_CONTEXT is present.
     __testOnlyAllowMultiFork: true,
     allowMultiFork: true,
@@ -220,7 +220,7 @@ test('orchestrator: registers service; status exposes tasks, forks compat, comme
   assert.equal(svc.role, 'mother')
   const st = svc.status()
   assert.equal(st.tasks.total, 0)
-  assert.equal(st.tasks.max, 8)
+  assert.equal(st.tasks.max, 5)
   // 显式 dataRoot 时不得自动跳到 FANG_HOME 默认目录（否则测试/独立部署会写进真实 D 盘）
   assert.equal(st.layout.dataDir, dataRoot)
   assert.equal(st.layout.essenceRoot, path.join(dataRoot, 'essences'))

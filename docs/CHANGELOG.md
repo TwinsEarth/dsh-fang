@@ -1,3 +1,25 @@
+## v3.9.10（2026-11-27）
+**主题：分身 Web 并发配额分层 + 单 Web 锁修复**
+
+### 配额分层
+- 新增 `src/lib/fork-capacity.mjs`：普通版 `5`、专业版 `20`（暂未开放）、团队版 `100`（预留未开放），同时约束任务槽位 `maxForks` 与托管浏览器窗口 `maxOpenForkBrowsers`。
+- 当前发行版只激活普通版；专业版/团队版只保留常量与上限表，未接入授权或套餐开关。
+- `maxForks` 默认 `5`、硬上限 `100`；`maxOpenForkBrowsers` 默认 `5`、硬上限 `100`；`forker` 同步为默认 `5` / 硬上限 `100`。
+- 端口池 18000–18100 共 101 个，团队版 100 个分身仍有 1 个余量。
+
+### 单 Web 锁修复
+- 根因：`maxOpenForkBrowsers` 旧默认 `1`，打开第二个分身 Web 时会按 LRU 关掉另一个；这不是内存不足。
+- 普通版默认改为 5 个并发 Web；内存/Commit 守卫仍在第二道门独立裁决，不会因配额改成 1。
+- `memoryGuardDefaults().singleActiveFork` 改为 `false`，单活跃仅保留为显式应急开关。
+
+### 可观测与文案
+- `status.capacity` 增加 `edition/editionLabel/browsers{limit,hardMax,defaultLimit,used}`；客户端容量条显示 `Web x/y`。
+- 新增关闭原因 `capacity`；`max-open-fork-browsers` 归类为「并发配额关闭」，不再显示成「内存保护关闭」。
+
+### 测试
+- 新增 `test/v3910-fork-capacity.test.mjs`：版表 5/20/100、夹紧规则、Config 默认、status 双容量面。
+- 更新既有配额、package metadata、cordis patch、close-reason 与 client 基线断言。
+
 ## v3.9.9（2026-11-27）
 **主题：安全收口版：权限第二道门、内存/身份回收、发布工具链与 P3 结构门**
 

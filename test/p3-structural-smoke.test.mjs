@@ -15,7 +15,7 @@ import * as orchestrator from '../src/plugins/orchestrator.mjs'
 
 test('compose Config validates nested child configs and keeps the 17-row map', () => {
   assert.ok(ComposeConfig)
-  assert.throws(() => ComposeConfig({ forker: { maxForks: 99 } }), /maxForks|62/)
+  assert.throws(() => ComposeConfig({ forker: { maxForks: 101 } }), /maxForks|100/)
   assert.equal(typeof applyCompose, 'function')
   assert.deepEqual(Object.keys(composeModules).sort(), [
     'adapter', 'approver', 'auditor', 'bufferKeeper', 'decisionCenter', 'forker', 'healer',

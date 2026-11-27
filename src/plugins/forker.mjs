@@ -70,6 +70,7 @@ import { loadAcceleratedKnownEventTypes, normalizeCoreMode, pruneAliasStubs, san
 import { OFFICIAL_EXPERIMENTAL_BUNDLES, NODE_COMPAT_BUNDLE, parsePatchEntries } from '../lib/essence.mjs'
 import { accelNodeModulesRoot, acceleratedCoreInfo, resolveAcceleratedCore } from '../lib/accelerated-install.mjs'
 import { buildJobHostArgs, jobObjectPaths, jobObjectSummary, readJobReady, resolveJobHostPath, JOB_HEARTBEAT_GRACE_MS, JOB_HEARTBEAT_TIMEOUT_MS } from '../lib/job-object.mjs'
+import { DEFAULT_MAX_FORKS, HARD_MAX_FORKS } from '../lib/fork-capacity.mjs'
 
 /** Repository root of this plugin (used as the @twinsearth/fang-dsh-plugin junction source). */
 const FANG_ROOT = (() => {
@@ -117,7 +118,7 @@ const DEFAULTS = {
   cliPath: '',
   profileTemplate: '',
   startTimeoutMs: 60000,
-  maxForks: 8,
+  maxForks: DEFAULT_MAX_FORKS,
   allowMultiFork: true,
   maxLogLines: 400,
   dataRoot: '',
@@ -150,7 +151,7 @@ export const Config = z
       .default('')
       .description('母版 profile 目录：clone 源 / node_modules junction 源（cleanTemplate 时只用后者）'),
     startTimeoutMs: z.natural().default(60000).description('等待 web URL 的启动超时（毫秒）'),
-    maxForks: z.natural().max(62).default(8).description('允许同时存活的分身上限；默认 8，硬上限 62，仍受 Commit 余量守卫限制'),
+    maxForks: z.natural().max(HARD_MAX_FORKS).default(DEFAULT_MAX_FORKS).description('允许同时存活的分身上限；普通版默认 5，硬上限 100（专业版 20 / 团队版 100 为预留档位），仍受 Commit 余量守卫限制'),
     allowMultiFork: z.boolean().default(true).description('是否允许 maxForks>1；默认 true，仍受 Commit 余量守卫限制'),
     maxLogLines: z.natural().default(400).description('每个分身 stdout 滚动缓冲行数'),
     dataRoot: z.string().default('').description('注册表/端口表落盘根目录（空 = 仅进程内存）'),

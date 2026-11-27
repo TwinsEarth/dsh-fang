@@ -58,7 +58,15 @@ try {
   const rowIds = [...patch.matchAll(/^\s*-\s*id:\s*['"]?([A-Za-z0-9_-]+)/gm)].map((m) => m[1])
   check('cordis rows = 19', rowIds.length === 19, `rows=${rowIds.length}`)
   check('no invalid ui-fang loader row', !rowIds.includes('ui-fang'))
-  check('cordis patch keeps 8-fork capacity', /^\s*maxForks:\s*8\s*$/m.test(patch) && /^\s*allowMultiFork:\s*true\s*$/m.test(patch) && /^\s*singleActiveFork:\s*false\s*$/m.test(patch))
+  const fiveForkRows = [...patch.matchAll(/^\s*maxForks:\s*5\s*$/gm)].length
+  check(
+    'cordis patch keeps ordinary-edition 5-fork / 5-web capacity',
+    fiveForkRows === 2 &&
+      /^\s*maxOpenForkBrowsers:\s*5\s*$/m.test(patch) &&
+      /^\s*allowMultiFork:\s*true\s*$/m.test(patch) &&
+      /^\s*singleActiveFork:\s*false\s*$/m.test(patch),
+    `maxForks5Rows=${fiveForkRows}`
+  )
 
   // DSH plugin metadata scans every *.json in <pkg>/locale and requires the
   // basename to be a language id. AppleDouble sidecars must never ship.
