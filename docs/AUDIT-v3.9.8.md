@@ -73,5 +73,14 @@
 - 本机一键修复从 03:05:01 到 03:08:30 完成，约 3.5 分钟；主要耗时在 reset/provision/mirror node_modules 与 spawn。面板 `api()` 无客户端超时，会等待最终响应；但外部脚本若设 90s 超时会先断开，宿主仍会继续完成修复。
 - 未跑全量测试；未修 v3.9.7 已记录的 30 条 orchestrator 夹具与 2 条 forker 清理竞态。
 - 未改宿主压力阈值、Host JS heap、多帧 zstd 逻辑。
-- 未执行 npm/GitHub/tag/Release 发布；npm `latest` 仍为 3.9.6。
 - 临时目录 `E:\DBH\fang-report\temp-fork-min`、`temp-fork-398` 未清理。
+
+## 六、三方发布
+
+- npm：`@twinsearth/fang-dsh-plugin@3.9.8` 已发布，`latest=3.9.8`，版本时间 `2026-11-27T03:23:57Z`。
+  https://www.npmjs.com/package/@twinsearth/fang-dsh-plugin/v/3.9.8
+- GitHub：release commit `a328337cced3f6b3129042a70a8f6e5c67f8d362`，branch `release/v3.9.8`，tag `v3.9.8`（annotated tag object `04929de60db86dc455edc1f6de637f75013f7326`）。
+  https://github.com/TwinsEarth/fang-dsh-plugin/releases/tag/v3.9.8
+- GitHub Release 资产：`dsh-fang-3.9.8.tgz`（935,321 bytes）、`dsh-fang-3.9.8.tgz.sha256`（85 bytes），发布于 `2026-11-27T03:20:06Z`。
+- 项目交付目录：`E:\DBH\Fang-v3.9.8\`，含 tarball、sha256 sidecar、manifest、RELEASE、AUDIT、`SHA256SUMS-3.9.8.txt`。
+- npm 发布为 PUT 202 后处理完成，发布脚本报告 PUBLISHED 时 registry 尚未可见；等待约 3 分钟后版本与 `latest` 才可查询。发布门禁 preflight 仍为 `skipped:true / green:false`。
