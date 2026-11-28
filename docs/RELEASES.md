@@ -8,6 +8,7 @@
 
 | 版本 | 主题 | 发布记录 | 审计 |
 |---|---|---|---|
+| v3.10.1 | 客户端加载与浏览器回收：分阶段加载配置、每页独立 renderer 与页关闭回收、Job 内存阈值 3000/6666 | [RELEASE-v3.10.1](RELEASE-v3.10.1.md) | [AUDIT-v3.10.1](AUDIT-v3.10.1.md) |
 | v3.10.0 | 安装链修复：移除 pnpm 11 下会被拦截的 `postinstall`，清理脚本改到 `prepack`，升级不再触发 `approve-builds` / 卸载重装 | [RELEASE-v3.10.0](RELEASE-v3.10.0.md) | [AUDIT-v3.10.0](AUDIT-v3.10.0.md) |
 | v3.9.10 | 分身 Web 配额分层：普通版 5、专业版 20（预留）、团队版 100（预留）；修复内存充足仍被压成单 Web，区分并发配额关闭与内存保护关闭 | [RELEASE-v3.9.10](RELEASE-v3.9.10.md) | [AUDIT-v3.9.10](AUDIT-v3.9.10.md) |
 | v3.9.9 | 安全收口：权限第二道门接入生产；内存/身份回收 fail-closed；npm 202/tag 门修复；compose/watchdog smoke + 461 空 catch 基线门 | [RELEASE-v3.9.9](RELEASE-v3.9.9.md) | [AUDIT-v3.9.9](AUDIT-v3.9.9.md) |

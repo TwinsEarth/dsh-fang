@@ -44,7 +44,7 @@ test('v3.8.9 JS heap at 1.5 GB and DOM at 200k close browser then fork', () => {
   assert.equal(heap.close, true)
   assert.equal(heap.reason, 'browser-heap-limit')
   assert.equal(heap.scope, 'task')
-  assert.equal(classifyCloseReason(heap.reason), 'browser-oom')
+  assert.equal(classifyCloseReason(heap.reason), 'browser-heap')
 
   const dom = evaluateBrowserAutoClose({ commitMB: 900, heapMB: 400, nodeCount: 200000 })
   assert.equal(dom.close, true)
@@ -61,9 +61,20 @@ test('v3.8.9 host CommitFree below 4 GB closes browser only and preserves fork h
   assert.equal(low.close, true)
   assert.equal(low.reason, 'host-commit-low-browser-memory-limit')
   assert.equal(low.scope, 'browser')
-  assert.equal(classifyCloseReason(low.reason), 'browser-oom')
+  assert.equal(classifyCloseReason(low.reason), 'host-memory')
   assert.equal(evaluateBrowserAutoClose({ hostCommitFreeMB: 4096 }).close, false)
   assert.equal(evaluateBrowserAutoClose({ autoClose: false, hostCommitFreeMB: 100 }).close, false)
+})
+
+test('close reason taxonomy keeps capacity, idle, host pressure and browser limits distinct', () => {
+  assert.equal(classifyCloseReason('max-open-fork-browsers'), 'capacity')
+  assert.equal(classifyCloseReason('idle-hidden'), 'idle')
+  assert.equal(classifyCloseReason('turn-ended-idle'), 'idle')
+  assert.equal(classifyCloseReason('host-commit-low-browser-memory-limit'), 'host-memory')
+  assert.equal(classifyCloseReason('host-panic:commit-free-critical'), 'host-panic')
+  assert.equal(classifyCloseReason('browser-memory-limit'), 'browser-oom')
+  assert.equal(classifyCloseReason('browser-heap-limit'), 'browser-heap')
+  assert.equal(classifyCloseReason('browser-dom-limit'), 'dom-limit')
 })
 
 test('v3.8.9 idle close requires hidden page and no running turn', () => {
@@ -124,6 +135,13 @@ test('v3.8.9 auto-close never deletes home and requires a manual reopen', () => 
   assert.equal(orchestrator.slice(closeStart, closeEnd).includes('removeTree'), false)
   assert.match(client, /task\.memoryGuard \? '重新打开' : '打开'/)
   assert.match(client, /必须手动重新打开，不会自动重开/)
+  assert.match(client, /closeReasonCard\(task\.memoryGuard\)/)
+  assert.match(client, /宿主内存压力关闭/)
+  assert.match(client, /空闲关闭/)
+  assert.match(client, /浏览器内存超限关闭/)
+  assert.match(client, /浏览器 JS heap 超限关闭/)
+  assert.doesNotMatch(client, /内存保护关闭/)
+  assert.match(client, /'spawn-failed': '分身进程启动后立即退出/)
 })
 
 test('v3.8.9 orphan sweep runs at startup and every 5 minutes with PID identity checks', () => {

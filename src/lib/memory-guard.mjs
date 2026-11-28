@@ -13,14 +13,23 @@ const DEFAULT_PROCESS_TABLE_CACHE_MS = 0
 let cache = { at: 0, value: null, pending: null }
 const processTableCache = new Map()
 
-function parsePowerShellJson(text) {
-  const trimmed = String(text ?? '').trim()
+export function parsePowerShellJson(text) {
+  const trimmed = String(text ?? '').replace(/^\uFEFF/, '').trim()
   if (!trimmed) return null
   try { return JSON.parse(trimmed) } catch { /* fall through */ }
-  const start = trimmed.indexOf('{')
-  const end = trimmed.lastIndexOf('}')
-  if (start >= 0 && end > start) {
-    try { return JSON.parse(trimmed.slice(start, end + 1)) } catch { /* ignore */ }
+  // PowerShell can prepend warnings/errors to stdout. `ConvertTo-Json` for a
+  // process table emits an array, but v3.10.0 only looked for the outer braces;
+  // `{...},{...}` is not valid JSON, so a single warning caused
+  // process-table-parse-failed and made the Commit budget look unavailable.
+  const candidates = []
+  const arrayStart = trimmed.indexOf('[')
+  const arrayEnd = trimmed.lastIndexOf(']')
+  if (arrayStart >= 0 && arrayEnd > arrayStart) candidates.push([arrayStart, arrayEnd])
+  const objectStart = trimmed.indexOf('{')
+  const objectEnd = trimmed.lastIndexOf('}')
+  if (objectStart >= 0 && objectEnd > objectStart) candidates.push([objectStart, objectEnd])
+  for (const [start, end] of candidates.sort((a, b) => a[0] - b[0])) {
+    try { return JSON.parse(trimmed.slice(start, end + 1)) } catch { /* try next shape */ }
   }
   return null
 }

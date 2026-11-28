@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildProcessTableScript, evaluateMemoryGuard, memoryGuardDefaults, parseProcessCreationDate, readProcessIdentity, readProcessTable, selectProcessTree, sumProcessTree } from '../src/lib/memory-guard.mjs'
+import { buildProcessTableScript, evaluateMemoryGuard, memoryGuardDefaults, parsePowerShellJson, parseProcessCreationDate, readProcessIdentity, readProcessTable, selectProcessTree, sumProcessTree } from '../src/lib/memory-guard.mjs'
 
 test('memory guard refuses when Windows CommitFree is below threshold', () => {
   const memory = { ok: true, supported: true, commitLimitMB: 32476, commitFreeMB: 1024 }
@@ -69,6 +69,16 @@ test('full process table query keeps identity fields for orphan cleanup', () => 
   const script = buildProcessTableScript({ detailed: true })
   assert.match(script, /CommandLine/)
   assert.match(script, /CreationDate/)
+})
+
+test('process table JSON survives PowerShell warnings before an array', () => {
+  const output = 'WARNING: something on stdout\n[{"ProcessId":1,"Name":"node"},{"ProcessId":2,"Name":"pwsh"}]\n'
+  assert.deepEqual(parsePowerShellJson(output), [
+    { ProcessId: 1, Name: 'node' },
+    { ProcessId: 2, Name: 'pwsh' },
+  ])
+  assert.deepEqual(parsePowerShellJson('warning\n{"ProcessId":3}'), { ProcessId: 3 })
+  assert.equal(parsePowerShellJson(''), null)
 })
 
 test('readProcessTable reuses a cached lite snapshot on Windows', async () => {

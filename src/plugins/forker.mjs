@@ -131,7 +131,7 @@ const DEFAULTS = {
   jobObject: true,
   jobHeartbeatTimeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
   jobHeartbeatGraceMs: JOB_HEARTBEAT_GRACE_MS,
-  jobProcessMemoryMB: 2048,
+  jobProcessMemoryMB: 3000,
   jobTotalMemoryMB: 4096,
 }
 
@@ -182,8 +182,8 @@ export const Config = z
       .description('Job helper 判定宿主心跳失效的阈值（毫秒）；宿主冻结时据此 TerminateJobObject'),
     jobHeartbeatGraceMs: z.natural().default(JOB_HEARTBEAT_GRACE_MS)
       .description('Job helper 对心跳缺失/过期额外宽限（毫秒）'),
-    jobProcessMemoryMB: z.natural().min(0).max(16384).default(2048)
-      .description('Windows Job Object 单进程提交内存上限（MB，0=不限制）；由 helper 设 JOB_OBJECT_LIMIT_PROCESS_MEMORY'),
+    jobProcessMemoryMB: z.natural().min(0).max(16384).default(3000)
+      .description('Windows Job Object 单进程提交内存上限（MB，默认 3000，0=不限制）；由 helper 设 JOB_OBJECT_LIMIT_PROCESS_MEMORY'),
     jobTotalMemoryMB: z.natural().min(0).max(32768).default(4096)
       .description('Windows Job Object 整个 Job 提交内存上限（MB，0=不限制）；由 helper 设 JOB_OBJECT_LIMIT_JOB_MEMORY'),
     // v3.1.12：新机器/新用户的干净分身默认不带第三方插件；这里按“安装不激活 /
@@ -508,6 +508,163 @@ function probePortFree(port, { host = PORT_HOST, timeoutMs = PORT_PROBE_TIMEOUT_
       done(false)
     }
   })
+}
+
+/** 2026-11-28：分阶段加载的 bundle 分组。stage 30 秒为 Fang 内置插件，60 秒为官方实验性
+ * bundle，100 秒为第三方插件；未列出的包保持立即加载。各阶段由浏览器独立定时器触发。 */
+const STAGED_LOADING_BUNDLES = [
+  {
+    delayMs: 30000,
+    bundles: ['@twinsearth/fang-dsh-plugin', '@deepseek-ai/dsh-personalized-recommendations'],
+  },
+  {
+    delayMs: 60000,
+    // 用户把个性化推荐归入内置插件；官方实验集合的其余 14 个 bundle 才延迟 60 秒。
+    bundles: OFFICIAL_EXPERIMENTAL_BUNDLES.filter(name => name !== '@deepseek-ai/dsh-personalized-recommendations'),
+  },
+  {
+    delayMs: 100000,
+    bundles: [
+      'dshmarket',
+      '@twinsearth/w2m-dsh-plugin',
+      '@twinsearth/dsh-im2a-plugin',
+      '@openviking/dsh-memory-plugin',
+      '@twinsearth/ai-prison-dsh-plugin',
+      '@twinsearth/dsh-2xray',
+      '@twinsearth/dsh-master',
+      '@michengai/dsh-agency-agents',
+      'dsh-better-sidebar',
+      'dsh-context',
+      '@liustack/modlens',
+      '@liustack/modsearch',
+    ],
+  },
+]
+
+/** Only bare package roots are configurable; subpath rows and cordis groups are server entries. */
+function barePackageName(value) {
+  const name = String(value ?? '').trim()
+  if (!name || name.startsWith('cordis:')) return null
+  if (name.startsWith('@')) {
+    const parts = name.split('/')
+    return parts.length === 2 && parts[0].length > 1 && parts[1] ? name : null
+  }
+  return name.includes('/') ? null : name
+}
+
+function packageScopeVariant(name) {
+  if (name.startsWith('@twinsearth/')) return `@deepseek-ai/${name.slice('@twinsearth/'.length)}`
+  if (name.startsWith('@deepseek-ai/')) return `@twinsearth/${name.slice('@deepseek-ai/'.length)}`
+  return null
+}
+
+function packageRoots(profileDir, cliPath = '') {
+  const roots = new Set([
+    path.join(String(profileDir), 'node_modules'),
+    path.join(FANG_ROOT, 'node_modules'),
+    path.join(FANG_ROOT, 'cli', 'node_modules'),
+    path.join(FANG_ROOT, '..', 'cli', 'node_modules'),
+  ])
+  const cliRoot = accelNodeModulesRoot(cliPath)
+  if (cliRoot) roots.add(cliRoot)
+  return [...roots]
+}
+
+function bundlePatchCandidates(profileDir, bundleName, cliPath = '') {
+  const names = [bundleName]
+  const variant = packageScopeVariant(bundleName)
+  if (variant) names.push(variant)
+  const candidates = []
+  for (const root of packageRoots(profileDir, cliPath)) for (const name of names) candidates.push(path.join(root, name, 'cordis.patch.yml'))
+  return candidates
+}
+
+/** Whether a package declares a web client half; undefined when no installed manifest can answer. */
+function packageClientDeclared(profileDir, cliPath, packageName) {
+  for (const root of packageRoots(profileDir, cliPath)) {
+    const manifestPath = path.join(root, packageName, 'package.json')
+    if (!exists(manifestPath)) continue
+    const pkg = readJson(manifestPath, null)
+    if (!pkg) return undefined
+    const client = pkg.dsh && typeof pkg.dsh === 'object' ? pkg.dsh.client : undefined
+    return client !== null && typeof client === 'object' && client.platform === 'web'
+  }
+  return undefined
+}
+
+/** Read one bundle patch and return every bare package name it mounts (both scope variants). */
+function bundlePackageNames(profileDir, bundleName, cliPath = '') {
+  const found = new Set()
+  for (const candidate of bundlePatchCandidates(profileDir, bundleName, cliPath)) {
+    if (!exists(candidate)) continue
+    try {
+      const text = fs.readFileSync(candidate, 'utf8')
+      for (const match of text.matchAll(/^\s*name:\s*['"]?([^'"\n]+)['"]?\s*$/gm)) {
+        const name = barePackageName(match[1])
+        if (!name) continue
+        found.add(name)
+        const variant = packageScopeVariant(name)
+        if (variant) found.add(variant)
+      }
+    } catch {
+      // An unreadable bundle patch simply contributes no names; startup handles it.
+    }
+  }
+  // A non-bundle plugin (for example a direct profile dependency) has no
+  // patch file but can still declare its own browser half.
+  for (const name of [bundleName, packageScopeVariant(bundleName)]) {
+    if (!name) continue
+    if (packageClientDeclared(profileDir, cliPath, name) !== true) continue
+    found.add(name)
+  }
+  // Keep only rows with a browser half. A scope variant absent from this
+  // install is kept when its counterpart declares one, so stock and
+  // accelerated package names both match.
+  return [...found].filter((name) => {
+    const declared = packageClientDeclared(profileDir, cliPath, name)
+    if (declared !== undefined) return declared
+    const variant = packageScopeVariant(name)
+    return variant !== null && packageClientDeclared(profileDir, cliPath, variant) === true
+  })
+}
+
+/**
+ * 2026-11-28：为 fork profile 生成 DSH client-modules 的 stagedLoading 配置。
+ * 从每个 bundle 的 cordis.patch.yml 读取客户端包名，避免硬编码 15 个实验 bundle
+ * 的 package 清单随版本漂移；读不到的 bundle 不会贡献任何行。
+ * @param {string} profileDir
+ * @returns {{stages: Array<{delayMs:number, packages:string[]}>, counts: number[]}}
+ */
+export function buildStagedLoadingConfig(profileDir, cliPath = '') {
+  const assigned = new Set()
+  const stages = STAGED_LOADING_BUNDLES.map(({ delayMs, bundles }) => {
+    const packages = [...new Set(bundles.flatMap((name) => bundlePackageNames(profileDir, name, cliPath)))]
+      .filter((name) => !assigned.has(name))
+    for (const name of packages) assigned.add(name)
+    return { delayMs, packages }
+  }).filter((stage) => stage.packages.length > 0)
+  return { stages, counts: stages.map((stage) => stage.packages.length) }
+}
+
+
+/** 2026-11-28：把分阶段加载配置合并进 profile 的 modules patch 行；stock/accelerated 都执行。 */
+export function applyForkStagedLoadingSurface(profileDir, cliPath = '') {
+  try {
+    const patchFile = path.join(String(profileDir), 'cordis.patch.yml')
+    const entries = parsePatchEntries(exists(patchFile) ? fs.readFileSync(patchFile, 'utf8') : '').entries
+    const staged = buildStagedLoadingConfig(profileDir, cliPath)
+    if (staged.stages.length === 0) return { ok: true, skipped: 'no-stage-packages', stagedLoading: staged }
+    const modulesEntry = entries.find((entry) => String(entry?.id ?? '') === 'modules')
+    if (modulesEntry) {
+      modulesEntry.config = { ...(modulesEntry.config ?? {}), stagedLoading: staged.stages }
+    } else {
+      entries.push({ id: 'modules', config: { stagedLoading: staged.stages } })
+    }
+    fs.writeFileSync(patchFile, `${JSON.stringify(entries, null, 2)}\n`, 'utf8')
+    return { ok: true, stagedLoading: staged }
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) }
+  }
 }
 
 export function apply(ctx, config) {
@@ -1221,6 +1378,7 @@ function applyForkExperimentalSurface(profileDir) {
     return { ok: false, error: String(error?.message ?? error) }
   }
 }
+
   const spawn = async (opts = {}) => {
     ensureRegistry()
     ensurePorts()
@@ -1392,6 +1550,11 @@ function applyForkExperimentalSurface(profileDir) {
       rec.experimentalSurface = applyForkExperimentalSurface(rec.profileDir)
       if (rec.experimentalSurface.ok !== true) audit(AUDIT.FORK_CREATED, { forkId, experimentalSurfaceError: rec.experimentalSurface.error })
     }
+    // 2026-11-28：分阶段加载对 stock 与 accelerated 都生效；放在实验性 surface 之后，
+    // 避免实验性 patch 重写时丢掉 modules 配置。
+    rec.stagedLoadingSurface = applyForkStagedLoadingSurface(rec.profileDir, cliPath)
+    if (rec.stagedLoadingSurface.ok !== true) audit(AUDIT.FORK_CREATED, { forkId, stagedLoadingSurfaceError: rec.stagedLoadingSurface.error })
+    else audit(AUDIT.FORK_CREATED, { forkId, stagedLoadingStages: rec.stagedLoadingSurface.stagedLoading?.counts ?? [] })
     writeForkMetaOf(rec)
     // 广播新 token：首次派生 = 生成，重启 = 刷新；订阅者拿到的是「当前 token」，
     // 不是「进程就绪」信号（进程就绪以 fang/fork-started 为准）。

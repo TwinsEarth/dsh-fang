@@ -240,15 +240,10 @@ export async function freePort(start = 19300, end = 19400) {
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
-/** Launch an isolated app window and wait for its CDP endpoint. */
-export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [], onExit = null, jobObject = null, priorityClass = 'BelowNormal' }) {
-  if (!exe || !fs.existsSync(exe)) return { ok: false, error: 'browser-unavailable' }
-  fs.mkdirSync(profileDir, { recursive: true })
-  fs.mkdirSync(logDir, { recursive: true })
-  const logFile = path.join(logDir, `browser-${Date.now()}.log`)
-  const crashDir = path.join(logDir, 'crash-dumps')
-  fs.mkdirSync(crashDir, { recursive: true })
-  const args = [
+/** Chromium argv for a managed app window: one page owns one renderer, and the
+ * last page close exits the tree instead of leaving a resident renderer. */
+export function buildManagedBrowserArgs({ url, profileDir, port, logFile, crashDir, extraArgs = [] } = {}) {
+  return [
     `--app=${url}`,
     `--user-data-dir=${profileDir}`,
     `--remote-debugging-port=${port}`,
@@ -258,7 +253,12 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
     '--disable-sync',
     '--disable-background-networking',
     '--disable-features=msEdgeSyncConfirmation,msEdgeIdentity',
-    '--renderer-process-limit=1',
+    // One page owns one renderer: do not cap the tree to a single renderer and
+    // keep tabs process-isolated. Closing a page target reclaims that renderer.
+    '--process-per-tab',
+    // The app exits when its last page closes instead of staying resident in the
+    // background; the watchdog/Job Object then reaps the whole tree.
+    '--disable-background-mode',
     '--enable-logging',
     `--log-file=${logFile}`,
     '--enable-crash-reporter',
@@ -266,6 +266,17 @@ export async function launchManagedBrowser({ exe, url, profileDir, logDir, port,
     '--js-flags=--max-old-space-size=2048',
     ...extraArgs,
   ]
+}
+
+/** Launch an isolated app window and wait for its CDP endpoint. */
+export async function launchManagedBrowser({ exe, url, profileDir, logDir, port, extraArgs = [], onExit = null, jobObject = null, priorityClass = 'BelowNormal' }) {
+  if (!exe || !fs.existsSync(exe)) return { ok: false, error: 'browser-unavailable' }
+  fs.mkdirSync(profileDir, { recursive: true })
+  fs.mkdirSync(logDir, { recursive: true })
+  const logFile = path.join(logDir, `browser-${Date.now()}.log`)
+  const crashDir = path.join(logDir, 'crash-dumps')
+  fs.mkdirSync(crashDir, { recursive: true })
+  const args = buildManagedBrowserArgs({ url, profileDir, port, logFile, crashDir, extraArgs })
   // Windows: the browser tree must be owned by a kernel Job, not just taskkill.
   // The helper starts the browser suspended, assigns it to the job, then resumes.
   const useJob = jobObject?.enabled === true
@@ -445,10 +456,10 @@ export async function closeManagedBrowser({ pid, port, graceMs = 3000, timeoutMs
 async function cdpTargets(port) {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(1500) })
-    if (!response.ok) return []
+    if (!response.ok) return null
     const list = await response.json()
-    return Array.isArray(list) ? list.filter((item) => item.type === 'page' && item.webSocketDebuggerUrl) : []
-  } catch { return [] }
+    return Array.isArray(list) ? list.filter((item) => item.type === 'page' && item.webSocketDebuggerUrl) : null
+  } catch { return null }
 }
 
 /** A profile must expose exactly one app page; DevTools/extension pages are not user tabs. */
@@ -471,6 +482,7 @@ export function selectExtraPageTargets(targets = [], maxPages = 1) {
 /** Close extra app windows/tabs in one fork profile; never touches the first app page. */
 export async function enforceSinglePageTarget(port, { maxPages = 1 } = {}) {
   const targets = await cdpTargets(port)
+  if (targets === null) return { ok: false, error: 'browser-cdp-unavailable', count: null, closed: [] }
   const extras = selectExtraPageTargets(targets, maxPages)
   if (extras.length === 0) return { ok: true, count: targets.length, closed: [] }
   const closed = []

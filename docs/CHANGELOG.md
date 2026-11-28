@@ -1,3 +1,27 @@
+## v3.10.1（2026-11-29）
+**主题：客户端分阶段加载、浏览器每页独立 renderer 与页关闭回收、Job 内存阈值调整**
+
+### 新增
+- 派生 fork 时写入 DSH `modules.stagedLoading`：30 秒内置插件、60 秒官方实验插件、100 秒第三方插件；只纳入声明 `dsh.client.platform === 'web'` 的客户端包，同时生成 `@twinsearth` / `@deepseek-ai` 双 scope 变体。
+- 托管浏览器改为 `--process-per-tab`，删除 `--renderer-process-limit=1`，增加 `--disable-background-mode`；页面关闭后 watchdog 在 5 秒无 page target 时回收整棵浏览器树。
+- 分身 Job 单进程上限默认 `3000 MB`；浏览器 Job 总上限默认 `6666 MB`。浏览器单进程 `2048 MB` 与分身 Job 总上限 `4096 MB` 保持不变。
+- 关闭原因细分 `host-memory` / `host-panic` / `browser-oom` / `browser-heap` / `dom-limit` / `capacity` / `idle`，任务卡不再统一显示“内存保护关闭”。
+- 修复 PowerShell warning 前缀导致进程表 JSON 解析失败，保障 Commit 预算可用。
+
+### 门禁（发布前必填，来自 dist/preflight.json）
+- tests: pass=1587 fail=0 skip=13
+- e2e: 125/125
+- routes: 129（allowlist） / plugins: 16
+- preflight: GREEN
+
+### 边界（本版明确不做的事）
+- 分阶段加载需要 DSH 侧 `@twinsearth/dsh-client-modules` 支持 `stagedLoading`；当前安装态若为 3.5.0 原版，配置不会生效。
+- `browserSingleAppWindow` 仍默认单页；多页面并行常驻需另行调整。
+- 不修复当前真实 fork profile 的 `@deepseek-ai` / `@twinsearth` scope 与 im2a / w2m engines 兼容阻塞。
+
+### 回滚锚点
+- 升级前快照/上一代目录：active-v3.10.1-pre（母体）；merged-v3.10.1-pre（原身）；plugin-snapshot-<ts>（插件层）
+
 ## v3.10.0（2026-11-28）
 **主题：安装链修复：移除 postinstall，清理脚本改到 prepack**
 

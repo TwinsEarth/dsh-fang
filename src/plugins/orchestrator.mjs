@@ -105,6 +105,10 @@ import {
 } from '../contract/index.js'
 import zlib from 'node:zlib'
 
+// A managed app window whose last page target disappears is given this short
+// grace period before the whole browser tree is reclaimed.
+const BROWSER_PAGE_RECLAIM_GRACE_MS = 5000
+
 // Package root is used only to resolve the bundled Windows Job helper.
 const FANG_ROOT = (() => {
   try { return fileURLToPath(new URL('../../', import.meta.url)).replace(/[/\\]$/, '') } catch { return '' }
@@ -453,7 +457,7 @@ export const Config = z.object({
     .description('Windows 下用 Job Object 托管浏览器进程树，宿主被杀/冻结时内核回收'),
   browserJobProcessMemoryMB: z.number().min(256).max(1048576).default(2048)
     .description('浏览器 Job 单进程 Commit 上限（MB）'),
-  browserJobTotalMemoryMB: z.number().min(256).max(1048576).default(2048)
+  browserJobTotalMemoryMB: z.number().min(256).max(1048576).default(6666)
     .description('浏览器 Job 总 Commit 上限（MB）'),
   gracefulBrowserCloseMs: z.number().min(0).max(30000).default(3000)
     .description('CDP Browser.close 后等待优雅退出的时间；超时才 taskkill'),
@@ -2077,7 +2081,7 @@ export function apply(ctx, config) {
         timeoutMs: JOB_HEARTBEAT_TIMEOUT_MS,
         graceMs: JOB_HEARTBEAT_GRACE_MS,
         processMemoryMB: Number(cfg.browserJobProcessMemoryMB) || 2048,
-        totalMemoryMB: Number(cfg.browserJobTotalMemoryMB) || 2048,
+        totalMemoryMB: Number(cfg.browserJobTotalMemoryMB) || 6666,
       } : null,
       onExit: (info) => {
         const handle = browserHandle ?? {
@@ -2462,16 +2466,30 @@ export function apply(ctx, config) {
       try {
         appendJsonlRotated(path.join(layout.dataDir, 'browser-samples.jsonl'), { taskId: task.taskId, ...browser.last }, diagnosticLogOptions())
       } catch { /* diagnostics only */ }
-      if (cfg.browserSingleAppWindow !== false || memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false) {
-        try {
-          const single = await enforceSinglePageTarget(browser.port, { maxPages: 1 })
-          browser.singlePage = { at: now, ...single }
-          if (single.closed?.length) {
-            audit('fork-browser-extra-pages-closed', { taskId: task.taskId, port: browser.port, closed: single.closed })
-          }
-        } catch (error) {
-          browser.singlePageError = String(error?.message ?? error)
+      const singlePageMode = cfg.browserSingleAppWindow !== false || memorySnapshot?.pagefileMissing === true || memorySnapshot?.hasPageFile === false
+      try {
+        const single = await enforceSinglePageTarget(browser.port, { maxPages: singlePageMode ? 1 : Number.MAX_SAFE_INTEGER })
+        browser.singlePage = { at: now, ...single }
+        if (singlePageMode && single.closed?.length) {
+          audit('fork-browser-extra-pages-closed', { taskId: task.taskId, port: browser.port, closed: single.closed })
         }
+        if (single.ok !== false && Number(single.count) === 0) {
+          const since = Number(browser.noPageSince) || now
+          browser.noPageSince = since
+          if (now - since >= BROWSER_PAGE_RECLAIM_GRACE_MS) {
+            audit('fork-browser-page-reclaimed', { taskId: task.taskId, port: browser.port, pid: browser.pid, waitedMs: now - since })
+            try {
+              await closeTaskBrowser(task, 'page-closed')
+            } catch (error) {
+              audit('fork-browser-page-reclaim-failed', { taskId: task.taskId, port: browser.port, error: String(error?.message ?? error) })
+            }
+            continue
+          }
+        } else {
+          browser.noPageSince = null
+        }
+      } catch (error) {
+        browser.singlePageError = String(error?.message ?? error)
       }
       const limits = memoryPolicySnapshot()
       // v3.8.9: hard 2 GB commit / 1.5 GB heap / 200k DOM / 4 GB host-free

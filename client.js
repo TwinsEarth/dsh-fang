@@ -142,6 +142,94 @@ window.__ModuleLoader__.load({
       'host-js-heap-pressure': '宿主 JS heap 已达到严重阈值：先关闭/重启宿主或减少大会话，再打开新任务；本轮不是 Commit 不足。',
       'session-footprint-pressure': 'session.v4 文件体量已达到紧急阈值：先归档或压缩过大会话，再打开新任务；本轮不是重装客户端能解决的问题。',
       'fork-url-missing': '分身没有可用的 Web URL，打开已取消。',
+      'spawn-failed': '分身进程启动后立即退出，不是浏览器关闭或空闲关闭；请展开详情或查看 job-object.log 的 exit code。常见原因是 DSH 启动脚本/加速核缺失、Job Object 启动失败或端口被占用。',
+      'spawn-error': '分身进程未能拉起（spawn 调用本身失败）；查看 job-object.log 与任务 home 权限。',
+      'job-object-unavailable': 'Windows Job Object 辅助程序不可用，已拒绝无内核回收保证的启动；请检查安装包完整性。',
+      'max-forks': '任务槽位已满：先归档旧分身，或调整 maxForks。',
+    }
+
+    // 关闭原因展示必须保留原始 taxonomy：capacity / idle / host-memory /
+    // host-panic / browser-oom / browser-heap / dom-limit 是不同故障，不能都折叠成“内存保护”。
+    const CLOSE_REASON_CARD = Object.freeze({
+      capacity: {
+        tone: 'warn',
+        label: '并发配额关闭',
+        detail: '达到 maxOpenForkBrowsers 并发窗口上限，按 LRU 关闭旧窗口；不是内存不足',
+      },
+      idle: {
+        tone: 'info',
+        label: '空闲关闭',
+        detail: '页面隐藏超过 autoCloseIdleMinutes 且没有运行中的 turn；不是内存不足',
+      },
+      'host-memory': {
+        tone: 'bad',
+        label: '宿主内存压力关闭',
+        detail: '宿主 Commit 余量低于 hostCriticalFreeMB，只关闭浏览器并保留会话 home',
+      },
+      'host-panic': {
+        tone: 'bad',
+        label: '宿主紧急保护关闭',
+        detail: '宿主进入 Safe Mode / Commit 紧急线，已全停浏览器并隔离任务',
+      },
+      'browser-oom': {
+        tone: 'bad',
+        label: '浏览器内存超限关闭',
+        detail: '浏览器自身 Commit 超过 browserMemoryLimitMB；不是宿主内存不足',
+      },
+      'browser-heap': {
+        tone: 'bad',
+        label: '浏览器 JS heap 超限关闭',
+        detail: '浏览器 JS heap 超过 browserHeapLimitMB；不是宿主内存不足',
+      },
+      'dom-limit': {
+        tone: 'bad',
+        label: '浏览器 DOM 超限关闭',
+        detail: '浏览器 DOM 节点数超过 browserDomNodeLimit',
+      },
+      'crash-loop': {
+        tone: 'warn',
+        label: '崩溃退避关闭',
+        detail: '连续崩溃触发退避/隔离，需先修复再重开',
+      },
+      user: {
+        tone: 'neutral',
+        label: '用户关闭',
+        detail: '用户主动关闭或浏览器正常退出',
+      },
+    })
+    function normalizeCloseReasonKind(guard) {
+      const raw = String(guard?.reason ?? '').trim().toLowerCase()
+      // 旧记录可能把 max-open / host-commit 写成 user 或 browser-oom；任务卡
+      // 以原始 reason 重新归一，避免历史记录继续显示错误文案。
+      if (/^host-panic|host-panic/.test(raw)) return 'host-panic'
+      if (/host-commit|commit-free|host-emergency/.test(raw)) return 'host-memory'
+      if (/crash-loop/.test(raw)) return 'crash-loop'
+      if (/max-open-fork-browsers|capacity|quota/.test(raw)) return 'capacity'
+      if (/dom|node-limit|dom-limit/.test(raw)) return 'dom-limit'
+      if (/heap-limit/.test(raw)) return 'browser-heap'
+      if (/oom|memory-limit|memory-guard/.test(raw)) return 'browser-oom'
+      if (/idle/.test(raw)) return 'idle'
+      return String(guard?.reasonKind ?? '').trim()
+    }
+    function closeReasonCard(guard) {
+      const rawKind = normalizeCloseReasonKind(guard)
+      const view = CLOSE_REASON_CARD[rawKind] || {
+        tone: 'warn',
+        label: '已关闭',
+        detail: '关闭原因未归类，请查看下方原始原因',
+      }
+      const unsaved = guard?.unsavedForceClose === true
+      return {
+        ...view,
+        tone: unsaved ? 'bad' : view.tone,
+        label: unsaved ? `${view.label}（未保存强杀）` : view.label,
+        detail: `${unsaved ? '关闭前会话落盘未确认；' : ''}${view.detail}`,
+      }
+    }
+    function closeReasonTitle(guard) {
+      const view = closeReasonCard(guard)
+      const rawKind = normalizeCloseReasonKind(guard)
+      return `${view.detail}；关闭原因：${guard?.reason || 'guard'}${rawKind ? `（${rawKind}）` : ''}；PID ${guard?.pid ?? '—'}；主机 Commit 余量 ${guard?.metrics?.hostCommitFreeMB ?? '—'} MB；会话 home 保留，必须手动重新打开，不会自动重开`
     }
 
     // ── 通用工具 ──────────────────────────────────────────────────────────
@@ -5512,13 +5600,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             task.importedSession ? chip('info', '已导入会话', { title: '派生时导入了母体会话历史/摘要' }) : null,
             task.quarantined ? chip('bad', '已隔离', { title: `通信已断开（${task.quarantined.reason || 'guard'}）；点任务卡「重启并解除隔离」恢复（新端口/新 token）` }) : null,
             task.browserCrash ? chip('bad', task.browserCrash.oom ? '上次崩溃于 OOM' : `上次崩溃于 exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`, { title: `上次浏览器崩溃：${task.browserCrash.oom ? 'OOM（0xE0000008）' : `exit ${task.browserCrash.hex || task.browserCrash.code || 'unknown'}`}；${new Date(task.browserCrash.at || Date.now()).toLocaleString()}；PID ${task.browserCrash.pid ?? '—'}${task.browserCrash.signal ? `；signal ${task.browserCrash.signal}` : ''}` }) : null,
-            task.memoryGuard ? chip(
-              task.memoryGuard.reasonKind === 'capacity' ? 'warn' : (task.memoryGuard.unsavedForceClose ? 'bad' : 'warn'),
-              task.memoryGuard.reasonKind === 'capacity'
-                ? '并发配额关闭'
-                : (task.memoryGuard.unsavedForceClose ? '未保存强杀' : '内存保护关闭'),
-              { title: `${task.memoryGuard.unsavedForceClose ? '关闭前会话落盘未确认：未保存强杀；' : ''}关闭原因：${task.memoryGuard.reason || 'guard'}${task.memoryGuard.reasonKind ? `（${task.memoryGuard.reasonKind}）` : ''}；PID ${task.memoryGuard.pid ?? '—'}；主机 Commit 余量 ${task.memoryGuard.metrics?.hostCommitFreeMB ?? '—'} MB；会话 home 保留，必须手动重新打开，不会自动重开` }
-            ) : null,
+            task.memoryGuard ? (() => {
+              const view = closeReasonCard(task.memoryGuard)
+              return chip(view.tone, view.label, { title: closeReasonTitle(task.memoryGuard) })
+            })() : null,
             task.sessions?.violation ? chip('warn', `会话 ${task.sessions.count}/${task.sessions.max} 超限`, { title: '分身会话超过上限；打开/修复不会再自动搬移，需手动归档或 enforce' }) : null,
             task.essenceDeleted ? chip('warn', '原身已删除（仅运行/归档）', { title: '来源原身已删除：不能再从该原身派生，但本分身可继续运行/归档/还原/删除' }) : null)),
         h('div', { class: 'fork-actions' },
@@ -5536,9 +5621,10 @@ html[data-fang-overlays="hidden"] .fang-console .toast{display:none!important}
             : [task.quarantined ? null : button(task.memoryGuard ? '重新打开' : '打开', {
               size: 'sm', variant: 'ghost', icon: icon('external', 12), iconAfter: true, dataBtnId: 'C-01',
               title: task.memoryGuard
-                ? (task.memoryGuard.reasonKind === 'capacity'
-                  ? `因并发配额关闭（${task.memoryGuard.reason || 'guard'}）：按 LRU 顶掉了旧窗口，host 与会话已保留，点此重新打开；不会自动重开`
-                  : `因内存保护关闭（${task.memoryGuard.reason || 'guard'}）：host 与会话已保留，点此重新打开；不会自动重开`)
+                ? (() => {
+                  const view = closeReasonCard(task.memoryGuard)
+                  return `因${view.label}（${task.memoryGuard.reason || 'guard'}）：${view.detail}；host 与会话已保留，点此重新打开；不会自动重开`
+                })()
                 : '在新标签页打开分身 Web UI（URL 打开时向宿主换取，不落盘）',
               onClick: () => void app.openTask(task),
               fk: 'open:' + taskId,
