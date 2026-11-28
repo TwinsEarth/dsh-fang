@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Remove macOS AppleDouble / Finder sidecars from the whole plugin tree.
 // They are metadata forks, never part of the plugin. `npm pack` must not ship
-// them, and an already-installed copy may still contain leftovers from a
-// macOS-generated tarball; postinstall cleans both cases.
+// them; `prepack` cleans the source tree before the tarball is assembled, while
+// user installs run no lifecycle scripts.
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
