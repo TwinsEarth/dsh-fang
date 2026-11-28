@@ -41,13 +41,20 @@ test('AppleDouble and Finder sidecars are identified as package junk', () => {
   assert.equal(isPackageJunkPath('src/plugins/orchestrator.mjs'), false)
 })
 
-test('package manifest filters sidecars and ships the locale cleanup hook', () => {
+test('package manifest filters sidecars and ships the prepack cleanup hook', () => {
   const files = selectFilesFromManifest(pkg)
   assert.equal(files.some((file) => isPackageJunkPath(file)), false)
   assert.equal(files.includes('locale/en.json'), true)
   assert.equal(files.includes('locale/zh.json'), true)
   assert.equal(files.includes('tools/release/clean-locale-sidecars.mjs'), true)
-  assert.equal(pkg.scripts?.postinstall, 'node tools/release/clean-apple-double.mjs && node tools/release/clean-locale-sidecars.mjs')
+  assert.equal(pkg.scripts?.prepack, 'node tools/release/clean-apple-double.mjs && node tools/release/clean-locale-sidecars.mjs')
+  assert.equal(pkg.scripts?.postinstall, undefined)
+})
+
+test('package has no user-install lifecycle scripts', () => {
+  for (const name of ['preinstall', 'install', 'postinstall']) {
+    assert.equal(pkg.scripts?.[name], undefined, `${name} must not run on user install`)
+  }
 })
 
 test('source locale directory contains only valid language-id JSON files', () => {
@@ -56,7 +63,7 @@ test('source locale directory contains only valid language-id JSON files', () =>
   assert.deepEqual(names.sort(), ['en.json', 'zh.json'])
 })
 
-test('postinstall cleanup removes AppleDouble locale sidecars only', () => {
+test('prepack cleanup removes AppleDouble locale sidecars only', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fang-locale-clean-'))
   try {
     fs.writeFileSync(path.join(dir, 'en.json'), '{}')

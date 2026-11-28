@@ -8,6 +8,7 @@
 
 | 版本 | 主题 | 发布记录 | 审计 |
 |---|---|---|---|
+| v3.10.0 | 安装链修复：移除 pnpm 11 下会被拦截的 `postinstall`，清理脚本改到 `prepack`，升级不再触发 `approve-builds` / 卸载重装 | [RELEASE-v3.10.0](RELEASE-v3.10.0.md) | [AUDIT-v3.10.0](AUDIT-v3.10.0.md) |
 | v3.9.10 | 分身 Web 配额分层：普通版 5、专业版 20（预留）、团队版 100（预留）；修复内存充足仍被压成单 Web，区分并发配额关闭与内存保护关闭 | [RELEASE-v3.9.10](RELEASE-v3.9.10.md) | [AUDIT-v3.9.10](AUDIT-v3.9.10.md) |
 | v3.9.9 | 安全收口：权限第二道门接入生产；内存/身份回收 fail-closed；npm 202/tag 门修复；compose/watchdog smoke + 461 空 catch 基线门 | [RELEASE-v3.9.9](RELEASE-v3.9.9.md) | [AUDIT-v3.9.9](AUDIT-v3.9.9.md) |
 | v3.9.8 | 打开分身热修：adapter 提供 fork 公开 `/fang/api/health`；restore/一键修复在 provision 后复查 bundle，修复 `fork-bundle-unavailable` | [RELEASE-v3.9.8](RELEASE-v3.9.8.md) | [AUDIT-v3.9.8](AUDIT-v3.9.8.md) |

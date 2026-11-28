@@ -1,3 +1,21 @@
+## v3.10.0（2026-11-28）
+**主题：安装链修复：移除 postinstall，清理脚本改到 prepack**
+
+### 根因
+- 包内 `postinstall` 在 pnpm 11 下属于依赖 build script；pnpm 默认拒绝执行，非交互更新器无法回答 `approve-builds`，把本次升级判为失败并回滚。
+- 手动卸载重装走交互安装，批准 build script 后才成功，因此表现为「只能重装、每次弹窗」。
+- 3.9.10 的 `postinstall` 只清理 macOS `._*` / `.DS_Store` / locale sidecar，不参与运行逻辑。
+
+### 修复
+- `package.json` 删除 `postinstall`，新增 `prepack`：`node tools/release/clean-apple-double.mjs && node tools/release/clean-locale-sidecars.mjs`。
+- `tools/release/build.mjs` 只把 `prepack` 写入 staged package metadata，不再向发布包注入安装期 hook。
+- 新增 package metadata 回归：`prepack` 存在，`preinstall` / `install` / `postinstall` 全部不存在。
+- 版本号与 `FANG_VERSION` 提升到 `3.10.0`。
+
+### 兼容性
+- 运行时代码与 3.9.10 一致；本版只改发布包生命周期与版本元数据。
+- 用户安装/升级不会再触发 `pnpm approve-builds`；已安装版本可在下一次正常升级到 3.10.0。
+
 ## v3.9.10（2026-11-27）
 **主题：分身 Web 并发配额分层 + 单 Web 锁修复**
 

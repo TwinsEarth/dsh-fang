@@ -69,7 +69,7 @@ const stagedPkg = {
   files: undefined,
   scripts: {
     test: pkg.scripts?.test ?? 'node --test --test-concurrency=1 "test/*.test.mjs"',
-    ...(pkg.scripts?.postinstall ? { postinstall: pkg.scripts.postinstall } : {}),
+    ...(pkg.scripts?.prepack ? { prepack: pkg.scripts.prepack } : {}),
   },
 }
 fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify(stagedPkg, null, 2) + '\n', 'utf8')
